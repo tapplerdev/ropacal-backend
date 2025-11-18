@@ -1,0 +1,7 @@
+2025/11/17 19:57:33 ✓ Connected to SQLite database: ./db/ropacal.db
+2025/11/17 19:57:33 ✓ Database migrations completed
+2025/11/17 19:57:33 ✓ Users already seeded, skipping...
+2025/11/17 19:57:33 ✓ Bins already seeded, skipping...
+2025/11/17 19:57:33 ✅ Firebase Cloud Messaging initialized
+2025/11/17 19:57:33 ✅ WebSocket hub started
+2025/11/17 19:57:33 🚀 Server starting on http://localhost:8080

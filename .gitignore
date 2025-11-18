@@ -1,0 +1,37 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Database
+db/*.db
+db/*.db-shm
+db/*.db-wal
+
+# Environment variables
+.env
+
+# Firebase credentials (NEVER commit this!)
+firebase-service-account.json
+*-firebase-*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# MacOS
+.DS_Store
