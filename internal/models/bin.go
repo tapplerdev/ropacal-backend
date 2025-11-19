@@ -50,6 +50,18 @@ type UpdateBinRequest struct {
 	CheckedOnIso   *string `json:"checkedOnIso,omitempty"`
 }
 
+// CreateBinRequest is the request body for POST /api/bins
+type CreateBinRequest struct {
+	BinNumber      int      `json:"bin_number"`
+	CurrentStreet  string   `json:"current_street"`
+	City           string   `json:"city"`
+	Zip            string   `json:"zip"`
+	Status         string   `json:"status"`
+	FillPercentage *int     `json:"fill_percentage,omitempty"`
+	Latitude       *float64 `json:"latitude,omitempty"`
+	Longitude      *float64 `json:"longitude,omitempty"`
+}
+
 // ToBinResponse converts a Bin to BinResponse
 func (b *Bin) ToBinResponse() BinResponse {
 	resp := BinResponse{

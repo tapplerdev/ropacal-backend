@@ -118,6 +118,7 @@ func main() {
 	r.Route("/api", func(r chi.Router) {
 		// Bins endpoints
 		r.Get("/bins", handlers.GetBins(db))
+		r.Post("/bins", handlers.CreateBin(db))
 		r.Patch("/bins/{id}", handlers.UpdateBin(db))
 		r.Delete("/bins/{id}", handlers.DeleteBin(db))
 

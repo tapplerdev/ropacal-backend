@@ -11,6 +11,7 @@ import (
 	"ropacal-backend/internal/models"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -51,6 +52,61 @@ func GetBins(db *sqlx.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responses)
+	}
+}
+
+func CreateBin(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req models.CreateBinRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Validate required fields
+		if req.BinNumber <= 0 || req.CurrentStreet == "" || req.City == "" || req.Zip == "" || req.Status == "" {
+			http.Error(w, "Missing required fields", http.StatusBadRequest)
+			return
+		}
+
+		// Generate UUID for new bin
+		id := uuid.New().String()
+		now := time.Now().Unix()
+
+		// Insert bin
+		_, err := db.Exec(`
+			INSERT INTO bins (
+				id, bin_number, current_street, city, zip, status,
+				fill_percentage, checked, move_requested, latitude, longitude,
+				created_at, updated_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		`,
+			id, req.BinNumber, req.CurrentStreet, req.City, req.Zip, req.Status,
+			req.FillPercentage, 0, 0, req.Latitude, req.Longitude, now, now,
+		)
+
+		if err != nil {
+			// Check if bin_number already exists
+			if strings.Contains(err.Error(), "duplicate key") {
+				http.Error(w, "Bin number already exists", http.StatusConflict)
+				return
+			}
+			http.Error(w, "Failed to create bin", http.StatusInternalServerError)
+			return
+		}
+
+		// Fetch created bin
+		var created models.Bin
+		err = db.Get(&created, "SELECT * FROM bins WHERE id = $1", id)
+		if err != nil {
+			http.Error(w, "Failed to fetch created bin", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(created.ToBinResponse())
 	}
 }
 
