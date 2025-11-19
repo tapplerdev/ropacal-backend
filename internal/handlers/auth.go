@@ -47,7 +47,7 @@ func Login(db *sqlx.DB) http.HandlerFunc {
 
 		// Find user by email
 		var user models.User
-		query := "SELECT * FROM users WHERE email = ?"
+		query := "SELECT * FROM users WHERE email = $1"
 		if err := db.Get(&user, query, req.Email); err != nil {
 			log.Printf("❌ User not found: %s", req.Email)
 			w.Header().Set("Content-Type", "application/json")

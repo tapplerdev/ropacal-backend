@@ -22,7 +22,7 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 		err := db.Select(&checks, `
 			SELECT id, bin_id, checked_from, fill_percentage, checked_on
 			FROM checks
-			WHERE bin_id = ?
+			WHERE bin_id = $1
 			ORDER BY checked_on DESC
 		`, binID)
 		if err != nil {

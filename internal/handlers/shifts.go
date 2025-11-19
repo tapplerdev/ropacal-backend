@@ -32,7 +32,7 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 
 		var shift models.Shift
 		query := `SELECT * FROM shifts
-				  WHERE driver_id = ?
+				  WHERE driver_id = $1
 				  AND status != 'inactive'
 				  ORDER BY created_at DESC
 				  LIMIT 1`
@@ -103,7 +103,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Check if driver has a ready shift
 		var shift models.Shift
 		query := `SELECT * FROM shifts
-				  WHERE driver_id = ?
+				  WHERE driver_id = $1
 				  AND status = 'ready'
 				  LIMIT 1`
 
@@ -123,9 +123,9 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		now := time.Now().Unix()
 		updateQuery := `UPDATE shifts
 						SET status = 'active',
-							start_time = ?,
-							updated_at = ?
-						WHERE id = ?`
+							start_time = $1,
+							updated_at = $2
+						WHERE id = $3`
 
 		_, err = db.Exec(updateQuery, now, now, shift.ID)
 		if err != nil {
@@ -135,7 +135,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Get updated shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE id = ?`, shift.ID)
+		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
 		// Broadcast WebSocket update
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
@@ -173,9 +173,9 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		now := time.Now().Unix()
 		query := `UPDATE shifts
 				  SET status = 'paused',
-					  pause_start_time = ?,
-					  updated_at = ?
-				  WHERE driver_id = ?
+					  pause_start_time = $1,
+					  updated_at = $2
+				  WHERE driver_id = $1
 				  AND status = 'active'`
 
 		result, err := db.Exec(query, now, now, userClaims.UserID)
@@ -193,7 +193,7 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Get updated shift
 		var shift models.Shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = ? AND status = 'paused'`, userClaims.UserID)
+		db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, userClaims.UserID)
 
 		// Broadcast WebSocket update
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
@@ -224,7 +224,7 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Get current shift
 		var shift models.Shift
-		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = ? AND status = 'paused'`, userClaims.UserID)
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, userClaims.UserID)
 		if err != nil {
 			utils.RespondError(w, http.StatusBadRequest, "No paused shift to resume")
 			return
@@ -241,10 +241,10 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		now := time.Now().Unix()
 		query := `UPDATE shifts
 				  SET status = 'active',
-					  total_pause_seconds = ?,
+					  total_pause_seconds = $1,
 					  pause_start_time = NULL,
-					  updated_at = ?
-				  WHERE id = ?`
+					  updated_at = $2
+				  WHERE id = $3`
 
 		_, err = db.Exec(query, totalPause, now, shift.ID)
 		if err != nil {
@@ -254,7 +254,7 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Get updated shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE id = ?`, shift.ID)
+		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
 		// Broadcast WebSocket update
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
@@ -286,7 +286,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Get current shift
 		var shift models.Shift
 		query := `SELECT * FROM shifts
-				  WHERE driver_id = ?
+				  WHERE driver_id = $1
 				  AND (status = 'active' OR status = 'paused')
 				  LIMIT 1`
 
@@ -316,11 +316,11 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Update shift
 		updateQuery := `UPDATE shifts
 						SET status = 'inactive',
-							end_time = ?,
-							total_pause_seconds = ?,
+							end_time = $1,
+							total_pause_seconds = $2,
 							pause_start_time = NULL,
-							updated_at = ?
-						WHERE id = ?`
+							updated_at = $3
+						WHERE id = $4`
 
 		_, err = db.Exec(updateQuery, endTime, totalPause, now, shift.ID)
 		if err != nil {
@@ -382,7 +382,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Get current active shift
 		var shift models.Shift
-		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = ? AND status = 'active'`, userClaims.UserID)
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'active'`, userClaims.UserID)
 		if err != nil {
 			utils.RespondError(w, http.StatusBadRequest, "No active shift")
 			return
@@ -392,9 +392,9 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		now := time.Now().Unix()
 		routeBinQuery := `UPDATE route_bins
 						  SET is_completed = 1,
-							  completed_at = ?
-						  WHERE shift_id = ?
-						  AND bin_id = ?
+							  completed_at = $1
+						  WHERE shift_id = $2
+						  AND bin_id = $3
 						  AND is_completed = 0`
 
 		result, err := db.Exec(routeBinQuery, now, shift.ID, req.BinID)
@@ -413,8 +413,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Update shift completed_bins count
 		shiftQuery := `UPDATE shifts
 					   SET completed_bins = completed_bins + 1,
-						   updated_at = ?
-					   WHERE id = ?`
+						   updated_at = $1
+					   WHERE id = $2`
 
 		_, err = db.Exec(shiftQuery, now, shift.ID)
 		if err != nil {
@@ -424,7 +424,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Get updated shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE id = ?`, shift.ID)
+		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
 		// Get updated bins list
 		bins, err := getRouteBinsWithDetails(db, shift.ID)
@@ -488,7 +488,7 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.RouteBinWith
 			b.longitude
 		FROM route_bins rb
 		JOIN bins b ON rb.bin_id = b.id
-		WHERE rb.shift_id = ?
+		WHERE rb.shift_id = $1
 		ORDER BY rb.sequence_order ASC`
 
 	var bins []models.RouteBinWithDetails
@@ -571,7 +571,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		totalBins := len(req.BinIDs)
 
 		shiftQuery := `INSERT INTO shifts (id, driver_id, route_id, status, total_bins, created_at, updated_at)
-					   VALUES (?, ?, ?, 'ready', ?, ?, ?)`
+					   VALUES ($1, $2, $3, 'ready', $4, $5, $6)`
 
 		_, err = tx.Exec(shiftQuery, shiftID, req.DriverID, req.RouteID, totalBins, now, now)
 		if err != nil {
@@ -583,7 +583,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		// Insert route bins with sequence order
 		for i, binID := range req.BinIDs {
 			routeBinQuery := `INSERT INTO route_bins (shift_id, bin_id, sequence_order, created_at)
-							  VALUES (?, ?, ?, ?)`
+							  VALUES ($1, $2, $3, $4)`
 
 			_, err = tx.Exec(routeBinQuery, shiftID, binID, i+1, now)
 			if err != nil {
@@ -602,7 +602,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		// Get created shift
 		var shift models.Shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE id = ?`, shiftID)
+		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
 
 		// Get route bins with details
 		bins, err := getRouteBinsWithDetails(db, shiftID)
@@ -614,7 +614,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		// Send push notification
 		var fcmToken models.FCMToken
-		tokenErr := db.Get(&fcmToken, `SELECT * FROM fcm_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, req.DriverID)
+		tokenErr := db.Get(&fcmToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, req.DriverID)
 		notificationSent := false
 
 		if tokenErr == nil {
@@ -683,7 +683,7 @@ func RegisterFCMToken(db *sqlx.DB) http.HandlerFunc {
 		// Insert or update token
 		now := time.Now().Unix()
 		query := `INSERT INTO fcm_tokens (user_id, token, device_type, created_at, updated_at)
-				  VALUES (?, ?, ?, ?, ?)
+				  VALUES ($1, $2, $3, $4, $5)
 				  ON CONFLICT(token) DO UPDATE SET
 					  user_id = excluded.user_id,
 					  device_type = excluded.device_type,

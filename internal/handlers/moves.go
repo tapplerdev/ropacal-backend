@@ -25,7 +25,7 @@ func GetMoves(db *sqlx.DB) http.HandlerFunc {
 		err := db.Select(&moves, `
 			SELECT id, bin_id, moved_from, moved_to, moved_on
 			FROM moves
-			WHERE bin_id = ?
+			WHERE bin_id = $1
 			ORDER BY moved_on DESC
 		`, binID)
 		if err != nil {
@@ -60,7 +60,7 @@ func CreateMove(db *sqlx.DB) http.HandlerFunc {
 
 		// Get existing bin
 		var bin models.Bin
-		err := db.Get(&bin, "SELECT * FROM bins WHERE id = ?", binID)
+		err := db.Get(&bin, "SELECT * FROM bins WHERE id = $1", binID)
 		if err == sql.ErrNoRows {
 			http.Error(w, "Bin not found", http.StatusNotFound)
 			return
@@ -100,7 +100,7 @@ func CreateMove(db *sqlx.DB) http.HandlerFunc {
 		// Insert move record
 		_, err = tx.Exec(`
 			INSERT INTO moves (bin_id, moved_from, moved_to, moved_on)
-			VALUES (?, ?, ?, ?)
+			VALUES ($1, $2, $3, $4)
 		`, binID, movedFrom, movedTo, movedOn.Unix())
 		if err != nil {
 			http.Error(w, "Failed to create move", http.StatusInternalServerError)
@@ -110,8 +110,8 @@ func CreateMove(db *sqlx.DB) http.HandlerFunc {
 		// Update bin
 		query := `
 			UPDATE bins
-			SET current_street = ?, city = ?, zip = ?,
-			    last_moved = ?, move_requested = 0, updated_at = ?`
+			SET current_street = $1, city = $2, zip = $3,
+			    last_moved = $4, move_requested = 0, updated_at = $5`
 		args := []interface{}{
 			req.ToStreet, req.ToCity, req.ToZip,
 			movedOn.Unix(), time.Now().Unix(),
@@ -121,7 +121,7 @@ func CreateMove(db *sqlx.DB) http.HandlerFunc {
 			query += `, latitude = NULL, longitude = NULL`
 		}
 
-		query += ` WHERE id = ?`
+		query += ` WHERE id = $6`
 		args = append(args, binID)
 
 		_, err = tx.Exec(query, args...)
@@ -138,7 +138,7 @@ func CreateMove(db *sqlx.DB) http.HandlerFunc {
 
 		// Fetch updated bin
 		var updated models.Bin
-		err = db.Get(&updated, "SELECT * FROM bins WHERE id = ?", binID)
+		err = db.Get(&updated, "SELECT * FROM bins WHERE id = $1", binID)
 		if err != nil {
 			http.Error(w, "Failed to fetch updated bin", http.StatusInternalServerError)
 			return

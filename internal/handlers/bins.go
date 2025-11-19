@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ func GetBins(db *sqlx.DB) http.HandlerFunc {
 		_, err := db.Exec(`
 			UPDATE bins
 			SET checked = 0
-			WHERE checked = 1 AND last_checked IS NOT NULL AND last_checked < ?
+			WHERE checked = 1 AND last_checked IS NOT NULL AND last_checked < $1
 		`, threeDaysAgo)
 		if err != nil {
 			http.Error(w, "Failed to update bins", http.StatusInternalServerError)
@@ -69,7 +70,7 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 
 		// Get existing bin
 		var existing models.Bin
-		err := db.Get(&existing, "SELECT * FROM bins WHERE id = ?", id)
+		err := db.Get(&existing, "SELECT * FROM bins WHERE id = $1", id)
 		if err == sql.ErrNoRows {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
@@ -118,16 +119,18 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 		// Build update query
 		query := `
 			UPDATE bins
-			SET current_street = ?, city = ?, zip = ?, status = ?,
-			    checked = ?, fill_percentage = ?, move_requested = ?`
+			SET current_street = $1, city = $2, zip = $3, status = $4,
+			    checked = $5, fill_percentage = $6, move_requested = $7`
 
 		args := []interface{}{
 			req.CurrentStreet, req.City, req.Zip, req.Status,
 			req.Checked, req.FillPercentage, req.MoveRequested,
 		}
 
+		paramCount := 7
 		if becomingChecked {
-			query += `, last_checked = ?`
+			paramCount++
+			query += `, last_checked = $` + fmt.Sprintf("%d", paramCount)
 			args = append(args, now.Unix())
 		}
 
@@ -135,7 +138,8 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 			query += `, latitude = NULL, longitude = NULL`
 		}
 
-		query += `, updated_at = ? WHERE id = ?`
+		paramCount++
+		query += `, updated_at = $` + fmt.Sprintf("%d", paramCount) + ` WHERE id = $` + fmt.Sprintf("%d", paramCount+1)
 		args = append(args, time.Now().Unix(), id)
 
 		_, err = tx.Exec(query, args...)
@@ -160,7 +164,7 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 
 			_, err = tx.Exec(`
 				INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on)
-				VALUES (?, ?, ?, ?)
+				VALUES ($1, $2, $3, $4)
 			`, id, checkedFrom, fillForCheck, now.Unix())
 			if err != nil {
 				http.Error(w, "Failed to create check record", http.StatusInternalServerError)
@@ -176,7 +180,7 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 
 		// Fetch updated bin
 		var updated models.Bin
-		err = db.Get(&updated, "SELECT * FROM bins WHERE id = ?", id)
+		err = db.Get(&updated, "SELECT * FROM bins WHERE id = $1", id)
 		if err != nil {
 			http.Error(w, "Failed to fetch updated bin", http.StatusInternalServerError)
 			return
@@ -195,7 +199,7 @@ func DeleteBin(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		result, err := db.Exec("DELETE FROM bins WHERE id = ?", id)
+		result, err := db.Exec("DELETE FROM bins WHERE id = $1", id)
 		if err != nil {
 			http.Error(w, "Failed to delete", http.StatusInternalServerError)
 			return
