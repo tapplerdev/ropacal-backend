@@ -135,6 +135,9 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
 
+			// Auth status endpoint
+			r.Get("/auth/status", handlers.GetAuthStatus(db))
+
 			// Shift management
 			r.Get("/driver/shift/current", handlers.GetCurrentShift(db))
 			r.Post("/driver/shift/start", handlers.StartShift(db, wsHub))

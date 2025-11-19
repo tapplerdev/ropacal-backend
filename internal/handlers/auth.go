@@ -1,13 +1,16 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
+	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/pkg/utils"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jmoiron/sqlx"
@@ -89,6 +92,45 @@ func Login(db *sqlx.DB) http.HandlerFunc {
 			OK:    true,
 			Token: tokenString,
 			User:  &userResponse,
+		})
+	}
+}
+
+// GetAuthStatus returns the current authenticated user's information
+func GetAuthStatus(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/auth/status")
+
+		// Extract user claims from context (set by Auth middleware)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			log.Println("❌ User claims not found in context")
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		log.Printf("   User ID: %s", userClaims.UserID)
+
+		// Query full user data from database
+		var user models.User
+		query := "SELECT * FROM users WHERE id = $1"
+		if err := db.Get(&user, query, userClaims.UserID); err != nil {
+			if err == sql.ErrNoRows {
+				log.Printf("❌ User not found: %s", userClaims.UserID)
+				utils.RespondError(w, http.StatusNotFound, "User not found")
+			} else {
+				log.Printf("❌ Database error: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Database error")
+			}
+			return
+		}
+
+		log.Printf("✅ Auth status retrieved for: %s (%s)", user.Email, user.Role)
+
+		// Return user response (without password)
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"user":    user.ToUserResponse(),
 		})
 	}
 }
