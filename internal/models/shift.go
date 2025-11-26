@@ -9,10 +9,12 @@ import (
 type ShiftStatus string
 
 const (
-	ShiftStatusInactive ShiftStatus = "inactive"
-	ShiftStatusReady    ShiftStatus = "ready"
-	ShiftStatusActive   ShiftStatus = "active"
-	ShiftStatusPaused   ShiftStatus = "paused"
+	ShiftStatusInactive  ShiftStatus = "inactive"  // Deprecated - use ended/cancelled
+	ShiftStatusReady     ShiftStatus = "ready"     // Route assigned, not started
+	ShiftStatusActive    ShiftStatus = "active"    // Shift in progress
+	ShiftStatusPaused    ShiftStatus = "paused"    // On break
+	ShiftStatusEnded     ShiftStatus = "ended"     // Completed or manually ended
+	ShiftStatusCancelled ShiftStatus = "cancelled" // Cancelled by manager
 )
 
 // Shift represents a driver's work shift

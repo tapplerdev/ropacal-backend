@@ -33,8 +33,14 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 		var shift models.Shift
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
-				  AND status != 'inactive'
-				  ORDER BY created_at DESC
+				  AND status IN ('active', 'paused', 'ready')
+				  ORDER BY
+			    CASE status
+			      WHEN 'active' THEN 1
+			      WHEN 'paused' THEN 2
+			      WHEN 'ready' THEN 3
+			    END ASC,
+			    created_at DESC
 				  LIMIT 1`
 
 		err := db.Get(&shift, query, userClaims.UserID)
@@ -100,7 +106,42 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
-		// Check if driver has a ready shift
+		// Check if driver has any existing active or paused shift
+	var existingShift models.Shift
+	existingQuery := `SELECT * FROM shifts
+					  WHERE driver_id = $1
+					  AND (status = 'active' OR status = 'paused')
+					  LIMIT 1`
+
+	existingErr := db.Get(&existingShift, existingQuery, userClaims.UserID)
+	if existingErr == nil {
+		// Found an existing active/paused shift - auto-end it
+		log.Printf("⚠️  Found existing %s shift (%s), auto-ending it before starting new shift", existingShift.Status, existingShift.ID)
+
+		endNow := time.Now().Unix()
+		totalPause := int64(existingShift.TotalPauseSeconds)
+		if existingShift.PauseStartTime != nil {
+			totalPause += endNow - *existingShift.PauseStartTime
+		}
+
+		endQuery := `UPDATE shifts
+					 SET status = 'ended',
+						 end_time = $1,
+						 total_pause_seconds = $2,
+						 pause_start_time = NULL,
+						 updated_at = $3
+					 WHERE id = $4`
+
+		_, err := db.Exec(endQuery, endNow, totalPause, endNow, existingShift.ID)
+		if err != nil {
+			log.Printf("❌ Error auto-ending existing shift: %v", err)
+			// Don't fail - continue with starting new shift
+		} else {
+			log.Printf("✅ Auto-ended existing shift %s", existingShift.ID)
+		}
+	}
+
+	// Check if driver has a ready shift
 		var shift models.Shift
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
@@ -315,7 +356,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Update shift
 		updateQuery := `UPDATE shifts
-						SET status = 'inactive',
+						SET status = 'ended',
 							end_time = $1,
 							total_pause_seconds = $2,
 							pause_start_time = NULL,
@@ -382,7 +423,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Get current active shift
 		var shift models.Shift
-		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'active'`, userClaims.UserID)
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1`, userClaims.UserID)
 		if err != nil {
 			utils.RespondError(w, http.StatusBadRequest, "No active shift")
 			return
