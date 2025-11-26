@@ -370,18 +370,19 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Broadcast WebSocket update
+		// Get updated shift with bins for WebSocket broadcast
+		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
+
+		// Broadcast WebSocket update with full shift data
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
-			"data": map[string]interface{}{
-				"status": "inactive",
-			},
+			"data": shift,
 		})
 
 		log.Printf("🏁 Shift ended: %s (%dm active)", shift.ID, activeDuration/60)
 
 		response := models.ShiftEndResponse{
-			Status:                "inactive",
+			Status:                "ended",
 			EndTime:               endTime,
 			TotalDurationSeconds:  totalDuration,
 			ActiveDurationSeconds: activeDuration,

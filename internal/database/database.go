@@ -133,6 +133,11 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_route_bins_shift_id ON route_bins(shift_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_route_bins_bin_id ON route_bins(bin_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_route_bins_shift_seq ON route_bins(shift_id, sequence_order)`,
+
+		// Add 'ended' and 'cancelled' status values to CHECK constraint
+		// Drop old constraint and add new one with additional values
+		`ALTER TABLE shifts DROP CONSTRAINT IF EXISTS shifts_status_check`,
+		`ALTER TABLE shifts ADD CONSTRAINT shifts_status_check CHECK(status IN ('inactive', 'ready', 'active', 'paused', 'ended', 'cancelled'))`,
 	}
 
 	for _, migration := range migrations {
