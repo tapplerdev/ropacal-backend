@@ -161,6 +161,9 @@ func main() {
 
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
+
+			// Fleet management
+			r.Get("/manager/drivers", handlers.GetAllDrivers(db))
 		})
 	})
 

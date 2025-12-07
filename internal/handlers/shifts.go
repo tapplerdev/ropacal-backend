@@ -885,3 +885,82 @@ func UpdateLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		})
 	}
 }
+
+// GetAllDrivers returns all drivers with their current status and last location
+// GET /api/manager/drivers
+func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/manager/drivers")
+
+		// Query all drivers with their current shift status
+		query := `
+			SELECT
+				u.id as driver_id,
+				u.name,
+				COALESCE(s.status, 'inactive') as status,
+				s.id as shift_id,
+				s.completed_bins as current_bin,
+				s.total_bins
+			FROM users u
+			LEFT JOIN shifts s ON u.id = s.driver_id
+				AND s.status IN ('active', 'paused', 'ready')
+			WHERE u.role = 'driver'
+			ORDER BY u.name
+		`
+
+		type DriverRow struct {
+			DriverID    string  `db:"driver_id"`
+			Name        string  `db:"name"`
+			Status      string  `db:"status"`
+			ShiftID     *string `db:"shift_id"`
+			CurrentBin  *int    `db:"current_bin"`
+			TotalBins   *int    `db:"total_bins"`
+		}
+
+		var drivers []DriverRow
+		err := db.Select(&drivers, query)
+		if err != nil {
+			log.Printf("❌ Error fetching drivers: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Database error")
+			return
+		}
+
+		// For each driver with active shift, get their last location
+		var response []map[string]interface{}
+		for _, driver := range drivers {
+			driverData := map[string]interface{}{
+				"driver_id":   driver.DriverID,
+				"name":        driver.Name,
+				"status":      driver.Status,
+				"shift_id":    driver.ShiftID,
+				"current_bin": driver.CurrentBin,
+				"total_bins":  driver.TotalBins,
+			}
+
+			// Get last location if driver has active shift
+			if driver.ShiftID != nil {
+				var location models.DriverLocation
+				locationQuery := `
+					SELECT id, driver_id, latitude, longitude, heading, speed,
+						   accuracy, shift_id, timestamp, created_at
+					FROM driver_locations
+					WHERE driver_id = $1
+					ORDER BY created_at DESC
+					LIMIT 1
+				`
+				err := db.Get(&location, locationQuery, driver.DriverID)
+				if err == nil {
+					driverData["last_location"] = location
+				}
+			}
+
+			response = append(response, driverData)
+		}
+
+		log.Printf("📤 RESPONSE: 200 - Found %d drivers", len(response))
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    response,
+		})
+	}
+}
