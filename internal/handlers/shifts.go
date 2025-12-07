@@ -796,3 +796,92 @@ func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		})
 	}
 }
+
+// UpdateLocation handles driver location updates (POST /api/driver/location)
+// Called every 10 seconds when driver is on active shift
+func UpdateLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		var req struct {
+			Latitude  float64  `json:"latitude"`
+			Longitude float64  `json:"longitude"`
+			Heading   *float64 `json:"heading"`
+			Speed     *float64 `json:"speed"`
+			Accuracy  *float64 `json:"accuracy"`
+			ShiftID   *string  `json:"shift_id"`
+			Timestamp int64    `json:"timestamp"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			utils.RespondError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+		// Validate required fields
+		if req.Latitude == 0 && req.Longitude == 0 {
+			utils.RespondError(w, http.StatusBadRequest, "Invalid coordinates")
+			return
+		}
+
+		// Insert location into database
+		query := `
+			INSERT INTO driver_locations (
+				driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING id, created_at
+		`
+
+		var locationID int
+		var createdAt int64
+
+		err := db.QueryRow(
+			query,
+			userClaims.UserID,
+			req.Latitude,
+			req.Longitude,
+			req.Heading,
+			req.Speed,
+			req.Accuracy,
+			req.ShiftID,
+			req.Timestamp,
+		).Scan(&locationID, &createdAt)
+
+		if err != nil {
+			log.Printf("❌ Error saving location: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to save location")
+			return
+		}
+
+		// Broadcast location update to all connected managers via WebSocket
+		locationUpdate := map[string]interface{}{
+			"type": "driver_location_update",
+			"data": map[string]interface{}{
+				"id":         locationID,
+				"driver_id":  userClaims.UserID,
+				"latitude":   req.Latitude,
+				"longitude":  req.Longitude,
+				"heading":    req.Heading,
+				"speed":      req.Speed,
+				"accuracy":   req.Accuracy,
+				"shift_id":   req.ShiftID,
+				"timestamp":  req.Timestamp,
+				"created_at": createdAt,
+			},
+		}
+
+		// Broadcast to all managers (users with role "admin")
+		hub.BroadcastToRole("admin", locationUpdate)
+
+		// Return success response
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "Location updated successfully",
+			"id":      locationID,
+		})
+	}
+}

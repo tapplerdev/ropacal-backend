@@ -24,11 +24,12 @@ const (
 
 // Client represents a WebSocket client connection
 type Client struct {
-	ID     string
-	UserID string
-	conn   *websocket.Conn
-	hub    *Hub
-	send   chan []byte
+	ID       string
+	UserID   string
+	UserRole string // User's role: "driver" or "admin"
+	conn     *websocket.Conn
+	hub      *Hub
+	send     chan []byte
 }
 
 // IncomingMessage represents a message from the client
@@ -38,12 +39,13 @@ type IncomingMessage struct {
 }
 
 // NewClient creates a new WebSocket client
-func NewClient(userID string, conn *websocket.Conn, hub *Hub) *Client {
+func NewClient(userID string, userRole string, conn *websocket.Conn, hub *Hub) *Client {
 	return &Client{
-		UserID: userID,
-		conn:   conn,
-		hub:    hub,
-		send:   make(chan []byte, 256),
+		UserID:   userID,
+		UserRole: userRole,
+		conn:     conn,
+		hub:      hub,
+		send:     make(chan []byte, 256),
 	}
 }
 

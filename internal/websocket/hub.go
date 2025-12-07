@@ -94,6 +94,32 @@ func (h *Hub) BroadcastToUser(userID string, data interface{}) {
 	}
 }
 
+// BroadcastToRole sends a message to all users with a specific role
+func (h *Hub) BroadcastToRole(role string, data interface{}) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("❌ Failed to marshal broadcast message: %v", err)
+		return
+	}
+
+	sentCount := 0
+	for userID, client := range h.clients {
+		if client.UserRole == role {
+			select {
+			case client.send <- dataBytes:
+				sentCount++
+			default:
+				log.Printf("⚠️ Client buffer full, skipping: %s", userID)
+			}
+		}
+	}
+
+	log.Printf("📤 Broadcast to role '%s': sent to %d clients", role, sentCount)
+}
+
 // GetClientCount returns the number of connected clients
 func (h *Hub) GetClientCount() int {
 	h.mu.RLock()

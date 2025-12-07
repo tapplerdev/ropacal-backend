@@ -86,7 +86,7 @@ func HandleWebSocket(hub *Hub) http.HandlerFunc {
 		}
 
 		// Create client
-		client := NewClient(userClaims.UserID, conn, hub)
+		client := NewClient(userClaims.UserID, userClaims.Role, conn, hub)
 
 		// Register client
 		hub.register <- client
@@ -95,6 +95,6 @@ func HandleWebSocket(hub *Hub) http.HandlerFunc {
 		go client.WritePump()
 		go client.ReadPump()
 
-		log.Printf("✅ WebSocket connection established for user: %s (%s)", userClaims.Email, userClaims.UserID)
+		log.Printf("✅ WebSocket connection established for user: %s (%s) with role: %s", userClaims.Email, userClaims.UserID, userClaims.Role)
 	}
 }

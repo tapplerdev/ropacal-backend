@@ -147,6 +147,9 @@ func main() {
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
 			r.Post("/driver/shift/complete-bin", handlers.CompleteBin(db, wsHub))
 
+			// Location tracking (sent every 10 seconds during active shift)
+			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub))
+
 			// FCM token registration
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
 		})
