@@ -56,6 +56,8 @@ func NewClient(userID string, userRole string, conn *websocket.Conn, hub *Hub, d
 // ReadPump pumps messages from the WebSocket connection to the hub
 func (c *Client) ReadPump() {
 	defer func() {
+		// Mark driver as disconnected in database when WebSocket closes
+		c.markAsDisconnected()
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
@@ -194,16 +196,27 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 		return
 	}
 
-	// Insert location into database
+	// UPSERT location into database (update if exists, insert if not)
+	// This keeps exactly 1 row per driver with their latest position
 	query := `
-		INSERT INTO driver_locations (
-			driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, created_at
+		INSERT INTO driver_current_location (
+			driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp, is_connected, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, EXTRACT(EPOCH FROM NOW())::BIGINT)
+		ON CONFLICT (driver_id)
+		DO UPDATE SET
+			latitude = EXCLUDED.latitude,
+			longitude = EXCLUDED.longitude,
+			heading = EXCLUDED.heading,
+			speed = EXCLUDED.speed,
+			accuracy = EXCLUDED.accuracy,
+			shift_id = EXCLUDED.shift_id,
+			timestamp = EXCLUDED.timestamp,
+			is_connected = TRUE,
+			updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+		RETURNING updated_at
 	`
 
-	var locationID int
-	var createdAt int64
+	var updatedAt int64
 
 	err := db.QueryRow(
 		query,
@@ -215,20 +228,19 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 		accuracy,
 		shiftID,
 		int64(timestamp),
-	).Scan(&locationID, &createdAt)
+	).Scan(&updatedAt)
 
 	if err != nil {
 		log.Printf("❌ Error saving location to database: %v", err)
 		return
 	}
 
-	log.Printf("✅ Location saved to database with ID: %d", locationID)
+	log.Printf("✅ Location updated in database for driver %s", c.UserID)
 
 	// Broadcast location update to all connected managers
 	locationUpdate := map[string]interface{}{
 		"type": "driver_location_update",
 		"data": map[string]interface{}{
-			"id":         locationID,
 			"driver_id":  c.UserID,
 			"latitude":   latitude,
 			"longitude":  longitude,
@@ -237,11 +249,41 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 			"accuracy":   accuracy,
 			"shift_id":   shiftID,
 			"timestamp":  int64(timestamp),
-			"created_at": createdAt,
+			"updated_at": updatedAt,
 		},
 	}
 
 	// Broadcast to all managers (users with role "admin")
 	c.hub.BroadcastToRole("admin", locationUpdate)
 	log.Printf("📤 Broadcasted location update to all managers")
+}
+
+// markAsDisconnected marks the driver as disconnected in the database
+// This preserves their last known location for managers to see
+func (c *Client) markAsDisconnected() {
+	// Only mark drivers as disconnected (not managers)
+	if c.UserRole != "driver" {
+		return
+	}
+
+	db, ok := c.db.(*sqlx.DB)
+	if !ok || db == nil {
+		log.Printf("❌ Database connection not available for disconnect handler")
+		return
+	}
+
+	query := `
+		UPDATE driver_current_location
+		SET is_connected = FALSE,
+		    updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+		WHERE driver_id = $1
+	`
+
+	_, err := db.Exec(query, c.UserID)
+	if err != nil {
+		log.Printf("❌ Error marking driver as disconnected: %v", err)
+		return
+	}
+
+	log.Printf("🔴 Driver %s marked as disconnected (last position preserved)", c.UserID)
 }

@@ -119,10 +119,11 @@ func Migrate(db *sqlx.DB) error {
 			FOREIGN KEY (bin_id) REFERENCES bins(id) ON DELETE CASCADE
 		)`,
 
-		// Create driver_locations table (Option C: Store all with 24h retention)
-		`CREATE TABLE IF NOT EXISTS driver_locations (
-			id SERIAL PRIMARY KEY,
-			driver_id TEXT NOT NULL,
+		// Create driver_current_location table (stores only latest position per driver)
+		// This table has exactly 1 row per driver, updated via UPSERT
+		// Primary tracking is via WebSocket broadcasts - DB is fallback for disconnections
+		`CREATE TABLE IF NOT EXISTS driver_current_location (
+			driver_id TEXT PRIMARY KEY,
 			latitude DOUBLE PRECISION NOT NULL,
 			longitude DOUBLE PRECISION NOT NULL,
 			heading DOUBLE PRECISION,
@@ -130,7 +131,8 @@ func Migrate(db *sqlx.DB) error {
 			accuracy DOUBLE PRECISION,
 			shift_id TEXT,
 			timestamp BIGINT NOT NULL,
-			created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+			is_connected BOOLEAN NOT NULL DEFAULT TRUE,
+			updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
 			FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
 			FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE SET NULL
 		)`,
@@ -149,10 +151,8 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_route_bins_shift_id ON route_bins(shift_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_route_bins_bin_id ON route_bins(bin_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_route_bins_shift_seq ON route_bins(shift_id, sequence_order)`,
-		`CREATE INDEX IF NOT EXISTS idx_driver_locations_driver_id ON driver_locations(driver_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_driver_locations_shift_id ON driver_locations(shift_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_driver_locations_timestamp ON driver_locations(timestamp)`,
-		`CREATE INDEX IF NOT EXISTS idx_driver_locations_created_at ON driver_locations(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_driver_current_location_shift_id ON driver_current_location(shift_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_driver_current_location_is_connected ON driver_current_location(is_connected)`,
 
 		// Add 'ended' and 'cancelled' status values to CHECK constraint
 		// Drop old constraint and add new one with additional values

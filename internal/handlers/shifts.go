@@ -937,16 +937,15 @@ func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
 				"total_bins":  driver.TotalBins,
 			}
 
-			// Get last location if driver has active shift
+			// Get last location from driver_current_location table
+			// This table has exactly 1 row per driver with their latest position
 			if driver.ShiftID != nil {
 				var location models.DriverLocation
 				locationQuery := `
-					SELECT id, driver_id, latitude, longitude, heading, speed,
-						   accuracy, shift_id, timestamp, created_at
-					FROM driver_locations
+					SELECT driver_id, latitude, longitude, heading, speed,
+						   accuracy, shift_id, timestamp, is_connected, updated_at
+					FROM driver_current_location
 					WHERE driver_id = $1
-					ORDER BY created_at DESC
-					LIMIT 1
 				`
 				err := db.Get(&location, locationQuery, driver.DriverID)
 				if err == nil {
