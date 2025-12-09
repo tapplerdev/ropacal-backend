@@ -22,7 +22,7 @@ var upgrader = websocket.Upgrader{
 }
 
 // HandleWebSocket upgrades HTTP connection to WebSocket
-func HandleWebSocket(hub *Hub) http.HandlerFunc {
+func HandleWebSocket(hub *Hub, db interface{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Try to get token from query parameter first (for WebSocket connections)
 		tokenString := r.URL.Query().Get("token")
@@ -86,7 +86,7 @@ func HandleWebSocket(hub *Hub) http.HandlerFunc {
 		}
 
 		// Create client
-		client := NewClient(userClaims.UserID, userClaims.Role, conn, hub)
+		client := NewClient(userClaims.UserID, userClaims.Role, conn, hub, db)
 
 		// Register client
 		hub.register <- client

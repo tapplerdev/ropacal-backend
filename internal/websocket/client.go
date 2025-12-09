@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jmoiron/sqlx"
 )
 
 const (
@@ -19,7 +20,7 @@ const (
 	pingPeriod = (pongWait * 9) / 10
 
 	// Maximum message size allowed from peer
-	maxMessageSize = 512
+	maxMessageSize = 2048 // Increased for location_update messages
 )
 
 // Client represents a WebSocket client connection
@@ -30,22 +31,25 @@ type Client struct {
 	conn     *websocket.Conn
 	hub      *Hub
 	send     chan []byte
+	db       interface{} // Database connection (will be *sqlx.DB)
 }
 
 // IncomingMessage represents a message from the client
 type IncomingMessage struct {
-	Type      string `json:"type"`
-	Timestamp string `json:"timestamp"`
+	Type      string                 `json:"type"`
+	Timestamp string                 `json:"timestamp"`
+	Data      map[string]interface{} `json:"data"` // For location_update data
 }
 
 // NewClient creates a new WebSocket client
-func NewClient(userID string, userRole string, conn *websocket.Conn, hub *Hub) *Client {
+func NewClient(userID string, userRole string, conn *websocket.Conn, hub *Hub, db interface{}) *Client {
 	return &Client{
 		UserID:   userID,
 		UserRole: userRole,
 		conn:     conn,
 		hub:      hub,
 		send:     make(chan []byte, 256),
+		db:       db,
 	}
 }
 
@@ -79,14 +83,20 @@ func (c *Client) ReadPump() {
 			continue
 		}
 
-		// Handle ping messages
-		if msg.Type == "ping" {
+		// Handle different message types
+		switch msg.Type {
+		case "ping":
+			// Respond with pong
 			response := map[string]interface{}{
 				"type":      "pong",
 				"timestamp": time.Now().Format(time.RFC3339),
 			}
 			responseData, _ := json.Marshal(response)
 			c.send <- responseData
+
+		case "location_update":
+			// Handle driver location update
+			c.handleLocationUpdate(msg.Data)
 		}
 	}
 }
@@ -133,4 +143,105 @@ func (c *Client) WritePump() {
 			}
 		}
 	}
+}
+
+// handleLocationUpdate processes driver location updates received via WebSocket
+func (c *Client) handleLocationUpdate(data map[string]interface{}) {
+	log.Printf("📍 Received location_update from driver %s", c.UserID)
+	log.Printf("   Data: %+v", data)
+
+	// Extract fields from data
+	latitude, ok := data["latitude"].(float64)
+	if !ok {
+		log.Printf("❌ Invalid latitude in location update")
+		return
+	}
+
+	longitude, ok := data["longitude"].(float64)
+	if !ok {
+		log.Printf("❌ Invalid longitude in location update")
+		return
+	}
+
+	// Optional fields (may be nil)
+	var heading, speed, accuracy *float64
+	if h, ok := data["heading"].(float64); ok {
+		heading = &h
+	}
+	if s, ok := data["speed"].(float64); ok {
+		speed = &s
+	}
+	if a, ok := data["accuracy"].(float64); ok {
+		accuracy = &a
+	}
+
+	// shift_id and timestamp
+	var shiftID *string
+	if sid, ok := data["shift_id"].(string); ok {
+		shiftID = &sid
+	}
+
+	timestamp, ok := data["timestamp"].(float64)
+	if !ok {
+		log.Printf("❌ Invalid timestamp in location update")
+		return
+	}
+
+	// Get database connection
+	db, ok := c.db.(*sqlx.DB)
+	if !ok || db == nil {
+		log.Printf("❌ Database connection not available")
+		return
+	}
+
+	// Insert location into database
+	query := `
+		INSERT INTO driver_locations (
+			driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, created_at
+	`
+
+	var locationID int
+	var createdAt int64
+
+	err := db.QueryRow(
+		query,
+		c.UserID,
+		latitude,
+		longitude,
+		heading,
+		speed,
+		accuracy,
+		shiftID,
+		int64(timestamp),
+	).Scan(&locationID, &createdAt)
+
+	if err != nil {
+		log.Printf("❌ Error saving location to database: %v", err)
+		return
+	}
+
+	log.Printf("✅ Location saved to database with ID: %d", locationID)
+
+	// Broadcast location update to all connected managers
+	locationUpdate := map[string]interface{}{
+		"type": "driver_location_update",
+		"data": map[string]interface{}{
+			"id":         locationID,
+			"driver_id":  c.UserID,
+			"latitude":   latitude,
+			"longitude":  longitude,
+			"heading":    heading,
+			"speed":      speed,
+			"accuracy":   accuracy,
+			"shift_id":   shiftID,
+			"timestamp":  int64(timestamp),
+			"created_at": createdAt,
+		},
+	}
+
+	// Broadcast to all managers (users with role "admin")
+	c.hub.BroadcastToRole("admin", locationUpdate)
+	log.Printf("📤 Broadcasted location update to all managers")
 }

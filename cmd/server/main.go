@@ -112,7 +112,7 @@ func main() {
 	r.Post("/api/auth/login", handlers.Login(db))
 
 	// WebSocket endpoint (authentication handled in handler via query param)
-	r.Get("/ws", websocket.HandleWebSocket(wsHub))
+	r.Get("/ws", websocket.HandleWebSocket(wsHub, db))
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
