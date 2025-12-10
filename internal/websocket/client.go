@@ -7,7 +7,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jmoiron/sqlx"
-	"ropacal-backend/internal/services/roads"
 )
 
 const (
