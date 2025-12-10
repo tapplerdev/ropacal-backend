@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+
+	"ropacal-backend/internal/services/roads"
 )
 
 // Hub maintains active WebSocket connections and broadcasts messages
@@ -20,6 +22,9 @@ type Hub struct {
 	// Unregister requests from clients
 	unregister chan *Client
 
+	// Roads API client for snap-to-roads functionality
+	roadsClient *roads.RoadsClient
+
 	// Mutex for thread-safe client map access
 	mu sync.RWMutex
 }
@@ -33,10 +38,11 @@ type Message struct {
 // NewHub creates a new Hub instance
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[string]*Client),
-		broadcast:  make(chan *Message, 256),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
+		clients:     make(map[string]*Client),
+		broadcast:   make(chan *Message, 256),
+		register:    make(chan *Client),
+		unregister:  make(chan *Client),
+		roadsClient: roads.NewRoadsClient(),
 	}
 }
 

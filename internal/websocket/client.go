@@ -7,6 +7,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jmoiron/sqlx"
+	"ropacal-backend/internal/services/roads"
 )
 
 const (
@@ -189,6 +190,23 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 		return
 	}
 
+	// OPTIMIZATION: Snap to roads with all optimizations
+	snappedLat := latitude
+	snappedLng := longitude
+	accuracyValue := 100.0 // Default if not provided
+	if accuracy != nil {
+		accuracyValue = *accuracy
+	}
+
+	// Try to snap coordinates (will auto-optimize based on accuracy)
+	if c.hub.roadsClient != nil {
+		newLat, newLng, err := c.hub.roadsClient.SnapToRoad(latitude, longitude, accuracyValue)
+		if err == nil {
+			snappedLat = newLat
+			snappedLng = newLng
+		}
+	}
+
 	// Get database connection
 	db, ok := c.db.(*sqlx.DB)
 	if !ok || db == nil {
@@ -197,7 +215,7 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 	}
 
 	// UPSERT location into database (update if exists, insert if not)
-	// This keeps exactly 1 row per driver with their latest position
+	// Store ORIGINAL coordinates in database (for legal/audit)
 	query := `
 		INSERT INTO driver_current_location (
 			driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp, is_connected, updated_at
@@ -218,11 +236,12 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 
 	var updatedAt int64
 
+	// Save ORIGINAL coordinates to database
 	err := db.QueryRow(
 		query,
 		c.UserID,
-		latitude,
-		longitude,
+		latitude,      // Original GPS
+		longitude,     // Original GPS
 		heading,
 		speed,
 		accuracy,
@@ -237,13 +256,13 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 
 	log.Printf("✅ Location updated in database for driver %s", c.UserID)
 
-	// Broadcast location update to all connected managers
+	// Broadcast SNAPPED coordinates to managers (better visual display)
 	locationUpdate := map[string]interface{}{
 		"type": "driver_location_update",
 		"data": map[string]interface{}{
 			"driver_id":  c.UserID,
-			"latitude":   latitude,
-			"longitude":  longitude,
+			"latitude":   snappedLat,   // SNAPPED coordinates for display
+			"longitude":  snappedLng,   // SNAPPED coordinates for display
 			"heading":    heading,
 			"speed":      speed,
 			"accuracy":   accuracy,
@@ -255,7 +274,7 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 
 	// Broadcast to all managers (users with role "admin")
 	c.hub.BroadcastToRole("admin", locationUpdate)
-	log.Printf("📤 Broadcasted location update to all managers")
+	log.Printf("📤 Broadcasted location update to all managers (snapped if needed)")
 }
 
 // markAsDisconnected marks the driver as disconnected in the database
