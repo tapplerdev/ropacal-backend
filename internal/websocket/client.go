@@ -189,6 +189,20 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 		return
 	}
 
+	// OPTIMIZATION: Only process if driver moved significantly (20m threshold)
+	if c.hub.roadsClient != nil {
+		shouldProcess := c.hub.roadsClient.Optimizer.ShouldProcessByDelta(
+			c.UserID,
+			latitude,
+			longitude,
+			int64(timestamp),
+		)
+		if !shouldProcess {
+			log.Printf("🔇 Skipping update - driver hasn't moved significantly (< 20m)")
+			return
+		}
+	}
+
 	// OPTIMIZATION: Snap to roads with all optimizations
 	snappedLat := latitude
 	snappedLng := longitude

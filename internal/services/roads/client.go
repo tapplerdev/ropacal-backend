@@ -16,7 +16,7 @@ type RoadsClient struct {
 	apiKey     string
 	httpClient *http.Client
 	cache      *RouteCache
-	optimizer  *LocationOptimizer
+	Optimizer  *LocationOptimizer // Public for access from websocket handler
 }
 
 // LatLng represents a geographic coordinate
@@ -50,7 +50,7 @@ func NewRoadsClient() *RoadsClient {
 			Timeout: 10 * time.Second,
 		},
 		cache:     NewRouteCache(),
-		optimizer: NewLocationOptimizer(),
+		Optimizer: NewLocationOptimizer(),
 	}
 }
 
@@ -64,7 +64,7 @@ func (c *RoadsClient) SnapToRoad(lat, lng, accuracy float64) (float64, float64, 
 
 	// OPTIMIZATION 1: Accuracy-based filtering
 	// Only snap if GPS accuracy is poor (> 15 meters)
-	if !c.optimizer.ShouldSnapByAccuracy(accuracy) {
+	if !c.Optimizer.ShouldSnapByAccuracy(accuracy) {
 		log.Printf("✅ GPS accuracy good (%.1fm) - skipping snap-to-roads", accuracy)
 		return lat, lng, nil
 	}
@@ -195,5 +195,5 @@ func (c *RoadsClient) GetCacheStats() map[string]interface{} {
 
 // GetOptimizerStats returns optimizer statistics for monitoring
 func (c *RoadsClient) GetOptimizerStats() map[string]interface{} {
-	return c.optimizer.GetStats()
+	return c.Optimizer.GetStats()
 }
