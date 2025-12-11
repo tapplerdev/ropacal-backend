@@ -35,7 +35,7 @@ type OptimizerStats struct {
 const (
 	// MinPositionDelta is the minimum distance (meters) for a significant position change
 	// Points closer than this to the last position are skipped
-	MinPositionDelta = 20.0 // 20 meters (simplified - good for city driving)
+	MinPositionDelta = 5.0 // 5 meters (more frequent updates for smoother animations)
 
 	// AccuracyThreshold is the GPS accuracy threshold (meters)
 	// Only snap points with accuracy worse than this

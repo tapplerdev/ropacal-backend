@@ -198,7 +198,7 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 			int64(timestamp),
 		)
 		if !shouldProcess {
-			log.Printf("🔇 Skipping update - driver hasn't moved significantly (< 20m)")
+			log.Printf("🔇 Skipping update - driver hasn't moved significantly (< 5m)")
 			return
 		}
 	}
