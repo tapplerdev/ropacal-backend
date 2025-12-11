@@ -46,7 +46,8 @@ const (
 
 	// AccuracyThreshold is the GPS accuracy threshold (meters)
 	// Only snap points with accuracy worse than this
-	AccuracyThreshold = 15.0 // 15 meters
+	// INCREASED from 15m to 30m to snap more points to roads (reduce wrong-side-of-road issues)
+	AccuracyThreshold = 30.0 // 30 meters
 
 	// MaxAccuracy is the maximum acceptable GPS accuracy
 	// Points with worse accuracy are rejected entirely
