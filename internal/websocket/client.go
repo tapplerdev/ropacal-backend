@@ -99,6 +99,10 @@ func (c *Client) ReadPump() {
 		case "location_update":
 			// Handle driver location update
 			c.handleLocationUpdate(msg.Data)
+
+		case "driver_log":
+			// Handle driver log streaming
+			c.handleDriverLog(msg.Data)
 		}
 	}
 }
@@ -318,4 +322,35 @@ func (c *Client) markAsDisconnected() {
 	}
 
 	log.Printf("🔴 Driver %s marked as disconnected (last position preserved)", c.UserID)
+}
+
+// handleDriverLog processes driver log messages and outputs them to Railway logs
+// This allows seeing driver-side logs in the backend logs for debugging
+func (c *Client) handleDriverLog(data map[string]interface{}) {
+	category, _ := data["category"].(string)
+	message, _ := data["message"].(string)
+	level, _ := data["level"].(float64)
+	timestamp, _ := data["timestamp"].(float64)
+
+	// Format level as string
+	levelStr := "INFO"
+	switch int(level) {
+	case 500:
+		levelStr = "DEBUG"
+	case 800:
+		levelStr = "INFO"
+	case 900:
+		levelStr = "WARN"
+	case 1000:
+		levelStr = "ERROR"
+	}
+
+	// Output driver log to Railway console with clear prefix
+	log.Printf("📱 [DRIVER:%s] [%s] [%s] %s (ts:%d)",
+		c.UserID[:8], // First 8 chars of driver ID
+		levelStr,
+		category,
+		message,
+		int64(timestamp),
+	)
 }

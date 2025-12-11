@@ -35,7 +35,13 @@ type OptimizerStats struct {
 const (
 	// MinPositionDelta is the minimum distance (meters) for a significant position change
 	// Points closer than this to the last position are skipped
-	MinPositionDelta = 5.0 // 5 meters (more frequent updates for smoother animations)
+	// REDUCED from 5m to 1m for smoother real-time tracking (Uber-style)
+	MinPositionDelta = 1.0 // 1 meter (very frequent updates for smooth animations)
+
+	// MaxTimeSinceLastBroadcast is the maximum time (seconds) before forcing a broadcast
+	// Even if driver hasn't moved MinPositionDelta, send update after this time
+	// Prevents stale positions when driver is moving slowly or stopped
+	MaxTimeSinceLastBroadcast = 2.0 // 2 seconds
 
 	// AccuracyThreshold is the GPS accuracy threshold (meters)
 	// Only snap points with accuracy worse than this
@@ -75,7 +81,7 @@ func (o *LocationOptimizer) ShouldSnapByAccuracy(accuracy float64) bool {
 }
 
 // ShouldProcessByDelta determines if a new position is significantly different from the last
-// This implements position delta storage (VVFGeoFleet technique)
+// This implements position delta storage + time-based fallback for smooth real-time tracking
 func (o *LocationOptimizer) ShouldProcessByDelta(driverID string, lat, lng float64, timestamp int64) bool {
 	o.mutex.RLock()
 	last, exists := o.lastPositions[driverID]
@@ -90,15 +96,28 @@ func (o *LocationOptimizer) ShouldProcessByDelta(driverID string, lat, lng float
 	// Calculate distance from last significant position
 	distance := haversineDistance(last.Latitude, last.Longitude, lat, lng)
 
-	// Not a significant move - skip
-	if distance < MinPositionDelta {
-		o.recordSkippedByDelta()
-		return false
+	// Calculate time since last broadcast (milliseconds → seconds)
+	timeSinceLastBroadcast := float64(timestamp-last.Timestamp) / 1000.0
+
+	// OPTION 1: Significant distance moved (>= 1m)
+	if distance >= MinPositionDelta {
+		o.updateLastPosition(driverID, lat, lng, timestamp)
+		return true
 	}
 
-	// Significant move - update and process
-	o.updateLastPosition(driverID, lat, lng, timestamp)
-	return true
+	// OPTION 2: Time-based fallback (> 2 seconds since last broadcast)
+	// Ensures managers get updates even when driver is slow/stopped
+	// Prevents marker from going stale
+	if timeSinceLastBroadcast > MaxTimeSinceLastBroadcast {
+		log.Printf("⏱️  Time-based broadcast (%.1fs since last update, distance: %.1fm)",
+			timeSinceLastBroadcast, distance)
+		o.updateLastPosition(driverID, lat, lng, timestamp)
+		return true
+	}
+
+	// Neither distance nor time threshold met - skip
+	o.recordSkippedByDelta()
+	return false
 }
 
 // updateLastPosition stores the latest significant position for a driver
