@@ -2,6 +2,7 @@ package roads
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"sync"
 )
