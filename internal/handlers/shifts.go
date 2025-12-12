@@ -730,15 +730,24 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			}
 		}
 
-		// Broadcast WebSocket update to driver
+		// Broadcast WebSocket update to driver with FULL shift data
 		hub.BroadcastToUser(req.DriverID, map[string]interface{}{
 			"type": "route_assigned",
 			"data": map[string]interface{}{
-				"shift_id":   shiftID,
-				"route_id":   req.RouteID,
-				"total_bins": totalBins,
-				"bins":       bins,
-				"message":    "New route assigned!",
+				"id":                  shift.ID,
+				"driver_id":           shift.DriverID,
+				"route_id":            shift.RouteID,
+				"status":              shift.Status, // CRITICAL: Include status for ShiftState.fromJson()
+				"start_time":          shift.StartTime,
+				"end_time":            shift.EndTime,
+				"total_pause_seconds": shift.TotalPauseSeconds,
+				"pause_start_time":    shift.PauseStartTime,
+				"total_bins":          shift.TotalBins,
+				"completed_bins":      shift.CompletedBins,
+				"bins":                bins,
+				"created_at":          shift.CreatedAt,
+				"updated_at":          shift.UpdatedAt,
+				"message":             "New route assigned!",
 			},
 		})
 
