@@ -105,11 +105,25 @@ func (h *Hub) BroadcastToRole(role string, data interface{}) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("🔊 BroadcastToRole CALLED")
+	log.Printf("   Target role: '%s'", role)
+	log.Printf("   Total connected clients: %d", len(h.clients))
+
+	// Log all connected clients and their roles
+	for userID, client := range h.clients {
+		log.Printf("   Client: %s (role: %s) %s", userID, client.UserRole,
+			map[bool]string{true: "✅ MATCH", false: "❌ no match"}[client.UserRole == role])
+	}
+
 	dataBytes, err := json.Marshal(data)
 	if err != nil {
 		log.Printf("❌ Failed to marshal broadcast message: %v", err)
 		return
 	}
+
+	log.Printf("   Message size: %d bytes", len(dataBytes))
+	log.Printf("   Message preview: %s", string(dataBytes[:min(len(dataBytes), 200)]))
 
 	sentCount := 0
 	for userID, client := range h.clients {
@@ -117,6 +131,7 @@ func (h *Hub) BroadcastToRole(role string, data interface{}) {
 			select {
 			case client.send <- dataBytes:
 				sentCount++
+				log.Printf("   ✅ Sent to %s", userID)
 			default:
 				log.Printf("⚠️ Client buffer full, skipping: %s", userID)
 			}
@@ -124,6 +139,7 @@ func (h *Hub) BroadcastToRole(role string, data interface{}) {
 	}
 
 	log.Printf("📤 Broadcast to role '%s': sent to %d clients", role, sentCount)
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
 
 // GetClientCount returns the number of connected clients

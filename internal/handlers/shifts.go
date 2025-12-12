@@ -185,15 +185,26 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		})
 
 		// Broadcast shift state change to all managers
-		hub.BroadcastToRole("manager", map[string]interface{}{
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("📡 BROADCASTING driver_shift_change TO MANAGERS")
+		log.Printf("   Driver ID: %s", shift.DriverID)
+		log.Printf("   Driver Email: %s", userClaims.Email)
+		log.Printf("   Status: %s", shift.Status)
+		log.Printf("   Shift ID: %s", shift.ID)
+
+		broadcastData := map[string]interface{}{
 			"type": "driver_shift_change",
 			"data": map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,
 			},
-		})
-		log.Printf("📡 Broadcast driver_shift_change to managers: %s -> %s", userClaims.Email, shift.Status)
+		}
+		log.Printf("   Broadcast payload: %+v", broadcastData)
+
+		hub.BroadcastToRole("manager", broadcastData)
+		log.Printf("   ✅ BroadcastToRole('manager') called")
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
 		log.Printf("📤 RESPONSE: 200 OK")
