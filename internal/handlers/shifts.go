@@ -178,11 +178,22 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Get updated shift
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
-		// Broadcast WebSocket update
+		// Broadcast WebSocket update to driver
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": shift,
 		})
+
+		// Broadcast shift state change to all managers
+		hub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "driver_shift_change",
+			"data": map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			},
+		})
+		log.Printf("📡 Broadcast driver_shift_change to managers: %s -> %s", userClaims.Email, shift.Status)
 
 		log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
 		log.Printf("📤 RESPONSE: 200 OK")
@@ -373,11 +384,22 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Get updated shift with bins for WebSocket broadcast
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
-		// Broadcast WebSocket update with full shift data
+		// Broadcast WebSocket update to driver
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": shift,
 		})
+
+		// Broadcast shift state change to all managers
+		hub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "driver_shift_change",
+			"data": map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			},
+		})
+		log.Printf("📡 Broadcast driver_shift_change to managers: Driver ended shift")
 
 		log.Printf("🏁 Shift ended: %s (%dm active)", shift.ID, activeDuration/60)
 
@@ -668,7 +690,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			}
 		}
 
-		// Broadcast WebSocket update with bins
+		// Broadcast WebSocket update to driver
 		hub.BroadcastToUser(req.DriverID, map[string]interface{}{
 			"type": "route_assigned",
 			"data": map[string]interface{}{
@@ -679,6 +701,17 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 				"message":    "New route assigned!",
 			},
 		})
+
+		// Broadcast shift state change to all managers (new driver assigned)
+		hub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "driver_shift_change",
+			"data": map[string]interface{}{
+				"driver_id": req.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shiftID,
+			},
+		})
+		log.Printf("📡 Broadcast driver_shift_change to managers: Route assigned to driver")
 
 		log.Printf("✅ Route assigned: %s to driver %s (%d bins)", req.RouteID, req.DriverID, totalBins)
 
