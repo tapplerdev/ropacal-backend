@@ -247,11 +247,22 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		var shift models.Shift
 		db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, userClaims.UserID)
 
-		// Broadcast WebSocket update
+		// Broadcast WebSocket update to driver
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": shift,
 		})
+
+		// Broadcast shift state change to all managers
+		hub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "driver_shift_change",
+			"data": map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			},
+		})
+		log.Printf("📡 Broadcast driver_shift_change to managers: Driver paused shift")
 
 		log.Printf("⏸️  Shift paused: %s", shift.ID)
 
@@ -308,11 +319,22 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Get updated shift
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
-		// Broadcast WebSocket update
+		// Broadcast WebSocket update to driver
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": shift,
 		})
+
+		// Broadcast shift state change to all managers
+		hub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "driver_shift_change",
+			"data": map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			},
+		})
+		log.Printf("📡 Broadcast driver_shift_change to managers: Driver resumed shift")
 
 		log.Printf("▶️  Shift resumed: %s (total pause: %ds)", shift.ID, totalPause)
 
@@ -818,9 +840,20 @@ func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				},
 			})
 			log.Printf("📤 Sent shift_deleted event to driver: %s", driverID)
+
+			// Also broadcast to managers that this driver's shift ended
+			hub.BroadcastToRole("manager", map[string]interface{}{
+				"type": "driver_shift_change",
+				"data": map[string]interface{}{
+					"driver_id": driverID,
+					"status":    "ended",
+					"shift_id":  "all",
+				},
+			})
 		}
 
 		log.Printf("✅ WebSocket events sent to %d drivers", len(affectedDrivers))
+		log.Printf("📡 Broadcast driver_shift_change to managers for %d drivers (shifts cleared)", len(affectedDrivers))
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success":       true,
