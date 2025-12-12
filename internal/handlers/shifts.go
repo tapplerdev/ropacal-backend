@@ -202,8 +202,9 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 		log.Printf("   Broadcast payload: %+v", broadcastData)
 
+		hub.BroadcastToRole("admin", broadcastData)
 		hub.BroadcastToRole("manager", broadcastData)
-		log.Printf("   ✅ BroadcastToRole('manager') called")
+		log.Printf("   ✅ BroadcastToRole('admin' + 'manager') called")
 		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
@@ -265,14 +266,16 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		})
 
 		// Broadcast shift state change to all managers
-		hub.BroadcastToRole("manager", map[string]interface{}{
+		broadcastPayload := map[string]interface{}{
 			"type": "driver_shift_change",
 			"data": map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,
 			},
-		})
+		}
+		hub.BroadcastToRole("admin", broadcastPayload)
+		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Driver paused shift")
 
 		log.Printf("⏸️  Shift paused: %s", shift.ID)
@@ -337,14 +340,16 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		})
 
 		// Broadcast shift state change to all managers
-		hub.BroadcastToRole("manager", map[string]interface{}{
+		broadcastPayload := map[string]interface{}{
 			"type": "driver_shift_change",
 			"data": map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,
 			},
-		})
+		}
+		hub.BroadcastToRole("admin", broadcastPayload)
+		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Driver resumed shift")
 
 		log.Printf("▶️  Shift resumed: %s (total pause: %ds)", shift.ID, totalPause)
@@ -424,14 +429,16 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		})
 
 		// Broadcast shift state change to all managers
-		hub.BroadcastToRole("manager", map[string]interface{}{
+		broadcastPayload := map[string]interface{}{
 			"type": "driver_shift_change",
 			"data": map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,
 			},
-		})
+		}
+		hub.BroadcastToRole("admin", broadcastPayload)
+		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Driver ended shift")
 
 		log.Printf("🏁 Shift ended: %s (%dm active)", shift.ID, activeDuration/60)
@@ -736,14 +743,16 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		})
 
 		// Broadcast shift state change to all managers (new driver assigned)
-		hub.BroadcastToRole("manager", map[string]interface{}{
+		broadcastPayload := map[string]interface{}{
 			"type": "driver_shift_change",
 			"data": map[string]interface{}{
 				"driver_id": req.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shiftID,
 			},
-		})
+		}
+		hub.BroadcastToRole("admin", broadcastPayload)
+		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Route assigned to driver")
 
 		log.Printf("✅ Route assigned: %s to driver %s (%d bins)", req.RouteID, req.DriverID, totalBins)
@@ -853,14 +862,16 @@ func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("📤 Sent shift_deleted event to driver: %s", driverID)
 
 			// Also broadcast to managers that this driver's shift ended
-			hub.BroadcastToRole("manager", map[string]interface{}{
+			broadcastPayload := map[string]interface{}{
 				"type": "driver_shift_change",
 				"data": map[string]interface{}{
 					"driver_id": driverID,
 					"status":    "ended",
 					"shift_id":  "all",
 				},
-			})
+			}
+			hub.BroadcastToRole("admin", broadcastPayload)
+			hub.BroadcastToRole("manager", broadcastPayload)
 		}
 
 		log.Printf("✅ WebSocket events sent to %d drivers", len(affectedDrivers))
