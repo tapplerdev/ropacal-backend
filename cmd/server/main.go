@@ -206,6 +206,9 @@ func main() {
 
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db))
+
+			// User management
+			r.Post("/users", handlers.CreateUser(db))
 		})
 	})
 
