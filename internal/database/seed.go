@@ -125,6 +125,20 @@ func SeedUsers(db *sqlx.DB) error {
 			"name":     "Admin User",
 			"role":     "admin",
 		},
+		{
+			"id":       uuid.New().String(),
+			"email":    "nate@ropacal.com",
+			"password": string(adminPassword),
+			"name":     "Nate",
+			"role":     "admin",
+		},
+		{
+			"id":       uuid.New().String(),
+			"email":    "ariel@ropacal.com",
+			"password": string(adminPassword),
+			"name":     "Ariel",
+			"role":     "admin",
+		},
 	}
 
 	for _, user := range users {
@@ -141,5 +155,7 @@ func SeedUsers(db *sqlx.DB) error {
 	log.Println("✓ Successfully seeded test users")
 	log.Println("  📧 Driver: driver@ropacal.com / driver123")
 	log.Println("  📧 Admin:  admin@ropacal.com / admin123")
+	log.Println("  📧 Admin:  nate@ropacal.com / admin123")
+	log.Println("  📧 Admin:  ariel@ropacal.com / admin123")
 	return nil
 }
