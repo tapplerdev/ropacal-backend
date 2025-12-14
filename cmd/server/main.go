@@ -18,36 +18,78 @@ import (
 )
 
 func main() {
+	log.Println("═══════════════════════════════════════════════════════════════════")
+	log.Println("🚀 ROPACAL BACKEND SERVER STARTING")
+	log.Println("═══════════════════════════════════════════════════════════════════")
+
 	// Load .env file
+	log.Println("📂 Loading environment variables...")
 	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found, using environment variables")
+		log.Println("⚠️  Warning: .env file not found, using environment variables from system")
+	} else {
+		log.Println("✅ .env file loaded successfully")
 	}
 
 	// Get database URL
+	log.Println("🔍 Checking DATABASE_URL environment variable...")
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: DATABASE_URL environment variable is required")
+		log.Println("   Please set DATABASE_URL in Railway Variables or .env file")
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Fatal("DATABASE_URL environment variable is required")
 	}
+	log.Println("✅ DATABASE_URL found")
 
 	// Connect to database
+	log.Println("🔌 Connecting to database...")
 	db, err := database.Connect(dbURL)
 	if err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: Database connection failed")
+		log.Printf("   Error: %v", err)
+		log.Println("   This is usually caused by:")
+		log.Println("   1. Wrong DATABASE_URL format")
+		log.Println("   2. PostgreSQL service is down")
+		log.Println("   3. Network connectivity issue")
+		log.Println("   4. Invalid credentials")
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Fatal(err)
 	}
 	defer db.Close()
+	log.Println("✅ Database connection established")
 
 	// Run migrations
+	log.Println("🔄 Running database migrations...")
 	if err := database.Migrate(db); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: Database migrations failed")
+		log.Printf("   Error: %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Fatal(err)
 	}
+	log.Println("✅ Database migrations completed")
 
 	// Seed database
+	log.Println("🌱 Seeding database with initial data...")
 	if err := database.SeedUsers(db); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: User seeding failed")
+		log.Printf("   Error: %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Fatal(err)
 	}
+	log.Println("✅ Users seeded successfully")
+
 	if err := database.SeedBins(db); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: Bins seeding failed")
+		log.Printf("   Error: %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Fatal(err)
 	}
+	log.Println("✅ Bins seeded successfully")
 
 	// Initialize Firebase Cloud Messaging
 	// Supports both file path and base64-encoded credentials (for Railway/cloud deployments)
@@ -168,14 +210,28 @@ func main() {
 	})
 
 	// Get port
+	log.Println("🔍 Checking PORT environment variable...")
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
+		log.Printf("⚠️  PORT not set, using default: %s", port)
+	} else {
+		log.Printf("✅ PORT found: %s", port)
 	}
 
-	// Start server
+	log.Println("═══════════════════════════════════════════════════════════════════")
+	log.Println("✅ ALL INITIALIZATION COMPLETE")
 	log.Printf("🚀 Server starting on http://localhost:%s", port)
+	log.Println("🔌 Ready to accept requests!")
+	log.Println("═══════════════════════════════════════════════════════════════════")
+
+	// Start server
 	if err := http.ListenAndServe(":"+port, r); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: Server failed to start")
+		log.Printf("   Error: %v", err)
+		log.Printf("   Port: %s", port)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Fatal(err)
 	}
 }

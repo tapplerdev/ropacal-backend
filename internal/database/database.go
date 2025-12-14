@@ -10,18 +10,46 @@ import (
 )
 
 func Connect(dbURL string) (*sqlx.DB, error) {
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Println("🔌 DATABASE CONNECTION ATTEMPT")
+	log.Printf("   📍 Database URL length: %d characters", len(dbURL))
+	log.Printf("   📍 URL prefix: %s...", dbURL[:min(30, len(dbURL))])
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	log.Println("🔄 Step 1: Attempting sqlx.Connect()...")
 	db, err := sqlx.Connect("postgres", dbURL)
 	if err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ DATABASE CONNECTION FAILED AT sqlx.Connect()")
+		log.Printf("   Error type: %T", err)
+		log.Printf("   Error message: %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
+	log.Println("✅ Step 1 Complete: sqlx.Connect() succeeded")
 
-	// Test the connection
+	log.Println("🔄 Step 2: Testing connection with Ping()...")
 	if err := db.Ping(); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ DATABASE CONNECTION FAILED AT Ping()")
+		log.Printf("   Error type: %T", err)
+		log.Printf("   Error message: %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
+	log.Println("✅ Step 2 Complete: Ping() succeeded")
 
-	log.Println("✓ Connected to PostgreSQL database")
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Println("✅ DATABASE CONNECTION SUCCESSFUL")
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	return db, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func Migrate(db *sqlx.DB) error {
