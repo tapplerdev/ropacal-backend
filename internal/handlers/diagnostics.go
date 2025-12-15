@@ -1,10 +1,11 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // DiagnosticLog represents a diagnostic log from the mobile app
