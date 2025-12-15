@@ -208,8 +208,9 @@ func main() {
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
 
-			// One-time data migration endpoint (can be removed after use)
+			// One-time data migration endpoints (can be removed after use)
 			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
+			r.Post("/manager/bins/fix-status", handlers.FixBinStatus(db))
 
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db))

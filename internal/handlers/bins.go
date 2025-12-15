@@ -386,3 +386,28 @@ INSERT INTO bins (id, bin_number, current_street, city, zip, last_moved, last_ch
 		})
 	}
 }
+
+// FixBinStatus lowercases all bin status values for Flutter compatibility
+func FixBinStatus(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("🔧 REQUEST: POST /api/admin/bins/fix-status")
+
+		// Update all bin statuses to lowercase
+		result, err := db.Exec("UPDATE bins SET status = LOWER(status)")
+		if err != nil {
+			fmt.Printf("❌ Error updating status: %v\n", err)
+			http.Error(w, "Failed to update bin statuses", http.StatusInternalServerError)
+			return
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		fmt.Printf("✅ Updated %d bin statuses to lowercase\n", rowsAffected)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"message":       "Fixed bin status casing",
+			"rows_affected": rowsAffected,
+		})
+	}
+}
