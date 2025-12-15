@@ -210,6 +210,8 @@ func main() {
 
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db))
+			r.Get("/manager/active-drivers", handlers.GetActiveDrivers(db))
+			r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
 
 			// User management
 			r.Post("/users", handlers.CreateUser(db))
