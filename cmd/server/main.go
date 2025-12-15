@@ -189,6 +189,10 @@ func main() {
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
 			r.Post("/driver/shift/complete-bin", handlers.CompleteBin(db, wsHub))
 
+			// Shift history
+			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
+			r.Get("/driver/shift-details", handlers.GetShiftDetails(db))
+
 			// Location tracking (sent every 10 seconds during active shift)
 			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub))
 

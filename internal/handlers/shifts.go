@@ -496,7 +496,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Parse request body
 		var req struct {
-			BinID string `json:"bin_id"`
+			BinID                 string `json:"bin_id"`
+			UpdatedFillPercentage int    `json:"updated_fill_percentage"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			utils.RespondError(w, http.StatusBadRequest, "Invalid request body")
@@ -504,6 +505,13 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		log.Printf("   Bin ID: %s", req.BinID)
+		log.Printf("   Updated Fill Percentage: %d%%", req.UpdatedFillPercentage)
+
+		// Validate fill percentage
+		if req.UpdatedFillPercentage < 0 || req.UpdatedFillPercentage > 100 {
+			utils.RespondError(w, http.StatusBadRequest, "Fill percentage must be between 0 and 100")
+			return
+		}
 
 		// Get current active shift
 		var shift models.Shift
@@ -517,12 +525,13 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		now := time.Now().Unix()
 		routeBinQuery := `UPDATE route_bins
 						  SET is_completed = 1,
-							  completed_at = $1
-						  WHERE shift_id = $2
-						  AND bin_id = $3
+							  completed_at = $1,
+							  updated_fill_percentage = $2
+						  WHERE shift_id = $3
+						  AND bin_id = $4
 						  AND is_completed = 0`
 
-		result, err := db.Exec(routeBinQuery, now, shift.ID, req.BinID)
+		result, err := db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, shift.ID, req.BinID)
 		if err != nil {
 			log.Printf("❌ Error marking bin as completed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
@@ -593,6 +602,108 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	}
 }
 
+// GetDriverShiftHistory returns all completed shifts for the authenticated driver
+func GetDriverShiftHistory(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/driver/shift-history")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+
+		// Query all shifts where start_time is NOT NULL (shift was actually started)
+		// Order by most recent first, limit to 100 for performance
+		query := `
+			SELECT id, driver_id, route_id, status, start_time, end_time,
+			       total_pause_seconds, total_bins, completed_bins,
+			       created_at, updated_at
+			FROM shifts
+			WHERE driver_id = $1 AND start_time IS NOT NULL
+			ORDER BY start_time DESC
+			LIMIT 100`
+
+		var shifts []models.Shift
+		err := db.Select(&shifts, query, userClaims.UserID)
+		if err != nil {
+			log.Printf("❌ Error fetching shift history: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift history")
+			return
+		}
+
+		log.Printf("✅ Found %d shifts in history", len(shifts))
+		log.Printf("📤 RESPONSE: 200 OK")
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    shifts,
+		})
+	}
+}
+
+// GetShiftDetails returns detailed information about a specific shift including all bins
+func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/driver/shift-details")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		shiftID := r.URL.Query().Get("shift_id")
+		if shiftID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "shift_id query parameter is required")
+			return
+		}
+
+		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+		log.Printf("   Shift ID: %s", shiftID)
+
+		// Get shift details
+		var shift models.Shift
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, userClaims.UserID)
+		if err != nil {
+			log.Printf("❌ Error fetching shift: %v", err)
+			utils.RespondError(w, http.StatusNotFound, "Shift not found")
+			return
+		}
+
+		// Get all bins with details for this shift
+		bins, err := getRouteBinsWithDetails(db, shiftID)
+		if err != nil {
+			log.Printf("❌ Error fetching route bins: %v", err)
+			bins = []models.RouteBinWithDetails{} // Return empty array on error
+		}
+
+		log.Printf("✅ Shift found with %d bins", len(bins))
+		log.Printf("📤 RESPONSE: 200 OK")
+
+		// Return shift with bins array
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"id":                 shift.ID,
+				"driver_id":          shift.DriverID,
+				"route_id":           shift.RouteID,
+				"status":             shift.Status,
+				"start_time":         shift.StartTime,
+				"end_time":           shift.EndTime,
+				"total_pause_seconds": shift.TotalPauseSeconds,
+				"total_bins":         shift.TotalBins,
+				"completed_bins":     shift.CompletedBins,
+				"created_at":         shift.CreatedAt,
+				"updated_at":         shift.UpdatedAt,
+				"bins":               bins,
+			},
+		})
+	}
+}
+
 // getRouteBinsWithDetails fetches route bins with full bin details
 func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.RouteBinWithDetails, error) {
 	query := `
@@ -603,6 +714,7 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.RouteBinWith
 			rb.sequence_order,
 			rb.is_completed,
 			rb.completed_at,
+			rb.updated_fill_percentage,
 			rb.created_at,
 			b.bin_number,
 			b.current_street,

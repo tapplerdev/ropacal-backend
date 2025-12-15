@@ -142,6 +142,7 @@ func Migrate(db *sqlx.DB) error {
 			sequence_order INT NOT NULL,
 			is_completed INT NOT NULL DEFAULT 0,
 			completed_at BIGINT,
+			updated_fill_percentage INT,
 			created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
 			FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE CASCADE,
 			FOREIGN KEY (bin_id) REFERENCES bins(id) ON DELETE CASCADE
@@ -164,6 +165,9 @@ func Migrate(db *sqlx.DB) error {
 			FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
 			FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE SET NULL
 		)`,
+
+		// Migration: Add updated_fill_percentage column to existing route_bins table
+		`ALTER TABLE route_bins ADD COLUMN IF NOT EXISTS updated_fill_percentage INT`,
 
 		// Create indexes
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
