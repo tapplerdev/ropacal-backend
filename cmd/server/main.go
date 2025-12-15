@@ -198,9 +198,6 @@ func main() {
 
 			// FCM token registration
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
-
-			// Diagnostic logging endpoint
-			r.Post("/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
 		})
 
 		// Manager endpoints (require authentication + admin role)
