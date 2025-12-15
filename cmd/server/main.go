@@ -200,6 +200,9 @@ func main() {
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
 		})
 
+		// Diagnostic logging endpoint (no auth required for easier debugging)
+		r.Post("/api/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
+
 		// Manager endpoints (require authentication + admin role)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
