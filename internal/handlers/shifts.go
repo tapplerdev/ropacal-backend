@@ -30,6 +30,15 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
+		// Check what shifts exist for this driver (for debugging)
+		var allShifts []models.Shift
+		debugQuery := `SELECT id, status, created_at FROM shifts WHERE driver_id = $1 ORDER BY created_at DESC LIMIT 3`
+		db.Select(&allShifts, debugQuery, userClaims.UserID)
+		log.Printf("   🔍 DEBUG: Found %d total shifts for this driver:", len(allShifts))
+		for i, s := range allShifts {
+			log.Printf("      %d. Shift ID: %s, Status: %s, Created: %v", i+1, s.ID, s.Status, s.CreatedAt)
+		}
+
 		var shift models.Shift
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
