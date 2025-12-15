@@ -768,7 +768,6 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		// Create new shift
 		shiftID := uuid.New().String()
-		now := time.Now().Unix()
 		totalBins := len(req.BinIDs)
 
 		shiftQuery := `INSERT INTO shifts (id, driver_id, route_id, status, total_bins, created_at, updated_at)
