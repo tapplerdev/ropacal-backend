@@ -638,6 +638,51 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		log.Printf("📋 Assigning route %s to driver %s with %d bins", req.RouteID, req.DriverID, len(req.BinIDs))
 
+		// Check if driver is online and has recent location
+		var driverLocation struct {
+			Latitude    float64 `db:"latitude"`
+			Longitude   float64 `db:"longitude"`
+			IsConnected bool    `db:"is_connected"`
+			UpdatedAt   int64   `db:"updated_at"`
+		}
+
+		now := time.Now().Unix()
+		locationQuery := `
+			SELECT latitude, longitude, is_connected, updated_at
+			FROM driver_current_location
+			WHERE driver_id = $1
+		`
+
+		err := db.Get(&driverLocation, locationQuery, req.DriverID)
+		if err == sql.ErrNoRows {
+			log.Printf("❌ Driver is not online (no location data)")
+			utils.RespondError(w, http.StatusBadRequest, "Driver is not online. Ask driver to log in and enable location.")
+			return
+		}
+		if err != nil {
+			log.Printf("❌ Error checking driver location: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to check driver status")
+			return
+		}
+
+		// Check if driver is connected
+		if !driverLocation.IsConnected {
+			log.Printf("❌ Driver is not connected (is_connected = false)")
+			utils.RespondError(w, http.StatusBadRequest, "Driver is not online. Ask driver to log in and enable location.")
+			return
+		}
+
+		// Check if location is recent (updated within last 30 seconds)
+		timeSinceUpdate := now - driverLocation.UpdatedAt
+		if timeSinceUpdate > 30 {
+			log.Printf("❌ Driver location is stale (last update: %ds ago)", timeSinceUpdate)
+			utils.RespondError(w, http.StatusBadRequest, "Driver location is not available. Ask driver to ensure GPS is enabled.")
+			return
+		}
+
+		log.Printf("✅ Driver is online with recent location (%.6f, %.6f) - updated %ds ago",
+			driverLocation.Latitude, driverLocation.Longitude, timeSinceUpdate)
+
 		// Start transaction
 		tx, err := db.Beginx()
 		if err != nil {
@@ -669,6 +714,58 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			return
 		}
 
+		// Fetch full bin details for TSP optimization
+		binQuery := `SELECT id, current_street, latitude, longitude, fill_percentage FROM bins WHERE id IN (?)`
+		binQuery, binArgs, err := sqlx.In(binQuery, req.BinIDs)
+		if err != nil {
+			log.Printf("❌ Error building bin query: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
+			return
+		}
+		binQuery = tx.Rebind(binQuery)
+
+		var binDetails []struct {
+			ID             string  `db:"id"`
+			CurrentStreet  string  `db:"current_street"`
+			Latitude       float64 `db:"latitude"`
+			Longitude      float64 `db:"longitude"`
+			FillPercentage int     `db:"fill_percentage"`
+		}
+		err = tx.Select(&binDetails, binQuery, binArgs...)
+		if err != nil {
+			log.Printf("❌ Error fetching bin details: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
+			return
+		}
+
+		// Convert to optimizer format
+		binsToOptimize := make([]services.BinWithPriority, len(binDetails))
+		for i, bin := range binDetails {
+			binsToOptimize[i] = services.BinWithPriority{
+				ID:             bin.ID,
+				Latitude:       bin.Latitude,
+				Longitude:      bin.Longitude,
+				FillPercentage: bin.FillPercentage,
+				CurrentStreet:  bin.CurrentStreet,
+			}
+		}
+
+		// Optimize route using TSP algorithm
+		optimizer := services.NewRouteOptimizer()
+		startLocation := services.Location{
+			Latitude:  driverLocation.Latitude,
+			Longitude: driverLocation.Longitude,
+		}
+		optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
+
+		log.Printf("🎯 Route optimized! Order: %v", func() []string {
+			streets := make([]string, len(optimizedBins))
+			for i, b := range optimizedBins {
+				streets[i] = b.CurrentStreet
+			}
+			return streets
+		}())
+
 		// Create new shift
 		shiftID := uuid.New().String()
 		now := time.Now().Unix()
@@ -684,12 +781,12 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			return
 		}
 
-		// Insert route bins with sequence order
-		for i, binID := range req.BinIDs {
+		// Insert route bins with OPTIMIZED sequence order
+		for i, bin := range optimizedBins {
 			routeBinQuery := `INSERT INTO route_bins (shift_id, bin_id, sequence_order, created_at)
 							  VALUES ($1, $2, $3, $4)`
 
-			_, err = tx.Exec(routeBinQuery, shiftID, binID, i+1, now)
+			_, err = tx.Exec(routeBinQuery, shiftID, bin.ID, i+1, now)
 			if err != nil {
 				log.Printf("❌ Error inserting route_bin: %v", err)
 				utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to route")
