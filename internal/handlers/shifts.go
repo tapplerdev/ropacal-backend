@@ -178,10 +178,31 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Get updated shift
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
-		// Broadcast WebSocket update to driver
+		// Get route bins with details for WebSocket broadcast
+		bins, err := getRouteBinsWithDetails(db, shift.ID)
+		if err != nil {
+			log.Printf("❌ Error fetching route bins for WebSocket: %v", err)
+			bins = []models.RouteBinWithDetails{} // Empty array on error
+		}
+
+		// Broadcast WebSocket update to driver (include bins!)
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
-			"data": shift,
+			"data": map[string]interface{}{
+				"id":                  shift.ID,
+				"driver_id":           shift.DriverID,
+				"route_id":            shift.RouteID,
+				"status":              shift.Status,
+				"start_time":          shift.StartTime,
+				"end_time":            shift.EndTime,
+				"total_pause_seconds": shift.TotalPauseSeconds,
+				"pause_start_time":    shift.PauseStartTime,
+				"total_bins":          shift.TotalBins,
+				"completed_bins":      shift.CompletedBins,
+				"bins":                bins, // ← Include route bins!
+				"created_at":          shift.CreatedAt,
+				"updated_at":          shift.UpdatedAt,
+			},
 		})
 
 		// Broadcast shift state change to all managers
