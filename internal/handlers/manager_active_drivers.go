@@ -29,6 +29,21 @@ type ActiveDriverResponse struct {
 	UpdatedAt       int64           `json:"updated_at"`
 }
 
+// AllDriverResponse represents a driver with their current status (used by GetAllDrivers)
+type AllDriverResponse struct {
+	DriverID        string          `json:"driver_id"`
+	DriverName      string          `json:"driver_name"`
+	Email           string          `json:"email"`
+	ShiftID         *string         `json:"shift_id,omitempty"`
+	RouteID         *string         `json:"route_id,omitempty"`
+	Status          string          `json:"status"` // 'active', 'paused', 'ready', 'inactive'
+	StartTime       *int64          `json:"start_time,omitempty"`
+	TotalBins       int             `json:"total_bins"`
+	CompletedBins   int             `json:"completed_bins"`
+	CurrentLocation *DriverLocation `json:"current_location,omitempty"`
+	UpdatedAt       *int64          `json:"updated_at,omitempty"`
+}
+
 // GetActiveDrivers returns all drivers with active shifts (ready, active, or paused)
 func GetActiveDrivers(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

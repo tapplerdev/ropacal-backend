@@ -17,27 +17,6 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// DriverLocation represents the driver's current GPS location
-type DriverLocation struct {
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-}
-
-// AllDriverResponse represents a driver with their current status
-type AllDriverResponse struct {
-	DriverID        string          `json:"driver_id"`
-	DriverName      string          `json:"driver_name"`
-	Email           string          `json:"email"`
-	ShiftID         *string         `json:"shift_id,omitempty"`
-	RouteID         *string         `json:"route_id,omitempty"`
-	Status          string          `json:"status"` // 'active', 'paused', 'ready', 'inactive'
-	StartTime       *int64          `json:"start_time,omitempty"`
-	TotalBins       int             `json:"total_bins"`
-	CompletedBins   int             `json:"completed_bins"`
-	CurrentLocation *DriverLocation `json:"current_location,omitempty"`
-	UpdatedAt       *int64          `json:"updated_at,omitempty"`
-}
-
 // GetCurrentShift returns the current active shift for the driver
 func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
