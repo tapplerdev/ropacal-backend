@@ -156,3 +156,14 @@ func (h *Hub) IsUserConnected(userID string) bool {
 	_, ok := h.clients[userID]
 	return ok
 }
+
+// GetConnectedClientIDs returns a list of all connected client IDs
+func (h *Hub) GetConnectedClientIDs() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]string, 0, len(h.clients))
+	for userID := range h.clients {
+		ids = append(ids, userID)
+	}
+	return ids
+}

@@ -294,6 +294,40 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 	log.Printf("📤 Broadcasted location update to all managers (snapped if needed)")
 }
 
+// markAsConnected marks the driver as connected in the database
+// This is called immediately when driver connects to WebSocket
+func (c *Client) markAsConnected() {
+	// Only mark drivers as connected (not managers)
+	if c.UserRole != "driver" {
+		return
+	}
+
+	db, ok := c.db.(*sqlx.DB)
+	if !ok || db == nil {
+		log.Printf("❌ Database connection not available for connect handler")
+		return
+	}
+
+	// Insert or update driver_current_location with is_connected = TRUE
+	query := `
+		INSERT INTO driver_current_location (
+			driver_id, is_connected, updated_at
+		) VALUES ($1, TRUE, EXTRACT(EPOCH FROM NOW())::BIGINT)
+		ON CONFLICT (driver_id)
+		DO UPDATE SET
+			is_connected = TRUE,
+			updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+	`
+
+	_, err := db.Exec(query, c.UserID)
+	if err != nil {
+		log.Printf("❌ Error marking driver as connected: %v", err)
+		return
+	}
+
+	log.Printf("🟢 Driver %s marked as CONNECTED (ready to receive assignments)", c.UserID)
+}
+
 // markAsDisconnected marks the driver as disconnected in the database
 // This preserves their last known location for managers to see
 func (c *Client) markAsDisconnected() {

@@ -17,6 +17,27 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// DriverLocation represents the driver's current GPS location
+type DriverLocation struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
+// AllDriverResponse represents a driver with their current status
+type AllDriverResponse struct {
+	DriverID        string          `json:"driver_id"`
+	DriverName      string          `json:"driver_name"`
+	Email           string          `json:"email"`
+	ShiftID         *string         `json:"shift_id,omitempty"`
+	RouteID         *string         `json:"route_id,omitempty"`
+	Status          string          `json:"status"` // 'active', 'paused', 'ready', 'inactive'
+	StartTime       *int64          `json:"start_time,omitempty"`
+	TotalBins       int             `json:"total_bins"`
+	CompletedBins   int             `json:"completed_bins"`
+	CurrentLocation *DriverLocation `json:"current_location,omitempty"`
+	UpdatedAt       *int64          `json:"updated_at,omitempty"`
+}
+
 // GetCurrentShift returns the current active shift for the driver
 func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1313,80 +1334,145 @@ func UpdateLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	}
 }
 
-// GetAllDrivers returns all drivers with their current status and last location
+// GetAllDrivers returns all drivers regardless of shift status
+// Drivers with active shifts will show their current shift info
+// Drivers without active shifts will show status as 'inactive'
 // GET /api/manager/drivers
 func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("📥 REQUEST: GET /api/manager/drivers")
+		log.Println("📋 GetAllDrivers: Fetching all drivers...")
 
-		// Query all drivers with their current shift status
 		query := `
 			SELECT
-				u.id as driver_id,
-				u.name,
-				COALESCE(s.status, 'inactive') as status,
-				s.id as shift_id,
-				s.completed_bins as current_bin,
-				s.total_bins
+				u.id AS driver_id,
+				u.name AS driver_name,
+				u.email,
+				s.id AS shift_id,
+				s.route_id,
+				s.status AS shift_status,
+				s.start_time,
+				s.total_bins,
+				s.completed_bins,
+				s.updated_at,
+				dl.latitude,
+				dl.longitude
 			FROM users u
-			LEFT JOIN shifts s ON u.id = s.driver_id
-				AND s.status IN ('active', 'paused', 'ready')
+			LEFT JOIN shifts s ON u.id = s.driver_id AND s.status IN ('ready', 'active', 'paused')
+			LEFT JOIN (
+				-- Get the most recent location for each driver
+				SELECT DISTINCT ON (driver_id)
+					driver_id, latitude, longitude
+				FROM driver_locations
+				ORDER BY driver_id, timestamp DESC
+			) dl ON u.id = dl.driver_id
 			WHERE u.role = 'driver'
-			ORDER BY u.name
+			ORDER BY
+				CASE
+					WHEN s.status IS NOT NULL THEN 0  -- Active drivers first
+					ELSE 1                             -- Idle drivers last
+				END,
+				s.updated_at DESC NULLS LAST,
+				u.name ASC
 		`
 
-		type DriverRow struct {
-			DriverID    string  `db:"driver_id"`
-			Name        string  `db:"name"`
-			Status      string  `db:"status"`
-			ShiftID     *string `db:"shift_id"`
-			CurrentBin  *int    `db:"current_bin"`
-			TotalBins   *int    `db:"total_bins"`
-		}
-
-		var drivers []DriverRow
-		err := db.Select(&drivers, query)
+		rows, err := db.Query(query)
 		if err != nil {
-			log.Printf("❌ Error fetching drivers: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Database error")
+			log.Printf("❌ Database error: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Failed to fetch drivers",
+			})
 			return
 		}
+		defer rows.Close()
 
-		// For each driver with active shift, get their last location
-		var response []map[string]interface{}
-		for _, driver := range drivers {
-			driverData := map[string]interface{}{
-				"driver_id":   driver.DriverID,
-				"name":        driver.Name,
-				"status":      driver.Status,
-				"shift_id":    driver.ShiftID,
-				"current_bin": driver.CurrentBin,
-				"total_bins":  driver.TotalBins,
+		var allDrivers []AllDriverResponse
+
+		for rows.Next() {
+			var driver AllDriverResponse
+			var shiftID, routeID, shiftStatus sql.NullString
+			var startTime, updatedAt sql.NullInt64
+			var totalBins, completedBins sql.NullInt32
+			var latitude, longitude sql.NullFloat64
+
+			err := rows.Scan(
+				&driver.DriverID,
+				&driver.DriverName,
+				&driver.Email,
+				&shiftID,
+				&routeID,
+				&shiftStatus,
+				&startTime,
+				&totalBins,
+				&completedBins,
+				&updatedAt,
+				&latitude,
+				&longitude,
+			)
+			if err != nil {
+				log.Printf("❌ Row scan error: %v", err)
+				continue
 			}
 
-			// Get last location from driver_current_location table
-			// This table has exactly 1 row per driver with their latest position
-			if driver.ShiftID != nil {
-				var location models.DriverLocation
-				locationQuery := `
-					SELECT driver_id, latitude, longitude, heading, speed,
-						   accuracy, shift_id, timestamp, is_connected, updated_at
-					FROM driver_current_location
-					WHERE driver_id = $1
-				`
-				err := db.Get(&location, locationQuery, driver.DriverID)
-				if err == nil {
-					driverData["last_location"] = location
+			// Set shift-related fields if driver has an active shift
+			if shiftID.Valid {
+				driver.ShiftID = &shiftID.String
+				driver.Status = shiftStatus.String
+
+				if routeID.Valid {
+					driver.RouteID = &routeID.String
+				}
+				if startTime.Valid {
+					t := startTime.Int64
+					driver.StartTime = &t
+				}
+				if totalBins.Valid {
+					driver.TotalBins = int(totalBins.Int32)
+				}
+				if completedBins.Valid {
+					driver.CompletedBins = int(completedBins.Int32)
+				}
+				if updatedAt.Valid {
+					t := updatedAt.Int64
+					driver.UpdatedAt = &t
+				}
+			} else {
+				// No active shift - driver is inactive
+				driver.Status = "inactive"
+				driver.TotalBins = 0
+				driver.CompletedBins = 0
+			}
+
+			// Add location if available
+			if latitude.Valid && longitude.Valid {
+				driver.CurrentLocation = &DriverLocation{
+					Latitude:  latitude.Float64,
+					Longitude: longitude.Float64,
 				}
 			}
 
-			response = append(response, driverData)
+			allDrivers = append(allDrivers, driver)
 		}
 
-		log.Printf("📤 RESPONSE: 200 - Found %d drivers", len(response))
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+		if err = rows.Err(); err != nil {
+			log.Printf("❌ Rows iteration error: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Failed to process drivers",
+			})
+			return
+		}
+
+		log.Printf("✅ Found %d driver(s)", len(allDrivers))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data":    response,
+			"data":    allDrivers,
 		})
 	}
 }
