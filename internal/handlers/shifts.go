@@ -133,6 +133,47 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			totalPause += endNow - *existingShift.PauseStartTime
 		}
 
+		// Calculate completion rate for history
+		completionRate := 0.0
+		if existingShift.TotalBins > 0 {
+			completionRate = (float64(existingShift.CompletedBins) / float64(existingShift.TotalBins)) * 100
+		}
+
+		// Determine end reason - auto-ended because driver started new shift
+		endReason := "manual_end"
+		if existingShift.CompletedBins >= existingShift.TotalBins {
+			endReason = "completed"
+		}
+
+		// Insert into shift_history
+		historyQuery := `INSERT INTO shift_history (
+			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+			total_pause_seconds, total_bins, completed_bins, completion_rate,
+			end_reason, ended_by_user_id, end_reason_metadata
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+
+		_, histErr := db.Exec(
+			historyQuery,
+			existingShift.ID,
+			existingShift.DriverID,
+			existingShift.RouteID,
+			existingShift.StartTime,
+			endNow,
+			existingShift.CreatedAt,
+			endNow,
+			totalPause,
+			existingShift.TotalBins,
+			existingShift.CompletedBins,
+			completionRate,
+			endReason,
+			nil, // Driver action
+			nil, // No metadata
+		)
+		if histErr != nil {
+			log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
+			// Continue anyway
+		}
+
 		endQuery := `UPDATE shifts
 					 SET status = 'ended',
 						 end_time = $1,
@@ -146,7 +187,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("❌ Error auto-ending existing shift: %v", err)
 			// Don't fail - continue with starting new shift
 		} else {
-			log.Printf("✅ Auto-ended existing shift %s", existingShift.ID)
+			log.Printf("✅ Auto-ended existing shift %s (saved to history)", existingShift.ID)
 		}
 	}
 
@@ -432,6 +473,50 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		activeDuration := totalDuration - totalPause
+
+		// Calculate completion rate
+		completionRate := 0.0
+		if shift.TotalBins > 0 {
+			completionRate = (float64(shift.CompletedBins) / float64(shift.TotalBins)) * 100
+		}
+
+		// Determine end reason
+		endReason := "manual_end" // Default: driver ended shift manually
+		if shift.CompletedBins >= shift.TotalBins {
+			endReason = "completed" // All bins completed
+		}
+
+		// Insert into shift_history BEFORE updating shift status
+		historyQuery := `INSERT INTO shift_history (
+			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+			total_pause_seconds, total_bins, completed_bins, completion_rate,
+			end_reason, ended_by_user_id, end_reason_metadata
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+
+		_, err = db.Exec(
+			historyQuery,
+			shift.ID,
+			shift.DriverID,
+			shift.RouteID,
+			shift.StartTime,
+			endTime,           // end_time
+			shift.CreatedAt,
+			now,               // ended_at (when history record created)
+			totalPause,        // total_pause_seconds
+			shift.TotalBins,
+			shift.CompletedBins,
+			completionRate,
+			endReason,
+			nil,               // ended_by_user_id (NULL - driver action)
+			nil,               // end_reason_metadata (NULL for basic driver ends)
+		)
+		if err != nil {
+			log.Printf("❌ Error inserting shift history: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to save shift history")
+			return
+		}
+
+		log.Printf("✅ Shift history saved: %s (reason: %s, completion: %.1f%%)", shift.ID, endReason, completionRate)
 
 		// Update shift
 		updateQuery := `UPDATE shifts
@@ -969,6 +1054,13 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		}
 
 		// Broadcast WebSocket update to driver with FULL shift data
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("📡 ATTEMPTING WEBSOCKET BROADCAST")
+		log.Printf("   Target driver_id: %s", req.DriverID)
+		log.Printf("   Is driver connected: %v", hub.IsUserConnected(req.DriverID))
+		log.Printf("   Total connected clients: %d", hub.GetClientCount())
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 		hub.BroadcastToUser(req.DriverID, map[string]interface{}{
 			"type": "route_assigned",
 			"data": map[string]interface{}{

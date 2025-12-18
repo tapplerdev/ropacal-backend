@@ -190,6 +190,40 @@ func Migrate(db *sqlx.DB) error {
 		// Drop old constraint and add new one with additional values
 		`ALTER TABLE shifts DROP CONSTRAINT IF EXISTS shifts_status_check`,
 		`ALTER TABLE shifts ADD CONSTRAINT shifts_status_check CHECK(status IN ('inactive', 'ready', 'active', 'paused', 'ended', 'cancelled'))`,
+
+		// Create shift_history table for completed shifts
+		`CREATE TABLE IF NOT EXISTS shift_history (
+			id TEXT PRIMARY KEY,
+			driver_id TEXT NOT NULL,
+			route_id TEXT,
+
+			-- Shift timing
+			start_time BIGINT,
+			end_time BIGINT,
+			created_at BIGINT NOT NULL,
+			ended_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+
+			-- Performance metrics
+			total_pause_seconds INT DEFAULT 0,
+			total_bins INT DEFAULT 0,
+			completed_bins INT DEFAULT 0,
+			completion_rate DECIMAL(5,2) NOT NULL,
+
+			-- End reason tracking
+			end_reason TEXT NOT NULL CHECK(end_reason IN ('completed', 'manual_end', 'manager_ended', 'manager_cancelled', 'driver_disconnected', 'system_timeout')),
+			ended_by_user_id TEXT,
+			end_reason_metadata JSONB,
+
+			-- Foreign keys
+			FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
+			FOREIGN KEY (ended_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+		)`,
+
+		// Create indexes for shift_history
+		`CREATE INDEX IF NOT EXISTS idx_shift_history_driver_id ON shift_history(driver_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_history_ended_at ON shift_history(ended_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_history_end_reason ON shift_history(end_reason)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_history_completion_rate ON shift_history(completion_rate)`,
 	}
 
 	for _, migration := range migrations {
