@@ -166,6 +166,7 @@ func main() {
 
 		// Checks endpoints
 		r.Get("/bins/{id}/checks", handlers.GetChecks(db))
+		r.Get("/checks", handlers.GetAllChecks(db))
 
 		// Moves endpoints
 		r.Get("/bins/{id}/moves", handlers.GetMoves(db))
