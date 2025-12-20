@@ -578,7 +578,8 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 // CompleteBin marks a bin as completed
 func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("📥 REQUEST: POST /api/driver/shift/complete-bin")
+		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("[DIAGNOSTIC] 📥 REQUEST: POST /api/driver/shift/complete-bin")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -586,20 +587,27 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+		log.Printf("[DIAGNOSTIC]    User: %s (%s)", userClaims.Email, userClaims.UserID)
 
 		// Parse request body
 		var req struct {
-			BinID                 string `json:"bin_id"`
-			UpdatedFillPercentage int    `json:"updated_fill_percentage"`
+			BinID                 string  `json:"bin_id"`
+			UpdatedFillPercentage int     `json:"updated_fill_percentage"`
+			PhotoUrl              *string `json:"photo_url,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("[DIAGNOSTIC] ❌ Error decoding request body: %v", err)
 			utils.RespondError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 
-		log.Printf("   Bin ID: %s", req.BinID)
-		log.Printf("   Updated Fill Percentage: %d%%", req.UpdatedFillPercentage)
+		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
+		log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: %d%%", req.UpdatedFillPercentage)
+		if req.PhotoUrl != nil {
+			log.Printf("[DIAGNOSTIC]    Photo URL: %s", *req.PhotoUrl)
+		} else {
+			log.Printf("[DIAGNOSTIC]    Photo URL: null (no photo)")
+		}
 
 		// Validate fill percentage
 		if req.UpdatedFillPercentage < 0 || req.UpdatedFillPercentage > 100 {
@@ -634,8 +642,29 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {
+			log.Printf("[DIAGNOSTIC] ⚠️  Bin not found in route or already completed")
 			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
 			return
+		}
+
+		log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in route_bins table")
+
+		// Insert check record into checks table
+		log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
+		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
+					   VALUES ($1, $2, $3, $4, $5, $6)`
+
+		_, err = db.Exec(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl)
+		if err != nil {
+			log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
+			// Don't fail the request - the bin is already marked complete
+			log.Printf("[DIAGNOSTIC] ⚠️  Continuing despite check insert error...")
+		} else {
+			if req.PhotoUrl != nil {
+				log.Printf("[DIAGNOSTIC] ✅ Check record inserted with photo_url")
+			} else {
+				log.Printf("[DIAGNOSTIC] ✅ Check record inserted without photo")
+			}
 		}
 
 		// Update shift completed_bins count
@@ -673,7 +702,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			},
 		})
 
-		log.Printf("✅ Bin completed: %d/%d", shift.CompletedBins, shift.TotalBins)
+		log.Printf("[DIAGNOSTIC] ✅ Bin completed: %d/%d", shift.CompletedBins, shift.TotalBins)
 
 		completionPercentage := 0.0
 		if shift.TotalBins > 0 {
@@ -686,8 +715,10 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			CompletionPercentage: completionPercentage,
 		}
 
-		log.Printf("📤 RESPONSE: 200 OK")
-		log.Printf("   Completed: %d/%d (%.1f%%)", shift.CompletedBins, shift.TotalBins, completionPercentage)
+		log.Printf("[DIAGNOSTIC] 📤 RESPONSE: 200 OK")
+		log.Printf("[DIAGNOSTIC]    Completed: %d/%d (%.1f%%)", shift.CompletedBins, shift.TotalBins, completionPercentage)
+		log.Printf("[DIAGNOSTIC]    Photo uploaded: %v", req.PhotoUrl != nil)
+		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
