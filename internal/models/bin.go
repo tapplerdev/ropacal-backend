@@ -48,6 +48,7 @@ type UpdateBinRequest struct {
 	MoveRequested  bool    `json:"move_requested"`
 	CheckedFrom    *string `json:"checkedFrom,omitempty"`
 	CheckedOnIso   *string `json:"checkedOnIso,omitempty"`
+	PhotoUrl       *string `json:"photoUrl,omitempty"` // Optional photo URL from Cloudinary
 }
 
 // CreateBinRequest is the request body for POST /api/bins

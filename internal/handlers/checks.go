@@ -18,12 +18,27 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		var checks []models.Check
-		err := db.Select(&checks, `
-			SELECT id, bin_id, checked_from, fill_percentage, checked_on
-			FROM checks
-			WHERE bin_id = $1
-			ORDER BY checked_on DESC
+		// Query with JOIN to get driver names
+		type CheckWithName struct {
+			models.Check
+			CheckedByName *string `db:"checked_by_name"`
+		}
+
+		var checksWithNames []CheckWithName
+		err := db.Select(&checksWithNames, `
+			SELECT
+				c.id,
+				c.bin_id,
+				c.checked_from,
+				c.fill_percentage,
+				c.checked_on,
+				c.photo_url,
+				c.checked_by,
+				u.name AS checked_by_name
+			FROM checks c
+			LEFT JOIN users u ON c.checked_by = u.id
+			WHERE c.bin_id = $1
+			ORDER BY c.checked_on DESC
 		`, binID)
 		if err != nil {
 			http.Error(w, "Failed to fetch checks", http.StatusInternalServerError)
@@ -31,9 +46,11 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Convert to response format
-		responses := make([]models.CheckResponse, len(checks))
-		for i, check := range checks {
-			responses[i] = check.ToCheckResponse()
+		responses := make([]models.CheckResponse, len(checksWithNames))
+		for i, checkWithName := range checksWithNames {
+			response := checkWithName.Check.ToCheckResponse()
+			response.CheckedByName = checkWithName.CheckedByName
+			responses[i] = response
 		}
 
 		w.Header().Set("Content-Type", "application/json")

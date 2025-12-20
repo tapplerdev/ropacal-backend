@@ -118,6 +118,14 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// Extract user from JWT context (for checked_by tracking)
+		var userID *string
+		if claims, ok := r.Context().Value("userClaims").(map[string]interface{}); ok {
+			if uid, ok := claims["user_id"].(string); ok {
+				userID = &uid
+			}
+		}
+
 		var req models.UpdateBinRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -218,10 +226,11 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 				fillForCheck = *req.FillPercentage
 			}
 
+			// Include checked_by (authenticated user) and photo_url if provided
 			_, err = tx.Exec(`
-				INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on)
-				VALUES ($1, $2, $3, $4)
-			`, id, checkedFrom, fillForCheck, now.Unix())
+				INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`, id, checkedFrom, fillForCheck, now.Unix(), userID, req.PhotoUrl)
 			if err != nil {
 				http.Error(w, "Failed to create check record", http.StatusInternalServerError)
 				return
