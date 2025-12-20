@@ -649,6 +649,21 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in route_bins table")
 
+		// Update the bin's fill percentage in bins table
+		log.Printf("[DIAGNOSTIC] 📝 Updating bin fill percentage in bins table...")
+		binUpdateQuery := `UPDATE bins
+						   SET fill_percentage = $1,
+						       updated_at = $2
+						   WHERE id = $3`
+
+		_, err = db.Exec(binUpdateQuery, req.UpdatedFillPercentage, now, req.BinID)
+		if err != nil {
+			log.Printf("[DIAGNOSTIC] ❌ Error updating bin fill percentage: %v", err)
+			// Don't fail the request - the bin is already marked complete in route
+		} else {
+			log.Printf("[DIAGNOSTIC] ✅ Bin fill percentage updated to %d%%", req.UpdatedFillPercentage)
+		}
+
 		// Insert check record into checks table
 		log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
 		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
