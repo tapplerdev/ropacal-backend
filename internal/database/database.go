@@ -293,6 +293,94 @@ func Migrate(db *sqlx.DB) error {
 			FOREIGN KEY (manager_id) REFERENCES users(id) ON DELETE CASCADE
 		)`,
 
+		// ALTER TABLE migrations for existing zone_incidents table
+		// These add new columns if they don't exist (for production database)
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='shift_id') THEN
+				ALTER TABLE zone_incidents ADD COLUMN shift_id TEXT;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='reporter_latitude') THEN
+				ALTER TABLE zone_incidents ADD COLUMN reporter_latitude DOUBLE PRECISION;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='reporter_longitude') THEN
+				ALTER TABLE zone_incidents ADD COLUMN reporter_longitude DOUBLE PRECISION;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='is_field_observation') THEN
+				ALTER TABLE zone_incidents ADD COLUMN is_field_observation BOOLEAN NOT NULL DEFAULT FALSE;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='verified_by_user_id') THEN
+				ALTER TABLE zone_incidents ADD COLUMN verified_by_user_id TEXT;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='verified_at') THEN
+				ALTER TABLE zone_incidents ADD COLUMN verified_at BIGINT;
+			END IF;
+		END $$`,
+
+		// Add foreign key constraints if they don't exist
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='zone_incidents_shift_id_fkey'
+						   AND table_name='zone_incidents') THEN
+				ALTER TABLE zone_incidents ADD CONSTRAINT zone_incidents_shift_id_fkey
+					FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='zone_incidents_verified_by_user_id_fkey'
+						   AND table_name='zone_incidents') THEN
+				ALTER TABLE zone_incidents ADD CONSTRAINT zone_incidents_verified_by_user_id_fkey
+					FOREIGN KEY (verified_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		// ALTER TABLE migrations for existing shift_history table
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='shift_history' AND column_name='incidents_reported') THEN
+				ALTER TABLE shift_history ADD COLUMN incidents_reported INT DEFAULT 0;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='shift_history' AND column_name='field_observations') THEN
+				ALTER TABLE shift_history ADD COLUMN field_observations INT DEFAULT 0;
+			END IF;
+		END $$`,
+
 		// Create indexes for no_go_zones
 		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_status ON no_go_zones(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_created_by ON no_go_zones(created_by_user_id)`,
