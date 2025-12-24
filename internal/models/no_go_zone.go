@@ -19,17 +19,22 @@ type NoGoZone struct {
 }
 
 type ZoneIncident struct {
-	ID                 string  `json:"id" db:"id"`
-	ZoneID             string  `json:"zone_id" db:"zone_id"`
-	BinID              string  `json:"bin_id" db:"bin_id"`
-	IncidentType       string  `json:"incident_type" db:"incident_type"` // vandalism, landlord_complaint, theft, relocation_request
-	ReportedByUserID   *string `json:"reported_by_user_id" db:"reported_by_user_id"`
-	ReportedAt         int64   `json:"reported_at" db:"reported_at"`
-	Description        *string `json:"description" db:"description"`
-	PhotoURL           *string `json:"photo_url" db:"photo_url"`
-	CheckID            *int    `json:"check_id" db:"check_id"`
-	MoveID             *int    `json:"move_id" db:"move_id"`
-	Status             string  `json:"status" db:"status"` // open, resolved, investigating
+	ID                  string   `json:"id" db:"id"`
+	ZoneID              string   `json:"zone_id" db:"zone_id"`
+	BinID               string   `json:"bin_id" db:"bin_id"`
+	IncidentType        string   `json:"incident_type" db:"incident_type"` // vandalism, landlord_complaint, theft, relocation_request
+	ReportedByUserID    *string  `json:"reported_by_user_id" db:"reported_by_user_id"`
+	ReportedAt          int64    `json:"reported_at" db:"reported_at"`
+	Description         *string  `json:"description" db:"description"`
+	PhotoURL            *string  `json:"photo_url" db:"photo_url"`
+	CheckID             *int     `json:"check_id" db:"check_id"`
+	MoveID              *int     `json:"move_id" db:"move_id"`
+	ReporterLatitude    *float64 `json:"reporter_latitude" db:"reporter_latitude"`
+	ReporterLongitude   *float64 `json:"reporter_longitude" db:"reporter_longitude"`
+	IsFieldObservation  bool     `json:"is_field_observation" db:"is_field_observation"`
+	VerifiedByUserID    *string  `json:"verified_by_user_id" db:"verified_by_user_id"`
+	VerifiedAt          *int64   `json:"verified_at" db:"verified_at"`
+	Status              string   `json:"status" db:"status"` // open, resolved, investigating
 }
 
 type ZoneRiskOverride struct {
@@ -63,19 +68,25 @@ type NoGoZoneResponse struct {
 }
 
 type ZoneIncidentResponse struct {
-	ID                 string  `json:"id"`
-	ZoneID             string  `json:"zone_id"`
-	BinID              string  `json:"bin_id"`
-	BinNumber          *int    `json:"bin_number,omitempty"`          // Joined from bins table
-	IncidentType       string  `json:"incident_type"`
-	ReportedByUserID   *string `json:"reported_by_user_id,omitempty"`
-	ReportedByName     *string `json:"reported_by_name,omitempty"`   // Joined from users table
-	ReportedAtIso      string  `json:"reported_at_iso"`
-	Description        *string `json:"description,omitempty"`
-	PhotoURL           *string `json:"photo_url,omitempty"`
-	CheckID            *int    `json:"check_id,omitempty"`
-	MoveID             *int    `json:"move_id,omitempty"`
-	Status             string  `json:"status"`
+	ID                  string   `json:"id"`
+	ZoneID              string   `json:"zone_id"`
+	BinID               string   `json:"bin_id"`
+	BinNumber           *int     `json:"bin_number,omitempty"`           // Joined from bins table
+	IncidentType        string   `json:"incident_type"`
+	ReportedByUserID    *string  `json:"reported_by_user_id,omitempty"`
+	ReportedByName      *string  `json:"reported_by_name,omitempty"`     // Joined from users table
+	ReportedAtIso       string   `json:"reported_at_iso"`
+	Description         *string  `json:"description,omitempty"`
+	PhotoURL            *string  `json:"photo_url,omitempty"`
+	CheckID             *int     `json:"check_id,omitempty"`
+	MoveID              *int     `json:"move_id,omitempty"`
+	ReporterLatitude    *float64 `json:"reporter_latitude,omitempty"`
+	ReporterLongitude   *float64 `json:"reporter_longitude,omitempty"`
+	IsFieldObservation  bool     `json:"is_field_observation"`
+	VerifiedByUserID    *string  `json:"verified_by_user_id,omitempty"`
+	VerifiedByName      *string  `json:"verified_by_name,omitempty"`     // Joined from users table
+	VerifiedAtIso       *string  `json:"verified_at_iso,omitempty"`
+	Status              string   `json:"status"`
 }
 
 type ZoneRiskOverrideResponse struct {
@@ -121,19 +132,30 @@ func (z *NoGoZone) ToResponse() NoGoZoneResponse {
 }
 
 func (i *ZoneIncident) ToResponse() ZoneIncidentResponse {
-	return ZoneIncidentResponse{
-		ID:               i.ID,
-		ZoneID:           i.ZoneID,
-		BinID:            i.BinID,
-		IncidentType:     i.IncidentType,
-		ReportedByUserID: i.ReportedByUserID,
-		ReportedAtIso:    time.Unix(i.ReportedAt, 0).Format(time.RFC3339),
-		Description:      i.Description,
-		PhotoURL:         i.PhotoURL,
-		CheckID:          i.CheckID,
-		MoveID:           i.MoveID,
-		Status:           i.Status,
+	resp := ZoneIncidentResponse{
+		ID:                 i.ID,
+		ZoneID:             i.ZoneID,
+		BinID:              i.BinID,
+		IncidentType:       i.IncidentType,
+		ReportedByUserID:   i.ReportedByUserID,
+		ReportedAtIso:      time.Unix(i.ReportedAt, 0).Format(time.RFC3339),
+		Description:        i.Description,
+		PhotoURL:           i.PhotoURL,
+		CheckID:            i.CheckID,
+		MoveID:             i.MoveID,
+		ReporterLatitude:   i.ReporterLatitude,
+		ReporterLongitude:  i.ReporterLongitude,
+		IsFieldObservation: i.IsFieldObservation,
+		VerifiedByUserID:   i.VerifiedByUserID,
+		Status:             i.Status,
 	}
+
+	if i.VerifiedAt != nil {
+		iso := time.Unix(*i.VerifiedAt, 0).Format(time.RFC3339)
+		resp.VerifiedAtIso = &iso
+	}
+
+	return resp
 }
 
 func (o *ZoneRiskOverride) ToResponse() ZoneRiskOverrideResponse {

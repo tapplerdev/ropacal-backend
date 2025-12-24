@@ -208,6 +208,9 @@ func main() {
 
 			// FCM token registration
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
+
+			// Incident reporting (drivers can report both check-based and field observations)
+			r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
 		})
 
 		// Diagnostic logging endpoint (no auth required for easier debugging)
@@ -237,7 +240,10 @@ func main() {
 			r.Post("/no-go-zones", handlers.CreateNoGoZone(db))
 			r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db))
 			r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
-			r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
+
+			// Field observations management
+			r.Get("/field-observations", handlers.GetFieldObservations(db))
+			r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
 		})
 	})
 
