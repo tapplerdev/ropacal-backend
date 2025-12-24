@@ -163,6 +163,7 @@ func main() {
 		r.Post("/bins", handlers.CreateBin(db))
 		r.Patch("/bins/{id}", handlers.UpdateBin(db))
 		r.Delete("/bins/{id}", handlers.DeleteBin(db))
+		r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
 
 		// Checks endpoints
 		r.Get("/bins/{id}/checks", handlers.GetChecks(db))
@@ -174,6 +175,14 @@ func main() {
 
 		// Route optimization
 		r.Post("/route", handlers.OptimizeRoute(db))
+
+		// No-Go Zones endpoints
+		r.Get("/no-go-zones", handlers.GetNoGoZones(db))
+		r.Get("/no-go-zones/{id}", handlers.GetNoGoZone(db))
+		r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
+
+		// Analytics endpoints
+		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
 
 		// Driver shift endpoints (require authentication)
 		r.Group(func(r chi.Router) {
@@ -223,6 +232,12 @@ func main() {
 
 			// User management
 			r.Post("/users", handlers.CreateUser(db))
+
+			// No-Go Zone management (admin only)
+			r.Post("/no-go-zones", handlers.CreateNoGoZone(db))
+			r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db))
+			r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
+			r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
 		})
 	})
 

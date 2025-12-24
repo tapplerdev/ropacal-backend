@@ -224,6 +224,80 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_shift_history_ended_at ON shift_history(ended_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_shift_history_end_reason ON shift_history(end_reason)`,
 		`CREATE INDEX IF NOT EXISTS idx_shift_history_completion_rate ON shift_history(completion_rate)`,
+
+		// Create no_go_zones table
+		`CREATE TABLE IF NOT EXISTS no_go_zones (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			center_latitude DOUBLE PRECISION NOT NULL,
+			center_longitude DOUBLE PRECISION NOT NULL,
+			radius_meters INT NOT NULL DEFAULT 500,
+			conflict_score INT NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'monitoring', 'resolved')),
+			created_by_user_id TEXT,
+			created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+			updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+			resolved_by_user_id TEXT,
+			resolved_at BIGINT,
+			resolution_notes TEXT,
+			FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+			FOREIGN KEY (resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+		)`,
+
+		// Create zone_incidents table
+		`CREATE TABLE IF NOT EXISTS zone_incidents (
+			id TEXT PRIMARY KEY,
+			zone_id TEXT NOT NULL,
+			bin_id TEXT NOT NULL,
+			incident_type TEXT NOT NULL CHECK(incident_type IN ('vandalism', 'landlord_complaint', 'theft', 'relocation_request')),
+			reported_by_user_id TEXT,
+			reported_at BIGINT NOT NULL,
+			description TEXT,
+			photo_url TEXT,
+			check_id INT,
+			move_id INT,
+			status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved', 'investigating')),
+			FOREIGN KEY (zone_id) REFERENCES no_go_zones(id) ON DELETE CASCADE,
+			FOREIGN KEY (bin_id) REFERENCES bins(id) ON DELETE CASCADE,
+			FOREIGN KEY (reported_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+			FOREIGN KEY (check_id) REFERENCES checks(id) ON DELETE SET NULL,
+			FOREIGN KEY (move_id) REFERENCES moves(id) ON DELETE SET NULL
+		)`,
+
+		// Create zone_risk_overrides table
+		`CREATE TABLE IF NOT EXISTS zone_risk_overrides (
+			id TEXT PRIMARY KEY,
+			zone_id TEXT NOT NULL,
+			bin_id TEXT NOT NULL,
+			manager_id TEXT NOT NULL,
+			override_reason TEXT NOT NULL,
+			override_at BIGINT NOT NULL,
+			expires_at BIGINT,
+			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'expired', 'revoked')),
+			incident_count INT NOT NULL DEFAULT 0,
+			last_incident_id TEXT,
+			FOREIGN KEY (zone_id) REFERENCES no_go_zones(id) ON DELETE CASCADE,
+			FOREIGN KEY (bin_id) REFERENCES bins(id) ON DELETE CASCADE,
+			FOREIGN KEY (manager_id) REFERENCES users(id) ON DELETE CASCADE
+		)`,
+
+		// Create indexes for no_go_zones
+		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_status ON no_go_zones(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_created_by ON no_go_zones(created_by_user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_location ON no_go_zones(center_latitude, center_longitude)`,
+
+		// Create indexes for zone_incidents
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_zone ON zone_incidents(zone_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_bin ON zone_incidents(bin_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_date ON zone_incidents(reported_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_type ON zone_incidents(incident_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_bin_zone ON zone_incidents(bin_id, zone_id)`,
+
+		// Create indexes for zone_risk_overrides
+		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_zone ON zone_risk_overrides(zone_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_bin ON zone_risk_overrides(bin_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_manager ON zone_risk_overrides(manager_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_status ON zone_risk_overrides(status)`,
 	}
 
 	for _, migration := range migrations {
