@@ -97,6 +97,7 @@ type CompleteBinResponse struct {
 	CompletedBins        int     `json:"completed_bins"`
 	TotalBins            int     `json:"total_bins"`
 	CompletionPercentage float64 `json:"completion_percentage"`
+	CheckID              *int    `json:"check_id,omitempty"` // ID of created check record (for linking incidents)
 }
 
 // ToNullInt64 converts a pointer to int64 to sql.NullInt64

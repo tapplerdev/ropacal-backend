@@ -664,21 +664,26 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("[DIAGNOSTIC] ✅ Bin fill percentage updated to %d%%", req.UpdatedFillPercentage)
 		}
 
-		// Insert check record into checks table
+		// Insert check record into checks table and get the ID back
 		log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
+		var checkID *int
 		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
-					   VALUES ($1, $2, $3, $4, $5, $6)`
+					   VALUES ($1, $2, $3, $4, $5, $6)
+					   RETURNING id`
 
-		_, err = db.Exec(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl)
+		var returnedID int
+		err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl).Scan(&returnedID)
 		if err != nil {
 			log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
 			// Don't fail the request - the bin is already marked complete
 			log.Printf("[DIAGNOSTIC] ⚠️  Continuing despite check insert error...")
+			checkID = nil
 		} else {
+			checkID = &returnedID
 			if req.PhotoUrl != nil {
-				log.Printf("[DIAGNOSTIC] ✅ Check record inserted with photo_url")
+				log.Printf("[DIAGNOSTIC] ✅ Check record inserted with photo_url (ID: %d)", returnedID)
 			} else {
-				log.Printf("[DIAGNOSTIC] ✅ Check record inserted without photo")
+				log.Printf("[DIAGNOSTIC] ✅ Check record inserted without photo (ID: %d)", returnedID)
 			}
 		}
 
@@ -728,11 +733,15 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			CompletedBins:        shift.CompletedBins,
 			TotalBins:            shift.TotalBins,
 			CompletionPercentage: completionPercentage,
+			CheckID:              checkID,
 		}
 
 		log.Printf("[DIAGNOSTIC] 📤 RESPONSE: 200 OK")
 		log.Printf("[DIAGNOSTIC]    Completed: %d/%d (%.1f%%)", shift.CompletedBins, shift.TotalBins, completionPercentage)
 		log.Printf("[DIAGNOSTIC]    Photo uploaded: %v", req.PhotoUrl != nil)
+		if checkID != nil {
+			log.Printf("[DIAGNOSTIC]    Check ID: %d (available for incident linking)", *checkID)
+		}
 		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
