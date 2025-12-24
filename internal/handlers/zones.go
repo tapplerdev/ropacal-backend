@@ -319,15 +319,15 @@ func CreateZoneIncident(db *sqlx.DB) http.HandlerFunc {
 		// Determine if this is a field observation
 		isFieldObservation := req.CheckID == nil
 
-		// Field observations require photo evidence
-		if isFieldObservation && req.PhotoURL == nil {
-			http.Error(w, "Field observations require photo_url", http.StatusBadRequest)
+		// ALL incidents require photo evidence (proof)
+		if req.PhotoURL == nil {
+			http.Error(w, "Photo evidence is required for all incident reports", http.StatusBadRequest)
 			return
 		}
 
-		// Field observations should include reporter coordinates
+		// Field observations additionally require GPS coordinates (proof driver was there)
 		if isFieldObservation && (req.ReporterLatitude == nil || req.ReporterLongitude == nil) {
-			http.Error(w, "Field observations require reporter coordinates", http.StatusBadRequest)
+			http.Error(w, "Field observations require reporter GPS coordinates", http.StatusBadRequest)
 			return
 		}
 
@@ -336,6 +336,21 @@ func CreateZoneIncident(db *sqlx.DB) http.HandlerFunc {
 		if claims, ok := r.Context().Value("userClaims").(map[string]interface{}); ok {
 			if uid, ok := claims["user_id"].(string); ok {
 				userID = &uid
+			}
+		}
+
+		// Get active shift if user is a driver with an active shift
+		var activeShiftID *string
+		if userID != nil {
+			var shift models.Shift
+			err := db.Get(&shift, `
+				SELECT id FROM shifts
+				WHERE driver_id = $1
+				AND status = 'active'
+				LIMIT 1
+			`, userID)
+			if err == nil {
+				activeShiftID = &shift.ID
 			}
 		}
 
@@ -422,13 +437,13 @@ func CreateZoneIncident(db *sqlx.DB) http.HandlerFunc {
 			INSERT INTO zone_incidents (
 				id, zone_id, bin_id, incident_type,
 				reported_by_user_id, reported_at, description,
-				photo_url, check_id, reporter_latitude, reporter_longitude,
+				photo_url, check_id, shift_id, reporter_latitude, reporter_longitude,
 				is_field_observation, status
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		`, incidentID, zoneID, req.BinID, req.IncidentType,
 			userID, now, req.Description, req.PhotoURL, req.CheckID,
-			req.ReporterLatitude, req.ReporterLongitude, isFieldObservation, "open")
+			activeShiftID, req.ReporterLatitude, req.ReporterLongitude, isFieldObservation, "open")
 
 		if err != nil {
 			http.Error(w, "Failed to create incident", http.StatusInternalServerError)
@@ -553,6 +568,57 @@ func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(incident.ToResponse())
+	}
+}
+
+// GetShiftIncidents returns all incidents reported during a specific shift
+func GetShiftIncidents(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shiftID := chi.URLParam(r, "id")
+		if shiftID == "" {
+			http.Error(w, "Shift ID required", http.StatusBadRequest)
+			return
+		}
+
+		type IncidentWithDetails struct {
+			models.ZoneIncident
+			BinNumber      *int    `db:"bin_number"`
+			ReportedByName *string `db:"reported_by_name"`
+			VerifiedByName *string `db:"verified_by_name"`
+		}
+
+		var incidents []IncidentWithDetails
+		err := db.Select(&incidents, `
+			SELECT
+				zi.*,
+				b.bin_number,
+				u1.name AS reported_by_name,
+				u2.name AS verified_by_name
+			FROM zone_incidents zi
+			LEFT JOIN bins b ON zi.bin_id = b.id
+			LEFT JOIN users u1 ON zi.reported_by_user_id = u1.id
+			LEFT JOIN users u2 ON zi.verified_by_user_id = u2.id
+			WHERE zi.shift_id = $1
+			ORDER BY zi.reported_at DESC
+		`, shiftID)
+
+		if err != nil {
+			http.Error(w, "Failed to fetch shift incidents", http.StatusInternalServerError)
+			return
+		}
+
+		// Convert to response format
+		responses := make([]models.ZoneIncidentResponse, len(incidents))
+		for i, inc := range incidents {
+			resp := inc.ZoneIncident.ToResponse()
+			resp.BinNumber = inc.BinNumber
+			resp.ReportedByName = inc.ReportedByName
+			resp.VerifiedByName = inc.VerifiedByName
+			responses[i] = resp
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(responses)
 	}
 }
 

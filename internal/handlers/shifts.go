@@ -480,6 +480,25 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			completionRate = (float64(shift.CompletedBins) / float64(shift.TotalBins)) * 100
 		}
 
+		// Count incidents reported during this shift
+		var incidentStats struct {
+			TotalIncidents     int `db:"total_incidents"`
+			FieldObservations  int `db:"field_observations"`
+		}
+		err = db.Get(&incidentStats, `
+			SELECT
+				COUNT(*) as total_incidents,
+				COUNT(*) FILTER (WHERE is_field_observation = true) as field_observations
+			FROM zone_incidents
+			WHERE shift_id = $1
+		`, shift.ID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Failed to count incidents for shift: %v", err)
+			// Continue anyway - this is not critical
+			incidentStats.TotalIncidents = 0
+			incidentStats.FieldObservations = 0
+		}
+
 		// Determine end reason
 		endReason := "manual_end" // Default: driver ended shift manually
 		if shift.CompletedBins >= shift.TotalBins {
@@ -490,8 +509,9 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		historyQuery := `INSERT INTO shift_history (
 			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 			total_pause_seconds, total_bins, completed_bins, completion_rate,
+			incidents_reported, field_observations,
 			end_reason, ended_by_user_id, end_reason_metadata
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
 
 		_, err = db.Exec(
 			historyQuery,
@@ -499,16 +519,18 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			shift.DriverID,
 			shift.RouteID,
 			shift.StartTime,
-			endTime,           // end_time
+			endTime,                         // end_time
 			shift.CreatedAt,
-			now,               // ended_at (when history record created)
-			totalPause,        // total_pause_seconds
+			now,                             // ended_at (when history record created)
+			totalPause,                      // total_pause_seconds
 			shift.TotalBins,
 			shift.CompletedBins,
 			completionRate,
+			incidentStats.TotalIncidents,    // NEW: incidents_reported
+			incidentStats.FieldObservations, // NEW: field_observations
 			endReason,
-			nil,               // ended_by_user_id (NULL - driver action)
-			nil,               // end_reason_metadata (NULL for basic driver ends)
+			nil,                             // ended_by_user_id (NULL - driver action)
+			nil,                             // end_reason_metadata (NULL for basic driver ends)
 		)
 		if err != nil {
 			log.Printf("❌ Error inserting shift history: %v", err)

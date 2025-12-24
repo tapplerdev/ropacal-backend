@@ -209,6 +209,10 @@ func Migrate(db *sqlx.DB) error {
 			completed_bins INT DEFAULT 0,
 			completion_rate DECIMAL(5,2) NOT NULL,
 
+			-- Incident tracking
+			incidents_reported INT DEFAULT 0,
+			field_observations INT DEFAULT 0,
+
 			-- End reason tracking
 			end_reason TEXT NOT NULL CHECK(end_reason IN ('completed', 'manual_end', 'manager_ended', 'manager_cancelled', 'driver_disconnected', 'system_timeout')),
 			ended_by_user_id TEXT,
@@ -256,6 +260,7 @@ func Migrate(db *sqlx.DB) error {
 			photo_url TEXT,
 			check_id INT,
 			move_id INT,
+			shift_id TEXT,
 			reporter_latitude DOUBLE PRECISION,
 			reporter_longitude DOUBLE PRECISION,
 			is_field_observation BOOLEAN NOT NULL DEFAULT FALSE,
@@ -267,6 +272,7 @@ func Migrate(db *sqlx.DB) error {
 			FOREIGN KEY (reported_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
 			FOREIGN KEY (check_id) REFERENCES checks(id) ON DELETE SET NULL,
 			FOREIGN KEY (move_id) REFERENCES moves(id) ON DELETE SET NULL,
+			FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE SET NULL,
 			FOREIGN KEY (verified_by_user_id) REFERENCES users(id) ON DELETE SET NULL
 		)`,
 
@@ -300,6 +306,7 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_bin_zone ON zone_incidents(bin_id, zone_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_field_observation ON zone_incidents(is_field_observation)`,
 		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_verification ON zone_incidents(verified_by_user_id, verified_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_shift ON zone_incidents(shift_id)`,
 
 		// Create indexes for zone_risk_overrides
 		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_zone ON zone_risk_overrides(zone_id)`,

@@ -29,6 +29,7 @@ type ZoneIncident struct {
 	PhotoURL            *string  `json:"photo_url" db:"photo_url"`
 	CheckID             *int     `json:"check_id" db:"check_id"`
 	MoveID              *int     `json:"move_id" db:"move_id"`
+	ShiftID             *string  `json:"shift_id" db:"shift_id"`
 	ReporterLatitude    *float64 `json:"reporter_latitude" db:"reporter_latitude"`
 	ReporterLongitude   *float64 `json:"reporter_longitude" db:"reporter_longitude"`
 	IsFieldObservation  bool     `json:"is_field_observation" db:"is_field_observation"`

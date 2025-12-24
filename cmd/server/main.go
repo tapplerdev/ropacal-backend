@@ -181,6 +181,9 @@ func main() {
 		r.Get("/no-go-zones/{id}", handlers.GetNoGoZone(db))
 		r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
 
+		// Shift-related incident queries
+		r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
+
 		// Analytics endpoints
 		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
 
