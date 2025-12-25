@@ -645,8 +645,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("[DIAGNOSTIC]    🚨 INCIDENT REPORTED: %s", *req.IncidentType)
 		}
 
-		// Validate: at least photo OR fill percentage required
-		if req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
+		// Validate: at least photo OR fill percentage required (unless incident is being reported)
+		if !req.HasIncident && req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
 			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
 			return
 		}
