@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -614,8 +615,14 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Parse request body
 		var req struct {
 			BinID                 string  `json:"bin_id"`
-			UpdatedFillPercentage int     `json:"updated_fill_percentage"`
+			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
+
+			// Incident reporting fields (all optional)
+			HasIncident           bool    `json:"has_incident"`
+			IncidentType          *string `json:"incident_type,omitempty"`
+			IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
+			IncidentDescription   *string `json:"incident_description,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			log.Printf("[DIAGNOSTIC] ❌ Error decoding request body: %v", err)
@@ -624,17 +631,49 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
-		log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: %d%%", req.UpdatedFillPercentage)
+		if req.UpdatedFillPercentage != nil {
+			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: %d%%", *req.UpdatedFillPercentage)
+		} else {
+			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: null (not assessed)")
+		}
 		if req.PhotoUrl != nil {
 			log.Printf("[DIAGNOSTIC]    Photo URL: %s", *req.PhotoUrl)
 		} else {
 			log.Printf("[DIAGNOSTIC]    Photo URL: null (no photo)")
 		}
+		if req.HasIncident {
+			log.Printf("[DIAGNOSTIC]    🚨 INCIDENT REPORTED: %s", *req.IncidentType)
+		}
 
-		// Validate fill percentage
-		if req.UpdatedFillPercentage < 0 || req.UpdatedFillPercentage > 100 {
+		// Validate: at least photo OR fill percentage required
+		if req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
+			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
+			return
+		}
+
+		// Validate fill percentage if provided
+		if req.UpdatedFillPercentage != nil && (*req.UpdatedFillPercentage < 0 || *req.UpdatedFillPercentage > 100) {
 			utils.RespondError(w, http.StatusBadRequest, "Fill percentage must be between 0 and 100")
 			return
+		}
+
+		// Validate incident fields if incident is being reported
+		if req.HasIncident {
+			if req.IncidentType == nil {
+				utils.RespondError(w, http.StatusBadRequest, "incident_type is required when reporting incident")
+				return
+			}
+			// Validate incident type
+			validTypes := map[string]bool{"vandalism": true, "landlord_complaint": true, "theft": true, "relocation_request": true, "missing": true, "damaged": true, "inaccessible": true}
+			if !validTypes[*req.IncidentType] {
+				utils.RespondError(w, http.StatusBadRequest, "Invalid incident_type")
+				return
+			}
+			// At least photo OR description required for incidents
+			if req.IncidentPhotoUrl == nil && req.IncidentDescription == nil {
+				utils.RespondError(w, http.StatusBadRequest, "Either incident photo or description is required")
+				return
+			}
 		}
 
 		// Get current active shift
@@ -671,19 +710,23 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in route_bins table")
 
-		// Update the bin's fill percentage in bins table
-		log.Printf("[DIAGNOSTIC] 📝 Updating bin fill percentage in bins table...")
-		binUpdateQuery := `UPDATE bins
-						   SET fill_percentage = $1,
-						       updated_at = $2
-						   WHERE id = $3`
+		// Update the bin's fill percentage in bins table (only if provided)
+		if req.UpdatedFillPercentage != nil {
+			log.Printf("[DIAGNOSTIC] 📝 Updating bin fill percentage in bins table...")
+			binUpdateQuery := `UPDATE bins
+							   SET fill_percentage = $1,
+							       updated_at = $2
+							   WHERE id = $3`
 
-		_, err = db.Exec(binUpdateQuery, req.UpdatedFillPercentage, now, req.BinID)
-		if err != nil {
-			log.Printf("[DIAGNOSTIC] ❌ Error updating bin fill percentage: %v", err)
-			// Don't fail the request - the bin is already marked complete in route
+			_, err = db.Exec(binUpdateQuery, *req.UpdatedFillPercentage, now, req.BinID)
+			if err != nil {
+				log.Printf("[DIAGNOSTIC] ❌ Error updating bin fill percentage: %v", err)
+				// Don't fail the request - the bin is already marked complete in route
+			} else {
+				log.Printf("[DIAGNOSTIC] ✅ Bin fill percentage updated to %d%%", *req.UpdatedFillPercentage)
+			}
 		} else {
-			log.Printf("[DIAGNOSTIC] ✅ Bin fill percentage updated to %d%%", req.UpdatedFillPercentage)
+			log.Printf("[DIAGNOSTIC] ⏭️  Skipping bin fill percentage update (NULL - incident prevents assessment)")
 		}
 
 		// Insert check record into checks table and get the ID back
@@ -706,6 +749,61 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				log.Printf("[DIAGNOSTIC] ✅ Check record inserted with photo_url (ID: %d)", returnedID)
 			} else {
 				log.Printf("[DIAGNOSTIC] ✅ Check record inserted without photo (ID: %d)", returnedID)
+			}
+		}
+
+		// Create incident if reported
+		if req.HasIncident && checkID != nil {
+			log.Printf("[DIAGNOSTIC] 🚨 Creating incident report for %s...", *req.IncidentType)
+
+			// Get bin details for zone creation
+			var bin models.Bin
+			err = db.Get(&bin, "SELECT * FROM bins WHERE id = $1", req.BinID)
+			if err == nil && bin.Latitude != nil && bin.Longitude != nil {
+				// Call the zone incident creation logic
+				incidentID := uuid.New().String()
+
+				// Check for existing zone within 100m
+				var zoneID string
+				var existingZone *models.NoGoZone
+				var zones []models.NoGoZone
+				err = db.Select(&zones, "SELECT * FROM no_go_zones WHERE status = 'active'")
+				if err == nil {
+					for _, zone := range zones {
+						distance := calculateZoneDistance(*bin.Latitude, *bin.Longitude, zone.CenterLatitude, zone.CenterLongitude)
+						if distance < 100 {
+							existingZone = &zone
+							break
+						}
+					}
+				}
+
+				// Create or update zone
+				if existingZone != nil {
+					zoneID = existingZone.ID
+					newScore := existingZone.ConflictScore + getIncidentScore(*req.IncidentType)
+					db.Exec(`UPDATE no_go_zones SET conflict_score = $1, updated_at = $2 WHERE id = $3`, newScore, now, zoneID)
+					log.Printf("[DIAGNOSTIC] ✅ Updated existing zone (new score: %d)", newScore)
+				} else {
+					zoneID = uuid.New().String()
+					zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
+					radiusMeters := getZoneRadius(*req.IncidentType)
+					db.Exec(`
+						INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
+						VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+					`, zoneID, zoneName, *bin.Latitude, *bin.Longitude, radiusMeters, getIncidentScore(*req.IncidentType), "active", nil, now, now)
+					log.Printf("[DIAGNOSTIC] ✅ Created new no-go zone")
+				}
+
+				// Create incident record
+				db.Exec(`
+					INSERT INTO zone_incidents (id, zone_id, bin_id, incident_type, reported_by_user_id, reported_at, description, photo_url, check_id, shift_id, is_field_observation, status)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				`, incidentID, zoneID, req.BinID, *req.IncidentType, userClaims.UserID, now, req.IncidentDescription, req.IncidentPhotoUrl, checkID, shift.ID, false, "open")
+
+				log.Printf("[DIAGNOSTIC] ✅ Incident created and linked to check ID %d", *checkID)
+			} else {
+				log.Printf("[DIAGNOSTIC] ⚠️  Could not create incident: bin has no coordinates")
 			}
 		}
 

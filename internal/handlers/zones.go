@@ -640,15 +640,32 @@ func calculateZoneDistance(lat1, lon1, lat2, lon2 float64) float64 {
 // Helper: Get conflict score increment based on incident type
 func getIncidentScore(incidentType string) int {
 	switch incidentType {
-	case "vandalism":
+	case "vandalism", "vandalized":
 		return 10
-	case "landlord_complaint":
+	case "landlord_complaint", "inaccessible":
 		return 15
-	case "theft":
+	case "theft", "missing":
 		return 20
 	case "relocation_request":
 		return 5
+	case "damaged":
+		return 10
 	default:
 		return 5
+	}
+}
+
+func getZoneRadius(incidentType string) int {
+	switch incidentType {
+	case "landlord_complaint", "inaccessible":
+		return 150
+	case "vandalism", "vandalized", "damaged":
+		return 500
+	case "theft", "missing":
+		return 600
+	case "relocation_request":
+		return 300
+	default:
+		return 500
 	}
 }

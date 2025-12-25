@@ -381,6 +381,19 @@ func Migrate(db *sqlx.DB) error {
 			END IF;
 		END $$`,
 
+		// ALTER TABLE migration to make fill_percentage nullable in checks table
+		// This allows incident-only check-ins where fill cannot be assessed
+		`DO $$
+		BEGIN
+			-- Check if fill_percentage is currently NOT NULL
+			IF EXISTS (SELECT 1 FROM information_schema.columns
+					   WHERE table_name='checks'
+					   AND column_name='fill_percentage'
+					   AND is_nullable='NO') THEN
+				ALTER TABLE checks ALTER COLUMN fill_percentage DROP NOT NULL;
+			END IF;
+		END $$`,
+
 		// Create indexes for no_go_zones
 		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_status ON no_go_zones(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_created_by ON no_go_zones(created_by_user_id)`,
