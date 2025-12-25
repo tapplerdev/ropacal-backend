@@ -253,7 +253,7 @@ func Migrate(db *sqlx.DB) error {
 			id TEXT PRIMARY KEY,
 			zone_id TEXT NOT NULL,
 			bin_id TEXT NOT NULL,
-			incident_type TEXT NOT NULL CHECK(incident_type IN ('vandalism', 'landlord_complaint', 'theft', 'relocation_request')),
+			incident_type TEXT NOT NULL CHECK(incident_type IN ('vandalism', 'landlord_complaint', 'theft', 'relocation_request', 'missing', 'damaged', 'vandalized', 'inaccessible')),
 			reported_by_user_id TEXT,
 			reported_at BIGINT NOT NULL,
 			description TEXT,
@@ -414,6 +414,10 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_bin ON zone_risk_overrides(bin_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_manager ON zone_risk_overrides(manager_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_status ON zone_risk_overrides(status)`,
+
+		// Migration: Update zone_incidents incident_type constraint to include new types
+		`ALTER TABLE zone_incidents DROP CONSTRAINT IF EXISTS zone_incidents_incident_type_check`,
+		`ALTER TABLE zone_incidents ADD CONSTRAINT zone_incidents_incident_type_check CHECK(incident_type IN ('vandalism', 'landlord_complaint', 'theft', 'relocation_request', 'missing', 'damaged', 'vandalized', 'inaccessible'))`,
 	}
 
 	for _, migration := range migrations {
