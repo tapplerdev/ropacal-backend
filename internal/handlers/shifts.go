@@ -759,20 +759,32 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			// Get bin details for zone creation
 			var bin models.Bin
 			err = db.Get(&bin, "SELECT * FROM bins WHERE id = $1", req.BinID)
+			if err != nil {
+				log.Printf("[DIAGNOSTIC] ❌ Error fetching bin details: %v", err)
+			} else {
+				log.Printf("[DIAGNOSTIC]    Bin found: %s, %s", bin.CurrentStreet, bin.City)
+				log.Printf("[DIAGNOSTIC]    Latitude: %v, Longitude: %v", bin.Latitude, bin.Longitude)
+			}
+
 			if err == nil && bin.Latitude != nil && bin.Longitude != nil {
 				// Call the zone incident creation logic
 				incidentID := uuid.New().String()
+				log.Printf("[DIAGNOSTIC]    Incident ID: %s", incidentID)
 
 				// Check for existing zone within 100m
 				var zoneID string
 				var existingZone *models.NoGoZone
 				var zones []models.NoGoZone
 				err = db.Select(&zones, "SELECT * FROM no_go_zones WHERE status = 'active'")
-				if err == nil {
+				if err != nil {
+					log.Printf("[DIAGNOSTIC] ⚠️  Error fetching zones: %v", err)
+				} else {
+					log.Printf("[DIAGNOSTIC]    Checking %d active zones for proximity...", len(zones))
 					for _, zone := range zones {
 						distance := calculateZoneDistance(*bin.Latitude, *bin.Longitude, zone.CenterLatitude, zone.CenterLongitude)
 						if distance < 100 {
 							existingZone = &zone
+							log.Printf("[DIAGNOSTIC]    Found existing zone within 100m (distance: %.2fm)", distance)
 							break
 						}
 					}
@@ -782,28 +794,44 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				if existingZone != nil {
 					zoneID = existingZone.ID
 					newScore := existingZone.ConflictScore + getIncidentScore(*req.IncidentType)
-					db.Exec(`UPDATE no_go_zones SET conflict_score = $1, updated_at = $2 WHERE id = $3`, newScore, now, zoneID)
-					log.Printf("[DIAGNOSTIC] ✅ Updated existing zone (new score: %d)", newScore)
+					_, err = db.Exec(`UPDATE no_go_zones SET conflict_score = $1, updated_at = $2 WHERE id = $3`, newScore, now, zoneID)
+					if err != nil {
+						log.Printf("[DIAGNOSTIC] ❌ Error updating zone: %v", err)
+					} else {
+						log.Printf("[DIAGNOSTIC] ✅ Updated existing zone (new score: %d)", newScore)
+					}
 				} else {
 					zoneID = uuid.New().String()
 					zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
 					radiusMeters := getZoneRadius(*req.IncidentType)
-					db.Exec(`
+					log.Printf("[DIAGNOSTIC]    Creating new zone: %s (radius: %dm)", zoneName, radiusMeters)
+					_, err = db.Exec(`
 						INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
 						VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 					`, zoneID, zoneName, *bin.Latitude, *bin.Longitude, radiusMeters, getIncidentScore(*req.IncidentType), "active", nil, now, now)
-					log.Printf("[DIAGNOSTIC] ✅ Created new no-go zone")
+					if err != nil {
+						log.Printf("[DIAGNOSTIC] ❌ Error creating zone: %v", err)
+					} else {
+						log.Printf("[DIAGNOSTIC] ✅ Created new no-go zone (ID: %s)", zoneID)
+					}
 				}
 
 				// Create incident record
-				db.Exec(`
+				log.Printf("[DIAGNOSTIC]    Inserting incident record...")
+				_, err = db.Exec(`
 					INSERT INTO zone_incidents (id, zone_id, bin_id, incident_type, reported_by_user_id, reported_at, description, photo_url, check_id, shift_id, is_field_observation, status)
 					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 				`, incidentID, zoneID, req.BinID, *req.IncidentType, userClaims.UserID, now, req.IncidentDescription, req.IncidentPhotoUrl, checkID, shift.ID, false, "open")
 
-				log.Printf("[DIAGNOSTIC] ✅ Incident created and linked to check ID %d", *checkID)
+				if err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ ERROR inserting incident: %v", err)
+				} else {
+					log.Printf("[DIAGNOSTIC] ✅ Incident created and linked to check ID %d", *checkID)
+				}
+			} else if err != nil {
+				log.Printf("[DIAGNOSTIC] ⚠️  Could not create incident: failed to fetch bin")
 			} else {
-				log.Printf("[DIAGNOSTIC] ⚠️  Could not create incident: bin has no coordinates")
+				log.Printf("[DIAGNOSTIC] ⚠️  Could not create incident: bin has no coordinates (lat: %v, lng: %v)", bin.Latitude, bin.Longitude)
 			}
 		}
 
