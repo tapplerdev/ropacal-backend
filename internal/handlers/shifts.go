@@ -753,6 +753,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Create incident if reported
+		var createdIncidentID *string
 		if req.HasIncident && checkID != nil {
 			log.Printf("[DIAGNOSTIC] 🚨 Creating incident report for %s...", *req.IncidentType)
 
@@ -826,7 +827,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				if err != nil {
 					log.Printf("[DIAGNOSTIC] ❌ ERROR inserting incident: %v", err)
 				} else {
-					log.Printf("[DIAGNOSTIC] ✅ Incident created and linked to check ID %d", *checkID)
+					createdIncidentID = &incidentID
+					log.Printf("[DIAGNOSTIC] ✅ Incident created (ID: %s) and linked to check ID %d", incidentID, *checkID)
 				}
 			} else if err != nil {
 				log.Printf("[DIAGNOSTIC] ⚠️  Could not create incident: failed to fetch bin")
@@ -882,6 +884,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			TotalBins:            shift.TotalBins,
 			CompletionPercentage: completionPercentage,
 			CheckID:              checkID,
+			IncidentID:           createdIncidentID,
 		}
 
 		log.Printf("[DIAGNOSTIC] 📤 RESPONSE: 200 OK")
@@ -889,6 +892,9 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		log.Printf("[DIAGNOSTIC]    Photo uploaded: %v", req.PhotoUrl != nil)
 		if checkID != nil {
 			log.Printf("[DIAGNOSTIC]    Check ID: %d (available for incident linking)", *checkID)
+		}
+		if createdIncidentID != nil {
+			log.Printf("[DIAGNOSTIC]    Incident ID: %s (incident successfully created)", *createdIncidentID)
 		}
 		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
