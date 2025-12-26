@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/middleware"
@@ -26,6 +28,10 @@ type NoGoZoneResponse struct {
 	ResolvedByUserID *string `json:"resolved_by_user_id,omitempty"`
 	ResolvedAtISO    *string `json:"resolved_at_iso,omitempty"`
 	ResolutionNotes  *string `json:"resolution_notes,omitempty"`
+	// Zone merge fields
+	MergedIntoZoneID *string `json:"merged_into_zone_id,omitempty"` // If this zone was merged into another
+	ResolutionType   *string `json:"resolution_type,omitempty"`     // 'merged' or 'manual_resolution'
+	MergedZoneCount  int     `json:"merged_zone_count,omitempty"`   // Count of zones that were merged into this one
 }
 
 // ZoneIncidentResponse represents an incident with ISO timestamps
@@ -56,6 +62,7 @@ func GetNoGoZones(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("📥 REQUEST: GET /api/no-go-zones")
 
 		status := r.URL.Query().Get("status")
+		includeMerged := r.URL.Query().Get("include_merged") == "true"
 
 		var zones []struct {
 			ID               string  `db:"id"`
@@ -71,28 +78,49 @@ func GetNoGoZones(db *sqlx.DB) http.HandlerFunc {
 			ResolvedByUserID *string `db:"resolved_by_user_id"`
 			ResolvedAt       *int64  `db:"resolved_at"`
 			ResolutionNotes  *string `db:"resolution_notes"`
+			MergedIntoZoneID *string `db:"merged_into_zone_id"`
+			ResolutionType   *string `db:"resolution_type"`
 		}
 
+		// Build query with merge filter
 		query := "SELECT * FROM no_go_zones"
+		whereClause := []string{}
+		args := []interface{}{}
+		argIndex := 1
+
+		// By default, exclude merged zones unless explicitly requested
+		if !includeMerged {
+			whereClause = append(whereClause, "(merged_into_zone_id IS NULL OR status != 'resolved')")
+		}
+
+		// Apply status filter if provided
 		if status != "" {
-			query += " WHERE status = $1 ORDER BY updated_at DESC"
-			if err := db.Select(&zones, query, status); err != nil {
-				log.Printf("❌ Error fetching zones: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch zones")
-				return
-			}
-		} else {
-			query += " ORDER BY updated_at DESC"
-			if err := db.Select(&zones, query); err != nil {
-				log.Printf("❌ Error fetching zones: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch zones")
-				return
-			}
+			whereClause = append(whereClause, fmt.Sprintf("status = $%d", argIndex))
+			args = append(args, status)
+			argIndex++
+		}
+
+		if len(whereClause) > 0 {
+			query += " WHERE " + strings.Join(whereClause, " AND ")
+		}
+
+		query += " ORDER BY updated_at DESC"
+
+		if err := db.Select(&zones, query, args...); err != nil {
+			log.Printf("❌ Error fetching zones: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch zones")
+			return
 		}
 
 		// Convert to response format with ISO timestamps
 		response := make([]NoGoZoneResponse, len(zones))
 		for i, zone := range zones {
+			// Count zones that were merged into this zone
+			mergedCount := 0
+			if err := db.Get(&mergedCount, "SELECT COUNT(*) FROM no_go_zones WHERE merged_into_zone_id = $1", zone.ID); err != nil {
+				log.Printf("⚠️ Error counting merged zones for %s: %v", zone.ID, err)
+			}
+
 			response[i] = NoGoZoneResponse{
 				ID:               zone.ID,
 				Name:             zone.Name,
@@ -106,6 +134,9 @@ func GetNoGoZones(db *sqlx.DB) http.HandlerFunc {
 				UpdatedAtISO:     time.Unix(zone.UpdatedAt, 0).Format(time.RFC3339),
 				ResolvedByUserID: zone.ResolvedByUserID,
 				ResolutionNotes:  zone.ResolutionNotes,
+				MergedIntoZoneID: zone.MergedIntoZoneID,
+				ResolutionType:   zone.ResolutionType,
+				MergedZoneCount:  mergedCount,
 			}
 
 			if zone.ResolvedAt != nil {
@@ -114,7 +145,7 @@ func GetNoGoZones(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		log.Printf("✅ Found %d zones (status filter: '%s')", len(response), status)
+		log.Printf("✅ Found %d zones (status: '%s', include_merged: %v)", len(response), status, includeMerged)
 		utils.RespondJSON(w, http.StatusOK, response)
 	}
 }
@@ -139,12 +170,20 @@ func GetNoGoZone(db *sqlx.DB) http.HandlerFunc {
 			ResolvedByUserID *string `db:"resolved_by_user_id"`
 			ResolvedAt       *int64  `db:"resolved_at"`
 			ResolutionNotes  *string `db:"resolution_notes"`
+			MergedIntoZoneID *string `db:"merged_into_zone_id"`
+			ResolutionType   *string `db:"resolution_type"`
 		}
 
 		if err := db.Get(&zone, "SELECT * FROM no_go_zones WHERE id = $1", zoneID); err != nil {
 			log.Printf("❌ Zone not found: %v", err)
 			utils.RespondError(w, http.StatusNotFound, "Zone not found")
 			return
+		}
+
+		// Count zones that were merged into this zone
+		mergedCount := 0
+		if err := db.Get(&mergedCount, "SELECT COUNT(*) FROM no_go_zones WHERE merged_into_zone_id = $1", zone.ID); err != nil {
+			log.Printf("⚠️ Error counting merged zones for %s: %v", zone.ID, err)
 		}
 
 		response := NoGoZoneResponse{
@@ -160,6 +199,9 @@ func GetNoGoZone(db *sqlx.DB) http.HandlerFunc {
 			UpdatedAtISO:     time.Unix(zone.UpdatedAt, 0).Format(time.RFC3339),
 			ResolvedByUserID: zone.ResolvedByUserID,
 			ResolutionNotes:  zone.ResolutionNotes,
+			MergedIntoZoneID: zone.MergedIntoZoneID,
+			ResolutionType:   zone.ResolutionType,
+			MergedZoneCount:  mergedCount,
 		}
 
 		if zone.ResolvedAt != nil {
@@ -173,10 +215,12 @@ func GetNoGoZone(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetZoneIncidents returns all incidents for a specific zone
+// Supports ?include_merged=true to include incidents from zones that were merged into this one
 func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		zoneID := r.PathValue("id")
-		log.Printf("📥 REQUEST: GET /api/no-go-zones/%s/incidents", zoneID)
+		includeMerged := r.URL.Query().Get("include_merged") == "true"
+		log.Printf("📥 REQUEST: GET /api/no-go-zones/%s/incidents (include_merged: %v)", zoneID, includeMerged)
 
 		var incidents []struct {
 			ID                 string   `db:"id"`
@@ -199,13 +243,28 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 			Status             string   `db:"status"`
 		}
 
-		query := `
-			SELECT zi.*, b.bin_number
-			FROM zone_incidents zi
-			LEFT JOIN bins b ON zi.bin_id = b.id
-			WHERE zi.zone_id = $1
-			ORDER BY zi.reported_at DESC
-		`
+		var query string
+		if includeMerged {
+			// Include incidents from zones that were merged into this zone
+			query = `
+				SELECT zi.*, b.bin_number
+				FROM zone_incidents zi
+				LEFT JOIN bins b ON zi.bin_id = b.id
+				WHERE zi.zone_id = $1 OR zi.zone_id IN (
+					SELECT id FROM no_go_zones WHERE merged_into_zone_id = $1
+				)
+				ORDER BY zi.reported_at DESC
+			`
+		} else {
+			// Only incidents directly associated with this zone
+			query = `
+				SELECT zi.*, b.bin_number
+				FROM zone_incidents zi
+				LEFT JOIN bins b ON zi.bin_id = b.id
+				WHERE zi.zone_id = $1
+				ORDER BY zi.reported_at DESC
+			`
+		}
 
 		if err := db.Select(&incidents, query, zoneID); err != nil {
 			log.Printf("❌ Error fetching incidents: %v", err)
@@ -242,7 +301,7 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		log.Printf("✅ Found %d incidents for zone %s", len(response), zoneID)
+		log.Printf("✅ Found %d incidents for zone %s (include_merged: %v)", len(response), zoneID, includeMerged)
 		utils.RespondJSON(w, http.StatusOK, response)
 	}
 }

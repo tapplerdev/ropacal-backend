@@ -394,10 +394,39 @@ func Migrate(db *sqlx.DB) error {
 			END IF;
 		END $$`,
 
+		// Add zone merge tracking columns to no_go_zones table
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='no_go_zones' AND column_name='merged_into_zone_id') THEN
+				ALTER TABLE no_go_zones ADD COLUMN merged_into_zone_id TEXT;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='no_go_zones' AND column_name='resolution_type') THEN
+				ALTER TABLE no_go_zones ADD COLUMN resolution_type TEXT CHECK(resolution_type IN ('merged', 'manual_resolution'));
+			END IF;
+		END $$`,
+
+		// Add foreign key constraint for merged_into_zone_id
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='no_go_zones_merged_into_zone_id_fkey'
+						   AND table_name='no_go_zones') THEN
+				ALTER TABLE no_go_zones ADD CONSTRAINT no_go_zones_merged_into_zone_id_fkey
+					FOREIGN KEY (merged_into_zone_id) REFERENCES no_go_zones(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
 		// Create indexes for no_go_zones
 		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_status ON no_go_zones(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_created_by ON no_go_zones(created_by_user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_location ON no_go_zones(center_latitude, center_longitude)`,
+		`CREATE INDEX IF NOT EXISTS idx_no_go_zones_merged_into ON no_go_zones(merged_into_zone_id)`,
 
 		// Create indexes for zone_incidents
 		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_zone ON zone_incidents(zone_id)`,
