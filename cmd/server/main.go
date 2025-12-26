@@ -182,7 +182,8 @@ func main() {
 		r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
 
 		// Shift-related incident queries
-		r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
+		// TODO: Implement GetShiftIncidents handler
+		// r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
 
 		// Analytics endpoints
 		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
@@ -213,7 +214,8 @@ func main() {
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
 
 			// Incident reporting (drivers can report both check-based and field observations)
-			r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
+			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteBin)
+			// r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
 		})
 
 		// Diagnostic logging endpoint (no auth required for easier debugging)
@@ -240,13 +242,15 @@ func main() {
 			r.Post("/users", handlers.CreateUser(db))
 
 			// No-Go Zone management (admin only)
-			r.Post("/no-go-zones", handlers.CreateNoGoZone(db))
-			r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db))
-			r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
+			// TODO: Implement admin zone management handlers
+			// r.Post("/no-go-zones", handlers.CreateNoGoZone(db))
+			// r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db))
+			// r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
 
 			// Field observations management
-			r.Get("/field-observations", handlers.GetFieldObservations(db))
-			r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
+			// TODO: Implement field observation management handlers
+			// r.Get("/field-observations", handlers.GetFieldObservations(db))
+			// r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
 		})
 	})
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"time"
 
@@ -1663,4 +1664,63 @@ func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
 			"data":    allDrivers,
 		})
 	}
+}
+
+// Helper Functions for Incident Reporting and No-Go Zones
+
+// getZoneRadius returns the radius in meters based on incident type
+func getZoneRadius(incidentType string) int {
+	switch incidentType {
+	case "theft", "vandalized":
+		return 500 // High severity - 500m radius
+	case "damaged", "missing":
+		return 300 // Medium severity - 300m radius
+	case "landlord_complaint":
+		return 200 // Localized issue - 200m radius
+	case "inaccessible", "relocation_request":
+		return 150 // Very localized - 150m radius
+	default:
+		return 250 // Default radius
+	}
+}
+
+// getIncidentScore returns the conflict score to add based on incident type
+func getIncidentScore(incidentType string) int {
+	switch incidentType {
+	case "theft":
+		return 20 // Most severe
+	case "vandalized":
+		return 15
+	case "damaged":
+		return 10
+	case "landlord_complaint":
+		return 8
+	case "missing":
+		return 12
+	case "inaccessible":
+		return 5
+	case "relocation_request":
+		return 3
+	default:
+		return 5
+	}
+}
+
+// calculateZoneDistance calculates the distance in meters between a point and a zone center
+func calculateZoneDistance(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadiusMeters = 6371000 // Earth's radius in meters
+
+	// Convert degrees to radians
+	lat1Rad := lat1 * (3.141592653589793 / 180)
+	lat2Rad := lat2 * (3.141592653589793 / 180)
+	deltaLatRad := (lat2 - lat1) * (3.141592653589793 / 180)
+	deltaLonRad := (lon2 - lon1) * (3.141592653589793 / 180)
+
+	// Haversine formula
+	a := math.Sin(deltaLatRad/2)*math.Sin(deltaLatRad/2) +
+		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
+			math.Sin(deltaLonRad/2)*math.Sin(deltaLonRad/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	return earthRadiusMeters * c
 }
