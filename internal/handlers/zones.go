@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"ropacal-backend/internal/middleware"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
@@ -243,5 +244,225 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ Found %d incidents for zone %s", len(response), zoneID)
 		utils.RespondJSON(w, http.StatusOK, response)
+	}
+}
+// GetShiftIncidents returns all incidents reported during a specific shift
+func GetShiftIncidents(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shiftID := r.PathValue("id")
+		log.Printf("📥 REQUEST: GET /api/shifts/%s/incidents", shiftID)
+
+		var incidents []struct {
+			ID                 string   `db:"id"`
+			ZoneID             string   `db:"zone_id"`
+			BinID              string   `db:"bin_id"`
+			BinNumber          *int     `db:"bin_number"`
+			IncidentType       string   `db:"incident_type"`
+			ReportedByUserID   *string  `db:"reported_by_user_id"`
+			ReportedAt         int64    `db:"reported_at"`
+			Description        *string  `db:"description"`
+			PhotoURL           *string  `db:"photo_url"`
+			CheckID            *int     `db:"check_id"`
+			MoveID             *int     `db:"move_id"`
+			ShiftID            *string  `db:"shift_id"`
+			ReporterLatitude   *float64 `db:"reporter_latitude"`
+			ReporterLongitude  *float64 `db:"reporter_longitude"`
+			IsFieldObservation bool     `db:"is_field_observation"`
+			VerifiedByUserID   *string  `db:"verified_by_user_id"`
+			VerifiedAt         *int64   `db:"verified_at"`
+			Status             string   `db:"status"`
+		}
+
+		query := `
+			SELECT zi.*, b.bin_number
+			FROM zone_incidents zi
+			LEFT JOIN bins b ON zi.bin_id = b.id
+			WHERE zi.shift_id = $1
+			ORDER BY zi.reported_at DESC
+		`
+
+		if err := db.Select(&incidents, query, shiftID); err != nil {
+			log.Printf("❌ Error fetching shift incidents: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch incidents")
+			return
+		}
+
+		// Convert to response format
+		response := make([]ZoneIncidentResponse, len(incidents))
+		for i, incident := range incidents {
+			response[i] = ZoneIncidentResponse{
+				ID:                 incident.ID,
+				ZoneID:             incident.ZoneID,
+				BinID:              incident.BinID,
+				BinNumber:          incident.BinNumber,
+				IncidentType:       incident.IncidentType,
+				ReportedByUserID:   incident.ReportedByUserID,
+				ReportedAtISO:      time.Unix(incident.ReportedAt, 0).Format(time.RFC3339),
+				Description:        incident.Description,
+				PhotoURL:           incident.PhotoURL,
+				CheckID:            incident.CheckID,
+				MoveID:             incident.MoveID,
+				ShiftID:            incident.ShiftID,
+				ReporterLatitude:   incident.ReporterLatitude,
+				ReporterLongitude:  incident.ReporterLongitude,
+				IsFieldObservation: incident.IsFieldObservation,
+				VerifiedByUserID:   incident.VerifiedByUserID,
+				Status:             incident.Status,
+			}
+
+			if incident.VerifiedAt != nil {
+				verifiedISO := time.Unix(*incident.VerifiedAt, 0).Format(time.RFC3339)
+				response[i].VerifiedAtISO = &verifiedISO
+			}
+		}
+
+		log.Printf("✅ Found %d incidents for shift %s", len(response), shiftID)
+		utils.RespondJSON(w, http.StatusOK, response)
+	}
+}
+
+// GetFieldObservations returns field observations for manager review
+func GetFieldObservations(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/field-observations")
+
+		statusFilter := r.URL.Query().Get("status") // all, pending, verified
+
+		var incidents []struct {
+			ID                 string   `db:"id"`
+			ZoneID             string   `db:"zone_id"`
+			BinID              string   `db:"bin_id"`
+			BinNumber          *int     `db:"bin_number"`
+			IncidentType       string   `db:"incident_type"`
+			ReportedByUserID   *string  `db:"reported_by_user_id"`
+			ReportedByName     *string  `db:"reported_by_name"`
+			ReportedAt         int64    `db:"reported_at"`
+			Description        *string  `db:"description"`
+			PhotoURL           *string  `db:"photo_url"`
+			CheckID            *int     `db:"check_id"`
+			MoveID             *int     `db:"move_id"`
+			ShiftID            *string  `db:"shift_id"`
+			ReporterLatitude   *float64 `db:"reporter_latitude"`
+			ReporterLongitude  *float64 `db:"reporter_longitude"`
+			IsFieldObservation bool     `db:"is_field_observation"`
+			VerifiedByUserID   *string  `db:"verified_by_user_id"`
+			VerifiedByName     *string  `db:"verified_by_name"`
+			VerifiedAt         *int64   `db:"verified_at"`
+			Status             string   `db:"status"`
+		}
+
+		query := `
+			SELECT zi.*, 
+			       b.bin_number,
+			       u1.full_name as reported_by_name,
+			       u2.full_name as verified_by_name
+			FROM zone_incidents zi
+			LEFT JOIN bins b ON zi.bin_id = b.id
+			LEFT JOIN users u1 ON zi.reported_by_user_id = u1.id
+			LEFT JOIN users u2 ON zi.verified_by_user_id = u2.id
+			WHERE zi.is_field_observation = true
+		`
+
+		// Apply status filter
+		if statusFilter == "pending" {
+			query += " AND zi.verified_at IS NULL"
+		} else if statusFilter == "verified" {
+			query += " AND zi.verified_at IS NOT NULL"
+		}
+
+		query += " ORDER BY zi.reported_at DESC"
+
+		if err := db.Select(&incidents, query); err != nil {
+			log.Printf("❌ Error fetching field observations: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch field observations")
+			return
+		}
+
+		// Convert to response format
+		type FieldObservationResponse struct {
+			ZoneIncidentResponse
+			ReportedByName *string `json:"reported_by_name,omitempty"`
+			VerifiedByName *string `json:"verified_by_name,omitempty"`
+		}
+
+		response := make([]FieldObservationResponse, len(incidents))
+		for i, incident := range incidents {
+			response[i] = FieldObservationResponse{
+				ZoneIncidentResponse: ZoneIncidentResponse{
+					ID:                 incident.ID,
+					ZoneID:             incident.ZoneID,
+					BinID:              incident.BinID,
+					BinNumber:          incident.BinNumber,
+					IncidentType:       incident.IncidentType,
+					ReportedByUserID:   incident.ReportedByUserID,
+					ReportedAtISO:      time.Unix(incident.ReportedAt, 0).Format(time.RFC3339),
+					Description:        incident.Description,
+					PhotoURL:           incident.PhotoURL,
+					CheckID:            incident.CheckID,
+					MoveID:             incident.MoveID,
+					ShiftID:            incident.ShiftID,
+					ReporterLatitude:   incident.ReporterLatitude,
+					ReporterLongitude:  incident.ReporterLongitude,
+					IsFieldObservation: incident.IsFieldObservation,
+					VerifiedByUserID:   incident.VerifiedByUserID,
+					Status:             incident.Status,
+				},
+				ReportedByName: incident.ReportedByName,
+				VerifiedByName: incident.VerifiedByName,
+			}
+
+			if incident.VerifiedAt != nil {
+				verifiedISO := time.Unix(*incident.VerifiedAt, 0).Format(time.RFC3339)
+				response[i].VerifiedAtISO = &verifiedISO
+			}
+		}
+
+		log.Printf("✅ Found %d field observations (filter: '%s')", len(response), statusFilter)
+		utils.RespondJSON(w, http.StatusOK, response)
+	}
+}
+
+// VerifyFieldObservation marks a field observation as verified by a manager
+func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		incidentID := r.PathValue("id")
+		log.Printf("📥 REQUEST: PATCH /api/field-observations/%s/verify", incidentID)
+
+		// Get user from context (manager only)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Update the incident
+		result, err := db.Exec(`
+			UPDATE zone_incidents 
+			SET verified_by_user_id = $1, verified_at = $2, status = 'investigating'
+			WHERE id = $3 AND is_field_observation = true
+		`, userClaims.UserID, now, incidentID)
+
+		if err != nil {
+			log.Printf("❌ Error verifying field observation: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to verify observation")
+			return
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			utils.RespondError(w, http.StatusNotFound, "Field observation not found")
+			return
+		}
+
+		log.Printf("✅ Field observation %s verified by manager %s", incidentID, userClaims.UserID)
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success":      true,
+			"incident_id":  incidentID,
+			"verified_at":  time.Unix(now, 0).Format(time.RFC3339),
+			"verified_by":  userClaims.UserID,
+		})
 	}
 }

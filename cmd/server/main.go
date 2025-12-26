@@ -182,8 +182,7 @@ func main() {
 		r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
 
 		// Shift-related incident queries
-		// TODO: Implement GetShiftIncidents handler
-		// r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
+		r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
 
 		// Analytics endpoints
 		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
@@ -248,9 +247,8 @@ func main() {
 			// r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
 
 			// Field observations management
-			// TODO: Implement field observation management handlers
-			// r.Get("/field-observations", handlers.GetFieldObservations(db))
-			// r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
+			r.Get("/field-observations", handlers.GetFieldObservations(db))
+			r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
 		})
 	})
 
