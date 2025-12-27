@@ -818,6 +818,15 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 					}
 				}
 
+				// Check for zone merges after creating/updating zone
+				if err == nil {
+					log.Printf("[DIAGNOSTIC] 🔍 Checking for zone merges...")
+					if mergeErr := detectAndMergeZones(db, zoneID, now); mergeErr != nil {
+						log.Printf("[DIAGNOSTIC] ⚠️  Zone merge check failed: %v", mergeErr)
+						// Don't fail the request if merge fails - it's not critical
+					}
+				}
+
 				// Create incident record
 				log.Printf("[DIAGNOSTIC]    Inserting incident record...")
 				_, err = db.Exec(`
@@ -1723,4 +1732,152 @@ func calculateZoneDistance(lat1, lon1, lat2, lon2 float64) float64 {
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 
 	return earthRadiusMeters * c
+}
+
+// calculateZoneOverlap calculates the overlap percentage between two circular zones
+// Returns the percentage of overlap (0-100) based on the smaller zone
+func calculateZoneOverlap(lat1, lon1 float64, radius1 int, lat2, lon2 float64, radius2 int) float64 {
+	distance := calculateZoneDistance(lat1, lon1, lat2, lon2)
+	r1 := float64(radius1)
+	r2 := float64(radius2)
+
+	// If zones don't overlap at all
+	if distance >= r1+r2 {
+		return 0.0
+	}
+
+	// If one zone completely contains the other
+	if distance+math.Min(r1, r2) <= math.Max(r1, r2) {
+		return 100.0
+	}
+
+	// Calculate intersection area using circle-circle intersection formula
+	d := distance
+	part1 := r1 * r1 * math.Acos((d*d+r1*r1-r2*r2)/(2*d*r1))
+	part2 := r2 * r2 * math.Acos((d*d+r2*r2-r1*r1)/(2*d*r2))
+	part3 := 0.5 * math.Sqrt((r1+r2-d)*(r1-r2+d)*(-r1+r2+d)*(r1+r2+d))
+
+	intersectionArea := part1 + part2 - part3
+
+	// Calculate percentage based on smaller zone
+	smallerZoneArea := math.Pi * math.Min(r1, r2) * math.Min(r1, r2)
+	overlapPercent := (intersectionArea / smallerZoneArea) * 100
+
+	return overlapPercent
+}
+
+// detectAndMergeZones checks if the given zone should be merged with any existing zones
+// Merges zones if they overlap by more than 50%
+func detectAndMergeZones(db *sqlx.DB, zoneID string, now int64) error {
+	// Get the current zone details
+	var currentZone models.NoGoZone
+	err := db.Get(&currentZone, "SELECT * FROM no_go_zones WHERE id = $1", zoneID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch current zone: %w", err)
+	}
+
+	// Get all other active zones
+	var otherZones []models.NoGoZone
+	err = db.Select(&otherZones, "SELECT * FROM no_go_zones WHERE status = 'active' AND id != $1 AND merged_into_zone_id IS NULL", zoneID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch other zones: %w", err)
+	}
+
+	log.Printf("[ZONE MERGE] Checking zone %s for potential merges with %d other zones", zoneID[:8], len(otherZones))
+
+	for _, otherZone := range otherZones {
+		// Calculate overlap percentage
+		overlapPercent := calculateZoneOverlap(
+			currentZone.CenterLatitude, currentZone.CenterLongitude, currentZone.RadiusMeters,
+			otherZone.CenterLatitude, otherZone.CenterLongitude, otherZone.RadiusMeters,
+		)
+
+		log.Printf("[ZONE MERGE] Zone %s vs %s: %.1f%% overlap", currentZone.ID[:8], otherZone.ID[:8], overlapPercent)
+
+		// If overlap is greater than 50%, merge the zones
+		if overlapPercent > 50.0 {
+			log.Printf("[ZONE MERGE] 🔄 Merging zones (%.1f%% overlap)", overlapPercent)
+
+			// Determine which zone to keep (higher conflict score wins, or larger radius)
+			var primaryZone, secondaryZone models.NoGoZone
+			if currentZone.ConflictScore > otherZone.ConflictScore {
+				primaryZone = currentZone
+				secondaryZone = otherZone
+			} else if currentZone.ConflictScore < otherZone.ConflictScore {
+				primaryZone = otherZone
+				secondaryZone = currentZone
+			} else {
+				// Equal scores, use larger radius
+				if currentZone.RadiusMeters >= otherZone.RadiusMeters {
+					primaryZone = currentZone
+					secondaryZone = otherZone
+				} else {
+					primaryZone = otherZone
+					secondaryZone = currentZone
+				}
+			}
+
+			// Execute the merge
+			err = executeMerge(db, primaryZone, secondaryZone, now)
+			if err != nil {
+				log.Printf("[ZONE MERGE] ❌ Failed to merge zones: %v", err)
+				continue
+			}
+
+			log.Printf("[ZONE MERGE] ✅ Successfully merged zone %s into %s", secondaryZone.ID[:8], primaryZone.ID[:8])
+		}
+	}
+
+	return nil
+}
+
+// executeMerge merges secondaryZone into primaryZone
+func executeMerge(db *sqlx.DB, primaryZone, secondaryZone models.NoGoZone, now int64) error {
+	log.Printf("[ZONE MERGE] Executing merge: %s <- %s", primaryZone.ID[:8], secondaryZone.ID[:8])
+
+	// Calculate combined conflict score
+	combinedScore := primaryZone.ConflictScore + secondaryZone.ConflictScore
+
+	// Use the larger radius
+	newRadius := primaryZone.RadiusMeters
+	if secondaryZone.RadiusMeters > newRadius {
+		newRadius = secondaryZone.RadiusMeters
+	}
+
+	// Update primary zone with combined score and larger radius
+	_, err := db.Exec(`
+		UPDATE no_go_zones
+		SET conflict_score = $1, radius_meters = $2, updated_at = $3
+		WHERE id = $4
+	`, combinedScore, newRadius, now, primaryZone.ID)
+	if err != nil {
+		return fmt.Errorf("failed to update primary zone: %w", err)
+	}
+	log.Printf("[ZONE MERGE]    ✓ Updated primary zone (score: %d -> %d, radius: %dm -> %dm)",
+		primaryZone.ConflictScore, combinedScore, primaryZone.RadiusMeters, newRadius)
+
+	// Transfer all incidents from secondary zone to primary zone
+	result, err := db.Exec(`
+		UPDATE zone_incidents
+		SET zone_id = $1
+		WHERE zone_id = $2
+	`, primaryZone.ID, secondaryZone.ID)
+	if err != nil {
+		return fmt.Errorf("failed to transfer incidents: %w", err)
+	}
+	rowsAffected, _ := result.RowsAffected()
+	log.Printf("[ZONE MERGE]    ✓ Transferred %d incidents to primary zone", rowsAffected)
+
+	// Mark secondary zone as merged
+	_, err = db.Exec(`
+		UPDATE no_go_zones
+		SET merged_into_zone_id = $1, resolution_type = 'merged', status = 'resolved', resolved_at = $2, updated_at = $2
+		WHERE id = $3
+	`, primaryZone.ID, now, secondaryZone.ID)
+	if err != nil {
+		return fmt.Errorf("failed to mark secondary zone as merged: %w", err)
+	}
+	log.Printf("[ZONE MERGE]    ✓ Marked secondary zone as merged")
+
+	return nil
 }
