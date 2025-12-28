@@ -6,10 +6,10 @@ type Check struct {
 	ID             int     `json:"id" db:"id"`
 	BinID          string  `json:"bin_id" db:"bin_id"`
 	CheckedFrom    string  `json:"checked_from" db:"checked_from"`
-	FillPercentage int     `json:"fill_percentage" db:"fill_percentage"`
-	CheckedOn      int64   `json:"checked_on" db:"checked_on"` // Unix timestamp
-	PhotoUrl       *string `json:"photo_url" db:"photo_url"`   // Cloudinary URL
-	CheckedBy      *string `json:"checked_by" db:"checked_by"` // User ID who performed the check
+	FillPercentage *int    `json:"fill_percentage" db:"fill_percentage"` // Nullable for incident-only check-ins
+	CheckedOn      int64   `json:"checked_on" db:"checked_on"`           // Unix timestamp
+	PhotoUrl       *string `json:"photo_url" db:"photo_url"`             // Cloudinary URL
+	CheckedBy      *string `json:"checked_by" db:"checked_by"`           // User ID who performed the check
 }
 
 // CheckResponse is what we send to the client
@@ -17,7 +17,7 @@ type CheckResponse struct {
 	ID             int     `json:"id"`
 	BinID          string  `json:"binId"`
 	CheckedFrom    string  `json:"checkedFrom"`
-	FillPercentage int     `json:"fillPercentage"`
+	FillPercentage *int    `json:"fillPercentage"` // Nullable for incident-only check-ins
 	CheckedOnIso   string  `json:"checkedOnIso"`
 	CheckedOn      string  `json:"checkedOn"`     // formatted date
 	PhotoUrl       *string `json:"photoUrl"`      // Cloudinary URL
