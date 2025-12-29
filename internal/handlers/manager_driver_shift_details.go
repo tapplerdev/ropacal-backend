@@ -122,7 +122,7 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 			b.fill_percentage,
 			b.latitude,
 			b.longitude
-		FROM route_bins rb
+		FROM shift_bins rb
 		INNER JOIN bins b ON rb.bin_id = b.id
 		WHERE rb.shift_id = $1
 		ORDER BY rb.sequence_order ASC

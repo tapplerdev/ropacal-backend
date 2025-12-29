@@ -34,14 +34,14 @@ CREATE TABLE IF NOT EXISTS route_bins (
 );
 
 -- Step 4: Add indexes for performance
-CREATE INDEX idx_routes_geographic_area ON routes(geographic_area);
-CREATE INDEX idx_routes_created_by ON routes(created_by_user_id);
-CREATE INDEX idx_routes_created_at ON routes(created_at);
-CREATE INDEX idx_route_bins_route_id ON route_bins(route_id);
-CREATE INDEX idx_route_bins_bin_id ON route_bins(bin_id);
+CREATE INDEX IF NOT EXISTS idx_routes_geographic_area ON routes(geographic_area);
+CREATE INDEX IF NOT EXISTS idx_routes_created_by ON routes(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_routes_created_at ON routes(created_at);
+CREATE INDEX IF NOT EXISTS idx_route_bins_route_id ON route_bins(route_id);
+CREATE INDEX IF NOT EXISTS idx_route_bins_bin_id ON route_bins(bin_id);
 
 -- Step 5: Add unique constraint to prevent duplicate bins in same route
-CREATE UNIQUE INDEX idx_route_bins_unique ON route_bins(route_id, bin_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_route_bins_unique ON route_bins(route_id, bin_id);
 
 -- Step 6: Verify the migration
 -- Run this to confirm tables exist:

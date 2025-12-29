@@ -687,7 +687,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Mark bin as completed in route_bins table
 		now := time.Now().Unix()
-		routeBinQuery := `UPDATE route_bins
+		routeBinQuery := `UPDATE shift_bins
 						  SET is_completed = 1,
 							  completed_at = $1,
 							  updated_fill_percentage = $2
@@ -1036,7 +1036,7 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 			b.fill_percentage,
 			b.latitude,
 			b.longitude
-		FROM route_bins rb
+		FROM shift_bins rb
 		JOIN bins b ON rb.bin_id = b.id
 		WHERE rb.shift_id = $1
 		ORDER BY rb.sequence_order ASC`
@@ -1228,7 +1228,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		// Insert route bins with OPTIMIZED sequence order
 		for i, bin := range optimizedBins {
-			routeBinQuery := `INSERT INTO route_bins (shift_id, bin_id, sequence_order, created_at)
+			routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
 							  VALUES ($1, $2, $3, $4)`
 
 			_, err = tx.Exec(routeBinQuery, shiftID, bin.ID, i+1, now)
