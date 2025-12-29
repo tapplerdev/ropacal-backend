@@ -18,8 +18,9 @@ CREATE TABLE IF NOT EXISTS routes (
 );
 
 -- Step 2: Rename existing route_bins to shift_bins (for active shifts)
--- This clarifies that route_bins (old) is for shift work, not route templates
-ALTER TABLE IF EXISTS route_bins RENAME TO shift_bins;
+-- Note: This step is now handled in database.go (shift_bins is created directly)
+-- Keeping this here for reference, but it's idempotent with IF EXISTS
+-- ALTER TABLE IF EXISTS route_bins RENAME TO shift_bins;
 
 -- Step 3: Create NEW route_bins table (junction table for route blueprints)
 -- This is the template/blueprint bins, not shift bins

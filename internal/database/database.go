@@ -134,8 +134,8 @@ func Migrate(db *sqlx.DB) error {
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		)`,
 
-		// Create route_bins table
-		`CREATE TABLE IF NOT EXISTS route_bins (
+		// Create shift_bins table (formerly route_bins - renamed for clarity)
+		`CREATE TABLE IF NOT EXISTS shift_bins (
 			id SERIAL PRIMARY KEY,
 			shift_id TEXT NOT NULL,
 			bin_id TEXT NOT NULL,
@@ -166,8 +166,8 @@ func Migrate(db *sqlx.DB) error {
 			FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE SET NULL
 		)`,
 
-		// Migration: Add updated_fill_percentage column to existing route_bins table
-		`ALTER TABLE route_bins ADD COLUMN IF NOT EXISTS updated_fill_percentage INT`,
+		// Migration: Add updated_fill_percentage column to existing shift_bins table
+		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS updated_fill_percentage INT`,
 
 		// Create indexes
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
@@ -180,9 +180,9 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_shifts_created_at ON shifts(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user_id ON fcm_tokens(user_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fcm_tokens_token ON fcm_tokens(token)`,
-		`CREATE INDEX IF NOT EXISTS idx_route_bins_shift_id ON route_bins(shift_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_route_bins_bin_id ON route_bins(bin_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_route_bins_shift_seq ON route_bins(shift_id, sequence_order)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_bins_shift_id ON shift_bins(shift_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_bins_bin_id ON shift_bins(bin_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_bins_shift_seq ON shift_bins(shift_id, sequence_order)`,
 		`CREATE INDEX IF NOT EXISTS idx_driver_current_location_shift_id ON driver_current_location(shift_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_driver_current_location_is_connected ON driver_current_location(is_connected)`,
 
