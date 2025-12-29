@@ -1,7 +1,8 @@
 package models
 
-// RouteBin represents a bin assigned to a route
-type RouteBin struct {
+// ShiftBin represents a bin assigned to an active shift (from shift_bins table)
+// Note: This was formerly called RouteBin, but renamed for clarity
+type ShiftBin struct {
 	ID            int    `db:"id" json:"id"`
 	ShiftID       string `db:"shift_id" json:"shift_id"`
 	BinID         string `db:"bin_id" json:"bin_id"`
@@ -11,8 +12,8 @@ type RouteBin struct {
 	CreatedAt     int64  `db:"created_at" json:"created_at"`
 }
 
-// RouteBinWithDetails extends RouteBin with bin details for API responses
-type RouteBinWithDetails struct {
+// ShiftBinWithDetails extends ShiftBin with bin details for API responses
+type ShiftBinWithDetails struct {
 	ID                    int     `db:"id" json:"id"`
 	ShiftID               string  `db:"shift_id" json:"shift_id"`
 	BinID                 string  `db:"bin_id" json:"bin_id"`

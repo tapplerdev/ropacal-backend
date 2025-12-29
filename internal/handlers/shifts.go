@@ -234,7 +234,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		bins, err := getRouteBinsWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins for WebSocket: %v", err)
-			bins = []models.RouteBinWithDetails{} // Empty array on error
+			bins = []models.ShiftBinWithDetails{} // Empty array on error
 		}
 
 		// Broadcast WebSocket update to driver (include bins!)
@@ -867,7 +867,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		bins, err := getRouteBinsWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
-			bins = []models.RouteBinWithDetails{}
+			bins = []models.ShiftBinWithDetails{}
 		}
 
 		// Broadcast WebSocket update with bins
@@ -990,7 +990,7 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 		bins, err := getRouteBinsWithDetails(db, shiftID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
-			bins = []models.RouteBinWithDetails{} // Return empty array on error
+			bins = []models.ShiftBinWithDetails{} // Return empty array on error
 		}
 
 		log.Printf("✅ Shift found with %d bins", len(bins))
@@ -1018,7 +1018,7 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 }
 
 // getRouteBinsWithDetails fetches route bins with full bin details
-func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.RouteBinWithDetails, error) {
+func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
 	query := `
 		SELECT
 			rb.id,
@@ -1041,7 +1041,7 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.RouteBinWith
 		WHERE rb.shift_id = $1
 		ORDER BY rb.sequence_order ASC`
 
-	var bins []models.RouteBinWithDetails
+	var bins []models.ShiftBinWithDetails
 	err := db.Select(&bins, query, shiftID)
 	if err != nil {
 		return nil, err

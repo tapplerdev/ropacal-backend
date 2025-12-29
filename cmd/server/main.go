@@ -173,8 +173,16 @@ func main() {
 		r.Get("/bins/{id}/moves", handlers.GetMoves(db))
 		r.Post("/bins/{id}/moves", handlers.CreateMove(db))
 
-		// Route optimization
+		// Route optimization (legacy - simple nearest-neighbor)
 		r.Post("/route", handlers.OptimizeRoute(db))
+
+		// Route management endpoints (route blueprints/templates)
+		r.Get("/routes", handlers.GetRoutes(db))
+		r.Get("/routes/{id}", handlers.GetRoute(db))
+		r.Post("/routes", handlers.CreateRoute(db))
+		r.Patch("/routes/{id}", handlers.UpdateRoute(db))
+		r.Delete("/routes/{id}", handlers.DeleteRoute(db))
+		r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
 
 		// No-Go Zones endpoints
 		r.Get("/no-go-zones", handlers.GetNoGoZones(db))

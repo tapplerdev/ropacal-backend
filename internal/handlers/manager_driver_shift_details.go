@@ -24,7 +24,7 @@ type DriverShiftDetailResponse struct {
 	TotalPauseSeconds int                        `json:"total_pause_seconds"`
 	CreatedAt  int64                              `json:"created_at"`
 	UpdatedAt  int64                              `json:"updated_at"`
-	Bins       []models.RouteBinWithDetails       `json:"bins"`
+	Bins       []models.ShiftBinWithDetails       `json:"bins"`
 }
 
 // GetDriverShiftDetails returns detailed shift information for a specific driver (manager view)
@@ -141,9 +141,9 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		var bins []models.RouteBinWithDetails
+		var bins []models.ShiftBinWithDetails
 		for rows.Next() {
-			var bin models.RouteBinWithDetails
+			var bin models.ShiftBinWithDetails
 			err := rows.Scan(
 				&bin.ID,
 				&bin.ShiftID,
