@@ -3,14 +3,18 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
+	"math"
 	"net/http"
 	"time"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 // GetRoutes returns all route blueprints
@@ -466,6 +470,192 @@ func DuplicateRoute(db *sqlx.DB) http.HandlerFunc {
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(created)
 	}
+}
+
+// OptimizeRoutePreview returns an optimized route order without saving to database
+func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BinIDs        []string `json:"bin_ids"`
+			StartLocation *struct {
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			} `json:"start_location"` // Optional
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.BinIDs) == 0 {
+			http.Error(w, "bin_ids cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("🎯 Optimizing route preview for %d bins", len(req.BinIDs))
+
+		// Fetch bins from database
+		query := `
+			SELECT id, bin_number, current_street, latitude, longitude, fill_percentage
+			FROM bins
+			WHERE id = ANY($1)
+			AND latitude IS NOT NULL
+			AND longitude IS NOT NULL
+		`
+		var bins []models.Bin
+		if err := db.Select(&bins, query, pq.Array(req.BinIDs)); err != nil {
+			log.Printf("❌ Error fetching bins: %v", err)
+			http.Error(w, "Failed to fetch bins", http.StatusInternalServerError)
+			return
+		}
+
+		if len(bins) == 0 {
+			http.Error(w, "No valid bins found", http.StatusNotFound)
+			return
+		}
+
+		// Convert to optimizer format
+		binsToOptimize := make([]services.BinWithPriority, len(bins))
+		for i, bin := range bins {
+			binsToOptimize[i] = services.BinWithPriority{
+				ID:             bin.ID,
+				Latitude:       *bin.Latitude,
+				Longitude:      *bin.Longitude,
+				FillPercentage: *bin.FillPercentage,
+				CurrentStreet:  bin.CurrentStreet,
+			}
+		}
+
+		// Determine start location
+		var startLocation services.Location
+		if req.StartLocation != nil {
+			startLocation = services.Location{
+				Latitude:  req.StartLocation.Latitude,
+				Longitude: req.StartLocation.Longitude,
+			}
+			log.Printf("📍 Using provided start location: (%.6f, %.6f)",
+				startLocation.Latitude, startLocation.Longitude)
+		} else {
+			// Default to first bin
+			startLocation = services.Location{
+				Latitude:  *bins[0].Latitude,
+				Longitude: *bins[0].Longitude,
+			}
+			log.Printf("📍 Using first bin as start location: %s", bins[0].CurrentStreet)
+		}
+
+		// Optimize route using TSP algorithm
+		optimizer := services.NewRouteOptimizer()
+		optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
+
+		// Build response with distance calculations
+		type BinInSequence struct {
+			ID                     string  `json:"id"`
+			BinNumber              int     `json:"bin_number"`
+			CurrentStreet          string  `json:"current_street"`
+			Latitude               float64 `json:"latitude"`
+			Longitude              float64 `json:"longitude"`
+			FillPercentage         int     `json:"fill_percentage"`
+			SequenceOrder          int     `json:"sequence_order"`
+			DistanceFromPreviousKm float64 `json:"distance_from_previous_km"`
+		}
+
+		response := struct {
+			OptimizedBinIDs      []string        `json:"optimized_bin_ids"`
+			TotalDistanceKm      float64         `json:"total_distance_km"`
+			EstimatedDurationHrs float64         `json:"estimated_duration_hours"`
+			Bins                 []BinInSequence `json:"bins"`
+		}{
+			OptimizedBinIDs: make([]string, len(optimizedBins)),
+			Bins:            make([]BinInSequence, len(optimizedBins)),
+		}
+
+		totalDistance := 0.0
+		currentLoc := startLocation
+
+		// Create map for quick lookup of bin details
+		binMap := make(map[string]models.Bin)
+		for _, bin := range bins {
+			binMap[bin.ID] = bin
+		}
+
+		for i, optimizedBin := range optimizedBins {
+			binLoc := services.Location{
+				Latitude:  optimizedBin.Latitude,
+				Longitude: optimizedBin.Longitude,
+			}
+
+			// Calculate distance from previous location
+			distance := haversineDistance(
+				currentLoc.Latitude, currentLoc.Longitude,
+				binLoc.Latitude, binLoc.Longitude,
+			)
+			totalDistance += distance
+
+			// Get original bin details
+			originalBin := binMap[optimizedBin.ID]
+
+			response.OptimizedBinIDs[i] = optimizedBin.ID
+			response.Bins[i] = BinInSequence{
+				ID:                     optimizedBin.ID,
+				BinNumber:              originalBin.BinNumber,
+				CurrentStreet:          optimizedBin.CurrentStreet,
+				Latitude:               optimizedBin.Latitude,
+				Longitude:              optimizedBin.Longitude,
+				FillPercentage:         optimizedBin.FillPercentage,
+				SequenceOrder:          i + 1,
+				DistanceFromPreviousKm: distance,
+			}
+
+			currentLoc = binLoc
+		}
+
+		// Add distance from last bin to warehouse
+		warehouseLoc := services.GetWarehouseLocation()
+		distanceToWarehouse := haversineDistance(
+			currentLoc.Latitude, currentLoc.Longitude,
+			warehouseLoc.Latitude, warehouseLoc.Longitude,
+		)
+		totalDistance += distanceToWarehouse
+
+		log.Printf("🏭 Distance to warehouse from last bin: %.2f km", distanceToWarehouse)
+
+		// Estimate duration: (distance / avg_speed) + (bins * time_per_bin)
+		avgSpeedKmh := 30.0          // 30 km/h average speed
+		minutesPerBin := 5.0          // 5 minutes per bin collection
+		travelTimeHours := totalDistance / avgSpeedKmh
+		collectionTimeHours := (float64(len(bins)) * minutesPerBin) / 60.0
+
+		response.TotalDistanceKm = totalDistance
+		response.EstimatedDurationHrs = travelTimeHours + collectionTimeHours
+
+		log.Printf("✅ Route optimized: %.2f km, %.2f hours",
+			response.TotalDistanceKm, response.EstimatedDurationHrs)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
+// haversineDistance calculates the distance between two GPS coordinates in kilometers
+func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadius = 6371.0 // Earth's radius in kilometers
+
+	// Convert to radians
+	lat1Rad := lat1 * math.Pi / 180
+	lat2Rad := lat2 * math.Pi / 180
+	deltaLat := (lat2 - lat1) * math.Pi / 180
+	deltaLon := (lon2 - lon1) * math.Pi / 180
+
+	// Haversine formula
+	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
+		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
+			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
+
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	return earthRadius * c
 }
 
 // Helper function to join strings

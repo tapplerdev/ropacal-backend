@@ -19,6 +19,26 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// haversineDistanceKm calculates the distance between two GPS coordinates in kilometers
+func haversineDistanceKm(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadius = 6371.0 // Earth's radius in kilometers
+
+	// Convert to radians
+	lat1Rad := lat1 * math.Pi / 180
+	lat2Rad := lat2 * math.Pi / 180
+	deltaLat := (lat2 - lat1) * math.Pi / 180
+	deltaLon := (lon2 - lon1) * math.Pi / 180
+
+	// Haversine formula
+	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
+		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
+			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
+
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	return earthRadius * c
+}
+
 // GetCurrentShift returns the current active shift for the driver
 func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1204,6 +1224,19 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		}
 		optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
 
+		// Calculate total distance including return to warehouse
+		totalDistance := 0.0
+		currentLat, currentLng := driverLocation.Latitude, driverLocation.Longitude
+		for _, bin := range optimizedBins {
+			distance := haversineDistanceKm(currentLat, currentLng, bin.Latitude, bin.Longitude)
+			totalDistance += distance
+			currentLat, currentLng = bin.Latitude, bin.Longitude
+		}
+		// Add distance from last bin to warehouse
+		warehouse := services.GetWarehouseLocation()
+		distanceToWarehouse := haversineDistanceKm(currentLat, currentLng, warehouse.Latitude, warehouse.Longitude)
+		totalDistance += distanceToWarehouse
+
 		log.Printf("🎯 Route optimized! Order: %v", func() []string {
 			streets := make([]string, len(optimizedBins))
 			for i, b := range optimizedBins {
@@ -1211,6 +1244,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			}
 			return streets
 		}())
+		log.Printf("📏 Total route distance: %.2f km (includes %.2f km return to warehouse)", totalDistance, distanceToWarehouse)
 
 		// Create new shift
 		shiftID := uuid.New().String()

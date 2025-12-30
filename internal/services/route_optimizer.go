@@ -5,6 +5,21 @@ import (
 	"math"
 )
 
+// Warehouse constants - all routes end here
+const (
+	WAREHOUSE_LAT     = 37.3009357
+	WAREHOUSE_LNG     = -121.9493848
+	WAREHOUSE_ADDRESS = "1185 Campbell Ave, San Jose, CA 95126, United States"
+)
+
+// GetWarehouseLocation returns the default warehouse location
+func GetWarehouseLocation() Location {
+	return Location{
+		Latitude:  WAREHOUSE_LAT,
+		Longitude: WAREHOUSE_LNG,
+	}
+}
+
 // Location represents a geographic point
 type Location struct {
 	Latitude  float64
