@@ -107,20 +107,25 @@ func CreatePotentialLocation(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get user ID from context (set by auth middleware)
-		userID, ok := r.Context().Value("user_id").(string)
-		if !ok || userID == "" {
-			http.Error(w, "Unauthorized: user_id not found in context", http.StatusUnauthorized)
+		// Get user from context (set by auth middleware)
+		userClaims, ok := r.Context().Value("user").(map[string]interface{})
+		if !ok {
+			http.Error(w, "Unauthorized: user not found in context", http.StatusUnauthorized)
 			return
 		}
 
-		// Get user name from database
-		var userName string
-		err := db.Get(&userName, "SELECT name FROM users WHERE id = $1", userID)
+		userID := userClaims["UserID"].(string)
+		userName := userClaims["Email"].(string)
+
+		// Get full user name from database
+		var fullName string
+		err := db.Get(&fullName, "SELECT name FROM users WHERE id = $1", userID)
 		if err != nil {
 			log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Failed to get user name: %v", err)
-			http.Error(w, "Failed to get user information", http.StatusInternalServerError)
-			return
+			// Fallback to email if name lookup fails
+			fullName = userName
+		} else {
+			userName = fullName
 		}
 
 		// Build full address
@@ -221,12 +226,14 @@ func ConvertPotentialLocationToBin(db *sqlx.DB) http.HandlerFunc {
 			json.NewDecoder(r.Body).Decode(&req)
 		}
 
-		// Get user ID from context (manager who is converting)
-		userID, ok := r.Context().Value("user_id").(string)
-		if !ok || userID == "" {
-			http.Error(w, "Unauthorized: user_id not found in context", http.StatusUnauthorized)
+		// Get user from context (manager who is converting)
+		userClaims, ok := r.Context().Value("user").(map[string]interface{})
+		if !ok {
+			http.Error(w, "Unauthorized: user not found in context", http.StatusUnauthorized)
 			return
 		}
+
+		userID := userClaims["UserID"].(string)
 
 		// Begin transaction
 		tx, err := db.Begin()
