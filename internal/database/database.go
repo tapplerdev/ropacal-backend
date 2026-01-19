@@ -447,6 +447,118 @@ func Migrate(db *sqlx.DB) error {
 		// Migration: Update zone_incidents incident_type constraint to include new types
 		`ALTER TABLE zone_incidents DROP CONSTRAINT IF EXISTS zone_incidents_incident_type_check`,
 		`ALTER TABLE zone_incidents ADD CONSTRAINT zone_incidents_incident_type_check CHECK(incident_type IN ('vandalism', 'landlord_complaint', 'theft', 'relocation_request', 'missing', 'damaged', 'vandalized', 'inaccessible'))`,
+
+		// Migration: Add bin retirement tracking fields
+		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS last_checked_at BIGINT`,
+		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS created_by_user_id TEXT`,
+		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS retired_at BIGINT`,
+		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS retired_by_user_id TEXT`,
+
+		// Add foreign key constraints (using DO block for IF NOT EXISTS)
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='fk_bins_created_by' AND table_name='bins') THEN
+				ALTER TABLE bins ADD CONSTRAINT fk_bins_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='fk_bins_retired_by' AND table_name='bins') THEN
+				ALTER TABLE bins ADD CONSTRAINT fk_bins_retired_by FOREIGN KEY (retired_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		`CREATE INDEX IF NOT EXISTS idx_bins_retired_at ON bins(retired_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_bins_status ON bins(status)`,
+
+		// Migration: Update bins status constraint to include new statuses
+		`ALTER TABLE bins DROP CONSTRAINT IF EXISTS bins_status_check`,
+		`ALTER TABLE bins ADD CONSTRAINT bins_status_check CHECK(status IN ('active', 'missing', 'retired', 'in_storage', 'pending_move', 'needs_check'))`,
+
+		// Migration: Create bin_move_requests table
+		`CREATE TABLE IF NOT EXISTS bin_move_requests (
+			id TEXT PRIMARY KEY,
+			bin_id TEXT NOT NULL,
+			scheduled_date BIGINT NOT NULL,
+			urgency TEXT NOT NULL CHECK(urgency IN ('urgent', 'scheduled')),
+			requested_by TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'completed', 'cancelled')),
+			original_latitude DOUBLE PRECISION NOT NULL,
+			original_longitude DOUBLE PRECISION NOT NULL,
+			original_address TEXT NOT NULL,
+			new_latitude DOUBLE PRECISION,
+			new_longitude DOUBLE PRECISION,
+			new_address TEXT,
+			move_type TEXT NOT NULL CHECK(move_type IN ('pickup_only', 'relocation')),
+			disposal_action TEXT CHECK(disposal_action IN ('retire', 'store')),
+			reason TEXT,
+			notes TEXT,
+			assigned_shift_id TEXT,
+			completed_at BIGINT,
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL,
+			FOREIGN KEY (bin_id) REFERENCES bins(id) ON DELETE CASCADE,
+			FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL,
+			FOREIGN KEY (assigned_shift_id) REFERENCES shifts(id) ON DELETE SET NULL
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_bin_move_requests_bin_id ON bin_move_requests(bin_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_move_requests_status ON bin_move_requests(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_move_requests_urgency ON bin_move_requests(urgency)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_move_requests_scheduled_date ON bin_move_requests(scheduled_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_move_requests_assigned_shift_id ON bin_move_requests(assigned_shift_id)`,
+
+		// Migration: Create bin_check_recommendations table
+		`CREATE TABLE IF NOT EXISTS bin_check_recommendations (
+			id TEXT PRIMARY KEY,
+			bin_id TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT 'time_based',
+			flagged_at BIGINT NOT NULL,
+			days_since_check INT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'resolved', 'dismissed')),
+			resolved_at BIGINT,
+			resolved_by_user_id TEXT,
+			notes TEXT,
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL,
+			FOREIGN KEY (bin_id) REFERENCES bins(id) ON DELETE CASCADE,
+			FOREIGN KEY (resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_bin_check_recommendations_bin_id ON bin_check_recommendations(bin_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_check_recommendations_status ON bin_check_recommendations(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_check_recommendations_flagged_at ON bin_check_recommendations(flagged_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_check_recommendations_bin_status ON bin_check_recommendations(bin_id, status)`,
+
+		// Migration: Create potential_locations table
+		`CREATE TABLE IF NOT EXISTS potential_locations (
+			id TEXT PRIMARY KEY,
+			address TEXT NOT NULL,
+			street TEXT NOT NULL,
+			city TEXT NOT NULL,
+			zip TEXT NOT NULL,
+			latitude DOUBLE PRECISION,
+			longitude DOUBLE PRECISION,
+			requested_by_user_id TEXT NOT NULL,
+			requested_by_name TEXT NOT NULL,
+			notes TEXT,
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL,
+			converted_to_bin_id TEXT,
+			converted_at BIGINT,
+			converted_by_user_id TEXT,
+			FOREIGN KEY (requested_by_user_id) REFERENCES users(id) ON DELETE CASCADE,
+			FOREIGN KEY (converted_to_bin_id) REFERENCES bins(id) ON DELETE SET NULL,
+			FOREIGN KEY (converted_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_created_at ON potential_locations(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_requested_by ON potential_locations(requested_by_user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_active ON potential_locations(created_at DESC) WHERE converted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_converted ON potential_locations(converted_to_bin_id) WHERE converted_to_bin_id IS NOT NULL`,
 	}
 
 	for _, migration := range migrations {
