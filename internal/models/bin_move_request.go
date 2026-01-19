@@ -61,8 +61,9 @@ type BinMoveRequestResponse struct {
 	Notes           *string `json:"notes,omitempty"`
 
 	// Assigned shift
-	AssignedShiftID *string `json:"assigned_shift_id,omitempty"`
-	CompletedAtIso  *string `json:"completed_at_iso,omitempty"`
+	AssignedShiftID    *string `json:"assigned_shift_id,omitempty"`
+	AssignedDriverName *string `json:"assigned_driver_name,omitempty"` // Driver's full name (populated when assigned)
+	CompletedAtIso     *string `json:"completed_at_iso,omitempty"`
 
 	// Timestamps
 	CreatedAtIso string `json:"created_at_iso"`
@@ -76,12 +77,16 @@ type BinMoveRequestResponse struct {
 type CreateBinMoveRequest struct {
 	BinID         string   `json:"bin_id" binding:"required"`
 	ScheduledDate int64    `json:"scheduled_date" binding:"required"` // Unix timestamp
-	Urgency       string   `json:"urgency" binding:"required"` // 'urgent' or 'scheduled'
+	// Urgency is now auto-calculated on backend, not required from frontend
 
 	// New location (optional for pickup-only)
+	// Accept both single address string (backward compatibility) and separate fields
 	NewLatitude  *float64 `json:"new_latitude,omitempty"`
 	NewLongitude *float64 `json:"new_longitude,omitempty"`
-	NewAddress   *string  `json:"new_address,omitempty"`
+	NewAddress   *string  `json:"new_address,omitempty"` // Single combined address (backward compatibility)
+	NewStreet    *string  `json:"new_street,omitempty"`  // Separate address fields (new format)
+	NewCity      *string  `json:"new_city,omitempty"`
+	NewZip       *string  `json:"new_zip,omitempty"`
 
 	// Move metadata
 	MoveType        string  `json:"move_type" binding:"required"` // 'pickup_only' or 'relocation'
