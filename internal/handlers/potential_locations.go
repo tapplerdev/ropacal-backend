@@ -109,7 +109,7 @@ func CreatePotentialLocation(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get user from context (set by auth middleware)
-		userClaims, ok := r.Context().Value("user").(middleware.UserClaims)
+		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			http.Error(w, "Unauthorized: user not found in context", http.StatusUnauthorized)
 			return
@@ -228,7 +228,7 @@ func ConvertPotentialLocationToBin(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get user from context (manager who is converting)
-		userClaims, ok := r.Context().Value("user").(middleware.UserClaims)
+		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			http.Error(w, "Unauthorized: user not found in context", http.StatusUnauthorized)
 			return
