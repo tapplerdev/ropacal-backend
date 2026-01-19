@@ -106,9 +106,8 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		// Build original address
 		originalAddress := fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.Zip)
 
-		// Generate ID and timestamps
+		// Generate ID (now already declared above for urgency calculation)
 		id := uuid.New().String()
-		now := time.Now().Unix()
 
 		// Create bin move request
 		moveRequest := models.BinMoveRequest{
