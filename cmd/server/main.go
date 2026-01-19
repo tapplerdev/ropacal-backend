@@ -253,7 +253,9 @@ func main() {
 
 			// Bin move request management
 			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(db, wsHub, fcmService))
-			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))
+			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))         // List all move requests (register first - exact match)
+			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))    // Get single move request (register after)
+			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db)) // Update move request
 			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService))
 			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, wsHub))
 
@@ -263,7 +265,7 @@ func main() {
 			r.Put("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db))
 
 			// Bin retirement
-			r.Post("/manager/bins/retire", handlers.RetireBin(db))
+			r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
 
 			// Potential Locations management (managers can delete and convert)
 			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db))

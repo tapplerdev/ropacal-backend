@@ -9,6 +9,7 @@ import (
 
 	"ropacal-backend/internal/models"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -304,7 +305,7 @@ func GetBinsWithPriority(db *sqlx.DB) http.HandlerFunc {
 // Body: { "reason": "optional reason", "disposal_action": "retire|store" }
 func RetireBin(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		binID := r.URL.Query().Get("id")
+		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Bin ID is required", http.StatusBadRequest)
 			return

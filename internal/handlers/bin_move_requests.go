@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/models"
@@ -28,15 +29,19 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 
 		// Validate required fields
-		if req.BinID == "" || req.Urgency == "" || req.MoveType == "" {
-			http.Error(w, "Missing required fields: bin_id, urgency, move_type", http.StatusBadRequest)
+		if req.BinID == "" || req.MoveType == "" {
+			http.Error(w, "Missing required fields: bin_id, move_type", http.StatusBadRequest)
 			return
 		}
 
-		// Validate urgency
-		if req.Urgency != "urgent" && req.Urgency != "scheduled" {
-			http.Error(w, "Invalid urgency: must be 'urgent' or 'scheduled'", http.StatusBadRequest)
-			return
+		// Auto-calculate urgency from scheduled_date
+		now := time.Now().Unix()
+		hoursUntil := float64(req.ScheduledDate-now) / 3600.0
+		var urgency string
+		if hoursUntil < 24 {
+			urgency = "urgent"
+		} else {
+			urgency = "scheduled"
 		}
 
 		// Validate move_type
@@ -51,9 +56,20 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			return
 		}
 
+		// Build new address from separate fields or use provided address
+		var newAddress *string
+		if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
+			// Build from separate fields (new format from frontend)
+			combined := fmt.Sprintf("%s, %s %s", *req.NewStreet, *req.NewCity, *req.NewZip)
+			newAddress = &combined
+		} else if req.NewAddress != nil {
+			// Use provided address (backward compatibility)
+			newAddress = req.NewAddress
+		}
+
 		// Validate relocation moves require new location
-		if req.MoveType == "relocation" && (req.NewLatitude == nil || req.NewLongitude == nil || req.NewAddress == nil) {
-			http.Error(w, "relocation moves require new_latitude, new_longitude, and new_address", http.StatusBadRequest)
+		if req.MoveType == "relocation" && (req.NewLatitude == nil || req.NewLongitude == nil || newAddress == nil) {
+			http.Error(w, "relocation moves require new_latitude, new_longitude, and address (either new_address or new_street+new_city+new_zip)", http.StatusBadRequest)
 			return
 		}
 
@@ -99,7 +115,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			ID:                id,
 			BinID:             req.BinID,
 			ScheduledDate:     req.ScheduledDate,
-			Urgency:           req.Urgency,
+			Urgency:           urgency, // Auto-calculated urgency
 			RequestedBy:       userID,
 			Status:            "pending",
 			OriginalLatitude:  *bin.Latitude,
@@ -107,7 +123,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			OriginalAddress:   originalAddress,
 			NewLatitude:       req.NewLatitude,
 			NewLongitude:      req.NewLongitude,
-			NewAddress:        req.NewAddress,
+			NewAddress:        newAddress, // Built from separate fields or provided address
 			MoveType:          req.MoveType,
 			DisposalAction:    req.DisposalAction,
 			Reason:            req.Reason,
@@ -474,6 +490,63 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	return nil
 }
 
+// GetBinMoveRequest returns a single move request by ID
+// GET /api/manager/bins/move-requests/:id
+func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			http.Error(w, "Missing move request ID", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch move request
+		var moveRequest models.BinMoveRequest
+		err := db.Get(&moveRequest, `
+			SELECT * FROM bin_move_requests WHERE id = $1
+		`, id)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, "Move request not found", http.StatusNotFound)
+				return
+			}
+			log.Printf("Error fetching move request: %v", err)
+			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
+			return
+		}
+
+		// Build response
+		response := moveRequest.ToBinMoveRequestResponse()
+
+		// Fetch associated bin details
+		var bin models.Bin
+		err = db.Get(&bin, `
+			SELECT id, bin_number, current_street, city, zip, latitude, longitude, status
+			FROM bins WHERE id = $1
+		`, moveRequest.BinID)
+		if err == nil {
+			binResp := bin.ToBinResponse()
+			response.Bin = &binResp
+		}
+
+		// Fetch assigned driver name if assigned to a shift
+		if moveRequest.AssignedShiftID != nil {
+			var driverName string
+			err = db.Get(&driverName, `
+				SELECT u.full_name FROM shifts s
+				JOIN users u ON s.driver_id = u.id
+				WHERE s.id = $1
+			`, *moveRequest.AssignedShiftID)
+			if err == nil {
+				response.AssignedDriverName = &driverName
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
 // GetBinMoveRequests returns all bin move requests with optional filtering
 // GET /api/manager/bins/move-requests?status=pending&urgency=urgent
 func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
@@ -518,7 +591,7 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Fetch associated bins
+		// Fetch associated bins and driver names
 		responses := make([]models.BinMoveRequestResponse, len(moveRequests))
 		for i, mr := range moveRequests {
 			responses[i] = mr.ToBinMoveRequestResponse()
@@ -534,10 +607,167 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 				binResp := bin.ToBinResponse()
 				responses[i].Bin = &binResp
 			}
+
+			// Fetch assigned driver name if assigned to a shift
+			if mr.AssignedShiftID != nil {
+				var driverName string
+				err := db.Get(&driverName, `
+					SELECT u.full_name FROM shifts s
+					JOIN users u ON s.driver_id = u.id
+					WHERE s.id = $1
+				`, *mr.AssignedShiftID)
+				if err == nil {
+					responses[i].AssignedDriverName = &driverName
+				}
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responses)
+	}
+}
+
+// UpdateBinMoveRequest updates move request details (date, notes, location, etc.)
+// PUT /api/manager/bins/move-requests/:id
+func UpdateBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			http.Error(w, "Missing move request ID", http.StatusBadRequest)
+			return
+		}
+
+		// Parse request body
+		var req struct {
+			ScheduledDate *int64   `json:"scheduled_date,omitempty"`
+			Reason        *string  `json:"reason,omitempty"`
+			Notes         *string  `json:"notes,omitempty"`
+			NewStreet     *string  `json:"new_street,omitempty"`
+			NewCity       *string  `json:"new_city,omitempty"`
+			NewZip        *string  `json:"new_zip,omitempty"`
+			NewLatitude   *float64 `json:"new_latitude,omitempty"`
+			NewLongitude  *float64 `json:"new_longitude,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch existing move request
+		var moveRequest models.BinMoveRequest
+		err := db.Get(&moveRequest, "SELECT * FROM bin_move_requests WHERE id = $1", id)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, "Move request not found", http.StatusNotFound)
+				return
+			}
+			log.Printf("Error fetching move request: %v", err)
+			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
+			return
+		}
+
+		// Only allow updating pending or assigned moves
+		if moveRequest.Status == "completed" || moveRequest.Status == "cancelled" {
+			http.Error(w, "Cannot update completed or cancelled move request", http.StatusBadRequest)
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Build dynamic update query
+		updates := []string{"updated_at = $1"}
+		args := []interface{}{now}
+		argCount := 2
+
+		// Update scheduled date and recalculate urgency if date changed
+		if req.ScheduledDate != nil {
+			updates = append(updates, fmt.Sprintf("scheduled_date = $%d", argCount))
+			args = append(args, *req.ScheduledDate)
+			argCount++
+
+			// Recalculate urgency
+			hoursUntil := float64(*req.ScheduledDate-now) / 3600.0
+			var newUrgency string
+			if hoursUntil < 24 {
+				newUrgency = "urgent"
+			} else {
+				newUrgency = "scheduled"
+			}
+			updates = append(updates, fmt.Sprintf("urgency = $%d", argCount))
+			args = append(args, newUrgency)
+			argCount++
+		}
+
+		if req.Reason != nil {
+			updates = append(updates, fmt.Sprintf("reason = $%d", argCount))
+			args = append(args, *req.Reason)
+			argCount++
+		}
+
+		if req.Notes != nil {
+			updates = append(updates, fmt.Sprintf("notes = $%d", argCount))
+			args = append(args, *req.Notes)
+			argCount++
+		}
+
+		// Build new address if separate fields provided
+		if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
+			newAddress := fmt.Sprintf("%s, %s %s", *req.NewStreet, *req.NewCity, *req.NewZip)
+			updates = append(updates, fmt.Sprintf("new_address = $%d", argCount))
+			args = append(args, newAddress)
+			argCount++
+		}
+
+		if req.NewLatitude != nil {
+			updates = append(updates, fmt.Sprintf("new_latitude = $%d", argCount))
+			args = append(args, *req.NewLatitude)
+			argCount++
+		}
+
+		if req.NewLongitude != nil {
+			updates = append(updates, fmt.Sprintf("new_longitude = $%d", argCount))
+			args = append(args, *req.NewLongitude)
+			argCount++
+		}
+
+		// Add ID parameter at the end
+		args = append(args, id)
+
+		// Execute update
+		query := fmt.Sprintf("UPDATE bin_move_requests SET %s WHERE id = $%d",
+			strings.Join(updates, ", "), argCount)
+
+		_, err = db.Exec(query, args...)
+		if err != nil {
+			log.Printf("Error updating move request: %v", err)
+			http.Error(w, "Failed to update move request", http.StatusInternalServerError)
+			return
+		}
+
+		// Fetch updated move request
+		err = db.Get(&moveRequest, "SELECT * FROM bin_move_requests WHERE id = $1", id)
+		if err != nil {
+			log.Printf("Error fetching updated move request: %v", err)
+			http.Error(w, "Failed to fetch updated move request", http.StatusInternalServerError)
+			return
+		}
+
+		// Return updated move request
+		response := moveRequest.ToBinMoveRequestResponse()
+
+		// Fetch bin details
+		var bin models.Bin
+		err = db.Get(&bin, `
+			SELECT id, bin_number, current_street, city, zip, latitude, longitude, status
+			FROM bins WHERE id = $1
+		`, moveRequest.BinID)
+		if err == nil {
+			binResp := bin.ToBinResponse()
+			response.Bin = &binResp
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
