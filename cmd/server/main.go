@@ -158,8 +158,15 @@ func main() {
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
+		// Geocoding endpoints (no auth required)
+		r.Post("/geocoding/reverse", handlers.ReverseGeocode())
+		r.Post("/geocoding/reverse/batch", handlers.BatchReverseGeocode())
+		r.Post("/geocoding/forward", handlers.Geocode())
+		r.Post("/geocoding/forward/batch", handlers.BatchGeocode())
+
 		// Bins endpoints
 		r.Get("/bins", handlers.GetBins(db))
+		r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering
 		r.Post("/bins", handlers.CreateBin(db))
 		r.Patch("/bins/{id}", handlers.UpdateBin(db))
 		r.Delete("/bins/{id}", handlers.DeleteBin(db))
@@ -193,6 +200,9 @@ func main() {
 		// Analytics endpoints
 		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
 
+		// Potential Locations endpoints (managers can view all - no auth required)
+		r.Get("/potential-locations", handlers.GetPotentialLocations(db))
+
 		// Driver shift endpoints (require authentication)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
@@ -218,6 +228,9 @@ func main() {
 			// FCM token registration
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
 
+			// Potential Locations (drivers can create requests)
+			r.Post("/potential-locations", handlers.CreatePotentialLocation(db))
+
 			// Incident reporting (drivers can report both check-based and field observations)
 			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteBin)
 			// r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
@@ -237,6 +250,24 @@ func main() {
 			// One-time data migration endpoints (can be removed after use)
 			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
 			r.Post("/manager/bins/fix-status", handlers.FixBinStatus(db))
+
+			// Bin move request management
+			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(db, wsHub, fcmService))
+			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))
+			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService))
+			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, wsHub))
+
+			// Bin check recommendations (7-day stale bin flagging)
+			r.Post("/manager/bins/flag-stale", handlers.FlagStaleBins(db))
+			r.Get("/manager/bins/check-recommendations", handlers.GetBinCheckRecommendations(db))
+			r.Put("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db))
+
+			// Bin retirement
+			r.Post("/manager/bins/retire", handlers.RetireBin(db))
+
+			// Potential Locations management (managers can delete and convert)
+			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db))
+			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db))
 
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db))

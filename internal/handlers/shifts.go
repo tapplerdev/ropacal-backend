@@ -731,23 +731,50 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in route_bins table")
 
-		// Update the bin's fill percentage in bins table (only if provided)
-		if req.UpdatedFillPercentage != nil {
-			log.Printf("[DIAGNOSTIC] 📝 Updating bin fill percentage in bins table...")
-			binUpdateQuery := `UPDATE bins
-							   SET fill_percentage = $1,
-							       updated_at = $2
-							   WHERE id = $3`
+		// Check if this bin is part of a move request
+		var moveRequest models.BinMoveRequest
+		moveErr := db.Get(&moveRequest, `
+			SELECT * FROM bin_move_requests
+			WHERE bin_id = $1
+			AND assigned_shift_id = $2
+			AND status = 'in_progress'
+		`, req.BinID, shift.ID)
 
-			_, err = db.Exec(binUpdateQuery, *req.UpdatedFillPercentage, now, req.BinID)
+		if moveErr == nil {
+			// This is a MOVE REQUEST bin!
+			log.Printf("[DIAGNOSTIC] 🚚 Detected move request: %s (type: %s)", moveRequest.ID, moveRequest.MoveType)
+			err = handleMoveRequestCompletion(db, moveRequest, req, now)
 			if err != nil {
-				log.Printf("[DIAGNOSTIC] ❌ Error updating bin fill percentage: %v", err)
-				// Don't fail the request - the bin is already marked complete in route
-			} else {
-				log.Printf("[DIAGNOSTIC] ✅ Bin fill percentage updated to %d%%", *req.UpdatedFillPercentage)
+				log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
+				// Don't fail - just log
 			}
 		} else {
-			log.Printf("[DIAGNOSTIC] ⏭️  Skipping bin fill percentage update (NULL - incident prevents assessment)")
+			// Regular bin check - update fill percentage and last_checked_at
+			if req.UpdatedFillPercentage != nil {
+				log.Printf("[DIAGNOSTIC] 📝 Updating bin fill percentage and last_checked_at in bins table...")
+				binUpdateQuery := `UPDATE bins
+								   SET fill_percentage = $1,
+								       last_checked_at = $2,
+								       updated_at = $2
+								   WHERE id = $3`
+
+				_, err = db.Exec(binUpdateQuery, *req.UpdatedFillPercentage, now, req.BinID)
+				if err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error updating bin fill percentage: %v", err)
+					// Don't fail the request - the bin is already marked complete in route
+				} else {
+					log.Printf("[DIAGNOSTIC] ✅ Bin fill percentage updated to %d%% and last_checked_at set to %d", *req.UpdatedFillPercentage, now)
+				}
+			} else {
+				// Even without fill percentage, update last_checked_at
+				log.Printf("[DIAGNOSTIC] 📝 Updating last_checked_at (no fill percentage due to incident)...")
+				_, err = db.Exec(`UPDATE bins SET last_checked_at = $1, updated_at = $1 WHERE id = $2`, now, req.BinID)
+				if err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error updating last_checked_at: %v", err)
+				} else {
+					log.Printf("[DIAGNOSTIC] ✅ last_checked_at set to %d", now)
+				}
+			}
 		}
 
 		// Insert check record into checks table and get the ID back
@@ -771,6 +798,9 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			} else {
 				log.Printf("[DIAGNOSTIC] ✅ Check record inserted without photo (ID: %d)", returnedID)
 			}
+
+			// Auto-resolve any pending check recommendations for this bin
+			autoResolveCheckRecommendation(db, req.BinID, userClaims.UserID, now)
 		}
 
 		// Create incident if reported
@@ -1912,6 +1942,92 @@ func executeMerge(db *sqlx.DB, primaryZone, secondaryZone models.NoGoZone, now i
 		return fmt.Errorf("failed to mark secondary zone as merged: %w", err)
 	}
 	log.Printf("[ZONE MERGE]    ✓ Marked secondary zone as merged")
+
+	return nil
+}
+
+// handleMoveRequestCompletion handles move request completion logic
+func handleMoveRequestCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest, req struct {
+	BinID                 string  `json:"bin_id"`
+	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
+	PhotoUrl              *string `json:"photo_url,omitempty"`
+	HasIncident           bool    `json:"has_incident"`
+	IncidentType          *string `json:"incident_type,omitempty"`
+	IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
+	IncidentDescription   *string `json:"incident_description,omitempty"`
+}, now int64) error {
+	log.Printf("[MOVE] 🚚 Handling move request completion")
+	log.Printf("[MOVE]    Type: %s", moveRequest.MoveType)
+
+	// Mark move request as completed
+	_, err := db.Exec(`
+		UPDATE bin_move_requests
+		SET status = 'completed', completed_at = $1, updated_at = $1
+		WHERE id = $2
+	`, now, moveRequest.ID)
+	if err != nil {
+		return fmt.Errorf("failed to complete move request: %w", err)
+	}
+	log.Printf("[MOVE] ✅ Move request marked as completed")
+
+	if moveRequest.MoveType == "pickup_only" {
+		// Pickup for retirement or storage
+		newStatus := "active" // Fallback
+		if moveRequest.DisposalAction != nil {
+			if *moveRequest.DisposalAction == "retire" {
+				newStatus = "retired"
+				log.Printf("[MOVE]    → Bin will be RETIRED")
+			} else if *moveRequest.DisposalAction == "store" {
+				newStatus = "in_storage"
+				log.Printf("[MOVE]    → Bin will be IN STORAGE")
+			}
+		}
+
+		_, err = db.Exec(`
+			UPDATE bins
+			SET status = $1, updated_at = $2
+			WHERE id = $3
+		`, newStatus, now, moveRequest.BinID)
+		if err != nil {
+			return fmt.Errorf("failed to update bin status: %w", err)
+		}
+		log.Printf("[MOVE] ✅ Bin status updated to %s", newStatus)
+
+	} else if moveRequest.MoveType == "relocation" {
+		// Update bin location to new coordinates
+		log.Printf("[MOVE]    → Relocating bin to new address")
+		_, err = db.Exec(`
+			UPDATE bins
+			SET latitude = $1,
+			    longitude = $2,
+			    current_street = $3,
+			    status = 'active',
+			    updated_at = $4
+			WHERE id = $5
+		`, moveRequest.NewLatitude,
+			moveRequest.NewLongitude,
+			moveRequest.NewAddress,
+			now,
+			moveRequest.BinID)
+		if err != nil {
+			return fmt.Errorf("failed to relocate bin: %w", err)
+		}
+
+		// Record the move in moves table
+		_, err = db.Exec(`
+			INSERT INTO moves (bin_id, moved_from, moved_to, moved_on)
+			VALUES ($1, $2, $3, $4)
+		`, moveRequest.BinID,
+			moveRequest.OriginalAddress,
+			*moveRequest.NewAddress,
+			now)
+		if err != nil {
+			log.Printf("[MOVE] ⚠️  Failed to record move: %v", err)
+			// Don't fail - move is already completed
+		}
+
+		log.Printf("[MOVE] ✅ Bin relocated to %s", *moveRequest.NewAddress)
+	}
 
 	return nil
 }

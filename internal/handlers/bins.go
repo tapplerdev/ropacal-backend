@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -64,34 +65,66 @@ func CreateBin(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Validate required fields
-		if req.BinNumber <= 0 || req.CurrentStreet == "" || req.City == "" || req.Zip == "" || req.Status == "" {
-			http.Error(w, "Missing required fields", http.StatusBadRequest)
+		if req.CurrentStreet == "" || req.City == "" || req.Zip == "" || req.Status == "" {
+			http.Error(w, "Missing required fields (current_street, city, zip, status)", http.StatusBadRequest)
 			return
+		}
+
+		// Auto-assign bin_number if not provided
+		var binNumber int
+		if req.BinNumber != nil && *req.BinNumber > 0 {
+			// Use provided bin number (for manual override or migration)
+			binNumber = *req.BinNumber
+			log.Printf("[CREATE-BIN] Using provided bin_number: %d", binNumber)
+		} else {
+			// Auto-assign based on highest existing bin_number (including retired bins)
+			// This ensures continuity: if bins are 54, 55, 56, 57, next will be 58
+			var maxBinNumber sql.NullInt64
+			err := db.Get(&maxBinNumber, "SELECT MAX(bin_number) FROM bins")
+			if err != nil {
+				log.Printf("❌ [CREATE-BIN] Failed to get max bin_number: %v", err)
+				http.Error(w, "Failed to generate bin number", http.StatusInternalServerError)
+				return
+			}
+
+			if maxBinNumber.Valid {
+				binNumber = int(maxBinNumber.Int64) + 1
+			} else {
+				// No bins exist yet, start at 1
+				binNumber = 1
+			}
+			log.Printf("[CREATE-BIN] Auto-assigned bin_number: %d (max existing: %v)", binNumber, maxBinNumber)
 		}
 
 		// Generate UUID for new bin
 		id := uuid.New().String()
 		now := time.Now().Unix()
 
+		// Get user ID from context (if authenticated)
+		userID, _ := r.Context().Value("user_id").(string)
+
 		// Insert bin
 		_, err := db.Exec(`
 			INSERT INTO bins (
 				id, bin_number, current_street, city, zip, status,
 				fill_percentage, checked, move_requested, latitude, longitude,
-				created_at, updated_at
+				created_by_user_id, created_at, updated_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		`,
-			id, req.BinNumber, req.CurrentStreet, req.City, req.Zip, req.Status,
-			req.FillPercentage, 0, 0, req.Latitude, req.Longitude, now, now,
+			id, binNumber, req.CurrentStreet, req.City, req.Zip, req.Status,
+			req.FillPercentage, 0, 0, req.Latitude, req.Longitude,
+			&userID, now, now,
 		)
 
 		if err != nil {
 			// Check if bin_number already exists
 			if strings.Contains(err.Error(), "duplicate key") {
+				log.Printf("❌ [CREATE-BIN] Bin number %d already exists", binNumber)
 				http.Error(w, "Bin number already exists", http.StatusConflict)
 				return
 			}
+			log.Printf("❌ [CREATE-BIN] Database insert failed: %v", err)
 			http.Error(w, "Failed to create bin", http.StatusInternalServerError)
 			return
 		}
@@ -100,9 +133,12 @@ func CreateBin(db *sqlx.DB) http.HandlerFunc {
 		var created models.Bin
 		err = db.Get(&created, "SELECT * FROM bins WHERE id = $1", id)
 		if err != nil {
+			log.Printf("❌ [CREATE-BIN] Failed to fetch created bin: %v", err)
 			http.Error(w, "Failed to fetch created bin", http.StatusInternalServerError)
 			return
 		}
+
+		log.Printf("✅ [CREATE-BIN] Created bin #%d (ID: %s) at %s, %s", binNumber, id, req.CurrentStreet, req.City)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
