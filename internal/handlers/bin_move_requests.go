@@ -333,7 +333,6 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	// Determine where to insert the bin based on shift status and parameters
 	var insertSequenceOrder int
-	var shiftAfterSequence int
 
 	now := time.Now().Unix()
 	isActiveShift := activeShift.Status == "active"
@@ -356,23 +355,19 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 
 		insertSequenceOrder = shiftBins[targetIndex].SequenceOrder + 1
-		shiftAfterSequence = shiftBins[targetIndex].SequenceOrder
 		log.Printf("   Inserting after bin #%d at sequence %d", shiftBins[targetIndex].BinNumber, insertSequenceOrder)
 	} else if isFutureShift && insertPosition != nil {
 		// CASE 2: Future shift with insertPosition ('start' or 'end')
 		if *insertPosition == "start" {
 			log.Printf("   Inserting at START of future shift")
 			insertSequenceOrder = 1
-			shiftAfterSequence = 0
 		} else { // 'end'
 			log.Printf("   Inserting at END of future shift")
 			if len(shiftBins) > 0 {
 				lastBin := shiftBins[len(shiftBins)-1]
 				insertSequenceOrder = lastBin.SequenceOrder + 1
-				shiftAfterSequence = lastBin.SequenceOrder
 			} else {
 				insertSequenceOrder = 1
-				shiftAfterSequence = 0
 			}
 		}
 	} else {
@@ -390,16 +385,13 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			if len(shiftBins) > 0 {
 				lastBin := shiftBins[len(shiftBins)-1]
 				insertSequenceOrder = lastBin.SequenceOrder + 1
-				shiftAfterSequence = lastBin.SequenceOrder
 			} else {
 				insertSequenceOrder = 1
-				shiftAfterSequence = 0
 			}
 		} else {
 			log.Printf("   Current position: bin #%d at index %d", shiftBins[currentIndex].BinNumber, currentIndex)
 			log.Printf("   Inserting as next waypoint (index %d)", currentIndex+1)
 			insertSequenceOrder = shiftBins[currentIndex].SequenceOrder + 1
-			shiftAfterSequence = shiftBins[currentIndex].SequenceOrder
 		}
 	}
 
