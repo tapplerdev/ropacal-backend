@@ -16,12 +16,12 @@ import (
 // BinWithPriority extends Bin with calculated priority score and metadata
 type BinWithPriority struct {
 	models.Bin
-	PriorityScore       float64 `json:"priority_score"`
-	DaysSinceCheck      *int    `json:"days_since_check,omitempty"`
-	NextMoveRequestDate *int64  `json:"next_move_request_date,omitempty"`
-	MoveRequestUrgency  *string `json:"move_request_urgency,omitempty"`
-	HasPendingMove      bool    `json:"has_pending_move"`
-	HasCheckRecommendation bool `json:"has_check_recommendation"`
+	PriorityScore          float64 `json:"priority_score"`
+	DaysSinceCheck         *int    `json:"days_since_check,omitempty"`
+	NextMoveRequestDate    *int64  `json:"next_move_request_date,omitempty"`
+	MoveRequestUrgency     *string `json:"move_request_urgency,omitempty"`
+	HasPendingMove         bool    `json:"has_pending_move"`
+	HasCheckRecommendation bool    `json:"has_check_recommendation"`
 }
 
 // calculateBinPriority computes a weighted priority score for a bin

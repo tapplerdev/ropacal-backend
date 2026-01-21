@@ -27,17 +27,17 @@ func GetTopPerformingBins(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		type BinPerformance struct {
-			ID                 string   `json:"id" db:"id"`
-			BinNumber          int      `json:"bin_number" db:"bin_number"`
-			CurrentStreet      string   `json:"current_street" db:"current_street"`
-			City               string   `json:"city" db:"city"`
-			Zip                string   `json:"zip" db:"zip"`
-			DaysActive         int      `json:"days_active" db:"days_active"`
-			TotalChecks        int      `json:"total_checks" db:"total_checks"`
-			AvgFillPercentage  *float64 `json:"avg_fill_percentage" db:"avg_fill_percentage"`
-			IncidentCount      int      `json:"incident_count" db:"incident_count"`
-			LastChecked        *int64   `json:"last_checked" db:"last_checked"`
-			PerformanceScore   float64  `json:"performance_score" db:"performance_score"`
+			ID                string   `json:"id" db:"id"`
+			BinNumber         int      `json:"bin_number" db:"bin_number"`
+			CurrentStreet     string   `json:"current_street" db:"current_street"`
+			City              string   `json:"city" db:"city"`
+			Zip               string   `json:"zip" db:"zip"`
+			DaysActive        int      `json:"days_active" db:"days_active"`
+			TotalChecks       int      `json:"total_checks" db:"total_checks"`
+			AvgFillPercentage *float64 `json:"avg_fill_percentage" db:"avg_fill_percentage"`
+			IncidentCount     int      `json:"incident_count" db:"incident_count"`
+			LastChecked       *int64   `json:"last_checked" db:"last_checked"`
+			PerformanceScore  float64  `json:"performance_score" db:"performance_score"`
 		}
 
 		var query string

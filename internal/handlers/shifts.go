@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/middleware"
@@ -106,19 +107,19 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"id":                   shift.ID,
-				"driver_id":            shift.DriverID,
-				"route_id":             shift.RouteID,
-				"status":               shift.Status,
-				"start_time":           shift.StartTime,
-				"end_time":             shift.EndTime,
-				"total_pause_seconds":  shift.TotalPauseSeconds,
-				"pause_start_time":     shift.PauseStartTime,
-				"total_bins":           shift.TotalBins,
-				"completed_bins":       shift.CompletedBins,
-				"bins":                 bins,
-				"created_at":           shift.CreatedAt,
-				"updated_at":           shift.UpdatedAt,
+				"id":                  shift.ID,
+				"driver_id":           shift.DriverID,
+				"route_id":            shift.RouteID,
+				"status":              shift.Status,
+				"start_time":          shift.StartTime,
+				"end_time":            shift.EndTime,
+				"total_pause_seconds": shift.TotalPauseSeconds,
+				"pause_start_time":    shift.PauseStartTime,
+				"total_bins":          shift.TotalBins,
+				"completed_bins":      shift.CompletedBins,
+				"bins":                bins,
+				"created_at":          shift.CreatedAt,
+				"updated_at":          shift.UpdatedAt,
 			},
 		})
 	}
@@ -138,65 +139,65 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
 		// Check if driver has any existing active or paused shift
-	var existingShift models.Shift
-	existingQuery := `SELECT * FROM shifts
+		var existingShift models.Shift
+		existingQuery := `SELECT * FROM shifts
 					  WHERE driver_id = $1
 					  AND (status = 'active' OR status = 'paused')
 					  LIMIT 1`
 
-	existingErr := db.Get(&existingShift, existingQuery, userClaims.UserID)
-	if existingErr == nil {
-		// Found an existing active/paused shift - auto-end it
-		log.Printf("⚠️  Found existing %s shift (%s), auto-ending it before starting new shift", existingShift.Status, existingShift.ID)
+		existingErr := db.Get(&existingShift, existingQuery, userClaims.UserID)
+		if existingErr == nil {
+			// Found an existing active/paused shift - auto-end it
+			log.Printf("⚠️  Found existing %s shift (%s), auto-ending it before starting new shift", existingShift.Status, existingShift.ID)
 
-		endNow := time.Now().Unix()
-		totalPause := int64(existingShift.TotalPauseSeconds)
-		if existingShift.PauseStartTime != nil {
-			totalPause += endNow - *existingShift.PauseStartTime
-		}
+			endNow := time.Now().Unix()
+			totalPause := int64(existingShift.TotalPauseSeconds)
+			if existingShift.PauseStartTime != nil {
+				totalPause += endNow - *existingShift.PauseStartTime
+			}
 
-		// Calculate completion rate for history
-		completionRate := 0.0
-		if existingShift.TotalBins > 0 {
-			completionRate = (float64(existingShift.CompletedBins) / float64(existingShift.TotalBins)) * 100
-		}
+			// Calculate completion rate for history
+			completionRate := 0.0
+			if existingShift.TotalBins > 0 {
+				completionRate = (float64(existingShift.CompletedBins) / float64(existingShift.TotalBins)) * 100
+			}
 
-		// Determine end reason - auto-ended because driver started new shift
-		endReason := "manual_end"
-		if existingShift.CompletedBins >= existingShift.TotalBins {
-			endReason = "completed"
-		}
+			// Determine end reason - auto-ended because driver started new shift
+			endReason := "manual_end"
+			if existingShift.CompletedBins >= existingShift.TotalBins {
+				endReason = "completed"
+			}
 
-		// Insert into shift_history
-		historyQuery := `INSERT INTO shift_history (
+			// Insert into shift_history
+			historyQuery := `INSERT INTO shift_history (
 			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 			total_pause_seconds, total_bins, completed_bins, completion_rate,
 			end_reason, ended_by_user_id, end_reason_metadata
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
-		_, histErr := db.Exec(
-			historyQuery,
-			existingShift.ID,
-			existingShift.DriverID,
-			existingShift.RouteID,
-			existingShift.StartTime,
-			endNow,
-			existingShift.CreatedAt,
-			endNow,
-			totalPause,
-			existingShift.TotalBins,
-			existingShift.CompletedBins,
-			completionRate,
-			endReason,
-			nil, // Driver action
-			nil, // No metadata
-		)
-		if histErr != nil {
-			log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
-			// Continue anyway
-		}
+			_, histErr := db.Exec(
+				historyQuery,
+				existingShift.ID,
+				existingShift.DriverID,
+				existingShift.RouteID,
+				existingShift.StartTime,
+				endNow,
+				existingShift.CreatedAt,
+				endNow,
+				totalPause,
+				existingShift.TotalBins,
+				existingShift.CompletedBins,
+				completionRate,
+				endReason,
+				nil, // Driver action
+				nil, // No metadata
+			)
+			if histErr != nil {
+				log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
+				// Continue anyway
+			}
 
-		endQuery := `UPDATE shifts
+			endQuery := `UPDATE shifts
 					 SET status = 'ended',
 						 end_time = $1,
 						 total_pause_seconds = $2,
@@ -204,16 +205,16 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 						 updated_at = $3
 					 WHERE id = $4`
 
-		_, err := db.Exec(endQuery, endNow, totalPause, endNow, existingShift.ID)
-		if err != nil {
-			log.Printf("❌ Error auto-ending existing shift: %v", err)
-			// Don't fail - continue with starting new shift
-		} else {
-			log.Printf("✅ Auto-ended existing shift %s (saved to history)", existingShift.ID)
+			_, err := db.Exec(endQuery, endNow, totalPause, endNow, existingShift.ID)
+			if err != nil {
+				log.Printf("❌ Error auto-ending existing shift: %v", err)
+				// Don't fail - continue with starting new shift
+			} else {
+				log.Printf("✅ Auto-ended existing shift %s (saved to history)", existingShift.ID)
+			}
 		}
-	}
 
-	// Check if driver has a ready shift
+		// Check if driver has a ready shift
 		var shift models.Shift
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
@@ -466,7 +467,7 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"status":               shift.Status,
+				"status":              shift.Status,
 				"total_pause_seconds": shift.TotalPauseSeconds,
 			},
 		})
@@ -520,8 +521,8 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Count incidents reported during this shift
 		var incidentStats struct {
-			TotalIncidents     int `db:"total_incidents"`
-			FieldObservations  int `db:"field_observations"`
+			TotalIncidents    int `db:"total_incidents"`
+			FieldObservations int `db:"field_observations"`
 		}
 		err = db.Get(&incidentStats, `
 			SELECT
@@ -557,18 +558,18 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			shift.DriverID,
 			shift.RouteID,
 			shift.StartTime,
-			endTime,                         // end_time
+			endTime, // end_time
 			shift.CreatedAt,
-			now,                             // ended_at (when history record created)
-			totalPause,                      // total_pause_seconds
+			now,        // ended_at (when history record created)
+			totalPause, // total_pause_seconds
 			shift.TotalBins,
 			shift.CompletedBins,
 			completionRate,
 			incidentStats.TotalIncidents,    // NEW: incidents_reported
 			incidentStats.FieldObservations, // NEW: field_observations
 			endReason,
-			nil,                             // ended_by_user_id (NULL - driver action)
-			nil,                             // end_reason_metadata (NULL for basic driver ends)
+			nil, // ended_by_user_id (NULL - driver action)
+			nil, // end_reason_metadata (NULL for basic driver ends)
 		)
 		if err != nil {
 			log.Printf("❌ Error inserting shift history: %v", err)
@@ -689,10 +690,10 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			PhotoUrl              *string `json:"photo_url,omitempty"`
 
 			// Incident reporting fields (all optional)
-			HasIncident           bool    `json:"has_incident"`
-			IncidentType          *string `json:"incident_type,omitempty"`
-			IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
-			IncidentDescription   *string `json:"incident_description,omitempty"`
+			HasIncident         bool    `json:"has_incident"`
+			IncidentType        *string `json:"incident_type,omitempty"`
+			IncidentPhotoUrl    *string `json:"incident_photo_url,omitempty"`
+			IncidentDescription *string `json:"incident_description,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			log.Printf("[DIAGNOSTIC] ❌ Error decoding request body: %v", err)
@@ -973,11 +974,11 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"status":              shift.Status,
-				"completed_bins":      shift.CompletedBins,
-				"total_bins":          shift.TotalBins,
-				"bins":                bins,
+				"id":             shift.ID,
+				"status":         shift.Status,
+				"completed_bins": shift.CompletedBins,
+				"total_bins":     shift.TotalBins,
+				"bins":           bins,
 			},
 		})
 
@@ -1099,18 +1100,18 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"id":                 shift.ID,
-				"driver_id":          shift.DriverID,
-				"route_id":           shift.RouteID,
-				"status":             shift.Status,
-				"start_time":         shift.StartTime,
-				"end_time":           shift.EndTime,
+				"id":                  shift.ID,
+				"driver_id":           shift.DriverID,
+				"route_id":            shift.RouteID,
+				"status":              shift.Status,
+				"start_time":          shift.StartTime,
+				"end_time":            shift.EndTime,
 				"total_pause_seconds": shift.TotalPauseSeconds,
-				"total_bins":         shift.TotalBins,
-				"completed_bins":     shift.CompletedBins,
-				"created_at":         shift.CreatedAt,
-				"updated_at":         shift.UpdatedAt,
-				"bins":               bins,
+				"total_bins":          shift.TotalBins,
+				"completed_bins":      shift.CompletedBins,
+				"created_at":          shift.CreatedAt,
+				"updated_at":          shift.UpdatedAt,
+				"bins":                bins,
 			},
 		})
 	}
@@ -2063,13 +2064,60 @@ func handleMoveRequestCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest,
 		}
 
 		// Record the move in moves table
+		// Parse address into separate fields
+		var fromStreet, fromCity, fromZip, toStreet, toCity, toZip *string
+
+		// Parse original address
+		if moveRequest.OriginalAddress != "" {
+			parts := strings.Split(moveRequest.OriginalAddress, ", ")
+			if len(parts) >= 2 {
+				street := parts[0]
+				fromStreet = &street
+				cityZip := strings.TrimSpace(parts[1])
+				cityZipParts := strings.Split(cityZip, " ")
+				if len(cityZipParts) >= 2 {
+					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+					zip := cityZipParts[len(cityZipParts)-1]
+					fromCity = &city
+					fromZip = &zip
+				}
+			}
+		}
+
+		// Parse new address
+		if moveRequest.NewAddress != nil {
+			parts := strings.Split(*moveRequest.NewAddress, ", ")
+			if len(parts) >= 2 {
+				street := parts[0]
+				toStreet = &street
+				cityZip := strings.TrimSpace(parts[1])
+				cityZipParts := strings.Split(cityZip, " ")
+				if len(cityZipParts) >= 2 {
+					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+					zip := cityZipParts[len(cityZipParts)-1]
+					toCity = &city
+					toZip = &zip
+				}
+			}
+		}
+
 		_, err = db.Exec(`
-			INSERT INTO moves (bin_id, moved_from, moved_to, moved_on)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO moves (
+				bin_id, moved_from, moved_to, moved_on,
+				move_type, from_street, from_city, from_zip,
+				to_street, to_city, to_zip,
+				move_request_id, shift_id
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		`, moveRequest.BinID,
 			moveRequest.OriginalAddress,
 			*moveRequest.NewAddress,
-			now)
+			now,
+			"shift", // move_type
+			fromStreet, fromCity, fromZip,
+			toStreet, toCity, toZip,
+			moveRequest.ID,
+			moveRequest.AssignedShiftID)
 		if err != nil {
 			log.Printf("[MOVE] ⚠️  Failed to record move: %v", err)
 			// Don't fail - move is already completed

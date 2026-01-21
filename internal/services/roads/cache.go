@@ -28,18 +28,18 @@ type CacheEntry struct {
 
 // CacheStats tracks cache performance
 type CacheStats struct {
-	Hits          int64
-	Misses        int64
-	Evictions     int64
-	TotalSavings  float64 // Estimated API cost savings
-	mutex         sync.RWMutex
+	Hits         int64
+	Misses       int64
+	Evictions    int64
+	TotalSavings float64 // Estimated API cost savings
+	mutex        sync.RWMutex
 }
 
 // NewRouteCache creates a new route cache
 func NewRouteCache() *RouteCache {
 	cache := &RouteCache{
 		cache:      make(map[string]*CacheEntry),
-		maxEntries: 1000, // Store up to 1000 unique routes
+		maxEntries: 1000,           // Store up to 1000 unique routes
 		ttl:        24 * time.Hour, // Cache for 24 hours
 	}
 
@@ -203,13 +203,13 @@ func (c *RouteCache) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"cache_size":     cacheSize,
-		"max_entries":    c.maxEntries,
-		"hits":           c.stats.Hits,
-		"misses":         c.stats.Misses,
-		"hit_rate":       fmt.Sprintf("%.2f%%", hitRate),
-		"evictions":      c.stats.Evictions,
-		"total_savings":  fmt.Sprintf("$%.2f", c.stats.TotalSavings),
-		"ttl_hours":      int(c.ttl.Hours()),
+		"cache_size":    cacheSize,
+		"max_entries":   c.maxEntries,
+		"hits":          c.stats.Hits,
+		"misses":        c.stats.Misses,
+		"hit_rate":      fmt.Sprintf("%.2f%%", hitRate),
+		"evictions":     c.stats.Evictions,
+		"total_savings": fmt.Sprintf("$%.2f", c.stats.TotalSavings),
+		"ttl_hours":     int(c.ttl.Hours()),
 	}
 }

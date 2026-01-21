@@ -4,40 +4,40 @@ import "time"
 
 // PotentialLocation represents a driver-requested location for a future bin
 type PotentialLocation struct {
-	ID                  string   `json:"id" db:"id"`
-	Address             string   `json:"address" db:"address"`
-	Street              string   `json:"street" db:"street"`
-	City                string   `json:"city" db:"city"`
-	Zip                 string   `json:"zip" db:"zip"`
-	Latitude            *float64 `json:"latitude,omitempty" db:"latitude"`
-	Longitude           *float64 `json:"longitude,omitempty" db:"longitude"`
-	RequestedByUserID   string   `json:"requested_by_user_id" db:"requested_by_user_id"`
-	RequestedByName     string   `json:"requested_by_name" db:"requested_by_name"`
-	Notes               *string  `json:"notes,omitempty" db:"notes"`
-	CreatedAt           int64    `json:"created_at" db:"created_at"`
-	UpdatedAt           int64    `json:"updated_at" db:"updated_at"`
-	ConvertedToBinID    *string  `json:"converted_to_bin_id,omitempty" db:"converted_to_bin_id"`
-	ConvertedAt         *int64   `json:"converted_at,omitempty" db:"converted_at"`
-	ConvertedByUserID   *string  `json:"converted_by_user_id,omitempty" db:"converted_by_user_id"`
+	ID                string   `json:"id" db:"id"`
+	Address           string   `json:"address" db:"address"`
+	Street            string   `json:"street" db:"street"`
+	City              string   `json:"city" db:"city"`
+	Zip               string   `json:"zip" db:"zip"`
+	Latitude          *float64 `json:"latitude,omitempty" db:"latitude"`
+	Longitude         *float64 `json:"longitude,omitempty" db:"longitude"`
+	RequestedByUserID string   `json:"requested_by_user_id" db:"requested_by_user_id"`
+	RequestedByName   string   `json:"requested_by_name" db:"requested_by_name"`
+	Notes             *string  `json:"notes,omitempty" db:"notes"`
+	CreatedAt         int64    `json:"created_at" db:"created_at"`
+	UpdatedAt         int64    `json:"updated_at" db:"updated_at"`
+	ConvertedToBinID  *string  `json:"converted_to_bin_id,omitempty" db:"converted_to_bin_id"`
+	ConvertedAt       *int64   `json:"converted_at,omitempty" db:"converted_at"`
+	ConvertedByUserID *string  `json:"converted_by_user_id,omitempty" db:"converted_by_user_id"`
 }
 
 // PotentialLocationResponse is what we send to the client with ISO timestamps
 type PotentialLocationResponse struct {
-	ID                  string   `json:"id"`
-	Address             string   `json:"address"`
-	Street              string   `json:"street"`
-	City                string   `json:"city"`
-	Zip                 string   `json:"zip"`
-	Latitude            *float64 `json:"latitude,omitempty"`
-	Longitude           *float64 `json:"longitude,omitempty"`
-	RequestedByUserID   string   `json:"requested_by_user_id"`
-	RequestedByName     string   `json:"requested_by_name"`
-	Notes               *string  `json:"notes,omitempty"`
-	CreatedAtIso        string   `json:"created_at_iso"`
-	ConvertedToBinID    *string  `json:"converted_to_bin_id,omitempty"`
-	ConvertedAtIso      *string  `json:"converted_at_iso,omitempty"`
-	ConvertedByUserID   *string  `json:"converted_by_user_id,omitempty"`
-	BinNumber           *int     `json:"bin_number,omitempty"` // From JOIN with bins table
+	ID                string   `json:"id"`
+	Address           string   `json:"address"`
+	Street            string   `json:"street"`
+	City              string   `json:"city"`
+	Zip               string   `json:"zip"`
+	Latitude          *float64 `json:"latitude,omitempty"`
+	Longitude         *float64 `json:"longitude,omitempty"`
+	RequestedByUserID string   `json:"requested_by_user_id"`
+	RequestedByName   string   `json:"requested_by_name"`
+	Notes             *string  `json:"notes,omitempty"`
+	CreatedAtIso      string   `json:"created_at_iso"`
+	ConvertedToBinID  *string  `json:"converted_to_bin_id,omitempty"`
+	ConvertedAtIso    *string  `json:"converted_at_iso,omitempty"`
+	ConvertedByUserID *string  `json:"converted_by_user_id,omitempty"`
+	BinNumber         *int     `json:"bin_number,omitempty"` // From JOIN with bins table
 }
 
 // CreatePotentialLocationRequest is the request body for POST /api/potential-locations

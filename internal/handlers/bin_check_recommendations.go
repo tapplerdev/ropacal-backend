@@ -60,9 +60,9 @@ func FlagStaleBins(db *sqlx.DB) http.HandlerFunc {
 			log.Println("✅ [FLAG-STALE-BINS] No stale bins found - all bins recently checked!")
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"message":         "No stale bins found",
-				"flagged_count":   0,
-				"checked_at":      now,
+				"message":       "No stale bins found",
+				"flagged_count": 0,
+				"checked_at":    now,
 			})
 			return
 		}
@@ -119,9 +119,9 @@ func FlagStaleBins(db *sqlx.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"message":         "Stale bins flagged successfully",
-			"flagged_count":   flaggedCount,
-			"checked_at":      now,
+			"message":       "Stale bins flagged successfully",
+			"flagged_count": flaggedCount,
+			"checked_at":    now,
 		})
 	}
 }

@@ -444,14 +444,14 @@ INSERT INTO bins (id, bin_number, current_street, city, zip, last_moved, last_ch
 		// Return success response
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":              true,
-			"message":              "Successfully loaded real bins",
-			"deleted_test_bins":    deletedRows,
-			"loaded_bins":          44,
-			"total_bins":           summary.TotalBins,
-			"active_bins":          summary.ActiveBins,
-			"missing_bins":         summary.MissingBins,
-			"bins_without_coords":  summary.BinsWithoutCoords,
+			"success":             true,
+			"message":             "Successfully loaded real bins",
+			"deleted_test_bins":   deletedRows,
+			"loaded_bins":         44,
+			"total_bins":          summary.TotalBins,
+			"active_bins":         summary.ActiveBins,
+			"missing_bins":        summary.MissingBins,
+			"bins_without_coords": summary.BinsWithoutCoords,
 		})
 	}
 }

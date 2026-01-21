@@ -23,8 +23,8 @@ type LoginRequest struct {
 }
 
 type LoginResponse struct {
-	OK    bool                `json:"ok"`
-	Token string              `json:"token,omitempty"`
+	OK    bool                 `json:"ok"`
+	Token string               `json:"token,omitempty"`
 	User  *models.UserResponse `json:"user,omitempty"`
 }
 

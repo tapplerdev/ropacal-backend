@@ -36,24 +36,24 @@ type NoGoZoneResponse struct {
 
 // ZoneIncidentResponse represents an incident with ISO timestamps
 type ZoneIncidentResponse struct {
-	ID                  string   `json:"id"`
-	ZoneID              string   `json:"zone_id"`
-	BinID               string   `json:"bin_id"`
-	BinNumber           *int     `json:"bin_number,omitempty"`
-	IncidentType        string   `json:"incident_type"`
-	ReportedByUserID    *string  `json:"reported_by_user_id,omitempty"`
-	ReportedAtISO       string   `json:"reported_at_iso"`
-	Description         *string  `json:"description,omitempty"`
-	PhotoURL            *string  `json:"photo_url,omitempty"`
-	CheckID             *int     `json:"check_id,omitempty"`
-	MoveID              *int     `json:"move_id,omitempty"`
-	ShiftID             *string  `json:"shift_id,omitempty"`
-	ReporterLatitude    *float64 `json:"reporter_latitude,omitempty"`
-	ReporterLongitude   *float64 `json:"reporter_longitude,omitempty"`
-	IsFieldObservation  bool     `json:"is_field_observation"`
-	VerifiedByUserID    *string  `json:"verified_by_user_id,omitempty"`
-	VerifiedAtISO       *string  `json:"verified_at_iso,omitempty"`
-	Status              string   `json:"status"`
+	ID                 string   `json:"id"`
+	ZoneID             string   `json:"zone_id"`
+	BinID              string   `json:"bin_id"`
+	BinNumber          *int     `json:"bin_number,omitempty"`
+	IncidentType       string   `json:"incident_type"`
+	ReportedByUserID   *string  `json:"reported_by_user_id,omitempty"`
+	ReportedAtISO      string   `json:"reported_at_iso"`
+	Description        *string  `json:"description,omitempty"`
+	PhotoURL           *string  `json:"photo_url,omitempty"`
+	CheckID            *int     `json:"check_id,omitempty"`
+	MoveID             *int     `json:"move_id,omitempty"`
+	ShiftID            *string  `json:"shift_id,omitempty"`
+	ReporterLatitude   *float64 `json:"reporter_latitude,omitempty"`
+	ReporterLongitude  *float64 `json:"reporter_longitude,omitempty"`
+	IsFieldObservation bool     `json:"is_field_observation"`
+	VerifiedByUserID   *string  `json:"verified_by_user_id,omitempty"`
+	VerifiedAtISO      *string  `json:"verified_at_iso,omitempty"`
+	Status             string   `json:"status"`
 }
 
 // GetNoGoZones returns all no-go zones (optionally filtered by status)
@@ -305,6 +305,7 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, response)
 	}
 }
+
 // GetShiftIncidents returns all incidents reported during a specific shift
 func GetShiftIncidents(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -518,10 +519,10 @@ func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("✅ Field observation %s verified by manager %s", incidentID, userClaims.UserID)
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success":      true,
-			"incident_id":  incidentID,
-			"verified_at":  time.Unix(now, 0).Format(time.RFC3339),
-			"verified_by":  userClaims.UserID,
+			"success":     true,
+			"incident_id": incidentID,
+			"verified_at": time.Unix(now, 0).Format(time.RFC3339),
+			"verified_by": userClaims.UserID,
 		})
 	}
 }

@@ -8,20 +8,20 @@ type Bin struct {
 	CurrentStreet   string   `json:"current_street" db:"current_street"`
 	City            string   `json:"city" db:"city"`
 	Zip             string   `json:"zip" db:"zip"`
-	LastMoved       *int64   `json:"last_moved,omitempty" db:"last_moved"`       // Unix timestamp
-	LastChecked     *int64   `json:"last_checked,omitempty" db:"last_checked"`   // Unix timestamp
+	LastMoved       *int64   `json:"last_moved,omitempty" db:"last_moved"`           // Unix timestamp
+	LastChecked     *int64   `json:"last_checked,omitempty" db:"last_checked"`       // Unix timestamp
 	LastCheckedAt   *int64   `json:"last_checked_at,omitempty" db:"last_checked_at"` // Unix timestamp (for priority calc)
-	Status          string   `json:"status" db:"status"` // 'active', 'retired', 'in_storage', 'pending_move', 'needs_check'
+	Status          string   `json:"status" db:"status"`                             // 'active', 'retired', 'in_storage', 'pending_move', 'needs_check'
 	FillPercentage  *int     `json:"fill_percentage,omitempty" db:"fill_percentage"`
 	Checked         bool     `json:"checked" db:"checked"`
 	MoveRequested   bool     `json:"move_requested" db:"move_requested"`
-	Latitude          *float64 `json:"latitude,omitempty" db:"latitude"`
-	Longitude         *float64 `json:"longitude,omitempty" db:"longitude"`
-	CreatedByUserID   *string  `json:"created_by_user_id,omitempty" db:"created_by_user_id"` // User who created the bin
-	RetiredAt         *int64   `json:"retired_at,omitempty" db:"retired_at"` // Unix timestamp when retired
-	RetiredByUserID   *string  `json:"retired_by_user_id,omitempty" db:"retired_by_user_id"` // User who retired the bin
-	CreatedAt         int64    `json:"created_at" db:"created_at"`                 // Unix timestamp
-	UpdatedAt         int64    `json:"updated_at" db:"updated_at"`                 // Unix timestamp
+	Latitude        *float64 `json:"latitude,omitempty" db:"latitude"`
+	Longitude       *float64 `json:"longitude,omitempty" db:"longitude"`
+	CreatedByUserID *string  `json:"created_by_user_id,omitempty" db:"created_by_user_id"` // User who created the bin
+	RetiredAt       *int64   `json:"retired_at,omitempty" db:"retired_at"`                 // Unix timestamp when retired
+	RetiredByUserID *string  `json:"retired_by_user_id,omitempty" db:"retired_by_user_id"` // User who retired the bin
+	CreatedAt       int64    `json:"created_at" db:"created_at"`                           // Unix timestamp
+	UpdatedAt       int64    `json:"updated_at" db:"updated_at"`                           // Unix timestamp
 }
 
 // BinResponse is what we send to the client with ISO timestamps

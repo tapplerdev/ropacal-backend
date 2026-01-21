@@ -257,8 +257,8 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 	err := db.QueryRow(
 		query,
 		c.UserID,
-		latitude,      // Original GPS
-		longitude,     // Original GPS
+		latitude,  // Original GPS
+		longitude, // Original GPS
 		heading,
 		speed,
 		accuracy,
@@ -278,8 +278,8 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 		"type": "driver_location_update",
 		"data": map[string]interface{}{
 			"driver_id":  c.UserID,
-			"latitude":   snappedLat,   // SNAPPED coordinates for display
-			"longitude":  snappedLng,   // SNAPPED coordinates for display
+			"latitude":   snappedLat, // SNAPPED coordinates for display
+			"longitude":  snappedLng, // SNAPPED coordinates for display
 			"heading":    heading,
 			"speed":      speed,
 			"accuracy":   accuracy,

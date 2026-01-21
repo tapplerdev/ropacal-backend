@@ -12,19 +12,19 @@ import (
 
 // DriverShiftDetailResponse represents detailed shift information for a specific driver
 type DriverShiftDetailResponse struct {
-	DriverID   string                `json:"driver_id"`
-	DriverName string                `json:"driver_name"`
-	ShiftID    string                `json:"shift_id"`
-	RouteID    *string               `json:"route_id"`
-	Status     string                `json:"status"`
-	StartTime  *int64                `json:"start_time"`
-	EndTime    *int64                `json:"end_time"`
-	TotalBins  int                   `json:"total_bins"`
-	CompletedBins int                `json:"completed_bins"`
-	TotalPauseSeconds int                        `json:"total_pause_seconds"`
-	CreatedAt  int64                              `json:"created_at"`
-	UpdatedAt  int64                              `json:"updated_at"`
-	Bins       []models.ShiftBinWithDetails       `json:"bins"`
+	DriverID          string                       `json:"driver_id"`
+	DriverName        string                       `json:"driver_name"`
+	ShiftID           string                       `json:"shift_id"`
+	RouteID           *string                      `json:"route_id"`
+	Status            string                       `json:"status"`
+	StartTime         *int64                       `json:"start_time"`
+	EndTime           *int64                       `json:"end_time"`
+	TotalBins         int                          `json:"total_bins"`
+	CompletedBins     int                          `json:"completed_bins"`
+	TotalPauseSeconds int                          `json:"total_pause_seconds"`
+	CreatedAt         int64                        `json:"created_at"`
+	UpdatedAt         int64                        `json:"updated_at"`
+	Bins              []models.ShiftBinWithDetails `json:"bins"`
 }
 
 // GetDriverShiftDetails returns detailed shift information for a specific driver (manager view)
@@ -43,8 +43,8 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("📋 GetDriverShiftDetails: Fetching shift details for driver: %s", driverID)
 
-	// First, get the active shift for this driver
-	shiftQuery := `
+		// First, get the active shift for this driver
+		shiftQuery := `
 		SELECT
 			s.id AS shift_id,
 			s.driver_id,
@@ -66,21 +66,21 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 		LIMIT 1
 	`
 
-	var detail DriverShiftDetailResponse
-	err := db.QueryRow(shiftQuery, driverID).Scan(
-		&detail.ShiftID,
-		&detail.DriverID,
-		&detail.DriverName,
-		&detail.RouteID,
-		&detail.Status,
-		&detail.StartTime,
-		&detail.EndTime,
-		&detail.TotalBins,
-		&detail.CompletedBins,
-		&detail.TotalPauseSeconds,
-		&detail.CreatedAt,
-		&detail.UpdatedAt,
-	)
+		var detail DriverShiftDetailResponse
+		err := db.QueryRow(shiftQuery, driverID).Scan(
+			&detail.ShiftID,
+			&detail.DriverID,
+			&detail.DriverName,
+			&detail.RouteID,
+			&detail.Status,
+			&detail.StartTime,
+			&detail.EndTime,
+			&detail.TotalBins,
+			&detail.CompletedBins,
+			&detail.TotalPauseSeconds,
+			&detail.CreatedAt,
+			&detail.UpdatedAt,
+		)
 
 		if err == sql.ErrNoRows {
 			log.Printf("⚠️  No active shift found for driver: %s", driverID)
@@ -104,8 +104,8 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-	// Now get the bins for this shift
-	binsQuery := `
+		// Now get the bins for this shift
+		binsQuery := `
 		SELECT
 			rb.id,
 			rb.shift_id,

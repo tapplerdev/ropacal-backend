@@ -24,12 +24,12 @@ type LastPosition struct {
 
 // OptimizerStats tracks optimization performance
 type OptimizerStats struct {
-	TotalRequests       int64
-	SkippedByAccuracy   int64
-	SkippedByDelta      int64
-	ProcessedRequests   int64
-	TotalSavings        float64
-	mutex               sync.RWMutex
+	TotalRequests     int64
+	SkippedByAccuracy int64
+	SkippedByDelta    int64
+	ProcessedRequests int64
+	TotalSavings      float64
+	mutex             sync.RWMutex
 }
 
 // Configuration constants
@@ -207,13 +207,13 @@ func (o *LocationOptimizer) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_requests":        o.stats.TotalRequests,
-		"skipped_by_accuracy":   o.stats.SkippedByAccuracy,
-		"skipped_by_delta":      o.stats.SkippedByDelta,
-		"processed_requests":    o.stats.ProcessedRequests,
-		"skip_rate":             fmt.Sprintf("%.2f%%", skipRate),
-		"total_savings":         fmt.Sprintf("$%.2f", o.stats.TotalSavings),
-		"min_position_delta_m":  MinPositionDelta,
-		"accuracy_threshold_m":  AccuracyThreshold,
+		"total_requests":       o.stats.TotalRequests,
+		"skipped_by_accuracy":  o.stats.SkippedByAccuracy,
+		"skipped_by_delta":     o.stats.SkippedByDelta,
+		"processed_requests":   o.stats.ProcessedRequests,
+		"skip_rate":            fmt.Sprintf("%.2f%%", skipRate),
+		"total_savings":        fmt.Sprintf("$%.2f", o.stats.TotalSavings),
+		"min_position_delta_m": MinPositionDelta,
+		"accuracy_threshold_m": AccuracyThreshold,
 	}
 }

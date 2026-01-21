@@ -22,9 +22,9 @@ type CreateUserRequest struct {
 }
 
 type CreateUserResponse struct {
-	Success bool                `json:"success"`
+	Success bool                 `json:"success"`
 	User    *models.UserResponse `json:"user,omitempty"`
-	Message string              `json:"message,omitempty"`
+	Message string               `json:"message,omitempty"`
 }
 
 // CreateUser creates a new user (admin/manager/driver)

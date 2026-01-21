@@ -622,8 +622,8 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("🏭 Distance to warehouse from last bin: %.2f km", distanceToWarehouse)
 
 		// Estimate duration: (distance / avg_speed) + (bins * time_per_bin)
-		avgSpeedKmh := 30.0          // 30 km/h average speed
-		minutesPerBin := 5.0          // 5 minutes per bin collection
+		avgSpeedKmh := 30.0  // 30 km/h average speed
+		minutesPerBin := 5.0 // 5 minutes per bin collection
 		travelTimeHours := totalDistance / avgSpeedKmh
 		collectionTimeHours := (float64(len(bins)) * minutesPerBin) / 60.0
 

@@ -83,13 +83,13 @@ func (s *Shift) GetCompletionPercentage() float64 {
 
 // ShiftEndResponse contains details when shift ends
 type ShiftEndResponse struct {
-	Status               ShiftStatus `json:"status"`
-	EndTime              int64       `json:"end_time"`
-	TotalDurationSeconds int64       `json:"total_duration_seconds"`
+	Status                ShiftStatus `json:"status"`
+	EndTime               int64       `json:"end_time"`
+	TotalDurationSeconds  int64       `json:"total_duration_seconds"`
 	ActiveDurationSeconds int64       `json:"active_duration_seconds"`
-	TotalPauseSeconds    int         `json:"total_pause_seconds"`
-	CompletedBins        int         `json:"completed_bins"`
-	TotalBins            int         `json:"total_bins"`
+	TotalPauseSeconds     int         `json:"total_pause_seconds"`
+	CompletedBins         int         `json:"completed_bins"`
+	TotalBins             int         `json:"total_bins"`
 }
 
 // CompleteBinResponse contains bin completion progress
@@ -97,8 +97,8 @@ type CompleteBinResponse struct {
 	CompletedBins        int     `json:"completed_bins"`
 	TotalBins            int     `json:"total_bins"`
 	CompletionPercentage float64 `json:"completion_percentage"`
-	CheckID              *int    `json:"check_id,omitempty"`     // ID of created check record (for linking incidents)
-	IncidentID           *string `json:"incident_id,omitempty"`  // ID of created incident (if incident was reported)
+	CheckID              *int    `json:"check_id,omitempty"`    // ID of created check record (for linking incidents)
+	IncidentID           *string `json:"incident_id,omitempty"` // ID of created incident (if incident was reported)
 }
 
 // ToNullInt64 converts a pointer to int64 to sql.NullInt64

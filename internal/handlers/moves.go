@@ -23,7 +23,11 @@ func GetMoves(db *sqlx.DB) http.HandlerFunc {
 
 		var moves []models.Move
 		err := db.Select(&moves, `
-			SELECT id, bin_id, moved_from, moved_to, moved_on
+			SELECT
+			id, bin_id, moved_from, moved_to, moved_on,
+			move_type, from_street, from_city, from_zip,
+			to_street, to_city, to_zip,
+			move_request_id, completed_by_user_id, shift_id
 			FROM moves
 			WHERE bin_id = $1
 			ORDER BY moved_on DESC

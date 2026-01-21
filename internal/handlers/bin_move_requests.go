@@ -129,6 +129,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			DisposalAction:    req.DisposalAction,
 			Reason:            req.Reason,
 			Notes:             req.Notes,
+			AssignmentType:    "shift", // Default to shift-based assignment
 			CreatedAt:         now,
 			UpdatedAt:         now,
 		}
@@ -224,9 +225,9 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 
 		var req struct {
-			ShiftID           *string `json:"shift_id"`              // Optional - auto-find active shift if nil
-			InsertAfterBinID  *string `json:"insert_after_bin_id"`   // For active shifts - insert after specific bin
-			InsertPosition    *string `json:"insert_position"`       // For future shifts - 'start' or 'end'
+			ShiftID          *string `json:"shift_id"`            // Optional - auto-find active shift if nil
+			InsertAfterBinID *string `json:"insert_after_bin_id"` // For active shifts - insert after specific bin
+			InsertPosition   *string `json:"insert_position"`     // For future shifts - 'start' or 'end'
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 
@@ -520,11 +521,11 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		"type": "urgent_move_inserted",
 		"data": map[string]interface{}{
 			"shift": map[string]interface{}{
-				"id":                  updatedShift.ID,
-				"status":              updatedShift.Status,
-				"total_bins":          updatedShift.TotalBins,
-				"completed_bins":      updatedShift.CompletedBins,
-				"bins":                updatedBins,
+				"id":             updatedShift.ID,
+				"status":         updatedShift.Status,
+				"total_bins":     updatedShift.TotalBins,
+				"completed_bins": updatedShift.CompletedBins,
+				"bins":           updatedBins,
 			},
 			"urgent_bin": map[string]interface{}{
 				"bin_number":     bin.BinNumber,
@@ -996,6 +997,267 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"message": "Move request cancelled successfully",
+		})
+	}
+}
+
+// AssignMoveToUser assigns a move request to a specific user for manual completion
+// PUT /api/manager/bins/move-requests/:id/assign-to-user
+func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			http.Error(w, "Missing move request ID", http.StatusBadRequest)
+			return
+		}
+
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.UserID == "" {
+			http.Error(w, "user_id is required", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch move request to check status
+		var moveRequest models.BinMoveRequest
+		err := db.Get(&moveRequest, `
+			SELECT id, bin_id, status, assignment_type
+			FROM bin_move_requests
+			WHERE id = $1
+		`, id)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, "Move request not found", http.StatusNotFound)
+				return
+			}
+			log.Printf("Error fetching move request: %v", err)
+			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
+			return
+		}
+
+		// Only allow assigning pending moves
+		if moveRequest.Status != "pending" {
+			http.Error(w, fmt.Sprintf("Cannot assign move request with status: %s", moveRequest.Status), http.StatusBadRequest)
+			return
+		}
+
+		// Verify user exists
+		var userExists bool
+		err = db.Get(&userExists, "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", req.UserID)
+		if err != nil || !userExists {
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Update move request
+		_, err = db.Exec(`
+			UPDATE bin_move_requests
+			SET assignment_type = 'manual',
+			    assigned_user_id = $1,
+			    status = 'assigned',
+			    updated_at = $2
+			WHERE id = $3
+		`, req.UserID, now, id)
+		if err != nil {
+			log.Printf("Error assigning move to user: %v", err)
+			http.Error(w, "Failed to assign move request", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("✅ Move request %s assigned to user %s for manual completion", id, req.UserID)
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Move request assigned successfully",
+		})
+	}
+}
+
+// ManuallyCompleteMoveRequest marks a move request as manually completed
+// PUT /api/manager/bins/move-requests/:id/complete-manually
+func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			http.Error(w, "Missing move request ID", http.StatusBadRequest)
+			return
+		}
+
+		// Get user ID from context (person completing the move)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			http.Error(w, "User not authenticated", http.StatusUnauthorized)
+			return
+		}
+		userID := userClaims.UserID
+
+		// Fetch move request
+		var moveRequest models.BinMoveRequest
+		err := db.Get(&moveRequest, `SELECT * FROM bin_move_requests WHERE id = $1`, id)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, "Move request not found", http.StatusNotFound)
+				return
+			}
+			log.Printf("Error fetching move request: %v", err)
+			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
+			return
+		}
+
+		// Verify this is a manual move
+		if moveRequest.AssignmentType != "manual" {
+			http.Error(w, "This endpoint is only for manual moves. Use shift completion flow for shift-based moves.", http.StatusBadRequest)
+			return
+		}
+
+		// Only allow completing assigned or in_progress manual moves
+		if moveRequest.Status != "assigned" && moveRequest.Status != "in_progress" {
+			http.Error(w, fmt.Sprintf("Cannot complete move request with status: %s", moveRequest.Status), http.StatusBadRequest)
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Mark move request as completed
+		_, err = db.Exec(`
+			UPDATE bin_move_requests
+			SET status = 'completed', completed_at = $1, updated_at = $1
+			WHERE id = $2
+		`, now, moveRequest.ID)
+		if err != nil {
+			log.Printf("Error completing move request: %v", err)
+			http.Error(w, "Failed to complete move request", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[MANUAL MOVE] ✅ Move request marked as completed")
+
+		if moveRequest.MoveType == "pickup_only" {
+			// Pickup for retirement or storage
+			newStatus := "active" // Fallback
+			if moveRequest.DisposalAction != nil {
+				if *moveRequest.DisposalAction == "retire" {
+					newStatus = "retired"
+					log.Printf("[MANUAL MOVE]    → Bin will be RETIRED")
+				} else if *moveRequest.DisposalAction == "store" {
+					newStatus = "in_storage"
+					log.Printf("[MANUAL MOVE]    → Bin will be IN STORAGE")
+				}
+			}
+
+			_, err = db.Exec(`
+				UPDATE bins
+				SET status = $1, updated_at = $2
+				WHERE id = $3
+			`, newStatus, now, moveRequest.BinID)
+			if err != nil {
+				log.Printf("Error updating bin status: %v", err)
+				http.Error(w, "Failed to update bin status", http.StatusInternalServerError)
+				return
+			}
+
+			log.Printf("[MANUAL MOVE] ✅ Bin status updated to %s", newStatus)
+
+		} else if moveRequest.MoveType == "relocation" {
+			// Update bin location to new coordinates
+			log.Printf("[MANUAL MOVE]    → Relocating bin to new address")
+
+			// Parse address into separate fields
+			var fromStreet, fromCity, fromZip, toStreet, toCity, toZip *string
+
+			// Parse original address
+			if moveRequest.OriginalAddress != "" {
+				parts := strings.Split(moveRequest.OriginalAddress, ", ")
+				if len(parts) >= 2 {
+					street := parts[0]
+					fromStreet = &street
+					cityZip := strings.TrimSpace(parts[1])
+					cityZipParts := strings.Split(cityZip, " ")
+					if len(cityZipParts) >= 2 {
+						city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+						zip := cityZipParts[len(cityZipParts)-1]
+						fromCity = &city
+						fromZip = &zip
+					}
+				}
+			}
+
+			// Parse new address
+			if moveRequest.NewAddress != nil {
+				parts := strings.Split(*moveRequest.NewAddress, ", ")
+				if len(parts) >= 2 {
+					street := parts[0]
+					toStreet = &street
+					cityZip := strings.TrimSpace(parts[1])
+					cityZipParts := strings.Split(cityZip, " ")
+					if len(cityZipParts) >= 2 {
+						city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+						zip := cityZipParts[len(cityZipParts)-1]
+						toCity = &city
+						toZip = &zip
+					}
+				}
+			}
+
+			_, err = db.Exec(`
+				UPDATE bins
+				SET latitude = $1,
+				    longitude = $2,
+				    current_street = $3,
+				    status = 'active',
+				    updated_at = $4
+				WHERE id = $5
+			`, moveRequest.NewLatitude,
+				moveRequest.NewLongitude,
+				moveRequest.NewAddress,
+				now,
+				moveRequest.BinID)
+			if err != nil {
+				log.Printf("Error relocating bin: %v", err)
+				http.Error(w, "Failed to relocate bin", http.StatusInternalServerError)
+				return
+			}
+
+			// Record the move in moves table with manual flag
+			_, err = db.Exec(`
+				INSERT INTO moves (
+					bin_id, moved_from, moved_to, moved_on,
+					move_type, from_street, from_city, from_zip,
+					to_street, to_city, to_zip,
+					move_request_id, completed_by_user_id
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			`, moveRequest.BinID,
+				moveRequest.OriginalAddress,
+				*moveRequest.NewAddress,
+				now,
+				"manual", // move_type
+				fromStreet, fromCity, fromZip,
+				toStreet, toCity, toZip,
+				moveRequest.ID,
+				userID)
+			if err != nil {
+				log.Printf("[MANUAL MOVE] ⚠️  Failed to record move: %v", err)
+				// Don't fail - move is already completed
+			} else {
+				log.Printf("[MANUAL MOVE] ✅ Move recorded in history")
+			}
+
+			log.Printf("[MANUAL MOVE] ✅ Bin relocated to %s", *moveRequest.NewAddress)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Move completed successfully",
 		})
 	}
 }

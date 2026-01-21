@@ -3,12 +3,12 @@ package models
 import "time"
 
 type BinMoveRequest struct {
-	ID               string   `json:"id" db:"id"`
-	BinID            string   `json:"bin_id" db:"bin_id"`
-	ScheduledDate    int64    `json:"scheduled_date" db:"scheduled_date"` // Unix timestamp
-	Urgency          string   `json:"urgency" db:"urgency"` // 'urgent' or 'scheduled'
-	RequestedBy      string   `json:"requested_by" db:"requested_by"` // User ID
-	Status           string   `json:"status" db:"status"` // 'pending', 'in_progress', 'completed', 'cancelled'
+	ID            string `json:"id" db:"id"`
+	BinID         string `json:"bin_id" db:"bin_id"`
+	ScheduledDate int64  `json:"scheduled_date" db:"scheduled_date"` // Unix timestamp
+	Urgency       string `json:"urgency" db:"urgency"`               // 'urgent' or 'scheduled'
+	RequestedBy   string `json:"requested_by" db:"requested_by"`     // User ID
+	Status        string `json:"status" db:"status"`                 // 'pending', 'in_progress', 'completed', 'cancelled'
 
 	// Original location
 	OriginalLatitude  float64 `json:"original_latitude" db:"original_latitude"`
@@ -21,13 +21,15 @@ type BinMoveRequest struct {
 	NewAddress   *string  `json:"new_address,omitempty" db:"new_address"`
 
 	// Move metadata
-	MoveType        string  `json:"move_type" db:"move_type"` // 'pickup_only' or 'relocation'
-	DisposalAction  *string `json:"disposal_action,omitempty" db:"disposal_action"` // 'retire' or 'store'
-	Reason          *string `json:"reason,omitempty" db:"reason"`
-	Notes           *string `json:"notes,omitempty" db:"notes"`
+	MoveType       string  `json:"move_type" db:"move_type"`                       // 'pickup_only' or 'relocation'
+	DisposalAction *string `json:"disposal_action,omitempty" db:"disposal_action"` // 'retire' or 'store'
+	Reason         *string `json:"reason,omitempty" db:"reason"`
+	Notes          *string `json:"notes,omitempty" db:"notes"`
 
-	// Assigned shift
+	// Assignment (shift-based or manual)
+	AssignmentType  string  `json:"assignment_type" db:"assignment_type"` // 'shift' or 'manual'
 	AssignedShiftID *string `json:"assigned_shift_id,omitempty" db:"assigned_shift_id"`
+	AssignedUserID  *string `json:"assigned_user_id,omitempty" db:"assigned_user_id"` // For manual moves
 	CompletedAt     *int64  `json:"completed_at,omitempty" db:"completed_at"`
 
 	// Timestamps
@@ -37,13 +39,13 @@ type BinMoveRequest struct {
 
 // BinMoveRequestResponse includes ISO formatted timestamps for client
 type BinMoveRequestResponse struct {
-	ID               string   `json:"id"`
-	BinID            string   `json:"bin_id"`
-	ScheduledDate    int64    `json:"scheduled_date"` // Unix timestamp (for frontend date math)
-	ScheduledDateIso string   `json:"scheduled_date_iso"`
-	Urgency          string   `json:"urgency"`
-	RequestedBy      string   `json:"requested_by"`
-	Status           string   `json:"status"`
+	ID               string `json:"id"`
+	BinID            string `json:"bin_id"`
+	ScheduledDate    int64  `json:"scheduled_date"` // Unix timestamp (for frontend date math)
+	ScheduledDateIso string `json:"scheduled_date_iso"`
+	Urgency          string `json:"urgency"`
+	RequestedBy      string `json:"requested_by"`
+	Status           string `json:"status"`
 
 	// Flattened bin fields (for easy table display)
 	BinNumber     int    `json:"bin_number"`
@@ -65,14 +67,17 @@ type BinMoveRequestResponse struct {
 	NewAddress   *string  `json:"new_address,omitempty"`
 
 	// Move metadata
-	MoveType        string  `json:"move_type"`
-	DisposalAction  *string `json:"disposal_action,omitempty"`
-	Reason          *string  `json:"reason,omitempty"`
-	Notes           *string  `json:"notes,omitempty"`
+	MoveType       string  `json:"move_type"`
+	DisposalAction *string `json:"disposal_action,omitempty"`
+	Reason         *string `json:"reason,omitempty"`
+	Notes          *string `json:"notes,omitempty"`
 
-	// Assigned shift
+	// Assignment (shift-based or manual)
+	AssignmentType     string  `json:"assignment_type"`
 	AssignedShiftID    *string `json:"assigned_shift_id,omitempty"`
-	AssignedDriverName *string `json:"assigned_driver_name,omitempty"` // Driver's full name (populated when assigned)
+	AssignedDriverName *string `json:"assigned_driver_name,omitempty"` // Driver's full name (populated when assigned to shift)
+	AssignedUserID     *string `json:"assigned_user_id,omitempty"`
+	AssignedUserName   *string `json:"assigned_user_name,omitempty"` // User's full name (populated when assigned manually)
 	CompletedAtIso     *string `json:"completed_at_iso,omitempty"`
 
 	// Timestamps
@@ -85,8 +90,8 @@ type BinMoveRequestResponse struct {
 
 // CreateBinMoveRequest is the request body for POST /api/manager/bins/schedule-move
 type CreateBinMoveRequest struct {
-	BinID         string   `json:"bin_id" binding:"required"`
-	ScheduledDate int64    `json:"scheduled_date" binding:"required"` // Unix timestamp
+	BinID         string `json:"bin_id" binding:"required"`
+	ScheduledDate int64  `json:"scheduled_date" binding:"required"` // Unix timestamp
 	// Urgency is now auto-calculated on backend, not required from frontend
 
 	// New location (optional for pickup-only)
@@ -99,10 +104,10 @@ type CreateBinMoveRequest struct {
 	NewZip       *string  `json:"new_zip,omitempty"`
 
 	// Move metadata
-	MoveType        string  `json:"move_type" binding:"required"` // 'pickup_only' or 'relocation'
-	DisposalAction  *string `json:"disposal_action,omitempty"` // Required if move_type is 'pickup_only'
-	Reason          *string `json:"reason,omitempty"`
-	Notes           *string `json:"notes,omitempty"`
+	MoveType       string  `json:"move_type" binding:"required"` // 'pickup_only' or 'relocation'
+	DisposalAction *string `json:"disposal_action,omitempty"`    // Required if move_type is 'pickup_only'
+	Reason         *string `json:"reason,omitempty"`
+	Notes          *string `json:"notes,omitempty"`
 }
 
 // ToBinMoveRequestResponse converts BinMoveRequest to BinMoveRequestResponse
@@ -125,7 +130,9 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 		DisposalAction:    bmr.DisposalAction,
 		Reason:            bmr.Reason,
 		Notes:             bmr.Notes,
+		AssignmentType:    bmr.AssignmentType,
 		AssignedShiftID:   bmr.AssignedShiftID,
+		AssignedUserID:    bmr.AssignedUserID,
 		CreatedAtIso:      time.Unix(bmr.CreatedAt, 0).Format(time.RFC3339),
 		UpdatedAtIso:      time.Unix(bmr.UpdatedAt, 0).Format(time.RFC3339),
 	}
