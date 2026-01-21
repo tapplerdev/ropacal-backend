@@ -133,3 +133,40 @@ func CreateUser(db *sqlx.DB) http.HandlerFunc {
 		})
 	}
 }
+
+// GetAllUsers returns all users (drivers, managers, admins)
+// GET /api/users
+func GetAllUsers(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Println("📤 REQUEST: GET /api/users - Fetch all users")
+
+		// Fetch all users
+		var users []models.User
+		query := `
+			SELECT id, email, name, role, created_at, updated_at
+			FROM users
+			ORDER BY name ASC
+		`
+		err := db.Select(&users, query)
+		if err != nil {
+			log.Printf("❌ Database error: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch users")
+			return
+		}
+
+		// Convert to user responses (without passwords)
+		userResponses := make([]models.UserResponse, len(users))
+		for i, user := range users {
+			userResponses[i] = user.ToUserResponse()
+		}
+
+		log.Printf("✅ Fetched %d users", len(userResponses))
+
+		// Return users
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"users":   userResponses,
+		})
+	}
+}

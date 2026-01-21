@@ -279,6 +279,7 @@ func main() {
 			r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
 
 			// User management
+			r.Get("/users", handlers.GetAllUsers(db))
 			r.Post("/users", handlers.CreateUser(db))
 
 			// No-Go Zone management (admin only)
