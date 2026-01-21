@@ -10,6 +10,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -94,7 +95,7 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 
 // CreatePotentialLocation creates a new potential location request
 // POST /api/potential-locations (requires authentication)
-func CreatePotentialLocation(db *sqlx.DB) http.HandlerFunc {
+func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req models.CreatePotentialLocationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -167,6 +168,13 @@ func CreatePotentialLocation(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ [CREATE-POTENTIAL-LOCATION] Created location (ID: %s) at %s by %s", id, address, userName)
 
+		// Broadcast to all managers
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "potential_location_created",
+			"data": created.ToPotentialLocationResponse(),
+		})
+		log.Printf("📤 [CREATE-POTENTIAL-LOCATION] WebSocket event broadcasted to managers")
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(created.ToPotentialLocationResponse())
@@ -175,7 +183,7 @@ func CreatePotentialLocation(db *sqlx.DB) http.HandlerFunc {
 
 // DeletePotentialLocation removes a potential location (hard delete)
 // DELETE /api/potential-locations/:id (requires admin role)
-func DeletePotentialLocation(db *sqlx.DB) http.HandlerFunc {
+func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -207,13 +215,22 @@ func DeletePotentialLocation(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Deleted location (ID: %s)", id)
 
+		// Broadcast to all managers
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "potential_location_deleted",
+			"data": map[string]interface{}{
+				"location_id": id,
+			},
+		})
+		log.Printf("📤 [DELETE-POTENTIAL-LOCATION] WebSocket event broadcasted to managers")
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
 // ConvertPotentialLocationToBin converts a potential location to an active bin
 // POST /api/potential-locations/:id/convert (requires admin role)
-func ConvertPotentialLocationToBin(db *sqlx.DB) http.HandlerFunc {
+func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -341,6 +358,16 @@ func ConvertPotentialLocationToBin(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Converted location (ID: %s) to Bin #%d (ID: %s)", id, binNumber, binID)
+
+		// Broadcast to all managers (both location removed and bin created)
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "potential_location_converted",
+			"data": map[string]interface{}{
+				"location_id": id,
+				"bin":         createdBin.ToBinResponse(),
+			},
+		})
+		log.Printf("📤 [CONVERT-POTENTIAL-LOCATION] WebSocket event broadcasted to managers")
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

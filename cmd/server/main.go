@@ -167,9 +167,9 @@ func main() {
 		// Bins endpoints
 		r.Get("/bins", handlers.GetBins(db))
 		r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering
-		r.Post("/bins", handlers.CreateBin(db))
-		r.Patch("/bins/{id}", handlers.UpdateBin(db))
-		r.Delete("/bins/{id}", handlers.DeleteBin(db))
+		r.Post("/bins", handlers.CreateBin(db, wsHub))
+		r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub))
+		r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
 		r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
 
 		// Checks endpoints
@@ -229,7 +229,7 @@ func main() {
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
 
 			// Potential Locations (drivers can create requests)
-			r.Post("/potential-locations", handlers.CreatePotentialLocation(db))
+			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub))
 
 			// Incident reporting (drivers can report both check-based and field observations)
 			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteBin)
@@ -268,8 +268,8 @@ func main() {
 			r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
 
 			// Potential Locations management (managers can delete and convert)
-			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db))
-			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db))
+			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, wsHub))
+			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub))
 
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db))

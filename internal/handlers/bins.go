@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -56,7 +57,7 @@ func GetBins(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func CreateBin(db *sqlx.DB) http.HandlerFunc {
+func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req models.CreateBinRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -140,13 +141,20 @@ func CreateBin(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ [CREATE-BIN] Created bin #%d (ID: %s) at %s, %s", binNumber, id, req.CurrentStreet, req.City)
 
+		// Broadcast to all managers
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "bin_created",
+			"data": created.ToBinResponse(),
+		})
+		log.Printf("📤 [CREATE-BIN] WebSocket event broadcasted to managers")
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(created.ToBinResponse())
 	}
 }
 
-func UpdateBin(db *sqlx.DB) http.HandlerFunc {
+func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -287,12 +295,19 @@ func UpdateBin(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// Broadcast to all managers
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "bin_updated",
+			"data": updated.ToBinResponse(),
+		})
+		log.Printf("📤 [UPDATE-BIN] WebSocket event broadcasted to managers")
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(updated.ToBinResponse())
 	}
 }
 
-func DeleteBin(db *sqlx.DB) http.HandlerFunc {
+func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -311,6 +326,15 @@ func DeleteBin(db *sqlx.DB) http.HandlerFunc {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
+
+		// Broadcast to all managers
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "bin_deleted",
+			"data": map[string]interface{}{
+				"bin_id": id,
+			},
+		})
+		log.Printf("📤 [DELETE-BIN] WebSocket event broadcasted to managers")
 
 		w.WriteHeader(http.StatusNoContent)
 	}
