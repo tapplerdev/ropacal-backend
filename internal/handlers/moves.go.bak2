@@ -1,0 +1,153 @@
+package handlers
+
+import (
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"time"
+
+	"ropacal-backend/internal/models"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/jmoiron/sqlx"
+)
+
+func GetMoves(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "id")
+		if binID == "" {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		var moves []models.Move
+
+
+
+
+
+		`, binID)
+		if err != nil {
+			http.Error(w, "Failed to fetch moves", http.StatusInternalServerError)
+			return
+		}
+
+		// Convert to response format
+		responses := make([]models.MoveResponse, len(moves))
+		for i, move := range moves {
+			responses[i] = move.ToMoveResponse()
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(responses)
+	}
+}
+
+func CreateMove(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "id")
+		if binID == "" {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		var req models.CreateMoveRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Get existing bin
+		var bin models.Bin
+		err := db.Get(&bin, "SELECT * FROM bins WHERE id = $1", binID)
+		if err == sql.ErrNoRows {
+			http.Error(w, "Bin not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+
+		movedFrom := bin.CurrentStreet + ", " + bin.City + " " + bin.Zip
+		movedTo := req.ToStreet + ", " + req.ToCity + " " + req.ToZip
+
+		// Determine move time
+		movedOn := time.Now()
+		if req.MovedOnIso != nil {
+			if parsed, err := time.Parse(time.RFC3339, *req.MovedOnIso); err == nil {
+				movedOn = parsed
+			}
+		}
+
+		// Check if address changed
+		norm := func(s string) string {
+			return strings.ToLower(strings.TrimSpace(strings.Join(strings.Fields(s), " ")))
+		}
+		addrChanged := norm(bin.CurrentStreet) != norm(req.ToStreet) ||
+			norm(bin.City) != norm(req.ToCity) ||
+			norm(bin.Zip) != norm(req.ToZip)
+
+		// Start transaction
+		tx, err := db.Beginx()
+		if err != nil {
+			http.Error(w, "Failed to begin transaction", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+
+		// Insert move record
+		_, err = tx.Exec(`
+			INSERT INTO moves (bin_id, moved_from, moved_to, moved_on)
+			VALUES ($1, $2, $3, $4)
+		`, binID, movedFrom, movedTo, movedOn.Unix())
+		if err != nil {
+			http.Error(w, "Failed to create move", http.StatusInternalServerError)
+			return
+		}
+
+		// Update bin
+		query := `
+			UPDATE bins
+			SET current_street = $1, city = $2, zip = $3,
+			    last_moved = $4, move_requested = 0, updated_at = $5`
+		args := []interface{}{
+			req.ToStreet, req.ToCity, req.ToZip,
+			movedOn.Unix(), time.Now().Unix(),
+		}
+
+		if addrChanged {
+			query += `, latitude = NULL, longitude = NULL`
+		}
+
+		query += ` WHERE id = $6`
+		args = append(args, binID)
+
+		_, err = tx.Exec(query, args...)
+		if err != nil {
+			http.Error(w, "Failed to update bin", http.StatusInternalServerError)
+			return
+		}
+
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
+			return
+		}
+
+		// Fetch updated bin
+		var updated models.Bin
+		err = db.Get(&updated, "SELECT * FROM bins WHERE id = $1", binID)
+		if err != nil {
+			http.Error(w, "Failed to fetch updated bin", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":  true,
+			"bin": updated.ToBinResponse(),
+		})
+	}
+}

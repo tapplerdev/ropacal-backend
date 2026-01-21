@@ -111,6 +111,12 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		// Generate ID (now already declared above for urgency calculation)
 		id := uuid.New().String()
 
+		// Determine status based on whether shift is assigned
+		status := "pending"
+		if req.ShiftID != nil {
+			status = "assigned" // Immediately assigned to shift
+		}
+
 		// Create bin move request
 		moveRequest := models.BinMoveRequest{
 			ID:                id,
@@ -118,7 +124,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			ScheduledDate:     req.ScheduledDate,
 			Urgency:           urgency, // Auto-calculated urgency
 			RequestedBy:       userID,
-			Status:            "pending",
+			Status:            status,
 			OriginalLatitude:  *bin.Latitude,
 			OriginalLongitude: *bin.Longitude,
 			OriginalAddress:   originalAddress,
@@ -129,7 +135,8 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			DisposalAction:    req.DisposalAction,
 			Reason:            req.Reason,
 			Notes:             req.Notes,
-			AssignmentType:    "shift", // Default to shift-based assignment
+			AssignmentType:    "shift",   // Default to shift-based assignment
+			AssignedShiftID:   req.ShiftID, // Assign to shift if provided
 			CreatedAt:         now,
 			UpdatedAt:         now,
 		}
@@ -141,15 +148,17 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 				original_latitude, original_longitude, original_address,
 				new_latitude, new_longitude, new_address,
 				move_type, disposal_action, reason, notes,
+				assignment_type, assigned_shift_id,
 				created_at, updated_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		`,
 			moveRequest.ID, moveRequest.BinID, moveRequest.ScheduledDate,
 			moveRequest.Urgency, moveRequest.RequestedBy, moveRequest.Status,
 			moveRequest.OriginalLatitude, moveRequest.OriginalLongitude, moveRequest.OriginalAddress,
 			moveRequest.NewLatitude, moveRequest.NewLongitude, moveRequest.NewAddress,
 			moveRequest.MoveType, moveRequest.DisposalAction, moveRequest.Reason, moveRequest.Notes,
+			moveRequest.AssignmentType, moveRequest.AssignedShiftID,
 			moveRequest.CreatedAt, moveRequest.UpdatedAt,
 		)
 		if err != nil {

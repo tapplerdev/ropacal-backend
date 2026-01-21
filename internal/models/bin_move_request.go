@@ -108,6 +108,9 @@ type CreateBinMoveRequest struct {
 	DisposalAction *string `json:"disposal_action,omitempty"`    // Required if move_type is 'pickup_only'
 	Reason         *string `json:"reason,omitempty"`
 	Notes          *string `json:"notes,omitempty"`
+
+	// Assignment (optional - if provided, assigns to shift immediately)
+	ShiftID *string `json:"shift_id,omitempty"`
 }
 
 // ToBinMoveRequestResponse converts BinMoveRequest to BinMoveRequestResponse
