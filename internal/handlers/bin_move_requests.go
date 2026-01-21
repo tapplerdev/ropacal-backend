@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/websocket"
@@ -74,11 +75,12 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 
 		// Get requesting user ID from context (set by Auth middleware)
-		userID, ok := r.Context().Value("user_id").(string)
-		if !ok || userID == "" {
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
 			http.Error(w, "User not authenticated", http.StatusUnauthorized)
 			return
 		}
+		userID := userClaims.UserID
 
 		// Fetch bin to get current location
 		var bin models.Bin
@@ -181,6 +183,29 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			Longitude:     bin.Longitude,
 			Status:        bin.Status,
 		}
+		// Flatten bin fields for easy table display
+		response.BinNumber = bin.BinNumber
+		response.CurrentStreet = bin.CurrentStreet
+		response.City = bin.City
+		response.Zip = bin.Zip
+
+		// Parse new address into separate fields if available
+		if moveRequest.NewAddress != nil {
+			// Split "street, city zip" format
+			parts := strings.Split(*moveRequest.NewAddress, ", ")
+			if len(parts) >= 2 {
+				street := parts[0]
+				cityZip := strings.TrimSpace(parts[1])
+				cityZipParts := strings.Split(cityZip, " ")
+				if len(cityZipParts) >= 2 {
+					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+					zip := cityZipParts[len(cityZipParts)-1]
+					response.NewStreet = &street
+					response.NewCity = &city
+					response.NewZip = &zip
+				}
+			}
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -199,7 +224,9 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 
 		var req struct {
-			ShiftID *string `json:"shift_id"` // Optional - auto-find active shift if nil
+			ShiftID           *string `json:"shift_id"`              // Optional - auto-find active shift if nil
+			InsertAfterBinID  *string `json:"insert_after_bin_id"`   // For active shifts - insert after specific bin
+			InsertPosition    *string `json:"insert_position"`       // For future shifts - 'start' or 'end'
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 
@@ -218,9 +245,9 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			return
 		}
 
-		// Check if already assigned
-		if moveRequest.Status != "pending" {
-			http.Error(w, fmt.Sprintf("Move request already %s", moveRequest.Status), http.StatusBadRequest)
+		// Check if can be assigned (only pending, assigned, or in_progress moves can be reassigned)
+		if moveRequest.Status != "pending" && moveRequest.Status != "assigned" && moveRequest.Status != "in_progress" {
+			http.Error(w, fmt.Sprintf("Cannot reassign move request with status: %s", moveRequest.Status), http.StatusBadRequest)
 			return
 		}
 
@@ -233,7 +260,7 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 
 		// Call the assignment logic
-		err = assignMoveToShift(db, wsHub, fcmService, moveRequest, bin, req.ShiftID)
+		err = assignMoveToShift(db, wsHub, fcmService, moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition)
 		if err != nil {
 			log.Printf("Error assigning move to shift: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -247,8 +274,8 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	}
 }
 
-// assignMoveToShift inserts move as next waypoint in shift and re-optimizes route
-func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string) error {
+// assignMoveToShift inserts move at specified position in shift and re-optimizes route
+func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string, insertAfterBinID *string, insertPosition *string) error {
 	log.Printf("🚚 ASSIGN MOVE: Assigning move request for bin #%d to shift", bin.BinNumber)
 
 	// 1. Find shift (use provided ID or auto-find active shift)
@@ -304,46 +331,100 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		return fmt.Errorf("failed to fetch shift bins: %w", err)
 	}
 
-	// Find first uncompleted bin index
-	currentIndex := -1
-	for i, sb := range shiftBins {
-		if sb.IsCompleted == 0 {
-			currentIndex = i
-			break
+	// Determine where to insert the bin based on shift status and parameters
+	var insertSequenceOrder int
+	var shiftAfterSequence int
+
+	now := time.Now().Unix()
+	isActiveShift := activeShift.Status == "active"
+	isFutureShift := activeShift.Status == "not_started"
+
+	// CASE 1: Active shift with specific insertAfterBinID
+	if isActiveShift && insertAfterBinID != nil && *insertAfterBinID != "" {
+		log.Printf("   Inserting after specific bin ID: %s", *insertAfterBinID)
+		// Find the specified bin in the route
+		targetIndex := -1
+		for i, sb := range shiftBins {
+			if sb.BinID == *insertAfterBinID {
+				targetIndex = i
+				break
+			}
+		}
+
+		if targetIndex == -1 {
+			return fmt.Errorf("specified bin not found in shift route: %s", *insertAfterBinID)
+		}
+
+		insertSequenceOrder = shiftBins[targetIndex].SequenceOrder + 1
+		shiftAfterSequence = shiftBins[targetIndex].SequenceOrder
+		log.Printf("   Inserting after bin #%d at sequence %d", shiftBins[targetIndex].BinNumber, insertSequenceOrder)
+	} else if isFutureShift && insertPosition != nil {
+		// CASE 2: Future shift with insertPosition ('start' or 'end')
+		if *insertPosition == "start" {
+			log.Printf("   Inserting at START of future shift")
+			insertSequenceOrder = 1
+			shiftAfterSequence = 0
+		} else { // 'end'
+			log.Printf("   Inserting at END of future shift")
+			if len(shiftBins) > 0 {
+				lastBin := shiftBins[len(shiftBins)-1]
+				insertSequenceOrder = lastBin.SequenceOrder + 1
+				shiftAfterSequence = lastBin.SequenceOrder
+			} else {
+				insertSequenceOrder = 1
+				shiftAfterSequence = 0
+			}
+		}
+	} else {
+		// CASE 3: Default behavior - insert as "next waypoint" for active shifts
+		currentIndex := -1
+		for i, sb := range shiftBins {
+			if sb.IsCompleted == 0 {
+				currentIndex = i
+				break
+			}
+		}
+
+		if currentIndex == -1 {
+			log.Printf("⚠️  All bins completed - inserting at end")
+			if len(shiftBins) > 0 {
+				lastBin := shiftBins[len(shiftBins)-1]
+				insertSequenceOrder = lastBin.SequenceOrder + 1
+				shiftAfterSequence = lastBin.SequenceOrder
+			} else {
+				insertSequenceOrder = 1
+				shiftAfterSequence = 0
+			}
+		} else {
+			log.Printf("   Current position: bin #%d at index %d", shiftBins[currentIndex].BinNumber, currentIndex)
+			log.Printf("   Inserting as next waypoint (index %d)", currentIndex+1)
+			insertSequenceOrder = shiftBins[currentIndex].SequenceOrder + 1
+			shiftAfterSequence = shiftBins[currentIndex].SequenceOrder
 		}
 	}
 
-	if currentIndex == -1 {
-		log.Printf("⚠️  All bins completed - cannot insert urgent move")
-		return nil // All bins done, nothing to do
-	}
-
-	log.Printf("   Current position: bin #%d at index %d", shiftBins[currentIndex].BinNumber, currentIndex)
-	log.Printf("   Inserting urgent move as next waypoint (index %d)", currentIndex+1)
-
-	// 3. Insert move request bin as next waypoint
-	now := time.Now().Unix()
+	// 3. Insert move request bin at determined position
 	tx, err := db.Beginx()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Shift all bins after current position up by 1
+	// Shift all bins after insert position up by 1
 	_, err = tx.Exec(`
 		UPDATE shift_bins
 		SET sequence_order = sequence_order + 1
-		WHERE shift_id = $1 AND sequence_order > $2
-	`, activeShift.ID, currentIndex+1)
+		WHERE shift_id = $1 AND sequence_order >= $2
+	`, activeShift.ID, insertSequenceOrder)
 	if err != nil {
 		return fmt.Errorf("failed to shift sequence order: %w", err)
 	}
 
-	// Insert urgent move bin at next position
+	// Insert move bin at determined position
 	_, err = tx.Exec(`
 		INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at)
 		VALUES ($1, $2, $3, 0, $4)
-	`, activeShift.ID, moveRequest.BinID, currentIndex+2, now)
+	`, activeShift.ID, moveRequest.BinID, insertSequenceOrder, now)
 	if err != nil {
 		return fmt.Errorf("failed to insert urgent move bin: %w", err)
 	}
@@ -351,7 +432,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// Update move request to assign it to this shift
 	_, err = tx.Exec(`
 		UPDATE bin_move_requests
-		SET assigned_shift_id = $1, status = 'in_progress', updated_at = $2
+		SET assigned_shift_id = $1, status = 'assigned', updated_at = $2
 		WHERE id = $3
 	`, activeShift.ID, now, moveRequest.ID)
 	if err != nil {
@@ -368,60 +449,62 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		return fmt.Errorf("failed to update shift: %w", err)
 	}
 
-	// 4. Re-optimize remaining route (bins after the urgent move)
-	var remainingBins []models.ShiftBinWithDetails
-	err = tx.Select(&remainingBins, `
-		SELECT rb.id, rb.shift_id, rb.bin_id, rb.sequence_order,
-		       b.bin_number, b.current_street, b.city, b.zip, b.fill_percentage,
-		       b.latitude, b.longitude
-		FROM shift_bins rb
-		JOIN bins b ON rb.bin_id = b.id
-		WHERE rb.shift_id = $1 AND rb.sequence_order > $2 AND rb.is_completed = 0
-		ORDER BY rb.sequence_order ASC
-	`, activeShift.ID, currentIndex+2)
-	if err != nil {
-		return fmt.Errorf("failed to fetch remaining bins: %w", err)
-	}
+	// 4. Re-optimize remaining route (bins after the inserted move) - only for active shifts
+	if isActiveShift {
+		var remainingBins []models.ShiftBinWithDetails
+		err = tx.Select(&remainingBins, `
+			SELECT rb.id, rb.shift_id, rb.bin_id, rb.sequence_order,
+			       b.bin_number, b.current_street, b.city, b.zip, b.fill_percentage,
+			       b.latitude, b.longitude
+			FROM shift_bins rb
+			JOIN bins b ON rb.bin_id = b.id
+			WHERE rb.shift_id = $1 AND rb.sequence_order > $2 AND rb.is_completed = 0
+			ORDER BY rb.sequence_order ASC
+		`, activeShift.ID, insertSequenceOrder)
+		if err != nil {
+			return fmt.Errorf("failed to fetch remaining bins: %w", err)
+		}
 
-	if len(remainingBins) > 0 {
-		// Convert to BinWithPriority for optimizer
-		binsToOptimize := make([]services.BinWithPriority, len(remainingBins))
-		for i, sb := range remainingBins {
-			binsToOptimize[i] = services.BinWithPriority{
-				ID:             sb.BinID,
-				Latitude:       sb.Latitude,
-				Longitude:      sb.Longitude,
-				FillPercentage: sb.FillPercentage,
-				CurrentStreet:  sb.CurrentStreet,
+		if len(remainingBins) > 0 {
+			// Convert to BinWithPriority for optimizer
+			binsToOptimize := make([]services.BinWithPriority, len(remainingBins))
+			for i, sb := range remainingBins {
+				binsToOptimize[i] = services.BinWithPriority{
+					ID:             sb.BinID,
+					Latitude:       sb.Latitude,
+					Longitude:      sb.Longitude,
+					FillPercentage: sb.FillPercentage,
+					CurrentStreet:  sb.CurrentStreet,
+				}
 			}
-		}
 
-		// Use urgent move bin as start location for re-optimization
-		urgentMoveLocation := services.Location{
-			Latitude:  moveRequest.OriginalLatitude,
-			Longitude: moveRequest.OriginalLongitude,
-		}
-
-		// Re-optimize remaining bins
-		optimizer := services.NewRouteOptimizer()
-		optimizedBins := optimizer.OptimizeRoute(binsToOptimize, urgentMoveLocation)
-
-		log.Printf("   Re-optimizing %d remaining bins after urgent move", len(optimizedBins))
-
-		// Update sequence order for optimized bins
-		for i, optimizedBin := range optimizedBins {
-			newSequence := currentIndex + 3 + i // After current + urgent move
-			_, err = tx.Exec(`
-				UPDATE shift_bins
-				SET sequence_order = $1
-				WHERE shift_id = $2 AND bin_id = $3
-			`, newSequence, activeShift.ID, optimizedBin.ID)
-			if err != nil {
-				return fmt.Errorf("failed to update sequence order: %w", err)
+			// Use inserted move bin as start location for re-optimization
+			insertedMoveLocation := services.Location{
+				Latitude:  moveRequest.OriginalLatitude,
+				Longitude: moveRequest.OriginalLongitude,
 			}
-		}
 
-		log.Printf("   ✅ Route re-optimized successfully")
+			// Re-optimize remaining bins
+			optimizer := services.NewRouteOptimizer()
+			optimizedBins := optimizer.OptimizeRoute(binsToOptimize, insertedMoveLocation)
+
+			log.Printf("   Re-optimizing %d remaining bins after inserted move", len(optimizedBins))
+
+			// Update sequence order for optimized bins
+			for i, optimizedBin := range optimizedBins {
+				newSequence := insertSequenceOrder + 1 + i // After inserted move
+				_, err = tx.Exec(`
+					UPDATE shift_bins
+					SET sequence_order = $1
+					WHERE shift_id = $2 AND bin_id = $3
+				`, newSequence, activeShift.ID, optimizedBin.ID)
+				if err != nil {
+					return fmt.Errorf("failed to update sequence order: %w", err)
+				}
+			}
+
+			log.Printf("   ✅ Route re-optimized successfully")
+		}
 	}
 
 	// Commit transaction
@@ -526,6 +609,29 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		if err == nil {
 			binResp := bin.ToBinResponse()
 			response.Bin = &binResp
+			// Flatten bin fields for easy table display
+			response.BinNumber = bin.BinNumber
+			response.CurrentStreet = bin.CurrentStreet
+			response.City = bin.City
+			response.Zip = bin.Zip
+		}
+
+		// Parse new address into separate fields if available
+		if moveRequest.NewAddress != nil {
+			// Split "street, city zip" format
+			parts := strings.Split(*moveRequest.NewAddress, ", ")
+			if len(parts) >= 2 {
+				street := parts[0]
+				cityZip := strings.TrimSpace(parts[1])
+				cityZipParts := strings.Split(cityZip, " ")
+				if len(cityZipParts) >= 2 {
+					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+					zip := cityZipParts[len(cityZipParts)-1]
+					response.NewStreet = &street
+					response.NewCity = &city
+					response.NewZip = &zip
+				}
+			}
 		}
 
 		// Fetch assigned driver name if assigned to a shift
@@ -605,6 +711,29 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			if err == nil {
 				binResp := bin.ToBinResponse()
 				responses[i].Bin = &binResp
+				// Flatten bin fields for easy table display
+				responses[i].BinNumber = bin.BinNumber
+				responses[i].CurrentStreet = bin.CurrentStreet
+				responses[i].City = bin.City
+				responses[i].Zip = bin.Zip
+			}
+
+			// Parse new address into separate fields if available
+			if mr.NewAddress != nil {
+				// Split "street, city zip" format
+				parts := strings.Split(*mr.NewAddress, ", ")
+				if len(parts) >= 2 {
+					street := parts[0]
+					cityZip := strings.TrimSpace(parts[1])
+					cityZipParts := strings.Split(cityZip, " ")
+					if len(cityZipParts) >= 2 {
+						city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+						zip := cityZipParts[len(cityZipParts)-1]
+						responses[i].NewStreet = &street
+						responses[i].NewCity = &city
+						responses[i].NewZip = &zip
+					}
+				}
 			}
 
 			// Fetch assigned driver name if assigned to a shift
@@ -763,6 +892,29 @@ func UpdateBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		if err == nil {
 			binResp := bin.ToBinResponse()
 			response.Bin = &binResp
+			// Flatten bin fields for easy table display
+			response.BinNumber = bin.BinNumber
+			response.CurrentStreet = bin.CurrentStreet
+			response.City = bin.City
+			response.Zip = bin.Zip
+		}
+
+		// Parse new address into separate fields if available
+		if moveRequest.NewAddress != nil {
+			// Split "street, city zip" format
+			parts := strings.Split(*moveRequest.NewAddress, ", ")
+			if len(parts) >= 2 {
+				street := parts[0]
+				cityZip := strings.TrimSpace(parts[1])
+				cityZipParts := strings.Split(cityZip, " ")
+				if len(cityZipParts) >= 2 {
+					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+					zip := cityZipParts[len(cityZipParts)-1]
+					response.NewStreet = &street
+					response.NewCity = &city
+					response.NewZip = &zip
+				}
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

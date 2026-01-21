@@ -39,10 +39,17 @@ type BinMoveRequest struct {
 type BinMoveRequestResponse struct {
 	ID               string   `json:"id"`
 	BinID            string   `json:"bin_id"`
+	ScheduledDate    int64    `json:"scheduled_date"` // Unix timestamp (for frontend date math)
 	ScheduledDateIso string   `json:"scheduled_date_iso"`
 	Urgency          string   `json:"urgency"`
 	RequestedBy      string   `json:"requested_by"`
 	Status           string   `json:"status"`
+
+	// Flattened bin fields (for easy table display)
+	BinNumber     int    `json:"bin_number"`
+	CurrentStreet string `json:"current_street"`
+	City          string `json:"city"`
+	Zip           string `json:"zip"`
 
 	// Original location
 	OriginalLatitude  float64 `json:"original_latitude"`
@@ -50,6 +57,9 @@ type BinMoveRequestResponse struct {
 	OriginalAddress   string  `json:"original_address"`
 
 	// New location
+	NewStreet    *string  `json:"new_street,omitempty"`
+	NewCity      *string  `json:"new_city,omitempty"`
+	NewZip       *string  `json:"new_zip,omitempty"`
 	NewLatitude  *float64 `json:"new_latitude,omitempty"`
 	NewLongitude *float64 `json:"new_longitude,omitempty"`
 	NewAddress   *string  `json:"new_address,omitempty"`
@@ -57,8 +67,8 @@ type BinMoveRequestResponse struct {
 	// Move metadata
 	MoveType        string  `json:"move_type"`
 	DisposalAction  *string `json:"disposal_action,omitempty"`
-	Reason          *string `json:"reason,omitempty"`
-	Notes           *string `json:"notes,omitempty"`
+	Reason          *string  `json:"reason,omitempty"`
+	Notes           *string  `json:"notes,omitempty"`
 
 	// Assigned shift
 	AssignedShiftID    *string `json:"assigned_shift_id,omitempty"`
@@ -100,6 +110,7 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 	resp := BinMoveRequestResponse{
 		ID:                bmr.ID,
 		BinID:             bmr.BinID,
+		ScheduledDate:     bmr.ScheduledDate, // Include Unix timestamp
 		ScheduledDateIso:  time.Unix(bmr.ScheduledDate, 0).Format(time.RFC3339),
 		Urgency:           bmr.Urgency,
 		RequestedBy:       bmr.RequestedBy,
