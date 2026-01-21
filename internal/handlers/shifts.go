@@ -247,6 +247,22 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
+		// Update all assigned move requests for this shift to in_progress
+		updateMovesQuery := `UPDATE bin_move_requests
+							 SET status = 'in_progress', updated_at = $1
+							 WHERE assigned_shift_id = $2
+							 AND status = 'assigned'`
+		result, err := db.Exec(updateMovesQuery, now, shift.ID)
+		if err != nil {
+			log.Printf("⚠️ Error updating move requests to in_progress: %v", err)
+			// Don't fail the request - continue
+		} else {
+			rowsAffected, _ := result.RowsAffected()
+			if rowsAffected > 0 {
+				log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
+			}
+		}
+
 		// Get updated shift
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
@@ -576,6 +592,39 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("❌ Error ending shift: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to end shift")
 			return
+		}
+
+		// Update incomplete move requests back to pending and clear assignment
+		updateMovesQuery := `UPDATE bin_move_requests
+							 SET status = 'pending',
+							     assigned_shift_id = NULL,
+							     updated_at = $1
+							 WHERE assigned_shift_id = $2
+							 AND status = 'in_progress'`
+		result, err := db.Exec(updateMovesQuery, now, shift.ID)
+		if err != nil {
+			log.Printf("⚠️ Error updating incomplete move requests: %v", err)
+			// Don't fail the request - continue
+		} else {
+			rowsAffected, _ := result.RowsAffected()
+			if rowsAffected > 0 {
+				log.Printf("✅ Updated %d incomplete move request(s) back to pending", rowsAffected)
+			}
+		}
+
+		// Remove incomplete move requests from shift_bins
+		deleteShiftBinsQuery := `DELETE FROM shift_bins
+								 WHERE shift_id = $1
+								 AND is_completed = 0
+								 AND bin_id IN (
+									SELECT bin_id FROM bin_move_requests
+									WHERE assigned_shift_id IS NULL
+									AND status = 'pending'
+								 )`
+		_, err = db.Exec(deleteShiftBinsQuery, shift.ID)
+		if err != nil {
+			log.Printf("⚠️ Error removing incomplete move bins from shift: %v", err)
+			// Don't fail the request - continue
 		}
 
 		// Get updated shift with bins for WebSocket broadcast
