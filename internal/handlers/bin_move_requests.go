@@ -1177,7 +1177,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				}
 
 				// Clear assignment, return to pending
-				updates = append(updates, fmt.Sprintf("assigned_shift_id = NULL, assigned_user_id = NULL, assignment_type = '', status = 'pending'"))
+				updates = append(updates, fmt.Sprintf("assigned_shift_id = NULL, assigned_user_id = NULL, assignment_type = NULL, status = 'pending'"))
 
 			case "insert_after_current":
 				// Keep on route, adjust waypoint order
@@ -1223,7 +1223,53 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				affectedDriverIDs = append(affectedDriverIDs, *req.AssignedUserID)
 			}
 
-			if req.AssignmentType != nil {
+			// Determine final assignment state (after potential updates)
+			finalShiftID := moveRequest.AssignedShiftID
+			finalUserID := moveRequest.AssignedUserID
+			if req.AssignedShiftID != nil {
+				if *req.AssignedShiftID == "" {
+					finalShiftID = nil
+				} else {
+					finalShiftID = req.AssignedShiftID
+				}
+			}
+			if req.AssignedUserID != nil {
+				if *req.AssignedUserID == "" {
+					finalUserID = nil
+				} else {
+					finalUserID = req.AssignedUserID
+				}
+			}
+
+			// If both assignments are being cleared, also clear assignment_type
+			isUnassigning := (finalShiftID == nil || (finalShiftID != nil && *finalShiftID == "")) &&
+				(finalUserID == nil || (finalUserID != nil && *finalUserID == ""))
+
+			if isUnassigning {
+				// Remove from shift_bins if previously assigned to a shift
+				if moveRequest.AssignedShiftID != nil {
+					_, err = tx.Exec(`DELETE FROM shift_bins WHERE shift_id = $1 AND bin_id = $2`,
+						*moveRequest.AssignedShiftID, moveRequest.BinID)
+					if err == nil {
+						_, err = tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
+							now, *moveRequest.AssignedShiftID)
+					}
+					log.Printf("[UNASSIGNMENT] Removed from shift_bins for shift: %s", *moveRequest.AssignedShiftID)
+					assignmentChanged = true
+
+					// Track affected driver for WebSocket notification
+					var driverID string
+					err = db.Get(&driverID, `SELECT driver_id FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID)
+					if err == nil {
+						affectedDriverIDs = append(affectedDriverIDs, driverID)
+					}
+				}
+
+				// Clear assignment_type and set status to pending when unassigning
+				updates = append(updates, "assignment_type = NULL, status = 'pending'")
+				log.Printf("[UNASSIGNMENT] Clearing assignment_type and setting status to pending")
+			} else if req.AssignmentType != nil {
+				// Only update assignment_type if provided and not unassigning
 				updates = append(updates, fmt.Sprintf("assignment_type = $%d", argCount))
 				args = append(args, *req.AssignmentType)
 				argCount++
