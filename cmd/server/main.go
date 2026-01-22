@@ -254,9 +254,9 @@ func main() {
 
 			// Bin move request management
 			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(db, wsHub, fcmService))
-			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))        // List all move requests (register first - exact match)
-			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))    // Get single move request (register after)
-			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db)) // Update move request
+			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))            // List all move requests (register first - exact match)
+			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))        // Get single move request (register after)
+			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db, wsHub)) // Update move request
 			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService))
 			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, wsHub))
 			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(db))
