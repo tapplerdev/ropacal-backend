@@ -434,7 +434,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// Update move request to assign it to this shift
 	_, err = tx.Exec(`
 		UPDATE bin_move_requests
-		SET assigned_shift_id = $1, status = 'assigned', updated_at = $2
+		SET assignment_type = 'shift', assigned_shift_id = $1, status = 'assigned', updated_at = $2
 		WHERE id = $3
 	`, activeShift.ID, now, moveRequest.ID)
 	if err != nil {
@@ -668,7 +668,8 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			       bmr.status, bmr.original_latitude, bmr.original_longitude, bmr.original_address,
 			       bmr.new_latitude, bmr.new_longitude, bmr.new_address,
 			       bmr.move_type, bmr.disposal_action, bmr.reason, bmr.notes,
-			       bmr.assigned_shift_id, bmr.completed_at, bmr.created_at, bmr.updated_at
+		       bmr.assignment_type, bmr.assigned_shift_id, bmr.assigned_user_id,
+		       bmr.completed_at, bmr.created_at, bmr.updated_at
 			FROM bin_move_requests bmr
 			WHERE 1=1
 		`
