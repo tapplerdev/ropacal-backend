@@ -990,10 +990,9 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		// Fetch existing move request with shift details
 		var moveRequest struct {
 			models.BinMoveRequest
-			ShiftStatus      *string `db:"shift_status"`
-			ShiftDriverName  *string `db:"shift_driver_name"`
-			CurrentWaypoint  *int    `db:"current_waypoint"`
-			TotalWaypoints   *int    `db:"total_waypoints"`
+			ShiftStatus     *string `db:"shift_status"`
+			ShiftDriverName *string `db:"shift_driver_name"`
+			TotalWaypoints  *int    `db:"total_waypoints"`
 		}
 
 		err := db.Get(&moveRequest, `
@@ -1001,7 +1000,6 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				mr.*,
 				s.status as shift_status,
 				u.name as shift_driver_name,
-				s.current_waypoint,
 				(SELECT COUNT(*) FROM shift_bins WHERE shift_id = mr.assigned_shift_id) as total_waypoints
 			FROM bin_move_requests mr
 			LEFT JOIN shifts s ON mr.assigned_shift_id = s.id
@@ -1049,16 +1047,11 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				if moveRequest.ShiftDriverName != nil {
 					driverInfo = *moveRequest.ShiftDriverName
 				}
-				waypointInfo := ""
-				if moveRequest.CurrentWaypoint != nil && moveRequest.TotalWaypoints != nil {
-					waypointInfo = fmt.Sprintf(" (Stop %d of %d)", *moveRequest.CurrentWaypoint, *moveRequest.TotalWaypoints)
-				}
-
 				http.Error(w,
-					fmt.Sprintf("⚠️ Driver %s is currently at this location%s. "+
+					fmt.Sprintf("⚠️ Driver %s is currently at this location. "+
 						"You must specify what should happen to this move by providing 'in_progress_action': "+
 						"'remove_from_route', 'insert_after_current', or 'reoptimize_route'.",
-						driverInfo, waypointInfo),
+						driverInfo),
 					http.StatusBadRequest)
 				return
 			}
