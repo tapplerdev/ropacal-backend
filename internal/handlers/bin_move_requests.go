@@ -113,10 +113,11 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 
 		// Determine status and assignment type based on whether shift is assigned
 		status := "pending"
-		assignmentType := "" // Empty/null for unassigned moves
+		var assignmentType *string // nil for unassigned moves
 		if req.ShiftID != nil {
 			status = "assigned" // Immediately assigned to shift
-			assignmentType = "shift"
+			shiftType := "shift"
+			assignmentType = &shiftType
 		}
 
 		// Create bin move request
@@ -1673,7 +1674,7 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Verify this is a manual move
-		if moveRequest.AssignmentType != "manual" {
+		if moveRequest.AssignmentType == nil || *moveRequest.AssignmentType != "manual" {
 			http.Error(w, "This endpoint is only for manual moves. Use shift completion flow for shift-based moves.", http.StatusBadRequest)
 			return
 		}
