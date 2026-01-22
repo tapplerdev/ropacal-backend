@@ -1278,9 +1278,14 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				log.Printf("[UNASSIGNMENT] Clearing assignment_type and setting status to pending")
 			} else if req.AssignmentType != nil {
 				// Only update assignment_type if provided and not unassigning
-				updates = append(updates, fmt.Sprintf("assignment_type = $%d", argCount))
-				args = append(args, *req.AssignmentType)
-				argCount++
+				// Treat empty string as NULL
+				if *req.AssignmentType == "" {
+					updates = append(updates, "assignment_type = NULL")
+				} else {
+					updates = append(updates, fmt.Sprintf("assignment_type = $%d", argCount))
+					args = append(args, *req.AssignmentType)
+					argCount++
+				}
 			}
 		}
 
