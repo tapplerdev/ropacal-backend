@@ -21,8 +21,8 @@ type BinMoveRequest struct {
 	NewAddress   *string  `json:"new_address,omitempty" db:"new_address"`
 
 	// Move metadata
-	MoveType       string  `json:"move_type" db:"move_type"`                       // 'pickup_only' or 'relocation'
-	DisposalAction *string `json:"disposal_action,omitempty" db:"disposal_action"` // 'retire' or 'store'
+	MoveType       string  `json:"move_type" db:"move_type"`                       // 'store' or 'relocation'
+	DisposalAction *string `json:"disposal_action,omitempty" db:"disposal_action"` // DEPRECATED: kept for backward compatibility
 	Reason         *string `json:"reason,omitempty" db:"reason"`
 	Notes          *string `json:"notes,omitempty" db:"notes"`
 
@@ -109,8 +109,8 @@ type CreateBinMoveRequest struct {
 	NewZip       *string  `json:"new_zip,omitempty"`
 
 	// Move metadata
-	MoveType       string  `json:"move_type" binding:"required"` // 'pickup_only' or 'relocation'
-	DisposalAction *string `json:"disposal_action,omitempty"`    // Required if move_type is 'pickup_only'
+	MoveType       string  `json:"move_type" binding:"required"` // 'store' or 'relocation'
+	DisposalAction *string `json:"disposal_action,omitempty"`    // DEPRECATED: kept for backward compatibility
 	Reason         *string `json:"reason,omitempty"`
 	Notes          *string `json:"notes,omitempty"`
 
