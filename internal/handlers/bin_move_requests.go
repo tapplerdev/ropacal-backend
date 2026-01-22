@@ -111,10 +111,12 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		// Generate ID (now already declared above for urgency calculation)
 		id := uuid.New().String()
 
-		// Determine status based on whether shift is assigned
+		// Determine status and assignment type based on whether shift is assigned
 		status := "pending"
+		assignmentType := "" // Empty/null for unassigned moves
 		if req.ShiftID != nil {
 			status = "assigned" // Immediately assigned to shift
+			assignmentType = "shift"
 		}
 
 		// Create bin move request
@@ -135,8 +137,8 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			DisposalAction:    req.DisposalAction,
 			Reason:            req.Reason,
 			Notes:             req.Notes,
-			AssignmentType:    "shift",   // Default to shift-based assignment
-			AssignedShiftID:   req.ShiftID, // Assign to shift if provided
+			AssignmentType:    assignmentType, // Set based on whether shift is assigned
+			AssignedShiftID:   req.ShiftID,    // Assign to shift if provided
 			CreatedAt:         now,
 			UpdatedAt:         now,
 		}
@@ -444,10 +446,10 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		return fmt.Errorf("failed to insert urgent move bin: %w", err)
 	}
 
-	// Update move request to assign it to this shift
+	// Update move request to assign it to this shift (clear any previous user assignment)
 	_, err = tx.Exec(`
 		UPDATE bin_move_requests
-		SET assignment_type = 'shift', assigned_shift_id = $1, status = 'assigned', updated_at = $2
+		SET assignment_type = 'shift', assigned_shift_id = $1, assigned_user_id = NULL, status = 'assigned', updated_at = $2
 		WHERE id = $3
 	`, activeShift.ID, now, moveRequest.ID)
 	if err != nil {
@@ -1247,12 +1249,12 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("👤 [ASSIGN TO USER] Found move request - Status: %s, BinID: %s", moveRequest.Status, moveRequest.BinID)
+		log.Printf("👤 [ASSIGN TO USER] Found move request - Status: %s, BinID: %s, CurrentType: %s", moveRequest.Status, moveRequest.BinID, moveRequest.AssignmentType)
 
-		// Only allow assigning pending moves
-		if moveRequest.Status != "pending" {
+		// Allow reassigning from any status except completed or cancelled
+		if moveRequest.Status == "completed" || moveRequest.Status == "cancelled" {
 			log.Printf("❌ [ASSIGN TO USER] Cannot assign move request with status: %s", moveRequest.Status)
-			http.Error(w, fmt.Sprintf("Cannot assign move request with status: %s", moveRequest.Status), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("Cannot reassign %s move request", moveRequest.Status), http.StatusBadRequest)
 			return
 		}
 
@@ -1269,11 +1271,45 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 
 		now := time.Now().Unix()
 
-		// Update move request
-		result, err := db.Exec(`
+		// Start transaction
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ [ASSIGN TO USER] Failed to begin transaction: %v", err)
+			http.Error(w, "Failed to assign move request", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+
+		// If previously assigned to a shift, remove from shift_bins
+		if moveRequest.AssignedShiftID != nil {
+			log.Printf("👤 [ASSIGN TO USER] Removing bin from shift %s", *moveRequest.AssignedShiftID)
+			_, err = tx.Exec(`
+				DELETE FROM shift_bins
+				WHERE shift_id = $1 AND bin_id = $2
+			`, *moveRequest.AssignedShiftID, moveRequest.BinID)
+			if err != nil {
+				log.Printf("❌ [ASSIGN TO USER] Failed to remove from shift_bins: %v", err)
+				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
+				return
+			}
+
+			// Update shift total_bins count
+			_, err = tx.Exec(`
+				UPDATE shifts
+				SET total_bins = total_bins - 1, updated_at = $1
+				WHERE id = $2
+			`, now, *moveRequest.AssignedShiftID)
+			if err != nil {
+				log.Printf("❌ [ASSIGN TO USER] Failed to update shift count: %v", err)
+			}
+		}
+
+		// Update move request - clear shift assignment and set user assignment
+		result, err := tx.Exec(`
 			UPDATE bin_move_requests
 			SET assignment_type = 'manual',
 			    assigned_user_id = $1,
+			    assigned_shift_id = NULL,
 			    status = 'assigned',
 			    updated_at = $2
 			WHERE id = $3
@@ -1286,6 +1322,13 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 
 		rowsAffected, _ := result.RowsAffected()
 		log.Printf("👤 [ASSIGN TO USER] Update result - Rows affected: %d", rowsAffected)
+
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			log.Printf("❌ [ASSIGN TO USER] Failed to commit transaction: %v", err)
+			http.Error(w, "Failed to assign move request", http.StatusInternalServerError)
+			return
+		}
 
 		log.Printf("✅ [ASSIGN TO USER] Move request %s assigned to user %s for manual completion", id, req.UserID)
 
@@ -1473,6 +1516,123 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "Move completed successfully",
+		})
+	}
+}
+
+// ClearMoveAssignment removes all assignment from a move request (shift or user)
+// PUT /api/manager/bins/move-requests/:id/clear-assignment
+func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		log.Printf("🔄 [CLEAR ASSIGNMENT] Starting for move request: %s", id)
+		if id == "" {
+			log.Printf("❌ [CLEAR ASSIGNMENT] Missing move request ID")
+			http.Error(w, "Missing move request ID", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch move request to check current assignment
+		var moveRequest models.BinMoveRequest
+		err := db.Get(&moveRequest, `
+			SELECT id, bin_id, status, assignment_type, assigned_shift_id, assigned_user_id
+			FROM bin_move_requests
+			WHERE id = $1
+		`, id)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				log.Printf("❌ [CLEAR ASSIGNMENT] Move request not found: %s", id)
+				http.Error(w, "Move request not found", http.StatusNotFound)
+				return
+			}
+			log.Printf("❌ [CLEAR ASSIGNMENT] Error fetching move request: %v", err)
+			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("🔄 [CLEAR ASSIGNMENT] Current state - Status: %s, Type: %s, ShiftID: %v, UserID: %v",
+			moveRequest.Status, moveRequest.AssignmentType, moveRequest.AssignedShiftID, moveRequest.AssignedUserID)
+
+		// Only allow clearing assignments from pending or assigned moves
+		if moveRequest.Status != "pending" && moveRequest.Status != "assigned" {
+			log.Printf("❌ [CLEAR ASSIGNMENT] Cannot clear assignment from status: %s", moveRequest.Status)
+			http.Error(w, fmt.Sprintf("Cannot clear assignment from %s move request", moveRequest.Status), http.StatusBadRequest)
+			return
+		}
+
+		// Check if there's any assignment to clear
+		if moveRequest.AssignedShiftID == nil && moveRequest.AssignedUserID == nil {
+			log.Printf("⚠️  [CLEAR ASSIGNMENT] Move request already unassigned")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{
+				"message": "Move request is already unassigned",
+			})
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Start transaction
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ [CLEAR ASSIGNMENT] Failed to begin transaction: %v", err)
+			http.Error(w, "Failed to clear assignment", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+
+		// If assigned to a shift, remove from shift_bins
+		if moveRequest.AssignedShiftID != nil {
+			log.Printf("🔄 [CLEAR ASSIGNMENT] Removing bin from shift %s", *moveRequest.AssignedShiftID)
+			_, err = tx.Exec(`
+				DELETE FROM shift_bins
+				WHERE shift_id = $1 AND bin_id = $2
+			`, *moveRequest.AssignedShiftID, moveRequest.BinID)
+			if err != nil {
+				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to remove from shift_bins: %v", err)
+				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
+				return
+			}
+
+			// Update shift total_bins count
+			_, err = tx.Exec(`
+				UPDATE shifts
+				SET total_bins = total_bins - 1, updated_at = $1
+				WHERE id = $2
+			`, now, *moveRequest.AssignedShiftID)
+			if err != nil {
+				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to update shift count: %v", err)
+			}
+		}
+
+		// Clear all assignments and reset to pending
+		_, err = tx.Exec(`
+			UPDATE bin_move_requests
+			SET assignment_type = '',
+			    assigned_shift_id = NULL,
+			    assigned_user_id = NULL,
+			    status = 'pending',
+			    updated_at = $1
+			WHERE id = $2
+		`, now, id)
+		if err != nil {
+			log.Printf("❌ [CLEAR ASSIGNMENT] Error clearing assignment: %v", err)
+			http.Error(w, "Failed to clear assignment", http.StatusInternalServerError)
+			return
+		}
+
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			log.Printf("❌ [CLEAR ASSIGNMENT] Failed to commit transaction: %v", err)
+			http.Error(w, "Failed to clear assignment", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("✅ [CLEAR ASSIGNMENT] Assignment cleared successfully for move request %s", id)
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Assignment cleared successfully",
 		})
 	}
 }
