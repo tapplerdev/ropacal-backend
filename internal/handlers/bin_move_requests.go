@@ -1207,20 +1207,28 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				assignmentChanged = true
 			}
 
-			// Add assignment fields to update
+			// Add assignment fields to update (treat empty strings as NULL)
 			if req.AssignedShiftID != nil {
-				updates = append(updates, fmt.Sprintf("assigned_shift_id = $%d", argCount))
-				args = append(args, *req.AssignedShiftID)
-				argCount++
+				if *req.AssignedShiftID == "" {
+					updates = append(updates, "assigned_shift_id = NULL")
+				} else {
+					updates = append(updates, fmt.Sprintf("assigned_shift_id = $%d", argCount))
+					args = append(args, *req.AssignedShiftID)
+					argCount++
+				}
 				assignmentChanged = true
 			}
 
 			if req.AssignedUserID != nil {
-				updates = append(updates, fmt.Sprintf("assigned_user_id = $%d", argCount))
-				args = append(args, *req.AssignedUserID)
-				argCount++
+				if *req.AssignedUserID == "" {
+					updates = append(updates, "assigned_user_id = NULL")
+				} else {
+					updates = append(updates, fmt.Sprintf("assigned_user_id = $%d", argCount))
+					args = append(args, *req.AssignedUserID)
+					argCount++
+					affectedDriverIDs = append(affectedDriverIDs, *req.AssignedUserID)
+				}
 				assignmentChanged = true
-				affectedDriverIDs = append(affectedDriverIDs, *req.AssignedUserID)
 			}
 
 			// Determine final assignment state (after potential updates)
