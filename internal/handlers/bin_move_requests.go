@@ -729,6 +729,21 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 				responses[i].RequestedByName = &requesterName
 			}
 
+			// Parse original address into separate fields
+			parts := strings.Split(mr.OriginalAddress, ", ")
+			if len(parts) >= 2 {
+				street := parts[0]
+				cityZip := strings.TrimSpace(parts[1])
+				cityZipParts := strings.Split(cityZip, " ")
+				if len(cityZipParts) >= 2 {
+					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+					zip := cityZipParts[len(cityZipParts)-1]
+					responses[i].OriginalStreet = &street
+					responses[i].OriginalCity = &city
+					responses[i].OriginalZip = &zip
+				}
+			}
+
 			// Parse new address into separate fields if available
 			if mr.NewAddress != nil {
 				// Split "street, city zip" format
@@ -751,12 +766,25 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			if mr.AssignedShiftID != nil {
 				var driverName string
 				err := db.Get(&driverName, `
-					SELECT u.full_name FROM shifts s
+					SELECT u.name FROM shifts s
 					JOIN users u ON s.driver_id = u.id
 					WHERE s.id = $1
 				`, *mr.AssignedShiftID)
 				if err == nil {
 					responses[i].AssignedDriverName = &driverName
+					responses[i].DriverName = &driverName // Set unified field
+				}
+			}
+
+			// Fetch assigned user name if manually assigned
+			if mr.AssignedUserID != nil {
+				var userName string
+				err := db.Get(&userName, `
+					SELECT name FROM users WHERE id = $1
+				`, *mr.AssignedUserID)
+				if err == nil {
+					responses[i].AssignedUserName = &userName
+					responses[i].DriverName = &userName // Set unified field
 				}
 			}
 		}
@@ -841,6 +869,21 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 				responses[i].RequestedByName = &requesterName
 			}
 
+			// Parse original address into separate fields
+			parts := strings.Split(mr.OriginalAddress, ", ")
+			if len(parts) >= 2 {
+				street := parts[0]
+				cityZip := strings.TrimSpace(parts[1])
+				cityZipParts := strings.Split(cityZip, " ")
+				if len(cityZipParts) >= 2 {
+					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+					zip := cityZipParts[len(cityZipParts)-1]
+					responses[i].OriginalStreet = &street
+					responses[i].OriginalCity = &city
+					responses[i].OriginalZip = &zip
+				}
+			}
+
 			// Parse new address into separate fields if available
 			if mr.NewAddress != nil {
 				parts := strings.Split(*mr.NewAddress, ", ")
@@ -868,6 +911,7 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 				`, *mr.AssignedShiftID)
 				if err == nil {
 					responses[i].AssignedDriverName = &driverName
+					responses[i].DriverName = &driverName // Set unified field
 				}
 			}
 
@@ -879,6 +923,7 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 				`, *mr.AssignedUserID)
 				if err == nil {
 					responses[i].AssignedUserName = &userName
+					responses[i].DriverName = &userName // Set unified field
 				}
 			}
 		}

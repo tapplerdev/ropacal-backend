@@ -55,9 +55,12 @@ type BinMoveRequestResponse struct {
 	Zip           string `json:"zip"`
 
 	// Original location
-	OriginalLatitude  float64 `json:"original_latitude"`
-	OriginalLongitude float64 `json:"original_longitude"`
-	OriginalAddress   string  `json:"original_address"`
+	OriginalStreet    *string  `json:"original_street,omitempty"`
+	OriginalCity      *string  `json:"original_city,omitempty"`
+	OriginalZip       *string  `json:"original_zip,omitempty"`
+	OriginalLatitude  float64  `json:"original_latitude"`
+	OriginalLongitude float64  `json:"original_longitude"`
+	OriginalAddress   string   `json:"original_address"`
 
 	// New location
 	NewStreet    *string  `json:"new_street,omitempty"`
@@ -79,6 +82,7 @@ type BinMoveRequestResponse struct {
 	AssignedDriverName *string `json:"assigned_driver_name,omitempty"` // Driver's full name (populated when assigned to shift)
 	AssignedUserID     *string `json:"assigned_user_id,omitempty"`
 	AssignedUserName   *string `json:"assigned_user_name,omitempty"` // User's full name (populated when assigned manually)
+	DriverName         *string `json:"driver_name,omitempty"`         // Unified field: returns driver or user name (whichever is set)
 	CompletedAtIso     *string `json:"completed_at_iso,omitempty"`
 
 	// Timestamps
