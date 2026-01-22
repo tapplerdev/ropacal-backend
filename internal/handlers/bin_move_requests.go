@@ -45,9 +45,9 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			urgency = "scheduled"
 		}
 
-		// Validate move_type
-		if req.MoveType != "pickup_only" && req.MoveType != "relocation" {
-			http.Error(w, "Invalid move_type: must be 'pickup_only' or 'relocation'", http.StatusBadRequest)
+		// Validate move_type (accept both 'store' and 'pickup_only' for backward compatibility)
+		if req.MoveType != "store" && req.MoveType != "pickup_only" && req.MoveType != "relocation" {
+			http.Error(w, "Invalid move_type: must be 'store', 'pickup_only' (deprecated), or 'relocation'", http.StatusBadRequest)
 			return
 		}
 
