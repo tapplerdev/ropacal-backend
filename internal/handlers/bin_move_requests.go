@@ -698,7 +698,7 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Fetch associated bins and driver names
+		// Fetch associated bins, requester names, and driver names
 		responses := make([]models.BinMoveRequestResponse, len(moveRequests))
 		for i, mr := range moveRequests {
 			responses[i] = mr.ToBinMoveRequestResponse()
@@ -718,6 +718,15 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 				responses[i].CurrentStreet = bin.CurrentStreet
 				responses[i].City = bin.City
 				responses[i].Zip = bin.Zip
+			}
+
+			// Fetch requester name
+			var requesterName string
+			err = db.Get(&requesterName, `
+				SELECT name FROM users WHERE id = $1
+			`, mr.RequestedBy)
+			if err == nil {
+				responses[i].RequestedByName = &requesterName
 			}
 
 			// Parse new address into separate fields if available

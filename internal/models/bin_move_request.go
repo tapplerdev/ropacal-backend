@@ -42,10 +42,11 @@ type BinMoveRequestResponse struct {
 	ID               string `json:"id"`
 	BinID            string `json:"bin_id"`
 	ScheduledDate    int64  `json:"scheduled_date"` // Unix timestamp (for frontend date math)
-	ScheduledDateIso string `json:"scheduled_date_iso"`
-	Urgency          string `json:"urgency"`
-	RequestedBy      string `json:"requested_by"`
-	Status           string `json:"status"`
+	ScheduledDateIso string  `json:"scheduled_date_iso"`
+	Urgency          string  `json:"urgency"`
+	RequestedBy      string  `json:"requested_by"`
+	RequestedByName  *string `json:"requested_by_name,omitempty"` // Requester's name (populated from users table)
+	Status           string  `json:"status"`
 
 	// Flattened bin fields (for easy table display)
 	BinNumber     int    `json:"bin_number"`
