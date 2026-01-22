@@ -766,6 +766,128 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// GetBinMoveRequestsByBinID returns all move requests for a specific bin
+// GET /api/bins/:id/move-requests
+func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "id")
+		if binID == "" {
+			http.Error(w, "Missing bin ID", http.StatusBadRequest)
+			return
+		}
+
+		// Parse optional status filter
+		status := r.URL.Query().Get("status")
+
+		// Build query
+		query := `
+			SELECT bmr.id, bmr.bin_id, bmr.scheduled_date, bmr.urgency, bmr.requested_by,
+			       bmr.status, bmr.original_latitude, bmr.original_longitude, bmr.original_address,
+			       bmr.new_latitude, bmr.new_longitude, bmr.new_address,
+			       bmr.move_type, bmr.disposal_action, bmr.reason, bmr.notes,
+			       bmr.assigned_shift_id, bmr.completed_at, bmr.created_at, bmr.updated_at,
+			       bmr.assignment_type, bmr.assigned_user_id
+			FROM bin_move_requests bmr
+			WHERE bmr.bin_id = $1
+		`
+		args := []interface{}{binID}
+		argCount := 2
+
+		if status != "" {
+			query += fmt.Sprintf(" AND bmr.status = $%d", argCount)
+			args = append(args, status)
+			argCount++
+		}
+
+		query += " ORDER BY bmr.created_at DESC"
+
+		// Fetch move requests
+		var moveRequests []models.BinMoveRequest
+		err := db.Select(&moveRequests, query, args...)
+		if err != nil {
+			log.Printf("Error fetching move requests for bin %s: %v", binID, err)
+			http.Error(w, "Failed to fetch move requests", http.StatusInternalServerError)
+			return
+		}
+
+		// Fetch associated data (requester name, driver name, etc.)
+		responses := make([]models.BinMoveRequestResponse, len(moveRequests))
+		for i, mr := range moveRequests {
+			responses[i] = mr.ToBinMoveRequestResponse()
+
+			// Fetch bin details
+			var bin models.Bin
+			err := db.Get(&bin, `
+				SELECT id, bin_number, current_street, city, zip, latitude, longitude, status
+				FROM bins
+				WHERE id = $1
+			`, mr.BinID)
+			if err == nil {
+				binResp := bin.ToBinResponse()
+				responses[i].Bin = &binResp
+				// Flatten bin fields
+				responses[i].BinNumber = bin.BinNumber
+				responses[i].CurrentStreet = bin.CurrentStreet
+				responses[i].City = bin.City
+				responses[i].Zip = bin.Zip
+			}
+
+			// Fetch requester name
+			var requesterName string
+			err = db.Get(&requesterName, `
+				SELECT name FROM users WHERE id = $1
+			`, mr.RequestedBy)
+			if err == nil {
+				responses[i].RequestedByName = &requesterName
+			}
+
+			// Parse new address into separate fields if available
+			if mr.NewAddress != nil {
+				parts := strings.Split(*mr.NewAddress, ", ")
+				if len(parts) >= 2 {
+					street := parts[0]
+					cityZip := strings.TrimSpace(parts[1])
+					cityZipParts := strings.Split(cityZip, " ")
+					if len(cityZipParts) >= 2 {
+						city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+						zip := cityZipParts[len(cityZipParts)-1]
+						responses[i].NewStreet = &street
+						responses[i].NewCity = &city
+						responses[i].NewZip = &zip
+					}
+				}
+			}
+
+			// Fetch assigned driver name if assigned to a shift
+			if mr.AssignedShiftID != nil {
+				var driverName string
+				err := db.Get(&driverName, `
+					SELECT u.name FROM shifts s
+					JOIN users u ON s.driver_id = u.id
+					WHERE s.id = $1
+				`, *mr.AssignedShiftID)
+				if err == nil {
+					responses[i].AssignedDriverName = &driverName
+				}
+			}
+
+			// Fetch assigned user name if manually assigned
+			if mr.AssignedUserID != nil {
+				var userName string
+				err := db.Get(&userName, `
+					SELECT name FROM users WHERE id = $1
+				`, *mr.AssignedUserID)
+				if err == nil {
+					responses[i].AssignedUserName = &userName
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(responses)
+	}
+}
+
 // UpdateBinMoveRequest updates move request details (date, notes, location, etc.)
 // PUT /api/manager/bins/move-requests/:id
 func UpdateBinMoveRequest(db *sqlx.DB) http.HandlerFunc {

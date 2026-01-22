@@ -179,6 +179,7 @@ func main() {
 		// Moves endpoints
 		r.Get("/bins/{id}/moves", handlers.GetMoves(db))
 		r.Post("/bins/{id}/moves", handlers.CreateMove(db))
+		r.Get("/bins/{id}/move-requests", handlers.GetBinMoveRequestsByBinID(db))
 
 		// Route management endpoints (route blueprints/templates)
 		r.Get("/routes", handlers.GetRoutes(db))
