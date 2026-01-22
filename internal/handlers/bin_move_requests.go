@@ -1260,9 +1260,23 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("[UPDATE MOVE] ✅ Successfully updated move request: %s", id)
 
-		// Fetch updated move request for response
-		var updatedMove models.BinMoveRequest
-		err = db.Get(&updatedMove, "SELECT * FROM bin_move_requests WHERE id = $1", id)
+		// Fetch updated move request for response (with user/driver names via JOIN)
+		var updatedMove struct {
+			models.BinMoveRequest
+			AssignedUserName   *string `db:"assigned_user_name"`
+			AssignedDriverName *string `db:"assigned_driver_name"`
+		}
+		err = db.Get(&updatedMove, `
+			SELECT
+				mr.*,
+				assigned_user.name AS assigned_user_name,
+				shift_driver.name AS assigned_driver_name
+			FROM bin_move_requests mr
+			LEFT JOIN users assigned_user ON mr.assigned_user_id = assigned_user.id
+			LEFT JOIN shifts s ON mr.assigned_shift_id = s.id
+			LEFT JOIN users shift_driver ON s.driver_id = shift_driver.id
+			WHERE mr.id = $1
+		`, id)
 		if err != nil {
 			log.Printf("Error fetching updated move request: %v", err)
 			http.Error(w, "Failed to fetch updated move request", http.StatusInternalServerError)
@@ -1296,7 +1310,22 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Return updated move request
-		response := updatedMove.ToBinMoveRequestResponse()
+		response := updatedMove.BinMoveRequest.ToBinMoveRequestResponse()
+
+		// Add assigned user/driver names to response
+		if updatedMove.AssignedUserName != nil {
+			response.AssignedUserName = updatedMove.AssignedUserName
+		}
+		if updatedMove.AssignedDriverName != nil {
+			response.AssignedDriverName = updatedMove.AssignedDriverName
+		}
+
+		// Set unified driver_name field
+		if updatedMove.AssignedDriverName != nil {
+			response.DriverName = updatedMove.AssignedDriverName
+		} else if updatedMove.AssignedUserName != nil {
+			response.DriverName = updatedMove.AssignedUserName
+		}
 
 		// Fetch bin details
 		var bin models.Bin
