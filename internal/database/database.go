@@ -492,7 +492,7 @@ func Migrate(db *sqlx.DB) error {
 			new_latitude DOUBLE PRECISION,
 			new_longitude DOUBLE PRECISION,
 			new_address TEXT,
-			move_type TEXT NOT NULL CHECK(move_type IN ('pickup_only', 'relocation')),
+			move_type TEXT NOT NULL CHECK(move_type IN ('store', 'pickup_only', 'relocation')),
 			disposal_action TEXT CHECK(disposal_action IN ('retire', 'store')),
 			reason TEXT,
 			notes TEXT,
@@ -559,6 +559,10 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_requested_by ON potential_locations(requested_by_user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_active ON potential_locations(created_at DESC) WHERE converted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_converted ON potential_locations(converted_to_bin_id) WHERE converted_to_bin_id IS NOT NULL`,
+
+		// Migration: Update bin_move_requests move_type constraint to include 'store'
+		`ALTER TABLE bin_move_requests DROP CONSTRAINT IF EXISTS bin_move_requests_move_type_check`,
+		`ALTER TABLE bin_move_requests ADD CONSTRAINT bin_move_requests_move_type_check CHECK(move_type IN ('store', 'pickup_only', 'relocation'))`,
 	}
 
 	for _, migration := range migrations {
