@@ -93,22 +93,12 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// CreatePotentialLocation creates a new potential location request
+// CreatePotentialLocation creates one or more potential location requests
 // POST /api/potential-locations (requires authentication)
+// Accepts either a single object or an array of objects
+// Always returns an array of created locations
 func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req models.CreatePotentialLocationRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		// Validate required fields
-		if req.Street == "" || req.City == "" || req.Zip == "" {
-			http.Error(w, "Missing required fields (street, city, zip)", http.StatusBadRequest)
-			return
-		}
-
 		// Get user from context (set by auth middleware)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -130,54 +120,119 @@ func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc
 			userName = fullName
 		}
 
-		// Build full address
-		address := fmt.Sprintf("%s, %s, %s", req.Street, req.City, req.Zip)
+		// Read raw JSON to detect if it's array or object
+		var rawMessage json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&rawMessage); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
 
-		// Generate UUID and timestamps
-		id := uuid.New().String()
+		// Parse as array or single object
+		var requests []models.CreatePotentialLocationRequest
+
+		// Try to unmarshal as array first
+		if err := json.Unmarshal(rawMessage, &requests); err != nil {
+			// If that fails, try as single object
+			var singleReq models.CreatePotentialLocationRequest
+			if err := json.Unmarshal(rawMessage, &singleReq); err != nil {
+				http.Error(w, "Invalid request body format", http.StatusBadRequest)
+				return
+			}
+			requests = []models.CreatePotentialLocationRequest{singleReq}
+		}
+
+		// Validate we have at least one request
+		if len(requests) == 0 {
+			http.Error(w, "At least one location is required", http.StatusBadRequest)
+			return
+		}
+
+		// Validate all requests
+		for i, req := range requests {
+			if req.Street == "" || req.City == "" || req.Zip == "" {
+				http.Error(w, fmt.Sprintf("Missing required fields at index %d (street, city, zip)", i), http.StatusBadRequest)
+				return
+			}
+		}
+
+		// Begin transaction
+		tx, err := db.Begin()
+		if err != nil {
+			log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Transaction begin failed: %v", err)
+			http.Error(w, "Failed to start transaction", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+
 		now := time.Now().Unix()
+		var createdIDs []string
+		var createdLocations []models.PotentialLocationResponse
 
-		// Insert potential location
-		_, err = db.Exec(`
-			INSERT INTO potential_locations (
-				id, address, street, city, zip, latitude, longitude,
-				requested_by_user_id, requested_by_name, notes,
-				created_at, updated_at
+		// Insert all locations
+		for _, req := range requests {
+			// Build full address
+			address := fmt.Sprintf("%s, %s, %s", req.Street, req.City, req.Zip)
+
+			// Generate UUID
+			id := uuid.New().String()
+			createdIDs = append(createdIDs, id)
+
+			// Insert potential location
+			_, err = tx.Exec(`
+				INSERT INTO potential_locations (
+					id, address, street, city, zip, latitude, longitude,
+					requested_by_user_id, requested_by_name, notes,
+					created_at, updated_at
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			`,
+				id, address, req.Street, req.City, req.Zip, req.Latitude, req.Longitude,
+				userID, userName, req.Notes,
+				now, now,
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		`,
-			id, address, req.Street, req.City, req.Zip, req.Latitude, req.Longitude,
-			userID, userName, req.Notes,
-			now, now,
-		)
 
-		if err != nil {
-			log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Database insert failed: %v", err)
-			http.Error(w, "Failed to create potential location", http.StatusInternalServerError)
+			if err != nil {
+				log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Database insert failed: %v", err)
+				http.Error(w, "Failed to create potential location", http.StatusInternalServerError)
+				return
+			}
+
+			log.Printf("✅ [CREATE-POTENTIAL-LOCATION] Created location (ID: %s) at %s by %s", id, address, userName)
+		}
+
+		// Commit transaction
+		if err = tx.Commit(); err != nil {
+			log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Transaction commit failed: %v", err)
+			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
 			return
 		}
 
-		// Fetch created location
-		var created models.PotentialLocation
-		err = db.Get(&created, "SELECT * FROM potential_locations WHERE id = $1", id)
-		if err != nil {
-			log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Failed to fetch created location: %v", err)
-			http.Error(w, "Failed to fetch created location", http.StatusInternalServerError)
-			return
+		// Fetch all created locations
+		for _, id := range createdIDs {
+			var created models.PotentialLocation
+			err = db.Get(&created, "SELECT * FROM potential_locations WHERE id = $1", id)
+			if err != nil {
+				log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Failed to fetch created location: %v", err)
+				http.Error(w, "Failed to fetch created location", http.StatusInternalServerError)
+				return
+			}
+
+			resp := created.ToPotentialLocationResponse()
+			createdLocations = append(createdLocations, resp)
+
+			// Broadcast each location to all managers
+			wsHub.BroadcastToRole("admin", map[string]interface{}{
+				"type": "potential_location_created",
+				"data": resp,
+			})
 		}
 
-		log.Printf("✅ [CREATE-POTENTIAL-LOCATION] Created location (ID: %s) at %s by %s", id, address, userName)
+		log.Printf("✅ [CREATE-POTENTIAL-LOCATION] Created %d location(s), broadcasted to managers", len(createdLocations))
 
-		// Broadcast to all managers
-		wsHub.BroadcastToRole("admin", map[string]interface{}{
-			"type": "potential_location_created",
-			"data": created.ToPotentialLocationResponse(),
-		})
-		log.Printf("📤 [CREATE-POTENTIAL-LOCATION] WebSocket event broadcasted to managers")
-
+		// Always return array
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(created.ToPotentialLocationResponse())
+		json.NewEncoder(w).Encode(createdLocations)
 	}
 }
 
