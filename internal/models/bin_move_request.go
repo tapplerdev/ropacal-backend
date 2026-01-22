@@ -27,7 +27,7 @@ type BinMoveRequest struct {
 	Notes          *string `json:"notes,omitempty" db:"notes"`
 
 	// Assignment (shift-based or manual)
-	AssignmentType  string  `json:"assignment_type" db:"assignment_type"` // 'shift' or 'manual'
+	AssignmentType  *string `json:"assignment_type,omitempty" db:"assignment_type"` // 'shift' or 'manual', NULL for unassigned
 	AssignedShiftID *string `json:"assigned_shift_id,omitempty" db:"assigned_shift_id"`
 	AssignedUserID  *string `json:"assigned_user_id,omitempty" db:"assigned_user_id"` // For manual moves
 	CompletedAt     *int64  `json:"completed_at,omitempty" db:"completed_at"`
@@ -77,7 +77,7 @@ type BinMoveRequestResponse struct {
 	Notes          *string `json:"notes,omitempty"`
 
 	// Assignment (shift-based or manual)
-	AssignmentType     string  `json:"assignment_type"`
+	AssignmentType     *string `json:"assignment_type,omitempty"`     // 'shift' or 'manual', NULL for unassigned
 	AssignedShiftID    *string `json:"assigned_shift_id,omitempty"`
 	AssignedDriverName *string `json:"assigned_driver_name,omitempty"` // Driver's full name (populated when assigned to shift)
 	AssignedUserID     *string `json:"assigned_user_id,omitempty"`
