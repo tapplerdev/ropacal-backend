@@ -964,6 +964,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		var req struct {
 			// Basic fields
 			ScheduledDate *int64   `json:"scheduled_date,omitempty"`
+			MoveType      *string  `json:"move_type,omitempty"` // "store" or "relocation"
 			Reason        *string  `json:"reason,omitempty"`
 			Notes         *string  `json:"notes,omitempty"`
 			NewStreet     *string  `json:"new_street,omitempty"`
@@ -1099,6 +1100,12 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			argCount++
 		}
 
+
+		if req.MoveType != nil {
+			updates = append(updates, fmt.Sprintf("move_type = $%d", argCount))
+			args = append(args, *req.MoveType)
+			argCount++
+		}
 		if req.Reason != nil {
 			updates = append(updates, fmt.Sprintf("reason = $%d", argCount))
 			args = append(args, *req.Reason)
