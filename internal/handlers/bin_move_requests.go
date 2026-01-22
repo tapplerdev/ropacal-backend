@@ -228,7 +228,9 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		moveRequestID := chi.URLParam(r, "id")
+		log.Printf("🚚 [ASSIGN TO SHIFT] Starting assignment for move request: %s", moveRequestID)
 		if moveRequestID == "" {
+			log.Printf("❌ [ASSIGN TO SHIFT] Missing move request ID")
 			http.Error(w, "Missing move request ID", http.StatusBadRequest)
 			return
 		}
@@ -240,6 +242,9 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 
+		log.Printf("🚚 [ASSIGN TO SHIFT] Request body - ShiftID: %v, InsertAfterBinID: %v, InsertPosition: %v",
+			req.ShiftID, req.InsertAfterBinID, req.InsertPosition)
+
 		// Fetch move request
 		var moveRequest models.BinMoveRequest
 		err := db.Get(&moveRequest, `
@@ -247,16 +252,20 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		`, moveRequestID)
 		if err != nil {
 			if err == sql.ErrNoRows {
+				log.Printf("❌ [ASSIGN TO SHIFT] Move request not found: %s", moveRequestID)
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
 			}
-			log.Printf("Error fetching move request: %v", err)
+			log.Printf("❌ [ASSIGN TO SHIFT] Error fetching move request: %v", err)
 			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
 			return
 		}
 
+		log.Printf("🚚 [ASSIGN TO SHIFT] Found move request - Status: %s, BinID: %s", moveRequest.Status, moveRequest.BinID)
+
 		// Check if can be assigned (only pending, assigned, or in_progress moves can be reassigned)
 		if moveRequest.Status != "pending" && moveRequest.Status != "assigned" && moveRequest.Status != "in_progress" {
+			log.Printf("❌ [ASSIGN TO SHIFT] Cannot reassign move request with status: %s", moveRequest.Status)
 			http.Error(w, fmt.Sprintf("Cannot reassign move request with status: %s", moveRequest.Status), http.StatusBadRequest)
 			return
 		}
@@ -265,18 +274,22 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		var bin models.Bin
 		err = db.Get(&bin, "SELECT * FROM bins WHERE id = $1", moveRequest.BinID)
 		if err != nil {
+			log.Printf("❌ [ASSIGN TO SHIFT] Bin not found: %s", moveRequest.BinID)
 			http.Error(w, "Bin not found", http.StatusNotFound)
 			return
 		}
 
+		log.Printf("🚚 [ASSIGN TO SHIFT] Found bin - Number: %s", bin.BinNumber)
+
 		// Call the assignment logic
 		err = assignMoveToShift(db, wsHub, fcmService, moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition)
 		if err != nil {
-			log.Printf("Error assigning move to shift: %v", err)
+			log.Printf("❌ [ASSIGN TO SHIFT] Error assigning move to shift: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
+		log.Printf("✅ [ASSIGN TO SHIFT] Successfully assigned move request %s to shift", moveRequestID)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"message": "Move request assigned to shift successfully",
@@ -1192,7 +1205,9 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
+		log.Printf("👤 [ASSIGN TO USER] Starting assignment for move request: %s", id)
 		if id == "" {
+			log.Printf("❌ [ASSIGN TO USER] Missing move request ID")
 			http.Error(w, "Missing move request ID", http.StatusBadRequest)
 			return
 		}
@@ -1201,11 +1216,15 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ [ASSIGN TO USER] Invalid request body: %v", err)
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
 
+		log.Printf("👤 [ASSIGN TO USER] Request body - UserID: %s", req.UserID)
+
 		if req.UserID == "" {
+			log.Printf("❌ [ASSIGN TO USER] user_id is required but empty")
 			http.Error(w, "user_id is required", http.StatusBadRequest)
 			return
 		}
@@ -1219,16 +1238,20 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 		`, id)
 		if err != nil {
 			if err == sql.ErrNoRows {
+				log.Printf("❌ [ASSIGN TO USER] Move request not found: %s", id)
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
 			}
-			log.Printf("Error fetching move request: %v", err)
+			log.Printf("❌ [ASSIGN TO USER] Error fetching move request: %v", err)
 			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
 			return
 		}
 
+		log.Printf("👤 [ASSIGN TO USER] Found move request - Status: %s, BinID: %s", moveRequest.Status, moveRequest.BinID)
+
 		// Only allow assigning pending moves
 		if moveRequest.Status != "pending" {
+			log.Printf("❌ [ASSIGN TO USER] Cannot assign move request with status: %s", moveRequest.Status)
 			http.Error(w, fmt.Sprintf("Cannot assign move request with status: %s", moveRequest.Status), http.StatusBadRequest)
 			return
 		}
@@ -1237,14 +1260,17 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 		var userExists bool
 		err = db.Get(&userExists, "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", req.UserID)
 		if err != nil || !userExists {
+			log.Printf("❌ [ASSIGN TO USER] User not found: %s (error: %v, exists: %v)", req.UserID, err, userExists)
 			http.Error(w, "User not found", http.StatusNotFound)
 			return
 		}
 
+		log.Printf("👤 [ASSIGN TO USER] User exists, proceeding with assignment")
+
 		now := time.Now().Unix()
 
 		// Update move request
-		_, err = db.Exec(`
+		result, err := db.Exec(`
 			UPDATE bin_move_requests
 			SET assignment_type = 'manual',
 			    assigned_user_id = $1,
@@ -1253,12 +1279,15 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 			WHERE id = $3
 		`, req.UserID, now, id)
 		if err != nil {
-			log.Printf("Error assigning move to user: %v", err)
+			log.Printf("❌ [ASSIGN TO USER] Error updating move request: %v", err)
 			http.Error(w, "Failed to assign move request", http.StatusInternalServerError)
 			return
 		}
 
-		log.Printf("✅ Move request %s assigned to user %s for manual completion", id, req.UserID)
+		rowsAffected, _ := result.RowsAffected()
+		log.Printf("👤 [ASSIGN TO USER] Update result - Rows affected: %d", rowsAffected)
+
+		log.Printf("✅ [ASSIGN TO USER] Move request %s assigned to user %s for manual completion", id, req.UserID)
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
