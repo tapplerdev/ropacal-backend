@@ -361,6 +361,12 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		binID := uuid.New().String()
 		now := time.Now().Unix()
 
+		// Default fill_percentage to 0 if not provided
+		fillPercentage := 0
+		if req.FillPercentage != nil {
+			fillPercentage = *req.FillPercentage
+		}
+
 		_, err = tx.Exec(`
 			INSERT INTO bins (
 				id, bin_number, current_street, city, zip, status,
@@ -370,7 +376,7 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		`,
 			binID, binNumber, location.Street, location.City, location.Zip, "active",
-			req.FillPercentage, 0, 0, location.Latitude, location.Longitude,
+			fillPercentage, 0, 0, location.Latitude, location.Longitude,
 			&userID, now, now,
 		)
 

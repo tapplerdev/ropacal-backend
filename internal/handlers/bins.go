@@ -104,6 +104,12 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		// Get user ID from context (if authenticated)
 		userID, _ := r.Context().Value("user_id").(string)
 
+		// Default fill_percentage to 0 if not provided
+		fillPercentage := 0
+		if req.FillPercentage != nil {
+			fillPercentage = *req.FillPercentage
+		}
+
 		// Insert bin
 		_, err := db.Exec(`
 			INSERT INTO bins (
@@ -114,7 +120,7 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		`,
 			id, binNumber, req.CurrentStreet, req.City, req.Zip, req.Status,
-			req.FillPercentage, 0, 0, req.Latitude, req.Longitude,
+			fillPercentage, 0, 0, req.Latitude, req.Longitude,
 			&userID, now, now,
 		)
 
