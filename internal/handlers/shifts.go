@@ -235,20 +235,18 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// If shift needs optimization (sequence_order = 0), do it now using driver's current location
 		// Check if any bin has sequence_order = 0 (unoptimized)
-		var needsOptimization bool
-		err = db.Get(&needsOptimization,
+		var needsFullOptimization bool
+		err = db.Get(&needsFullOptimization,
 			`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1 AND sequence_order = 0)`,
 			shift.ID,
 		)
 		if err != nil {
 			log.Printf("❌ Error checking if shift needs optimization: %v", err)
-			needsOptimization = false // Default to false on error
+			needsFullOptimization = false // Default to false on error
 		}
 
-		if needsOptimization {
-			log.Printf("🔄 Shift needs route optimization - getting driver location")
 
-			// Get driver's CURRENT location
+	// Get driver's CURRENT location (needed for both optimization types)
 			var driverLocation struct {
 				Latitude  float64 `db:"latitude"`
 				Longitude float64 `db:"longitude"`
@@ -267,6 +265,11 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 
 			log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+
+		if needsFullOptimization {
+			// Case 1: Custom bin selection - Full TSP optimization from driver's location
+		log.Printf("🔄 Custom route - performing full TSP optimization from driver location")
+
 
 			// Fetch all bins assigned to this shift
 			var binDetails []struct {
@@ -334,8 +337,94 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				}
 			}
 
-			log.Printf("✅ Route optimized with %d bins from driver's location", len(optimizedBins))
+			log.Printf("✅ Full TSP optimization complete with %d bins", len(optimizedBins))
+	} else {
+		// Case 2: Pre-defined route - Rotate sequence to start from closest bin
+		log.Printf("🔄 Pre-defined route - rotating sequence to start from closest bin")
+
+		// Fetch bins with their current sequence order
+		var binDetails []struct {
+			ID            string  `db:"id"`
+			CurrentStreet string  `db:"current_street"`
+			Latitude      float64 `db:"latitude"`
+			Longitude     float64 `db:"longitude"`
+			SequenceOrder int     `db:"sequence_order"`
 		}
+
+		binQuery := `
+			SELECT b.id, b.current_street, b.latitude, b.longitude, sb.sequence_order
+			FROM bins b
+			JOIN shift_bins sb ON b.id = sb.bin_id
+			WHERE sb.shift_id = $1
+			ORDER BY sb.sequence_order
+		`
+		err = db.Select(&binDetails, binQuery, shift.ID)
+		if err != nil {
+			log.Printf("❌ Error fetching bins: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
+			return
+		}
+
+		log.Printf("📦 Fetched %d bins from pre-defined route", len(binDetails))
+
+		// Find closest bin to driver's current location using Haversine distance
+		closestIdx := 0
+		minDistance := math.MaxFloat64
+
+		for i, bin := range binDetails {
+			distance := haversineDistance(
+				driverLocation.Latitude, driverLocation.Longitude,
+				bin.Latitude, bin.Longitude,
+			)
+			if distance < minDistance {
+				minDistance = distance
+				closestIdx = i
+			}
+		}
+
+		log.Printf("🎯 Closest bin to driver: %s (%.2f km away)", binDetails[closestIdx].CurrentStreet, minDistance)
+
+		// Rotate the sequence to start from closest bin
+		// Example: [A, B, C, D, E] with closest = C becomes [C, D, E, A, B]
+		rotatedBins := make([]struct {
+			ID            string  `db:"id"`
+			CurrentStreet string  `db:"current_street"`
+			Latitude      float64 `db:"latitude"`
+			Longitude     float64 `db:"longitude"`
+			SequenceOrder int     `db:"sequence_order"`
+		}, len(binDetails))
+
+		for i := 0; i < len(binDetails); i++ {
+			srcIdx := (closestIdx + i) % len(binDetails)
+			rotatedBins[i] = binDetails[srcIdx]
+		}
+
+		log.Printf("🔄 Rotated order: %v", func() []string {
+			streets := make([]string, len(rotatedBins))
+			for i, b := range rotatedBins {
+				streets[i] = b.CurrentStreet
+			}
+			return streets
+		}())
+
+		// Update shift_bins with rotated sequence_order
+		for i, bin := range rotatedBins {
+			updateQuery := `UPDATE shift_bins
+							SET sequence_order = $1
+							WHERE shift_id = $2 AND bin_id = $3`
+
+			_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
+			if err != nil {
+				log.Printf("❌ Error updating bin sequence: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to rotate route")
+				return
+			}
+		}
+
+		log.Printf("✅ Route rotation complete with %d bins", len(rotatedBins))
+
+
+	}
 
 		// Update shift to active
 		now := time.Now().Unix()
@@ -1336,16 +1425,53 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			return
 		}
 
-		// Insert bins WITHOUT sequence order (will be optimized when shift starts)
-		for _, binID := range req.BinIDs {
-			routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
-							  VALUES ($1, $2, 0, $3)`
+		// Insert bins - preserve route sequence if from pre-defined route, otherwise mark as unoptimized
+		// Check if this is from a pre-defined route (has bins in route_bins table)
+		var routeBins []struct {
+			BinID         string `db:"bin_id"`
+			SequenceOrder int    `db:"sequence_order"`
+		}
 
-			_, err = tx.Exec(routeBinQuery, shiftID, binID, now)
-			if err != nil {
-				log.Printf("❌ Error inserting shift_bin: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
-				return
+		if req.RouteID != "" && req.RouteID != "custom" {
+			// Try to get pre-defined route bins with sequence
+			routeBinsQuery := `SELECT bin_id, sequence_order FROM route_bins
+							   WHERE route_id = $1
+							   ORDER BY sequence_order`
+			err = tx.Select(&routeBins, routeBinsQuery, req.RouteID)
+			if err != nil && err != sql.ErrNoRows {
+				log.Printf("❌ Error fetching route_bins: %v", err)
+				// Continue anyway - will treat as custom
+				routeBins = nil
+			}
+		}
+
+		// If we found pre-defined route bins, use their sequence
+		if len(routeBins) > 0 {
+			log.Printf("✅ Using pre-defined route sequence with %d bins", len(routeBins))
+			for _, rb := range routeBins {
+				routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
+								  VALUES ($1, $2, $3, $4)`
+
+				_, err = tx.Exec(routeBinQuery, shiftID, rb.BinID, rb.SequenceOrder, now)
+				if err != nil {
+					log.Printf("❌ Error inserting shift_bin: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
+					return
+				}
+			}
+		} else {
+			// Custom selection or route without pre-defined bins - insert with sequence_order = 0
+			log.Printf("ℹ️  Custom bin selection - will optimize from driver's start location")
+			for _, binID := range req.BinIDs {
+				routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
+								  VALUES ($1, $2, 0, $3)`
+
+				_, err = tx.Exec(routeBinQuery, shiftID, binID, now)
+				if err != nil {
+					log.Printf("❌ Error inserting shift_bin: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
+					return
+				}
 			}
 		}
 
