@@ -214,11 +214,11 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Check if driver has a ready or pending_start shift
+		// Check if driver has a ready shift
 		var shift models.Shift
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
-				  AND (status = 'ready' OR status = 'pending_start')
+				  AND status = 'ready'
 				  LIMIT 1`
 
 		err := db.Get(&shift, query, userClaims.UserID)
@@ -233,8 +233,19 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// If shift needs optimization (pending_start), do it now using driver's current location
-		if shift.Status == "pending_start" {
+		// If shift needs optimization (sequence_order = 0), do it now using driver's current location
+		// Check if any bin has sequence_order = 0 (unoptimized)
+		var needsOptimization bool
+		err = db.Get(&needsOptimization,
+			`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1 AND sequence_order = 0)`,
+			shift.ID,
+		)
+		if err != nil {
+			log.Printf("❌ Error checking if shift needs optimization: %v", err)
+			needsOptimization = false // Default to false on error
+		}
+
+		if needsOptimization {
 			log.Printf("🔄 Shift needs route optimization - getting driver location")
 
 			// Get driver's CURRENT location
@@ -1316,7 +1327,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		totalBins := len(req.BinIDs)
 
 		shiftQuery := `INSERT INTO shifts (id, driver_id, route_id, status, total_bins, created_at, updated_at)
-					   VALUES ($1, $2, $3, 'pending_start', $4, $5, $6)`
+					   VALUES ($1, $2, $3, 'ready', $4, $5, $6)`
 
 		_, err = tx.Exec(shiftQuery, shiftID, req.DriverID, req.RouteID, totalBins, now, now)
 		if err != nil {
