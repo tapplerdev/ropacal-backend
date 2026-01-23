@@ -562,6 +562,28 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		},
 	})
 
+	// 6b. Send move_request_assigned WebSocket notification (for mobile app)
+	log.Printf("📡 Broadcasting move_request_assigned to driver %s", activeShift.DriverID)
+
+	// Fetch the updated move request from database
+	var updatedMoveRequest models.BinMoveRequest
+	err = db.Get(&updatedMoveRequest, `SELECT * FROM bin_move_requests WHERE id = $1`, moveRequest.ID)
+	if err == nil {
+		wsHub.BroadcastToUser(activeShift.DriverID, map[string]interface{}{
+			"type": "move_request_assigned",
+			"data": map[string]interface{}{
+				"move_request": updatedMoveRequest,
+				"updated_route": map[string]interface{}{
+					"shift_id": activeShift.ID,
+					"bins":     updatedBins,
+				},
+			},
+		})
+		log.Printf("✅ move_request_assigned notification sent")
+	} else {
+		log.Printf("⚠️  Failed to fetch updated move request for WebSocket: %v", err)
+	}
+
 	// 7. Send push notification to driver
 	if fcmService != nil {
 		var fcmToken models.FCMToken
