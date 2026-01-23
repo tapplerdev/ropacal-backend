@@ -214,11 +214,11 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Check if driver has a ready shift
+		// Check if driver has a ready or pending_start shift
 		var shift models.Shift
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
-				  AND status = 'ready'
+				  AND (status = 'ready' OR status = 'pending_start')
 				  LIMIT 1`
 
 		err := db.Get(&shift, query, userClaims.UserID)
@@ -231,6 +231,99 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("❌ Error getting shift: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Database error")
 			return
+		}
+
+		// If shift needs optimization (pending_start), do it now using driver's current location
+		if shift.Status == "pending_start" {
+			log.Printf("🔄 Shift needs route optimization - getting driver location")
+
+			// Get driver's CURRENT location
+			var driverLocation struct {
+				Latitude  float64 `db:"latitude"`
+				Longitude float64 `db:"longitude"`
+			}
+
+			locationErr := db.Get(&driverLocation,
+				`SELECT latitude, longitude FROM driver_current_location
+				 WHERE driver_id = $1 AND is_connected = true`,
+				userClaims.UserID,
+			)
+
+			if locationErr != nil {
+				log.Printf("❌ Driver location not available: %v", locationErr)
+				utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
+				return
+			}
+
+			log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+
+			// Fetch all bins assigned to this shift
+			var binDetails []struct {
+				ID             string  `db:"id"`
+				CurrentStreet  string  `db:"current_street"`
+				Latitude       float64 `db:"latitude"`
+				Longitude      float64 `db:"longitude"`
+				FillPercentage int     `db:"fill_percentage"`
+			}
+
+			binQuery := `
+				SELECT b.id, b.current_street, b.latitude, b.longitude, b.fill_percentage
+				FROM bins b
+				JOIN shift_bins sb ON b.id = sb.bin_id
+				WHERE sb.shift_id = $1
+			`
+			err = db.Select(&binDetails, binQuery, shift.ID)
+			if err != nil {
+				log.Printf("❌ Error fetching bins: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
+				return
+			}
+
+			log.Printf("📦 Fetched %d bins for optimization", len(binDetails))
+
+			// Convert to optimizer format
+			binsToOptimize := make([]services.BinWithPriority, len(binDetails))
+			for i, bin := range binDetails {
+				binsToOptimize[i] = services.BinWithPriority{
+					ID:             bin.ID,
+					Latitude:       bin.Latitude,
+					Longitude:      bin.Longitude,
+					FillPercentage: bin.FillPercentage,
+					CurrentStreet:  bin.CurrentStreet,
+				}
+			}
+
+			// Optimize route using TSP algorithm from driver's current location
+			optimizer := services.NewRouteOptimizer()
+			startLocation := services.Location{
+				Latitude:  driverLocation.Latitude,
+				Longitude: driverLocation.Longitude,
+			}
+			optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
+
+			log.Printf("🎯 Route optimized! Order: %v", func() []string {
+				streets := make([]string, len(optimizedBins))
+				for i, b := range optimizedBins {
+					streets[i] = b.CurrentStreet
+				}
+				return streets
+			}())
+
+			// Update shift_bins with optimized sequence_order
+			for i, bin := range optimizedBins {
+				updateQuery := `UPDATE shift_bins
+								SET sequence_order = $1
+								WHERE shift_id = $2 AND bin_id = $3`
+
+				_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
+				if err != nil {
+					log.Printf("❌ Error updating bin sequence: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to optimize route")
+					return
+				}
+			}
+
+			log.Printf("✅ Route optimized with %d bins from driver's location", len(optimizedBins))
 		}
 
 		// Update shift to active
@@ -1183,51 +1276,9 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		}
 
 		log.Printf("📋 Assigning route %s to driver %s with %d bins", req.RouteID, req.DriverID, len(req.BinIDs))
-
-		// Check if driver is online and has recent location
-		var driverLocation struct {
-			Latitude    float64 `db:"latitude"`
-			Longitude   float64 `db:"longitude"`
-			IsConnected bool    `db:"is_connected"`
-			UpdatedAt   int64   `db:"updated_at"`
-		}
+		log.Printf("🔄 Route will be optimized when driver starts shift (based on actual location)")
 
 		now := time.Now().Unix()
-		locationQuery := `
-			SELECT latitude, longitude, is_connected, updated_at
-			FROM driver_current_location
-			WHERE driver_id = $1
-		`
-
-		err := db.Get(&driverLocation, locationQuery, req.DriverID)
-		if err == sql.ErrNoRows {
-			log.Printf("❌ Driver is not online (no location data)")
-			utils.RespondError(w, http.StatusBadRequest, "Driver is not online. Ask driver to log in and enable location.")
-			return
-		}
-		if err != nil {
-			log.Printf("❌ Error checking driver location: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to check driver status")
-			return
-		}
-
-		// Check if driver is connected
-		if !driverLocation.IsConnected {
-			log.Printf("❌ Driver is not connected (is_connected = false)")
-			utils.RespondError(w, http.StatusBadRequest, "Driver is not online. Ask driver to log in and enable location.")
-			return
-		}
-
-		// Check if location is recent (updated within last 30 seconds)
-		timeSinceUpdate := now - driverLocation.UpdatedAt
-		if timeSinceUpdate > 30 {
-			log.Printf("❌ Driver location is stale (last update: %ds ago)", timeSinceUpdate)
-			utils.RespondError(w, http.StatusBadRequest, "Driver location is not available. Ask driver to ensure GPS is enabled.")
-			return
-		}
-
-		log.Printf("✅ Driver is online with recent location (%.6f, %.6f) - updated %ds ago",
-			driverLocation.Latitude, driverLocation.Longitude, timeSinceUpdate)
 
 		// Start transaction
 		tx, err := db.Beginx()
@@ -1260,78 +1311,12 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			return
 		}
 
-		// Fetch full bin details for TSP optimization
-		binQuery := `SELECT id, current_street, latitude, longitude, fill_percentage FROM bins WHERE id IN (?)`
-		binQuery, binArgs, err := sqlx.In(binQuery, req.BinIDs)
-		if err != nil {
-			log.Printf("❌ Error building bin query: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
-			return
-		}
-		binQuery = tx.Rebind(binQuery)
-
-		var binDetails []struct {
-			ID             string  `db:"id"`
-			CurrentStreet  string  `db:"current_street"`
-			Latitude       float64 `db:"latitude"`
-			Longitude      float64 `db:"longitude"`
-			FillPercentage int     `db:"fill_percentage"`
-		}
-		err = tx.Select(&binDetails, binQuery, binArgs...)
-		if err != nil {
-			log.Printf("❌ Error fetching bin details: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
-			return
-		}
-
-		// Convert to optimizer format
-		binsToOptimize := make([]services.BinWithPriority, len(binDetails))
-		for i, bin := range binDetails {
-			binsToOptimize[i] = services.BinWithPriority{
-				ID:             bin.ID,
-				Latitude:       bin.Latitude,
-				Longitude:      bin.Longitude,
-				FillPercentage: bin.FillPercentage,
-				CurrentStreet:  bin.CurrentStreet,
-			}
-		}
-
-		// Optimize route using TSP algorithm
-		optimizer := services.NewRouteOptimizer()
-		startLocation := services.Location{
-			Latitude:  driverLocation.Latitude,
-			Longitude: driverLocation.Longitude,
-		}
-		optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
-
-		// Calculate total distance including return to warehouse
-		totalDistance := 0.0
-		currentLat, currentLng := driverLocation.Latitude, driverLocation.Longitude
-		for _, bin := range optimizedBins {
-			distance := haversineDistanceKm(currentLat, currentLng, bin.Latitude, bin.Longitude)
-			totalDistance += distance
-			currentLat, currentLng = bin.Latitude, bin.Longitude
-		}
-		// Add distance from last bin to warehouse
-		warehouse := services.GetWarehouseLocation()
-		distanceToWarehouse := haversineDistanceKm(currentLat, currentLng, warehouse.Latitude, warehouse.Longitude)
-		totalDistance += distanceToWarehouse
-
-		log.Printf("🎯 Route optimized! Order: %v", func() []string {
-			streets := make([]string, len(optimizedBins))
-			for i, b := range optimizedBins {
-				streets[i] = b.CurrentStreet
-			}
-			return streets
-		}())
-		log.Printf("📏 Total route distance: %.2f km (includes %.2f km return to warehouse)", totalDistance, distanceToWarehouse)
-
-		// Create new shift
+		// Create new shift (route optimization will happen when driver starts)
 		shiftID := uuid.New().String()
 		totalBins := len(req.BinIDs)
 
 		shiftQuery := `INSERT INTO shifts (id, driver_id, route_id, status, total_bins, created_at, updated_at)
-					   VALUES ($1, $2, $3, 'ready', $4, $5, $6)`
+					   VALUES ($1, $2, $3, 'pending_start', $4, $5, $6)`
 
 		_, err = tx.Exec(shiftQuery, shiftID, req.DriverID, req.RouteID, totalBins, now, now)
 		if err != nil {
@@ -1340,15 +1325,15 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			return
 		}
 
-		// Insert route bins with OPTIMIZED sequence order
-		for i, bin := range optimizedBins {
+		// Insert bins WITHOUT sequence order (will be optimized when shift starts)
+		for _, binID := range req.BinIDs {
 			routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
-							  VALUES ($1, $2, $3, $4)`
+							  VALUES ($1, $2, 0, $3)`
 
-			_, err = tx.Exec(routeBinQuery, shiftID, bin.ID, i+1, now)
+			_, err = tx.Exec(routeBinQuery, shiftID, binID, now)
 			if err != nil {
-				log.Printf("❌ Error inserting route_bin: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to route")
+				log.Printf("❌ Error inserting shift_bin: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
 				return
 			}
 		}
