@@ -70,7 +70,7 @@ func GetRoute(db *sqlx.DB) http.HandlerFunc {
 		var binsWithSequence []BinWithSequence
 		err = db.Select(&binsWithSequence, `
 			SELECT b.id, b.bin_number, b.current_street, b.city, b.zip,
-			       b.last_moved, b.last_checked, b.status, b.fill_percentage,
+			       b.last_moved, b.last_checked, b.status, COALESCE(b.fill_percentage, 0) as fill_percentage,
 			       b.checked, b.move_requested, b.latitude, b.longitude,
 			       b.created_at, b.updated_at, rb.sequence_order
 			FROM bins b

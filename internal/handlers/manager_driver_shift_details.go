@@ -119,7 +119,7 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 			b.current_street,
 			b.city,
 			b.zip,
-			b.fill_percentage,
+			COALESCE(b.fill_percentage, 0) as fill_percentage,
 			b.latitude,
 			b.longitude
 		FROM shift_bins rb

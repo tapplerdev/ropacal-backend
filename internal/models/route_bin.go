@@ -22,11 +22,11 @@ type ShiftBinWithDetails struct {
 	CompletedAt           *int64  `db:"completed_at" json:"completed_at"`
 	UpdatedFillPercentage *int    `db:"updated_fill_percentage" json:"updated_fill_percentage"`
 	CreatedAt             int64   `db:"created_at" json:"created_at"`
-	BinNumber             int     `db:"bin_number" json:"bin_number"`
-	CurrentStreet         string  `db:"current_street" json:"current_street"`
-	City                  string  `db:"city" json:"city"`
-	Zip                   string  `db:"zip" json:"zip"`
-	FillPercentage        int     `db:"fill_percentage" json:"fill_percentage"`
-	Latitude              float64 `db:"latitude" json:"latitude"`
-	Longitude             float64 `db:"longitude" json:"longitude"`
+	BinNumber             int      `db:"bin_number" json:"bin_number"`
+	CurrentStreet         string   `db:"current_street" json:"current_street"`
+	City                  string   `db:"city" json:"city"`
+	Zip                   string   `db:"zip" json:"zip"`
+	FillPercentage        int      `db:"fill_percentage" json:"fill_percentage"`
+	Latitude              float64  `db:"latitude" json:"latitude"`
+	Longitude             float64  `db:"longitude" json:"longitude"`
 }

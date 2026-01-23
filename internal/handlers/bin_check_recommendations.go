@@ -147,7 +147,7 @@ func GetBinCheckRecommendations(db *sqlx.DB) http.HandlerFunc {
 				b.city as "bin.city",
 				b.zip as "bin.zip",
 				b.status as "bin.status",
-				b.fill_percentage as "bin.fill_percentage",
+				COALESCE(b.fill_percentage, 0) as "bin.fill_percentage",
 				b.latitude as "bin.latitude",
 				b.longitude as "bin.longitude",
 				b.last_checked_at as "bin.last_checked_at"

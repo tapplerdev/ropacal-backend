@@ -281,7 +281,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 
 			binQuery := `
-				SELECT b.id, b.current_street, b.latitude, b.longitude, b.fill_percentage
+				SELECT b.id, b.current_street, b.latitude, b.longitude, COALESCE(b.fill_percentage, 0) as fill_percentage
 				FROM bins b
 				JOIN shift_bins sb ON b.id = sb.bin_id
 				WHERE sb.shift_id = $1
@@ -1326,7 +1326,7 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 			b.current_street,
 			b.city,
 			b.zip,
-			b.fill_percentage,
+			COALESCE(b.fill_percentage, 0) as fill_percentage,
 			b.latitude,
 			b.longitude
 		FROM shift_bins rb

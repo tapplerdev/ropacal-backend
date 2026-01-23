@@ -346,7 +346,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	var shiftBins []models.ShiftBinWithDetails
 	err = db.Select(&shiftBins, `
 		SELECT rb.id, rb.shift_id, rb.bin_id, rb.sequence_order, rb.is_completed,
-		       b.bin_number, b.current_street, b.city, b.zip, b.fill_percentage,
+		       b.bin_number, b.current_street, b.city, b.zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
 		       b.latitude, b.longitude
 		FROM shift_bins rb
 		JOIN bins b ON rb.bin_id = b.id
@@ -472,7 +472,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		var remainingBins []models.ShiftBinWithDetails
 		err = tx.Select(&remainingBins, `
 			SELECT rb.id, rb.shift_id, rb.bin_id, rb.sequence_order,
-			       b.bin_number, b.current_street, b.city, b.zip, b.fill_percentage,
+			       b.bin_number, b.current_street, b.city, b.zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
 			       b.latitude, b.longitude
 			FROM shift_bins rb
 			JOIN bins b ON rb.bin_id = b.id
