@@ -1431,9 +1431,13 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 			b.latitude,
 			b.longitude,
 			rb.stop_type,
-			rb.move_request_id
+			rb.move_request_id,
+			mr.original_address,
+			mr.new_address,
+			mr.move_type
 		FROM shift_bins rb
 		JOIN bins b ON rb.bin_id = b.id
+		LEFT JOIN bin_move_requests mr ON rb.move_request_id = mr.id
 		WHERE rb.shift_id = $1
 		ORDER BY rb.sequence_order ASC`
 

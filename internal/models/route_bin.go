@@ -16,14 +16,14 @@ type ShiftBin struct {
 
 // ShiftBinWithDetails extends ShiftBin with bin details for API responses
 type ShiftBinWithDetails struct {
-	ID                    int     `db:"id" json:"id"`
-	ShiftID               string  `db:"shift_id" json:"shift_id"`
-	BinID                 string  `db:"bin_id" json:"bin_id"`
-	SequenceOrder         int     `db:"sequence_order" json:"sequence_order"`
-	IsCompleted           int     `db:"is_completed" json:"is_completed"`
-	CompletedAt           *int64  `db:"completed_at" json:"completed_at"`
-	UpdatedFillPercentage *int    `db:"updated_fill_percentage" json:"updated_fill_percentage"`
-	CreatedAt             int64   `db:"created_at" json:"created_at"`
+	ID                    int      `db:"id" json:"id"`
+	ShiftID               string   `db:"shift_id" json:"shift_id"`
+	BinID                 string   `db:"bin_id" json:"bin_id"`
+	SequenceOrder         int      `db:"sequence_order" json:"sequence_order"`
+	IsCompleted           int      `db:"is_completed" json:"is_completed"`
+	CompletedAt           *int64   `db:"completed_at" json:"completed_at"`
+	UpdatedFillPercentage *int     `db:"updated_fill_percentage" json:"updated_fill_percentage"`
+	CreatedAt             int64    `db:"created_at" json:"created_at"`
 	BinNumber             int      `db:"bin_number" json:"bin_number"`
 	CurrentStreet         string   `db:"current_street" json:"current_street"`
 	City                  string   `db:"city" json:"city"`
@@ -33,4 +33,7 @@ type ShiftBinWithDetails struct {
 	Longitude             float64  `db:"longitude" json:"longitude"`
 	StopType              string   `db:"stop_type" json:"stop_type"`
 	MoveRequestID         *string  `db:"move_request_id" json:"move_request_id"`
+	OriginalAddress       *string  `db:"original_address" json:"original_address"`
+	NewAddress            *string  `db:"new_address" json:"new_address"`
+	MoveType              *string  `db:"move_type" json:"move_type"`
 }
