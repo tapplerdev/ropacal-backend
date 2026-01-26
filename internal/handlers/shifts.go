@@ -1164,35 +1164,41 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			bins = []models.ShiftBinWithDetails{}
 		}
 
+	// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
+	logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
+	log.Printf("[DIAGNOSTIC] 🔢 Logical counts: %d completed / %d total (Physical: %d/%d)",
+		logicalCompleted, logicalTotal, shift.CompletedBins, shift.TotalBins)
+
+
 		// Broadcast WebSocket update with bins
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": map[string]interface{}{
 				"id":             shift.ID,
 				"status":         shift.Status,
-				"completed_bins": shift.CompletedBins,
-				"total_bins":     shift.TotalBins,
+				"completed_bins": logicalCompleted,
+				"total_bins":     logicalTotal,
 				"bins":           bins,
 			},
 		})
 
-		log.Printf("[DIAGNOSTIC] ✅ Bin completed: %d/%d", shift.CompletedBins, shift.TotalBins)
+		log.Printf("[DIAGNOSTIC] ✅ Bin completed: %d/%d (logical)", logicalCompleted, logicalTotal)
 
 		completionPercentage := 0.0
-		if shift.TotalBins > 0 {
-			completionPercentage = float64(shift.CompletedBins) / float64(shift.TotalBins) * 100
+		if logicalTotal > 0 {
+			completionPercentage = float64(logicalCompleted) / float64(logicalTotal) * 100
 		}
 
 		response := models.CompleteBinResponse{
-			CompletedBins:        shift.CompletedBins,
-			TotalBins:            shift.TotalBins,
+			CompletedBins:        logicalCompleted,
+			TotalBins:            logicalTotal,
 			CompletionPercentage: completionPercentage,
 			CheckID:              checkID,
 			IncidentID:           createdIncidentID,
 		}
 
 		log.Printf("[DIAGNOSTIC] 📤 RESPONSE: 200 OK")
-		log.Printf("[DIAGNOSTIC]    Completed: %d/%d (%.1f%%)", shift.CompletedBins, shift.TotalBins, completionPercentage)
+		log.Printf("[DIAGNOSTIC]    Completed: %d/%d (%.1f%%) [LOGICAL COUNTS]", logicalCompleted, logicalTotal, completionPercentage)
 		log.Printf("[DIAGNOSTIC]    Photo uploaded: %v", req.PhotoUrl != nil)
 		if checkID != nil {
 			log.Printf("[DIAGNOSTIC]    Check ID: %d (available for incident linking)", *checkID)
@@ -1409,6 +1415,54 @@ func GetShiftMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			"data":    responses,
 		})
 	}
+}
+
+// calculateLogicalBinCounts groups move request pickup+dropoff as one logical bin
+// Returns (logicalTotal, logicalCompleted)
+func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
+	processedMoveRequests := make(map[string]bool)
+	logicalTotal := 0
+	logicalCompleted := 0
+
+	for _, bin := range bins {
+		// If it's part of a move request
+		if bin.MoveRequestID != nil && *bin.MoveRequestID != "" {
+			moveReqID := *bin.MoveRequestID
+
+			// Only count once per move request (not per waypoint)
+			if !processedMoveRequests[moveReqID] {
+				logicalTotal++
+				processedMoveRequests[moveReqID] = true
+
+				// Check if BOTH waypoints are completed
+				pickupCompleted := false
+				dropoffCompleted := false
+
+				for _, b := range bins {
+					if b.MoveRequestID != nil && *b.MoveRequestID == moveReqID {
+						if b.StopType == "pickup" && b.IsCompleted == 1 {
+							pickupCompleted = true
+						}
+						if b.StopType == "dropoff" && b.IsCompleted == 1 {
+							dropoffCompleted = true
+						}
+					}
+				}
+
+				if pickupCompleted && dropoffCompleted {
+					logicalCompleted++
+				}
+			}
+		} else {
+			// Regular collection bin
+			logicalTotal++
+			if bin.IsCompleted == 1 {
+				logicalCompleted++
+			}
+		}
+	}
+
+	return logicalTotal, logicalCompleted
 }
 
 // getRouteBinsWithDetails fetches route bins with full bin details
