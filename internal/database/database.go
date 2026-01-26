@@ -563,6 +563,56 @@ func Migrate(db *sqlx.DB) error {
 		// Migration: Update bin_move_requests move_type constraint to include 'store'
 		`ALTER TABLE bin_move_requests DROP CONSTRAINT IF EXISTS bin_move_requests_move_type_check`,
 		`ALTER TABLE bin_move_requests ADD CONSTRAINT bin_move_requests_move_type_check CHECK(move_type IN ('store', 'pickup_only', 'relocation'))`,
+
+		// Migration: Add missing columns to checks table for enhanced check tracking
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS checked_by TEXT`,
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS photo_url TEXT`,
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS move_request_id TEXT`,
+
+		// Add foreign key constraint for checked_by
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='checks_checked_by_fkey' AND table_name='checks') THEN
+				ALTER TABLE checks ADD CONSTRAINT checks_checked_by_fkey
+					FOREIGN KEY (checked_by) REFERENCES users(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		// Add foreign key constraint for move_request_id
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='checks_move_request_id_fkey' AND table_name='checks') THEN
+				ALTER TABLE checks ADD CONSTRAINT checks_move_request_id_fkey
+					FOREIGN KEY (move_request_id) REFERENCES bin_move_requests(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		// Create index on move_request_id for faster lookups
+		`CREATE INDEX IF NOT EXISTS idx_checks_move_request_id ON checks(move_request_id)`,
+
+		// Migration: Add stop_type and move_request_id columns to shift_bins table for move request waypoint tracking
+		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS stop_type TEXT DEFAULT 'collection'`,
+		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS move_request_id TEXT`,
+
+		// Add foreign key constraint for move_request_id in shift_bins
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='shift_bins_move_request_id_fkey' AND table_name='shift_bins') THEN
+				ALTER TABLE shift_bins ADD CONSTRAINT shift_bins_move_request_id_fkey
+					FOREIGN KEY (move_request_id) REFERENCES bin_move_requests(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		// Add check constraint for stop_type values
+		`ALTER TABLE shift_bins DROP CONSTRAINT IF EXISTS shift_bins_stop_type_check`,
+		`ALTER TABLE shift_bins ADD CONSTRAINT shift_bins_stop_type_check CHECK(stop_type IN ('collection', 'pickup', 'dropoff'))`,
+
+		// Create index on move_request_id in shift_bins for faster lookups
+		`CREATE INDEX IF NOT EXISTS idx_shift_bins_move_request_id ON shift_bins(move_request_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_bins_stop_type ON shift_bins(stop_type)`,
 	}
 
 	for _, migration := range migrations {
