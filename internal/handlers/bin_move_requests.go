@@ -422,29 +422,51 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	}
 
 	// 3. Insert move request bin at determined position
+	// Determine how many waypoints to add (pickup only, or pickup + dropoff)
+	binsAdded := 1
+	if moveRequest.MoveType == "relocation" {
+		binsAdded = 2
+		log.Printf("   Relocation move - will add both pickup and dropoff waypoints")
+	} else {
+		log.Printf("   Store move - will add pickup waypoint only")
+	}
+
 	tx, err := db.Beginx()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Shift all bins after insert position up by 1
+	// Shift all bins after insert position up by binsAdded
 	_, err = tx.Exec(`
 		UPDATE shift_bins
-		SET sequence_order = sequence_order + 1
-		WHERE shift_id = $1 AND sequence_order >= $2
-	`, activeShift.ID, insertSequenceOrder)
+		SET sequence_order = sequence_order + $1
+		WHERE shift_id = $2 AND sequence_order >= $3
+	`, binsAdded, activeShift.ID, insertSequenceOrder)
 	if err != nil {
 		return fmt.Errorf("failed to shift sequence order: %w", err)
 	}
 
-	// Insert move bin at determined position
+	// Insert pickup waypoint for move request
 	_, err = tx.Exec(`
-		INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at)
-		VALUES ($1, $2, $3, 0, $4)
-	`, activeShift.ID, moveRequest.BinID, insertSequenceOrder, now)
+		INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at, stop_type, move_request_id)
+		VALUES ($1, $2, $3, 0, $4, 'pickup', $5)
+	`, activeShift.ID, moveRequest.BinID, insertSequenceOrder, now, moveRequest.ID)
 	if err != nil {
-		return fmt.Errorf("failed to insert urgent move bin: %w", err)
+		return fmt.Errorf("failed to insert pickup waypoint: %w", err)
+	}
+	log.Printf("   ✅ Inserted pickup waypoint at sequence %d", insertSequenceOrder)
+
+	// For relocation moves, also insert dropoff waypoint immediately after pickup
+	if moveRequest.MoveType == "relocation" {
+		_, err = tx.Exec(`
+			INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at, stop_type, move_request_id)
+			VALUES ($1, $2, $3, 0, $4, 'dropoff', $5)
+		`, activeShift.ID, moveRequest.BinID, insertSequenceOrder+1, now, moveRequest.ID)
+		if err != nil {
+			return fmt.Errorf("failed to insert dropoff waypoint: %w", err)
+		}
+		log.Printf("   ✅ Inserted dropoff waypoint at sequence %d", insertSequenceOrder+1)
 	}
 
 	// Update move request to assign it to this shift (clear any previous user assignment)
@@ -460,9 +482,9 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// Update shift total_bins count
 	_, err = tx.Exec(`
 		UPDATE shifts
-		SET total_bins = total_bins + 1, updated_at = $1
-		WHERE id = $2
-	`, now, activeShift.ID)
+		SET total_bins = total_bins + $1, updated_at = $2
+		WHERE id = $3
+	`, binsAdded, now, activeShift.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update shift: %w", err)
 	}
