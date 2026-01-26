@@ -1424,12 +1424,21 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 			rb.updated_fill_percentage,
 			rb.created_at,
 			b.bin_number,
-			b.current_street,
+			CASE
+				WHEN rb.stop_type = 'dropoff' AND mr.new_address IS NOT NULL THEN mr.new_address
+				ELSE b.current_street
+			END as current_street,
 			b.city,
 			b.zip,
 			COALESCE(b.fill_percentage, 0) as fill_percentage,
-			b.latitude,
-			b.longitude,
+			CASE
+				WHEN rb.stop_type = 'dropoff' AND mr.new_latitude IS NOT NULL THEN mr.new_latitude
+				ELSE b.latitude
+			END as latitude,
+			CASE
+				WHEN rb.stop_type = 'dropoff' AND mr.new_longitude IS NOT NULL THEN mr.new_longitude
+				ELSE b.longitude
+			END as longitude,
 			rb.stop_type,
 			rb.move_request_id,
 			mr.original_address,
