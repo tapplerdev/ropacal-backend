@@ -1328,7 +1328,9 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 			b.zip,
 			COALESCE(b.fill_percentage, 0) as fill_percentage,
 			b.latitude,
-			b.longitude
+			b.longitude,
+			rb.stop_type,
+			rb.move_request_id
 		FROM shift_bins rb
 		JOIN bins b ON rb.bin_id = b.id
 		WHERE rb.shift_id = $1
