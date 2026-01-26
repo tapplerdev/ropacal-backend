@@ -448,31 +448,39 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	}
 
 	// Insert pickup waypoint for move request
-	log.Printf("   🔍 DEBUG: About to insert PICKUP at sequence %d", insertSequenceOrder)
+	pickupSeq := insertSequenceOrder
+	log.Printf("   🔍 DEBUG: About to insert PICKUP - insertSequenceOrder=%d, pickupSeq=%d", insertSequenceOrder, pickupSeq)
+	log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%d, sequence=%d, stop_type=pickup, move_request_id=%s",
+		activeShift.ID, moveRequest.BinID, pickupSeq, moveRequest.ID)
+
 	_, err = tx.Exec(`
 		INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at, stop_type, move_request_id)
 		VALUES ($1, $2, $3, 0, $4, 'pickup', $5)
-	`, activeShift.ID, moveRequest.BinID, insertSequenceOrder, now, moveRequest.ID)
+	`, activeShift.ID, moveRequest.BinID, pickupSeq, now, moveRequest.ID)
 	if err != nil {
 		return fmt.Errorf("failed to insert pickup waypoint: %w", err)
 	}
-	log.Printf("   ✅ Inserted pickup waypoint at sequence %d", insertSequenceOrder)
+	log.Printf("   ✅ Inserted pickup waypoint at sequence %d", pickupSeq)
 
 	// For relocation moves, also insert dropoff waypoint immediately after pickup
 	if moveRequest.MoveType == "relocation" {
-		log.Printf("   🔍 DEBUG: About to insert DROPOFF at sequence %d", insertSequenceOrder+1)
+		dropoffSeq := insertSequenceOrder + 1
+		log.Printf("   🔍 DEBUG: About to insert DROPOFF - insertSequenceOrder=%d, dropoffSeq=%d", insertSequenceOrder, dropoffSeq)
+		log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%d, sequence=%d, stop_type=dropoff, move_request_id=%s",
+			activeShift.ID, moveRequest.BinID, dropoffSeq, moveRequest.ID)
+
 		_, err = tx.Exec(`
 			INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at, stop_type, move_request_id)
 			VALUES ($1, $2, $3, 0, $4, 'dropoff', $5)
-		`, activeShift.ID, moveRequest.BinID, insertSequenceOrder+1, now, moveRequest.ID)
+		`, activeShift.ID, moveRequest.BinID, dropoffSeq, now, moveRequest.ID)
 		if err != nil {
 			return fmt.Errorf("failed to insert dropoff waypoint: %w", err)
 		}
-		log.Printf("   ✅ Inserted dropoff waypoint at sequence %d", insertSequenceOrder+1)
+		log.Printf("   ✅ Inserted dropoff waypoint at sequence %d", dropoffSeq)
 
 		// Verify both waypoints have different sequence_order values
-		var pickupSeq, dropoffSeq int
-		err = tx.Get(&pickupSeq, `
+		var actualPickupSeq, actualDropoffSeq int
+		err = tx.Get(&actualPickupSeq, `
 			SELECT sequence_order FROM shift_bins
 			WHERE shift_id = $1 AND move_request_id = $2 AND stop_type = 'pickup'
 		`, activeShift.ID, moveRequest.ID)
@@ -480,7 +488,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			log.Printf("   ⚠️  Warning: Could not verify pickup sequence_order: %v", err)
 		}
 
-		err = tx.Get(&dropoffSeq, `
+		err = tx.Get(&actualDropoffSeq, `
 			SELECT sequence_order FROM shift_bins
 			WHERE shift_id = $1 AND move_request_id = $2 AND stop_type = 'dropoff'
 		`, activeShift.ID, moveRequest.ID)
@@ -488,16 +496,18 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			log.Printf("   ⚠️  Warning: Could not verify dropoff sequence_order: %v", err)
 		}
 
-		log.Printf("   🔍 VERIFICATION: Pickup sequence=%d, Dropoff sequence=%d", pickupSeq, dropoffSeq)
-		if pickupSeq == dropoffSeq {
-			log.Printf("   ❌ ERROR: Pickup and dropoff have SAME sequence_order: %d", pickupSeq)
-			return fmt.Errorf("duplicate sequence_order detected: both pickup and dropoff at %d", pickupSeq)
+		log.Printf("   🔍 VERIFICATION: Expected pickup=%d, actual=%d | Expected dropoff=%d, actual=%d",
+			pickupSeq, actualPickupSeq, dropoffSeq, actualDropoffSeq)
+
+		if actualPickupSeq == actualDropoffSeq {
+			log.Printf("   ❌ ERROR: Pickup and dropoff have SAME sequence_order: %d", actualPickupSeq)
+			return fmt.Errorf("duplicate sequence_order detected: both pickup and dropoff at %d", actualPickupSeq)
 		}
-		if pickupSeq >= dropoffSeq {
-			log.Printf("   ❌ ERROR: Pickup sequence (%d) >= Dropoff sequence (%d)", pickupSeq, dropoffSeq)
-			return fmt.Errorf("invalid sequence order: pickup at %d, dropoff at %d", pickupSeq, dropoffSeq)
+		if actualPickupSeq >= actualDropoffSeq {
+			log.Printf("   ❌ ERROR: Pickup sequence (%d) >= Dropoff sequence (%d)", actualPickupSeq, actualDropoffSeq)
+			return fmt.Errorf("invalid sequence order: pickup at %d, dropoff at %d", actualPickupSeq, actualDropoffSeq)
 		}
-		log.Printf("   ✅ VALIDATION PASSED: Pickup (%d) < Dropoff (%d)", pickupSeq, dropoffSeq)
+		log.Printf("   ✅ VALIDATION PASSED: Pickup (%d) < Dropoff (%d)", actualPickupSeq, actualDropoffSeq)
 	}
 
 	// Update move request to assign it to this shift (clear any previous user assignment)
