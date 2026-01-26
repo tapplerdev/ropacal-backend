@@ -95,6 +95,6 @@ func HandleWebSocket(hub *Hub, db interface{}) http.HandlerFunc {
 		go client.WritePump()
 		go client.ReadPump()
 
-		log.Printf("✅ WebSocket connection established for user: %s (%s) with role: %s", userClaims.Email, userClaims.UserID, userClaims.Role)
+		// log.Printf("✅ WebSocket connection established for user: %s (%s) with role: %s", userClaims.Email, userClaims.UserID, userClaims.Role)
 	}
 }

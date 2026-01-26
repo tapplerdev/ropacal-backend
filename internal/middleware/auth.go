@@ -23,8 +23,8 @@ type UserClaims struct {
 // Auth middleware validates JWT token and adds user claims to context
 func Auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Printf("🔐 AUTH MIDDLEWARE: %s %s", r.Method, r.URL.Path)
+		// log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		// log.Printf("🔐 AUTH MIDDLEWARE: %s %s", r.Method, r.URL.Path)
 
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
@@ -34,7 +34,7 @@ func Auth(next http.Handler) http.Handler {
 			return
 		}
 
-		log.Printf("   Authorization header present: %s...", authHeader[:20])
+		// log.Printf("   Authorization header present: %s...", authHeader[:20])
 
 		// Extract Bearer token
 		parts := strings.Split(authHeader, " ")
@@ -48,8 +48,8 @@ func Auth(next http.Handler) http.Handler {
 		}
 
 		tokenString := parts[1]
-		log.Printf("   Token extracted (length: %d)", len(tokenString))
-		log.Printf("   Token preview: %s...", tokenString[:20])
+		// log.Printf("   Token extracted (length: %d)", len(tokenString))
+		// log.Printf("   Token preview: %s...", tokenString[:20])
 
 		// Get JWT secret
 		jwtSecret := os.Getenv("APP_JWT_SECRET")
@@ -58,7 +58,7 @@ func Auth(next http.Handler) http.Handler {
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("   JWT secret configured: YES (length: %d)", len(jwtSecret))
+		// log.Printf("   JWT secret configured: YES (length: %d)", len(jwtSecret))
 
 		// Parse and validate token
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
@@ -67,7 +67,7 @@ func Auth(next http.Handler) http.Handler {
 				log.Printf("   ⚠️  Invalid signing method: %v", token.Method)
 				return nil, jwt.ErrSignatureInvalid
 			}
-			log.Printf("   ✓ Signing method valid: %v", token.Method)
+			// log.Printf("   ✓ Signing method valid: %v", token.Method)
 			return []byte(jwtSecret), nil
 		})
 
@@ -82,7 +82,7 @@ func Auth(next http.Handler) http.Handler {
 			return
 		}
 
-		log.Println("   ✓ Token is valid")
+		// log.Println("   ✓ Token is valid")
 
 		// Extract claims
 		claims, ok := token.Claims.(jwt.MapClaims)
@@ -93,7 +93,7 @@ func Auth(next http.Handler) http.Handler {
 			return
 		}
 
-		log.Printf("   ✓ Claims extracted: %v", claims)
+		// log.Printf("   ✓ Claims extracted: %v", claims)
 
 		// Convert to UserClaims struct
 		userClaims := UserClaims{
@@ -102,8 +102,8 @@ func Auth(next http.Handler) http.Handler {
 			Role:   claims["role"].(string),
 		}
 
-		log.Printf("✅ Authenticated: %s (%s)", userClaims.Email, userClaims.Role)
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		// log.Printf("✅ Authenticated: %s (%s)", userClaims.Email, userClaims.Role)
+		// log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		// Add claims to context
 		ctx := context.WithValue(r.Context(), UserContextKey, userClaims)

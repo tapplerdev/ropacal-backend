@@ -153,8 +153,8 @@ func (c *Client) WritePump() {
 
 // handleLocationUpdate processes driver location updates received via WebSocket
 func (c *Client) handleLocationUpdate(data map[string]interface{}) {
-	log.Printf("📍 Received location_update from driver %s", c.UserID)
-	log.Printf("   Data: %+v", data)
+	// log.Printf("📍 Received location_update from driver %s", c.UserID)
+	// log.Printf("   Data: %+v", data)
 
 	// Extract fields from data
 	latitude, ok := data["latitude"].(float64)
@@ -202,7 +202,7 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 			int64(timestamp),
 		)
 		if !shouldProcess {
-			log.Printf("🔇 Skipping update - driver hasn't moved significantly (< 5m)")
+			// log.Printf("🔇 Skipping update - driver hasn't moved significantly (< 5m)")
 			return
 		}
 	}
@@ -271,7 +271,7 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 		return
 	}
 
-	log.Printf("✅ Location updated in database for driver %s", c.UserID)
+	// log.Printf("✅ Location updated in database for driver %s", c.UserID)
 
 	// Broadcast SNAPPED coordinates to managers (better visual display)
 	locationUpdate := map[string]interface{}{
@@ -291,7 +291,7 @@ func (c *Client) handleLocationUpdate(data map[string]interface{}) {
 
 	// Broadcast to all managers (users with role "admin")
 	c.hub.BroadcastToRole("admin", locationUpdate)
-	log.Printf("📤 Broadcasted location update to all managers (snapped if needed)")
+	// log.Printf("📤 Broadcasted location update to all managers (snapped if needed)")
 }
 
 // markAsConnected marks the driver as connected in the database
@@ -325,7 +325,7 @@ func (c *Client) markAsConnected() {
 		return
 	}
 
-	log.Printf("🟢 Driver %s marked as CONNECTED (ready to receive assignments)", c.UserID)
+	// log.Printf("🟢 Driver %s marked as CONNECTED (ready to receive assignments)", c.UserID)
 }
 
 // markAsDisconnected marks the driver as disconnected in the database
@@ -355,7 +355,7 @@ func (c *Client) markAsDisconnected() {
 		return
 	}
 
-	log.Printf("🔴 Driver %s marked as disconnected (last position preserved)", c.UserID)
+	// log.Printf("🔴 Driver %s marked as disconnected (last position preserved)", c.UserID)
 }
 
 // handleDriverLog processes driver log messages and outputs them to Railway logs
