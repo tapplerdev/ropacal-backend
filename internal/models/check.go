@@ -10,6 +10,7 @@ type Check struct {
 	CheckedOn      int64   `json:"checked_on" db:"checked_on"`           // Unix timestamp
 	PhotoUrl       *string `json:"photo_url" db:"photo_url"`             // Cloudinary URL
 	CheckedBy      *string `json:"checked_by" db:"checked_by"`           // User ID who performed the check
+	MoveRequestID  *string `json:"move_request_id" db:"move_request_id"` // Links to move request if this check was for pickup/dropoff
 }
 
 // CheckResponse is what we send to the client
@@ -23,6 +24,7 @@ type CheckResponse struct {
 	PhotoUrl       *string `json:"photoUrl"`      // Cloudinary URL
 	CheckedBy      *string `json:"checkedBy"`     // User ID
 	CheckedByName  *string `json:"checkedByName"` // Driver's name (joined from users table)
+	MoveRequestID  *string `json:"moveRequestId"` // Links to move request if this check was for pickup/dropoff
 }
 
 // ToCheckResponse converts a Check to CheckResponse
@@ -39,5 +41,6 @@ func (c *Check) ToCheckResponse() CheckResponse {
 		PhotoUrl:       c.PhotoUrl,
 		CheckedBy:      c.CheckedBy,
 		CheckedByName:  nil, // Must be populated by handler with JOIN query
+		MoveRequestID:  c.MoveRequestID,
 	}
 }

@@ -881,6 +881,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			BinID                 string  `json:"bin_id"`
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
+			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
 
 			// Incident reporting fields (all optional)
 			HasIncident         bool    `json:"has_incident"`
@@ -1023,12 +1024,12 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		// Insert check record into checks table and get the ID back
 		log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
 		var checkID *int
-		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
-					   VALUES ($1, $2, $3, $4, $5, $6)
+		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id)
+					   VALUES ($1, $2, $3, $4, $5, $6, $7)
 					   RETURNING id`
 
 		var returnedID int
-		err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl).Scan(&returnedID)
+		err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID).Scan(&returnedID)
 		if err != nil {
 			log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
 			// Don't fail the request - the bin is already marked complete
@@ -1306,6 +1307,106 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 				"updated_at":          shift.UpdatedAt,
 				"bins":                bins,
 			},
+		})
+	}
+}
+
+// GetShiftMoveRequests returns all move requests assigned to a shift
+func GetShiftMoveRequests(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/driver/shift-move-requests")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		shiftID := r.URL.Query().Get("shift_id")
+		if shiftID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "shift_id query parameter is required")
+			return
+		}
+
+		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+		log.Printf("   Shift ID: %s", shiftID)
+
+		// Verify shift exists and belongs to the driver
+		var shift models.Shift
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, userClaims.UserID)
+		if err != nil {
+			log.Printf("❌ Error fetching shift: %v", err)
+			utils.RespondError(w, http.StatusNotFound, "Shift not found")
+			return
+		}
+
+		// Query move requests for this shift with bin details
+		query := `
+			SELECT
+				mr.id,
+				mr.bin_id,
+				mr.scheduled_date,
+				mr.urgency,
+				mr.requested_by,
+				mr.status,
+				mr.original_latitude,
+				mr.original_longitude,
+				mr.original_address,
+				mr.new_latitude,
+				mr.new_longitude,
+				mr.new_address,
+				mr.move_type,
+				mr.disposal_action,
+				mr.reason,
+				mr.notes,
+				mr.assignment_type,
+				mr.assigned_shift_id,
+				mr.assigned_user_id,
+				mr.completed_at,
+				mr.created_at,
+				mr.updated_at,
+				b.bin_number,
+				b.current_street,
+				b.city,
+				b.zip
+			FROM bin_move_requests mr
+			JOIN bins b ON mr.bin_id = b.id
+			WHERE mr.assigned_shift_id = $1
+			ORDER BY mr.scheduled_date ASC`
+
+		type MoveRequestWithBinDetails struct {
+			models.BinMoveRequest
+			BinNumber     int    `db:"bin_number"`
+			CurrentStreet string `db:"current_street"`
+			City          string `db:"city"`
+			Zip           string `db:"zip"`
+		}
+
+		var moveRequests []MoveRequestWithBinDetails
+		err = db.Select(&moveRequests, query, shiftID)
+		if err != nil {
+			log.Printf("❌ Error fetching move requests: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch move requests")
+			return
+		}
+
+		log.Printf("✅ Found %d move requests for shift", len(moveRequests))
+		log.Printf("📤 RESPONSE: 200 OK")
+
+		// Convert to response format
+		responses := make([]models.BinMoveRequestResponse, 0, len(moveRequests))
+		for _, mr := range moveRequests {
+			resp := mr.BinMoveRequest.ToBinMoveRequestResponse()
+			resp.BinNumber = mr.BinNumber
+			resp.CurrentStreet = mr.CurrentStreet
+			resp.City = mr.City
+			resp.Zip = mr.Zip
+			responses = append(responses, resp)
+		}
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    responses,
 		})
 	}
 }
@@ -2125,6 +2226,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest,
 	BinID                 string  `json:"bin_id"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
 	PhotoUrl              *string `json:"photo_url,omitempty"`
+	MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
 	HasIncident           bool    `json:"has_incident"`
 	IncidentType          *string `json:"incident_type,omitempty"`
 	IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`

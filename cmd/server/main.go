@@ -222,6 +222,7 @@ func main() {
 			// Shift history
 			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
 			r.Get("/driver/shift-details", handlers.GetShiftDetails(db))
+			r.Get("/driver/shift-move-requests", handlers.GetShiftMoveRequests(db))
 
 			// Location tracking (sent every 10 seconds during active shift)
 			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub))
