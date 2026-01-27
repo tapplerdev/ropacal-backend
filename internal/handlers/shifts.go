@@ -451,6 +451,27 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			rowsAffected, _ := result.RowsAffected()
 			if rowsAffected > 0 {
 				log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
+
+				// Broadcast move request status update to dashboard
+				hub.BroadcastToRole("admin", map[string]interface{}{
+					"type": "move_request_status_updated",
+					"data": map[string]interface{}{
+						"shift_id":    shift.ID,
+						"new_status":  "in_progress",
+						"count":       rowsAffected,
+						"updated_at":  now,
+					},
+				})
+				hub.BroadcastToRole("manager", map[string]interface{}{
+					"type": "move_request_status_updated",
+					"data": map[string]interface{}{
+						"shift_id":    shift.ID,
+						"new_status":  "in_progress",
+						"count":       rowsAffected,
+						"updated_at":  now,
+					},
+				})
+				log.Printf("📡 Broadcast move_request_status_updated to managers: %d move requests → in_progress", rowsAffected)
 			}
 		}
 
@@ -1023,7 +1044,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			// For pickup, we just mark the waypoint complete (already done above) and continue
 			if stopType == "dropoff" {
 				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
-				err = handleMoveRequestCompletion(db, moveRequest, req, now)
+				err = handleMoveRequestCompletion(db, hub, moveRequest, req, now)
 				if err != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
 					// Don't fail - just log
@@ -2327,7 +2348,7 @@ func executeMerge(db *sqlx.DB, primaryZone, secondaryZone models.NoGoZone, now i
 }
 
 // handleMoveRequestCompletion handles move request completion logic
-func handleMoveRequestCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest, req struct {
+func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest models.BinMoveRequest, req struct {
 	ShiftBinID            int     `json:"shift_bin_id"`
 	BinID                 string  `json:"bin_id"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
@@ -2351,6 +2372,27 @@ func handleMoveRequestCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest,
 		return fmt.Errorf("failed to complete move request: %w", err)
 	}
 	log.Printf("[MOVE] ✅ Move request marked as completed")
+
+	// Broadcast move request completion to dashboard
+	hub.BroadcastToRole("admin", map[string]interface{}{
+		"type": "move_request_status_updated",
+		"data": map[string]interface{}{
+			"move_request_id": moveRequest.ID,
+			"bin_id":          moveRequest.BinID,
+			"new_status":      "completed",
+			"completed_at":    now,
+		},
+	})
+	hub.BroadcastToRole("manager", map[string]interface{}{
+		"type": "move_request_status_updated",
+		"data": map[string]interface{}{
+			"move_request_id": moveRequest.ID,
+			"bin_id":          moveRequest.BinID,
+			"new_status":      "completed",
+			"completed_at":    now,
+		},
+	})
+	log.Printf("📡 Broadcast move_request_status_updated to managers: Move request %s → completed", moveRequest.ID)
 
 	if moveRequest.MoveType == "pickup_only" {
 		// Pickup for retirement or storage
