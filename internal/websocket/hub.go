@@ -54,14 +54,24 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			h.clients[client.UserID] = client
 			h.mu.Unlock()
-			// log.Printf("✅ WebSocket client registered: %s", client.UserID)
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Printf("✅ [WEBSOCKET] Client CONNECTED")
+			log.Printf("   User ID: %s", client.UserID)
+			log.Printf("   Role: %s", client.UserRole)
+			log.Printf("   Total connected clients: %d", len(h.clients))
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		case client := <-h.unregister:
 			h.mu.Lock()
 			if _, ok := h.clients[client.UserID]; ok {
 				delete(h.clients, client.UserID)
 				close(client.send)
-				// log.Printf("🔌 WebSocket client unregistered: %s", client.UserID)
+				log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+				log.Printf("🔴 [WEBSOCKET] Client DISCONNECTED")
+				log.Printf("   User ID: %s", client.UserID)
+				log.Printf("   Role: %s", client.UserRole)
+				log.Printf("   Remaining connected clients: %d", len(h.clients))
+				log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			}
 			h.mu.Unlock()
 

@@ -1131,6 +1131,22 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
+		// Get authenticated user (manager making the update)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			http.Error(w, "User not authenticated", http.StatusUnauthorized)
+			return
+		}
+		managerUserID := userClaims.UserID
+
+		// Fetch manager's name for notifications
+		var managerName string
+		err := db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerUserID)
+		if err != nil {
+			log.Printf("Warning: Could not fetch manager name: %v", err)
+			managerName = "A manager" // Fallback
+		}
+
 		// Fetch existing move request with shift details
 		var moveRequest struct {
 			models.BinMoveRequest
@@ -1621,12 +1637,32 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			// Notify affected drivers
 			if len(affectedDriverIDs) > 0 {
 				log.Printf("   Broadcasting to %d affected driver(s):", len(affectedDriverIDs))
+
+				// Fetch bin number for the notification
+				var binNumber int
+				err := db.Get(&binNumber, `SELECT bin_number FROM bins WHERE id = $1`, updatedMove.BinID)
+				if err != nil {
+					log.Printf("Warning: Could not fetch bin number: %v", err)
+					binNumber = 0 // Fallback
+				}
+
+				// Determine action type (removed/added)
+				actionType := "updated"
+				if isUnassigning {
+					actionType = "removed"
+				} else if moveRequest.AssignedShiftID == nil && updatedMove.AssignedShiftID != nil {
+					actionType = "added"
+				}
+
 				for i, driverID := range affectedDriverIDs {
 					driverPayload := &websocket.Message{
 						Data: map[string]interface{}{
 							"type":            "route_updated",
-							"message":         "Your route has been updated by a manager",
+							"message":         fmt.Sprintf("%s has %s Bin #%d from your route", managerName, actionType, binNumber),
 							"move_request_id": id,
+							"manager_name":    managerName,
+							"action_type":     actionType,
+							"bin_number":      binNumber,
 						},
 					}
 					log.Printf("   [%d/%d] Driver ID: %s", i+1, len(affectedDriverIDs), driverID)
