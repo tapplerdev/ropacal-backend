@@ -998,7 +998,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			SELECT * FROM bin_move_requests
 			WHERE bin_id = $1
 			AND assigned_shift_id = $2
-			AND status = 'in_progress'
+			AND status IN ('assigned', 'in_progress')
 		`, req.BinID, shift.ID)
 
 		if moveErr == nil {
