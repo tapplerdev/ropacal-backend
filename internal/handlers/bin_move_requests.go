@@ -560,10 +560,21 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 				}
 			}
 
-			// Use inserted move bin as start location for re-optimization
+			// Use dropoff location as start for re-optimization (where driver will be after completing move)
+			// For relocation moves, use the new location; for store moves, use original location
+			var startLat, startLng float64
+			if moveRequest.MoveType == "relocation" && moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+				startLat = *moveRequest.NewLatitude
+				startLng = *moveRequest.NewLongitude
+			} else {
+				// Store move - driver returns to pickup location after storing bin
+				startLat = moveRequest.OriginalLatitude
+				startLng = moveRequest.OriginalLongitude
+			}
+
 			insertedMoveLocation := services.Location{
-				Latitude:  moveRequest.OriginalLatitude,
-				Longitude: moveRequest.OriginalLongitude,
+				Latitude:  startLat,
+				Longitude: startLng,
 			}
 
 			// Re-optimize remaining bins
