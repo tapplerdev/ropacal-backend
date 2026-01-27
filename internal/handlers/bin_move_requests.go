@@ -1421,6 +1421,36 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
+		// CRITICAL FIX: After updating, check if move request should have "assigned" status
+		// This ensures status is correct even when assignment fields are preserved (not changed)
+		var finalShiftID, finalUserID *string
+		err = tx.QueryRow(`
+			SELECT assigned_shift_id, assigned_user_id
+			FROM bin_move_requests
+			WHERE id = $1
+		`, id).Scan(&finalShiftID, &finalUserID)
+		if err != nil {
+			log.Printf("Error checking final assignment status: %v", err)
+			http.Error(w, "Failed to verify assignment status", http.StatusInternalServerError)
+			return
+		}
+
+		// If move request is assigned to a shift or user, ensure status is "assigned"
+		if (finalShiftID != nil || finalUserID != nil) && moveRequest.Status != "in_progress" && moveRequest.Status != "completed" {
+			log.Printf("[UPDATE MOVE] Move request has assignment (shift: %v, user: %v), setting status to 'assigned'",
+				finalShiftID, finalUserID)
+			_, err = tx.Exec(`
+				UPDATE bin_move_requests
+				SET status = 'assigned'
+				WHERE id = $1
+			`, id)
+			if err != nil {
+				log.Printf("Error setting status to assigned: %v", err)
+				http.Error(w, "Failed to update status", http.StatusInternalServerError)
+				return
+			}
+		}
+
 		// Commit transaction
 		if err = tx.Commit(); err != nil {
 			log.Printf("Error committing transaction: %v", err)
