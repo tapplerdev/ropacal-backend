@@ -540,8 +540,9 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			FROM shift_bins rb
 			JOIN bins b ON rb.bin_id = b.id
 			WHERE rb.shift_id = $1 AND rb.sequence_order > $2 AND rb.is_completed = 0
+			  AND rb.move_request_id IS NULL
 			ORDER BY rb.sequence_order ASC
-		`, activeShift.ID, insertSequenceOrder)
+		`, activeShift.ID, insertSequenceOrder + binsAdded - 1)
 		if err != nil {
 			return fmt.Errorf("failed to fetch remaining bins: %w", err)
 		}
@@ -573,7 +574,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 			// Update sequence order for optimized bins
 			for i, optimizedBin := range optimizedBins {
-				newSequence := insertSequenceOrder + 1 + i // After inserted move
+				newSequence := insertSequenceOrder + binsAdded + i // After both move waypoints
 				_, err = tx.Exec(`
 					UPDATE shift_bins
 					SET sequence_order = $1
