@@ -1421,31 +1421,48 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// CRITICAL FIX: After updating, check if move request should have "assigned" status
-		// This ensures status is correct even when assignment fields are preserved (not changed)
+		// CRITICAL FIX: After updating, check if move request should have correct status
+		// This ensures status matches the assignment state and shift status
 		var finalShiftID, finalUserID *string
+		var shiftStatus *string
 		err = tx.QueryRow(`
-			SELECT assigned_shift_id, assigned_user_id
-			FROM bin_move_requests
-			WHERE id = $1
-		`, id).Scan(&finalShiftID, &finalUserID)
+			SELECT
+				mr.assigned_shift_id,
+				mr.assigned_user_id,
+				s.status as shift_status
+			FROM bin_move_requests mr
+			LEFT JOIN shifts s ON mr.assigned_shift_id = s.id
+			WHERE mr.id = $1
+		`, id).Scan(&finalShiftID, &finalUserID, &shiftStatus)
 		if err != nil {
 			log.Printf("Error checking final assignment status: %v", err)
 			http.Error(w, "Failed to verify assignment status", http.StatusInternalServerError)
 			return
 		}
 
-		// If move request is assigned to a shift or user, ensure status is "assigned"
+		// Set status based on assignment and shift state
+		// Only update status if it's not already in_progress or completed
 		if (finalShiftID != nil || finalUserID != nil) && moveRequest.Status != "in_progress" && moveRequest.Status != "completed" {
-			log.Printf("[UPDATE MOVE] Move request has assignment (shift: %v, user: %v), setting status to 'assigned'",
-				finalShiftID, finalUserID)
+			var newStatus string
+
+			// If assigned to an ACTIVE shift, status should be "in_progress"
+			// If assigned to a future/scheduled shift, status should be "assigned"
+			if finalShiftID != nil && shiftStatus != nil && *shiftStatus == "active" {
+				newStatus = "in_progress"
+				log.Printf("[UPDATE MOVE] Move request assigned to ACTIVE shift, setting status to 'in_progress'")
+			} else {
+				newStatus = "assigned"
+				log.Printf("[UPDATE MOVE] Move request has assignment (shift: %v, user: %v, shift_status: %v), setting status to 'assigned'",
+					finalShiftID, finalUserID, shiftStatus)
+			}
+
 			_, err = tx.Exec(`
 				UPDATE bin_move_requests
-				SET status = 'assigned'
-				WHERE id = $1
-			`, id)
+				SET status = $1
+				WHERE id = $2
+			`, newStatus, id)
 			if err != nil {
-				log.Printf("Error setting status to assigned: %v", err)
+				log.Printf("Error setting status to %s: %v", newStatus, err)
 				http.Error(w, "Failed to update status", http.StatusInternalServerError)
 				return
 			}
