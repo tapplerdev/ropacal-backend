@@ -247,6 +247,8 @@ func main() {
 			r.Use(middleware.RequireRole("admin"))
 
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService))
+			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService))
+			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
 
 			// One-time data migration endpoints (can be removed after use)

@@ -16,6 +16,7 @@ import (
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
@@ -2501,4 +2502,326 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 	}
 
 	return nil
+}
+
+// CancelShift cancels a specific shift
+// PUT /api/manager/shifts/:id/cancel
+func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shiftID := chi.URLParam(r, "id")
+		log.Printf("❌ REQUEST: PUT /api/manager/shifts/%s/cancel", shiftID)
+
+		if shiftID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "shift_id is required")
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Get shift details for websocket/FCM notifications
+		var shift models.Shift
+		err := db.Get(&shift, "SELECT * FROM shifts WHERE id = $1", shiftID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				utils.RespondError(w, http.StatusNotFound, "Shift not found")
+				return
+			}
+			log.Printf("❌ Error fetching shift: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift")
+			return
+		}
+
+		// Only allow cancelling active, paused, or ready shifts
+		if shift.Status != "active" && shift.Status != "paused" && shift.Status != "ready" {
+			utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Cannot cancel shift with status: %s", shift.Status))
+			return
+		}
+
+		// Start transaction
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ Error starting transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to start transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		// 1. Update shift status to cancelled
+		_, err = tx.Exec(`
+			UPDATE shifts
+			SET status = 'cancelled', updated_at = $1
+			WHERE id = $2
+		`, now, shiftID)
+		if err != nil {
+			log.Printf("❌ Error updating shift status: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to cancel shift")
+			return
+		}
+
+		// 2. Return all in_progress move requests to pending
+		result, err := tx.Exec(`
+			UPDATE bin_move_requests
+			SET status = 'pending',
+			    assigned_shift_id = NULL,
+			    updated_at = $1
+			WHERE assigned_shift_id = $2
+			AND status = 'in_progress'
+		`, now, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Error returning move requests to pending: %v", err)
+			// Don't fail - continue
+		} else {
+			rowsAffected, _ := result.RowsAffected()
+			if rowsAffected > 0 {
+				log.Printf("✅ Returned %d move request(s) to pending status", rowsAffected)
+			}
+		}
+
+		// 3. Delete shift_bins entries (cleanup)
+		_, err = tx.Exec(`DELETE FROM shift_bins WHERE shift_id = $1`, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Error deleting shift_bins: %v", err)
+			// Don't fail - continue
+		}
+
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			log.Printf("❌ Error committing transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to commit cancellation")
+			return
+		}
+
+		log.Printf("✅ Shift %s cancelled successfully", shiftID)
+
+		// 4. Send WebSocket notification to driver's mobile app
+		wsHub.BroadcastToUser(shift.DriverID, map[string]interface{}{
+			"type": "shift_cancelled",
+			"data": map[string]interface{}{
+				"shift_id":     shiftID,
+				"cancelled_at": now,
+				"message":      "Your shift has been cancelled by management",
+			},
+		})
+		log.Printf("📡 Sent shift_cancelled websocket to driver %s", shift.DriverID)
+
+		// 5. Send FCM push notification to driver
+		if fcmService != nil {
+			// Get driver's FCM token
+			var fcmToken sql.NullString
+			err = db.Get(&fcmToken, "SELECT fcm_token FROM users WHERE id = $1", shift.DriverID)
+			if err == nil && fcmToken.Valid && fcmToken.String != "" {
+				fcmErr := fcmService.SendShiftUpdateNotification(
+					fcmToken.String,
+					shiftID,
+					"shift_cancelled",
+				)
+				if fcmErr != nil {
+					log.Printf("⚠️  Failed to send FCM notification: %v", fcmErr)
+				} else {
+					log.Printf("📱 Sent FCM notification to driver")
+				}
+			}
+		}
+
+		// 6. Broadcast to dashboard (managers/admins)
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "shift_cancelled",
+			"data": map[string]interface{}{
+				"shift_id":     shiftID,
+				"driver_id":    shift.DriverID,
+				"cancelled_at": now,
+			},
+		})
+		wsHub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "shift_cancelled",
+			"data": map[string]interface{}{
+				"shift_id":     shiftID,
+				"driver_id":    shift.DriverID,
+				"cancelled_at": now,
+			},
+		})
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "Shift cancelled successfully",
+			"data": map[string]interface{}{
+				"shift_id":     shiftID,
+				"driver_id":    shift.DriverID,
+				"cancelled_at": now,
+			},
+		})
+	}
+}
+
+// CancelAllActiveShifts cancels all active or paused shifts
+// POST /api/manager/shifts/cancel-all-active
+func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("❌ REQUEST: POST /api/manager/shifts/cancel-all-active")
+
+		now := time.Now().Unix()
+
+		// Get all active/paused shifts
+		var shifts []models.Shift
+		err := db.Select(&shifts, `
+			SELECT * FROM shifts
+			WHERE status IN ('active', 'paused', 'ready')
+		`)
+		if err != nil {
+			log.Printf("❌ Error fetching active shifts: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch active shifts")
+			return
+		}
+
+		if len(shifts) == 0 {
+			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+				"success": true,
+				"message": "No active shifts to cancel",
+				"data": map[string]interface{}{
+					"cancelled_count": 0,
+				},
+			})
+			return
+		}
+
+		log.Printf("📋 Found %d active/paused shift(s) to cancel", len(shifts))
+
+		// Start transaction
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ Error starting transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to start transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		// Collect shift IDs
+		shiftIDs := make([]string, len(shifts))
+		for i, shift := range shifts {
+			shiftIDs[i] = shift.ID
+		}
+
+		// 1. Update all shifts to cancelled
+		query, args, err := sqlx.In(`
+			UPDATE shifts
+			SET status = 'cancelled', updated_at = ?
+			WHERE id IN (?)
+		`, now, shiftIDs)
+		if err != nil {
+			log.Printf("❌ Error building update query: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to build query")
+			return
+		}
+		query = tx.Rebind(query)
+		_, err = tx.Exec(query, args...)
+		if err != nil {
+			log.Printf("❌ Error updating shifts: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to cancel shifts")
+			return
+		}
+
+		// 2. Return all in_progress move requests to pending
+		moveQuery, moveArgs, err := sqlx.In(`
+			UPDATE bin_move_requests
+			SET status = 'pending',
+			    assigned_shift_id = NULL,
+			    updated_at = ?
+			WHERE assigned_shift_id IN (?)
+			AND status = 'in_progress'
+		`, now, shiftIDs)
+		if err != nil {
+			log.Printf("⚠️  Error building move request query: %v", err)
+		} else {
+			moveQuery = tx.Rebind(moveQuery)
+			result, err := tx.Exec(moveQuery, moveArgs...)
+			if err != nil {
+				log.Printf("⚠️  Error returning move requests to pending: %v", err)
+			} else {
+				rowsAffected, _ := result.RowsAffected()
+				if rowsAffected > 0 {
+					log.Printf("✅ Returned %d move request(s) to pending status", rowsAffected)
+				}
+			}
+		}
+
+		// 3. Delete shift_bins entries
+		deleteQuery, deleteArgs, err := sqlx.In(`DELETE FROM shift_bins WHERE shift_id IN (?)`, shiftIDs)
+		if err != nil {
+			log.Printf("⚠️  Error building delete query: %v", err)
+		} else {
+			deleteQuery = tx.Rebind(deleteQuery)
+			_, err = tx.Exec(deleteQuery, deleteArgs...)
+			if err != nil {
+				log.Printf("⚠️  Error deleting shift_bins: %v", err)
+			}
+		}
+
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			log.Printf("❌ Error committing transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to commit cancellations")
+			return
+		}
+
+		log.Printf("✅ Cancelled %d shift(s) successfully", len(shifts))
+
+		// 4. Send notifications to each affected driver
+		for _, shift := range shifts {
+			// WebSocket notification
+			wsHub.BroadcastToUser(shift.DriverID, map[string]interface{}{
+				"type": "shift_cancelled",
+				"data": map[string]interface{}{
+					"shift_id":     shift.ID,
+					"cancelled_at": now,
+					"message":      "Your shift has been cancelled by management",
+				},
+			})
+
+			// FCM push notification
+			if fcmService != nil {
+				var fcmToken sql.NullString
+				err = db.Get(&fcmToken, "SELECT fcm_token FROM users WHERE id = $1", shift.DriverID)
+				if err == nil && fcmToken.Valid && fcmToken.String != "" {
+					fcmErr := fcmService.SendShiftUpdateNotification(
+						fcmToken.String,
+						shift.ID,
+						"shift_cancelled",
+					)
+					if fcmErr != nil {
+						log.Printf("⚠️  Failed to send FCM to driver %s: %v", shift.DriverID, fcmErr)
+					}
+				}
+			}
+		}
+
+		log.Printf("📡 Sent notifications to %d driver(s)", len(shifts))
+
+		// 5. Broadcast to dashboard
+		wsHub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "bulk_shifts_cancelled",
+			"data": map[string]interface{}{
+				"cancelled_count": len(shifts),
+				"shift_ids":       shiftIDs,
+				"cancelled_at":    now,
+			},
+		})
+		wsHub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "bulk_shifts_cancelled",
+			"data": map[string]interface{}{
+				"cancelled_count": len(shifts),
+				"shift_ids":       shiftIDs,
+				"cancelled_at":    now,
+			},
+		})
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Successfully cancelled %d shift(s)", len(shifts)),
+			"data": map[string]interface{}{
+				"cancelled_count": len(shifts),
+				"shift_ids":       shiftIDs,
+				"cancelled_at":    now,
+			},
+		})
+	}
 }
