@@ -19,6 +19,29 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// calculateUrgency determines the urgency level based on status and scheduled date
+// Returns "resolved" for completed/cancelled moves, otherwise calculates time-based urgency
+func calculateUrgency(status string, scheduledDate int64) string {
+	// If move is completed or cancelled, urgency is "resolved"
+	if status == "completed" || status == "cancelled" {
+		return "resolved"
+	}
+
+	// Otherwise calculate urgency based on time until scheduled date
+	now := time.Now().Unix()
+	hoursUntil := float64(scheduledDate-now) / 3600.0
+
+	if hoursUntil < 0 {
+		return "overdue"
+	} else if hoursUntil < 24 {
+		return "urgent"
+	} else if hoursUntil < 72 {
+		return "soon"
+	} else {
+		return "scheduled"
+	}
+}
+
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
 func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
@@ -728,6 +751,9 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		// Build response
 		response := moveRequest.ToBinMoveRequestResponse()
 
+	// Override urgency with smart calculation (resolved for completed/cancelled)
+	response.Urgency = calculateUrgency(moveRequest.Status, moveRequest.ScheduledDate)
+
 		// Fetch associated bin details
 		var bin models.Bin
 		err = db.Get(&bin, `
@@ -829,6 +855,9 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 		responses := make([]models.BinMoveRequestResponse, len(moveRequests))
 		for i, mr := range moveRequests {
 			responses[i] = mr.ToBinMoveRequestResponse()
+
+			// Override urgency with smart calculation (resolved for completed/cancelled)
+			responses[i].Urgency = calculateUrgency(mr.Status, mr.ScheduledDate)
 
 			// Fetch bin details
 			var bin models.Bin
@@ -969,6 +998,9 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 		responses := make([]models.BinMoveRequestResponse, len(moveRequests))
 		for i, mr := range moveRequests {
 			responses[i] = mr.ToBinMoveRequestResponse()
+
+			// Override urgency with smart calculation (resolved for completed/cancelled)
+			responses[i].Urgency = calculateUrgency(mr.Status, mr.ScheduledDate)
 
 			// Fetch bin details
 			var bin models.Bin
