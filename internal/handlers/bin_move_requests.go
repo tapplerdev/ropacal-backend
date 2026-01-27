@@ -1403,24 +1403,59 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			isUnassigning := (finalShiftID == nil || (finalShiftID != nil && *finalShiftID == "")) &&
 				(finalUserID == nil || (finalUserID != nil && *finalUserID == ""))
 
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Printf("🔍 [UNASSIGNMENT DETECTION]")
+			log.Printf("   isUnassigning: %v", isUnassigning)
+			log.Printf("   finalShiftID: %v", finalShiftID)
+			log.Printf("   finalUserID: %v", finalUserID)
+			log.Printf("   moveRequest.AssignedShiftID: %v", moveRequest.AssignedShiftID)
+			log.Printf("   moveRequest.Status: %s", moveRequest.Status)
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 			if isUnassigning {
 				// Remove from shift_bins if previously assigned to a shift
 				if moveRequest.AssignedShiftID != nil {
+					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+					log.Printf("⭕ [UNASSIGNMENT] Starting shift removal")
+					log.Printf("   Move Request ID: %s", id)
+					log.Printf("   Old Shift ID: %s", *moveRequest.AssignedShiftID)
+					log.Printf("   Bin ID: %s", moveRequest.BinID)
+
 					_, err = tx.Exec(`DELETE FROM shift_bins WHERE shift_id = $1 AND bin_id = $2`,
 						*moveRequest.AssignedShiftID, moveRequest.BinID)
 					if err == nil {
+						log.Printf("   ✅ Removed bin from shift_bins")
 						_, err = tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
 							now, *moveRequest.AssignedShiftID)
+						if err == nil {
+							log.Printf("   ✅ Updated shift total_bins count")
+						} else {
+							log.Printf("   ⚠️  Failed to update shift count: %v", err)
+						}
+					} else {
+						log.Printf("   ❌ Failed to remove from shift_bins: %v", err)
 					}
+
 					log.Printf("[UNASSIGNMENT] Removed from shift_bins for shift: %s", *moveRequest.AssignedShiftID)
 					assignmentChanged = true
 
 					// Track affected driver for WebSocket notification
+					log.Printf("   Fetching driver ID for WebSocket notification...")
 					var driverID string
 					err = db.Get(&driverID, `SELECT driver_id FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID)
 					if err == nil {
 						affectedDriverIDs = append(affectedDriverIDs, driverID)
+						log.Printf("   ✅ Driver ID found: %s", driverID)
+						log.Printf("   Driver will receive WebSocket notification")
+					} else {
+						log.Printf("   ❌ Failed to fetch driver ID: %v", err)
 					}
+					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+				} else {
+					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+					log.Printf("⚠️  [UNASSIGNMENT] No shift assignment to remove")
+					log.Printf("   Move request was not assigned to a shift")
+					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 				}
 
 				// Clear assignment_type and set status to pending when unassigning
@@ -1557,29 +1592,61 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Send WebSocket notification if assignment changed OR if there are affected drivers
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("📡 [WEBSOCKET NOTIFICATION CHECK]")
+		log.Printf("   assignmentChanged: %v", assignmentChanged)
+		log.Printf("   affectedDriverIDs: %v (count: %d)", affectedDriverIDs, len(affectedDriverIDs))
+		log.Printf("   wsHub available: %v", wsHub != nil)
+		log.Printf("   Should send notifications: %v", (assignmentChanged || len(affectedDriverIDs) > 0) && wsHub != nil)
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 		if (assignmentChanged || len(affectedDriverIDs) > 0) && wsHub != nil {
-			log.Printf("[UPDATE MOVE] Sending WebSocket notifications...")
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Printf("📡 [WEBSOCKET] Sending notifications...")
 
 			// Broadcast to all managers
-			wsHub.BroadcastToRole("admin", &websocket.Message{
+			managerPayload := &websocket.Message{
 				Data: map[string]interface{}{
 					"type":            "move_request_updated",
 					"move_request_id": id,
 					"status":          updatedMove.Status,
 					"bin_id":          updatedMove.BinID,
 				},
-			})
+			}
+			log.Printf("   Broadcasting to managers (admin role):")
+			log.Printf("   Payload: %+v", managerPayload)
+			wsHub.BroadcastToRole("admin", managerPayload)
+			log.Printf("   ✅ Manager notification sent")
 
 			// Notify affected drivers
-			for _, driverID := range affectedDriverIDs {
-				wsHub.BroadcastToUser(driverID, &websocket.Message{
-					Data: map[string]interface{}{
-						"type":            "route_updated",
-						"message":         "Your route has been updated by a manager",
-						"move_request_id": id,
-					},
-				})
+			if len(affectedDriverIDs) > 0 {
+				log.Printf("   Broadcasting to %d affected driver(s):", len(affectedDriverIDs))
+				for i, driverID := range affectedDriverIDs {
+					driverPayload := &websocket.Message{
+						Data: map[string]interface{}{
+							"type":            "route_updated",
+							"message":         "Your route has been updated by a manager",
+							"move_request_id": id,
+						},
+					}
+					log.Printf("   [%d/%d] Driver ID: %s", i+1, len(affectedDriverIDs), driverID)
+					log.Printf("   Payload: %+v", driverPayload)
+					wsHub.BroadcastToUser(driverID, driverPayload)
+					log.Printf("   ✅ Notification sent to driver %s", driverID)
+				}
+			} else {
+				log.Printf("   ⚠️  No affected drivers to notify")
 			}
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		} else {
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Printf("⚠️  [WEBSOCKET] Skipping notifications")
+			if !assignmentChanged && len(affectedDriverIDs) == 0 {
+				log.Printf("   Reason: No assignment changes and no affected drivers")
+			} else if wsHub == nil {
+				log.Printf("   Reason: WebSocket hub not available")
+			}
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		}
 
 		// Return updated move request
