@@ -878,7 +878,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Parse request body
 		var req struct {
-			BinID                 string  `json:"bin_id"`
+			ShiftBinID            int     `json:"shift_bin_id"` // ID of shift_bins record (identifies specific waypoint)
+		BinID                 string  `json:"bin_id"`       // DEPRECATED: Use shift_bin_id instead
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
 			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
@@ -895,7 +896,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
+		log.Printf("[DIAGNOSTIC]    Shift Bin ID: %d (waypoint-specific ID)", req.ShiftBinID)
+	log.Printf("[DIAGNOSTIC]    Bin ID: %s (deprecated)", req.BinID)
 		if req.UpdatedFillPercentage != nil {
 			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: %d%%", *req.UpdatedFillPercentage)
 		} else {
@@ -949,17 +951,35 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Mark bin as completed in route_bins table
+		// Mark bin as completed in shift_bins table
 		now := time.Now().Unix()
-		routeBinQuery := `UPDATE shift_bins
-						  SET is_completed = 1,
-							  completed_at = $1,
-							  updated_fill_percentage = $2
-						  WHERE shift_id = $3
-						  AND bin_id = $4
-						  AND is_completed = 0`
 
-		result, err := db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, shift.ID, req.BinID)
+		var result sql.Result
+
+		// Use shift_bin_id if provided (new elegant approach), otherwise fall back to bin_id (deprecated)
+		if req.ShiftBinID > 0 {
+			// NEW: Use shift_bin_id to mark specific waypoint (proper for move requests with multiple waypoints)
+			log.Printf("[DIAGNOSTIC] 🆕 Using shift_bin_id=%d (correct approach for move requests)", req.ShiftBinID)
+			routeBinQuery := `UPDATE shift_bins
+							  SET is_completed = 1,
+								  completed_at = $1,
+								  updated_fill_percentage = $2
+							  WHERE id = $3
+							  AND shift_id = $4
+							  AND is_completed = 0`
+			result, err = db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, req.ShiftBinID, shift.ID)
+		} else {
+			// DEPRECATED: Use bin_id (only works for regular bins, causes issues with move requests)
+			log.Printf("[DIAGNOSTIC] ⚠️  Using bin_id=%s (deprecated - causes issues with move requests!)", req.BinID)
+			routeBinQuery := `UPDATE shift_bins
+							  SET is_completed = 1,
+								  completed_at = $1,
+								  updated_fill_percentage = $2
+							  WHERE shift_id = $3
+							  AND bin_id = $4
+							  AND is_completed = 0`
+			result, err = db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, shift.ID, req.BinID)
+		}
 		if err != nil {
 			log.Printf("❌ Error marking bin as completed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
@@ -2290,6 +2310,7 @@ func executeMerge(db *sqlx.DB, primaryZone, secondaryZone models.NoGoZone, now i
 
 // handleMoveRequestCompletion handles move request completion logic
 func handleMoveRequestCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest, req struct {
+	ShiftBinID            int     `json:"shift_bin_id"`
 	BinID                 string  `json:"bin_id"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
 	PhotoUrl              *string `json:"photo_url,omitempty"`
