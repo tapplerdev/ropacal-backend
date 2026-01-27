@@ -1155,7 +1155,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			TotalWaypoints  *int    `db:"total_waypoints"`
 		}
 
-		err := db.Get(&moveRequest, `
+		err = db.Get(&moveRequest, `
 			SELECT
 				mr.*,
 				s.status as shift_status,
@@ -1647,6 +1647,8 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				}
 
 				// Determine action type (removed/added)
+				// Recalculate isUnassigning for this scope
+				isUnassigning := moveRequest.AssignedShiftID != nil && updatedMove.AssignedShiftID == nil
 				actionType := "updated"
 				if isUnassigning {
 					actionType = "removed"
