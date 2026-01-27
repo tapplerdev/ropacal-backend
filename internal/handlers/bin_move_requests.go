@@ -1453,8 +1453,32 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Send WebSocket notification if assignment changed
-		if assignmentChanged && wsHub != nil {
+		// Check if this move request is on an active shift (even if assignment didn't change)
+		// This ensures drivers are notified when move details change (scheduled_date, move_type, etc.)
+		if updatedMove.AssignedShiftID != nil && wsHub != nil && !assignmentChanged {
+			var shift struct {
+				DriverID string `db:"driver_id"`
+				Status   string `db:"status"`
+			}
+			err = db.Get(&shift, `SELECT driver_id, status FROM shifts WHERE id = $1`, *updatedMove.AssignedShiftID)
+			if err == nil && shift.Status == "active" {
+				// Add driver to affected list if not already present
+				driverAlreadyInList := false
+				for _, dID := range affectedDriverIDs {
+					if dID == shift.DriverID {
+						driverAlreadyInList = true
+						break
+					}
+				}
+				if !driverAlreadyInList {
+					affectedDriverIDs = append(affectedDriverIDs, shift.DriverID)
+					log.Printf("[UPDATE MOVE] Added driver %s to notification list (active shift field update)", shift.DriverID)
+				}
+			}
+		}
+
+		// Send WebSocket notification if assignment changed OR if there are affected drivers
+		if (assignmentChanged || len(affectedDriverIDs) > 0) && wsHub != nil {
 			log.Printf("[UPDATE MOVE] Sending WebSocket notifications...")
 
 			// Broadcast to all managers
