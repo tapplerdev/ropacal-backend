@@ -245,31 +245,29 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			needsFullOptimization = false // Default to false on error
 		}
 
+		// Get driver's CURRENT location (needed for both optimization types)
+		var driverLocation struct {
+			Latitude  float64 `db:"latitude"`
+			Longitude float64 `db:"longitude"`
+		}
 
-	// Get driver's CURRENT location (needed for both optimization types)
-			var driverLocation struct {
-				Latitude  float64 `db:"latitude"`
-				Longitude float64 `db:"longitude"`
-			}
-
-			locationErr := db.Get(&driverLocation,
-				`SELECT latitude, longitude FROM driver_current_location
+		locationErr := db.Get(&driverLocation,
+			`SELECT latitude, longitude FROM driver_current_location
 				 WHERE driver_id = $1 AND is_connected = true`,
-				userClaims.UserID,
-			)
+			userClaims.UserID,
+		)
 
-			if locationErr != nil {
-				log.Printf("❌ Driver location not available: %v", locationErr)
-				utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
-				return
-			}
+		if locationErr != nil {
+			log.Printf("❌ Driver location not available: %v", locationErr)
+			utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
+			return
+		}
 
-			log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+		log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
 
 		if needsFullOptimization {
 			// Case 1: Custom bin selection - Full TSP optimization from driver's location
-		log.Printf("🔄 Custom route - performing full TSP optimization from driver location")
-
+			log.Printf("🔄 Custom route - performing full TSP optimization from driver location")
 
 			// Fetch all bins assigned to this shift
 			var binDetails []struct {
@@ -338,93 +336,92 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 
 			log.Printf("✅ Full TSP optimization complete with %d bins", len(optimizedBins))
-	} else {
-		// Case 2: Pre-defined route - Rotate sequence to start from closest bin
-		log.Printf("🔄 Pre-defined route - rotating sequence to start from closest bin")
+		} else {
+			// Case 2: Pre-defined route - Rotate sequence to start from closest bin
+			log.Printf("🔄 Pre-defined route - rotating sequence to start from closest bin")
 
-		// Fetch bins with their current sequence order
-		var binDetails []struct {
-			ID            string  `db:"id"`
-			CurrentStreet string  `db:"current_street"`
-			Latitude      float64 `db:"latitude"`
-			Longitude     float64 `db:"longitude"`
-			SequenceOrder int     `db:"sequence_order"`
-		}
+			// Fetch bins with their current sequence order
+			var binDetails []struct {
+				ID            string  `db:"id"`
+				CurrentStreet string  `db:"current_street"`
+				Latitude      float64 `db:"latitude"`
+				Longitude     float64 `db:"longitude"`
+				SequenceOrder int     `db:"sequence_order"`
+			}
 
-		binQuery := `
+			binQuery := `
 			SELECT b.id, b.current_street, b.latitude, b.longitude, sb.sequence_order
 			FROM bins b
 			JOIN shift_bins sb ON b.id = sb.bin_id
 			WHERE sb.shift_id = $1
 			ORDER BY sb.sequence_order
 		`
-		err = db.Select(&binDetails, binQuery, shift.ID)
-		if err != nil {
-			log.Printf("❌ Error fetching bins: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
-			return
-		}
-
-		log.Printf("📦 Fetched %d bins from pre-defined route", len(binDetails))
-
-		// Find closest bin to driver's current location using Haversine distance
-		closestIdx := 0
-		minDistance := math.MaxFloat64
-
-		for i, bin := range binDetails {
-			distance := haversineDistance(
-				driverLocation.Latitude, driverLocation.Longitude,
-				bin.Latitude, bin.Longitude,
-			)
-			if distance < minDistance {
-				minDistance = distance
-				closestIdx = i
+			err = db.Select(&binDetails, binQuery, shift.ID)
+			if err != nil {
+				log.Printf("❌ Error fetching bins: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
+				return
 			}
-		}
 
-		log.Printf("🎯 Closest bin to driver: %s (%.2f km away)", binDetails[closestIdx].CurrentStreet, minDistance)
+			log.Printf("📦 Fetched %d bins from pre-defined route", len(binDetails))
 
-		// Rotate the sequence to start from closest bin
-		// Example: [A, B, C, D, E] with closest = C becomes [C, D, E, A, B]
-		rotatedBins := make([]struct {
-			ID            string  `db:"id"`
-			CurrentStreet string  `db:"current_street"`
-			Latitude      float64 `db:"latitude"`
-			Longitude     float64 `db:"longitude"`
-			SequenceOrder int     `db:"sequence_order"`
-		}, len(binDetails))
+			// Find closest bin to driver's current location using Haversine distance
+			closestIdx := 0
+			minDistance := math.MaxFloat64
 
-		for i := 0; i < len(binDetails); i++ {
-			srcIdx := (closestIdx + i) % len(binDetails)
-			rotatedBins[i] = binDetails[srcIdx]
-		}
-
-		log.Printf("🔄 Rotated order: %v", func() []string {
-			streets := make([]string, len(rotatedBins))
-			for i, b := range rotatedBins {
-				streets[i] = b.CurrentStreet
+			for i, bin := range binDetails {
+				distance := haversineDistance(
+					driverLocation.Latitude, driverLocation.Longitude,
+					bin.Latitude, bin.Longitude,
+				)
+				if distance < minDistance {
+					minDistance = distance
+					closestIdx = i
+				}
 			}
-			return streets
-		}())
 
-		// Update shift_bins with rotated sequence_order
-		for i, bin := range rotatedBins {
-			updateQuery := `UPDATE shift_bins
+			log.Printf("🎯 Closest bin to driver: %s (%.2f km away)", binDetails[closestIdx].CurrentStreet, minDistance)
+
+			// Rotate the sequence to start from closest bin
+			// Example: [A, B, C, D, E] with closest = C becomes [C, D, E, A, B]
+			rotatedBins := make([]struct {
+				ID            string  `db:"id"`
+				CurrentStreet string  `db:"current_street"`
+				Latitude      float64 `db:"latitude"`
+				Longitude     float64 `db:"longitude"`
+				SequenceOrder int     `db:"sequence_order"`
+			}, len(binDetails))
+
+			for i := 0; i < len(binDetails); i++ {
+				srcIdx := (closestIdx + i) % len(binDetails)
+				rotatedBins[i] = binDetails[srcIdx]
+			}
+
+			log.Printf("🔄 Rotated order: %v", func() []string {
+				streets := make([]string, len(rotatedBins))
+				for i, b := range rotatedBins {
+					streets[i] = b.CurrentStreet
+				}
+				return streets
+			}())
+
+			// Update shift_bins with rotated sequence_order
+			for i, bin := range rotatedBins {
+				updateQuery := `UPDATE shift_bins
 							SET sequence_order = $1
 							WHERE shift_id = $2 AND bin_id = $3`
 
-			_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
-			if err != nil {
-				log.Printf("❌ Error updating bin sequence: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to rotate route")
-				return
+				_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
+				if err != nil {
+					log.Printf("❌ Error updating bin sequence: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to rotate route")
+					return
+				}
 			}
+
+			log.Printf("✅ Route rotation complete with %d bins", len(rotatedBins))
+
 		}
-
-		log.Printf("✅ Route rotation complete with %d bins", len(rotatedBins))
-
-
-	}
 
 		// Update shift to active
 		now := time.Now().Unix()
@@ -878,8 +875,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Parse request body
 		var req struct {
-			ShiftBinID            int     `json:"shift_bin_id"` // ID of shift_bins record (identifies specific waypoint)
-		BinID                 string  `json:"bin_id"`       // DEPRECATED: Use shift_bin_id instead
+			ShiftBinID            int     `json:"shift_bin_id"`                      // ID of shift_bins record (identifies specific waypoint)
+			BinID                 string  `json:"bin_id"`                            // DEPRECATED: Use shift_bin_id instead
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
 			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
@@ -897,7 +894,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		log.Printf("[DIAGNOSTIC]    Shift Bin ID: %d (waypoint-specific ID)", req.ShiftBinID)
-	log.Printf("[DIAGNOSTIC]    Bin ID: %s (deprecated)", req.BinID)
+		log.Printf("[DIAGNOSTIC]    Bin ID: %s (deprecated)", req.BinID)
 		if req.UpdatedFillPercentage != nil {
 			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: %d%%", *req.UpdatedFillPercentage)
 		} else {
@@ -1007,10 +1004,32 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		if moveErr == nil {
 			// This is a MOVE REQUEST bin!
 			log.Printf("[DIAGNOSTIC] 🚚 Detected move request: %s (type: %s)", moveRequest.ID, moveRequest.MoveType)
-			err = handleMoveRequestCompletion(db, moveRequest, req, now)
-			if err != nil {
-				log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
-				// Don't fail - just log
+			// Get the stop_type of the current waypoint to determine if this is pickup or dropoff
+			var stopType string
+			stopTypeErr := db.Get(&stopType, `
+			SELECT stop_type FROM shift_bins
+			WHERE id = $1
+		`, req.ShiftBinID)
+
+			if stopTypeErr != nil {
+				log.Printf("[DIAGNOSTIC] Error getting stop_type: %v", stopTypeErr)
+				// Fallback: assume it's a dropoff if we can't determine
+				stopType = "dropoff"
+			}
+
+			log.Printf("[DIAGNOSTIC] Stop type: %s", stopType)
+
+			// Only finalize move request (update bin location, mark complete) when DROPOFF is completed
+			// For pickup, we just mark the waypoint complete (already done above) and continue
+			if stopType == "dropoff" {
+				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
+				err = handleMoveRequestCompletion(db, moveRequest, req, now)
+				if err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
+					// Don't fail - just log
+				}
+			} else {
+				log.Printf("[DIAGNOSTIC] This is the PICKUP - move request remains in_progress")
 			}
 		} else {
 			// Regular bin check - update fill percentage and last_checked_at
@@ -1184,11 +1203,10 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			bins = []models.ShiftBinWithDetails{}
 		}
 
-	// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
-	logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
-	log.Printf("[DIAGNOSTIC] 🔢 Logical counts: %d completed / %d total (Physical: %d/%d)",
-		logicalCompleted, logicalTotal, shift.CompletedBins, shift.TotalBins)
-
+		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
+		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
+		log.Printf("[DIAGNOSTIC] 🔢 Logical counts: %d completed / %d total (Physical: %d/%d)",
+			logicalCompleted, logicalTotal, shift.CompletedBins, shift.TotalBins)
 
 		// Broadcast WebSocket update with bins
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
