@@ -511,11 +511,16 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	}
 
 	// Update move request to assign it to this shift (clear any previous user assignment)
+	// If shift is already active, set status to 'in_progress', otherwise 'assigned'
+	moveRequestStatus := "assigned"
+	if isActiveShift {
+		moveRequestStatus = "in_progress"
+	}
 	_, err = tx.Exec(`
 		UPDATE bin_move_requests
-		SET assignment_type = 'shift', assigned_shift_id = $1, assigned_user_id = NULL, status = 'assigned', updated_at = $2
-		WHERE id = $3
-	`, activeShift.ID, now, moveRequest.ID)
+		SET assignment_type = 'shift', assigned_shift_id = $1, assigned_user_id = NULL, status = $2, updated_at = $3
+		WHERE id = $4
+	`, activeShift.ID, moveRequestStatus, now, moveRequest.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update move request: %w", err)
 	}
