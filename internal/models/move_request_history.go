@@ -107,37 +107,61 @@ func (h *MoveRequestHistory) BuildDescription() string {
 
 	case "assigned":
 		if h.NewAssignmentType != nil && *h.NewAssignmentType == "shift" && h.NewAssignedUserName != nil {
-			return "Assigned to " + *h.NewAssignedUserName
+			return "Assigned to " + *h.NewAssignedUserName + "'s shift (added to their route)"
 		} else if h.NewAssignmentType != nil && *h.NewAssignmentType == "manual" && h.NewAssignedUserName != nil {
-			return "Manually assigned to " + *h.NewAssignedUserName
+			return "Manually assigned to " + *h.NewAssignedUserName + " (one-off task, not part of shift route)"
+		} else if h.NewAssignedUserName != nil {
+			return "Assigned to " + *h.NewAssignedUserName
 		}
 		return "Assigned"
 
 	case "reassigned":
+		prevType := ""
+		newType := ""
+
+		if h.PreviousAssignmentType != nil && *h.PreviousAssignmentType == "shift" {
+			prevType = " (shift route)"
+		} else if h.PreviousAssignmentType != nil && *h.PreviousAssignmentType == "manual" {
+			prevType = " (one-off task)"
+		}
+
+		if h.NewAssignmentType != nil && *h.NewAssignmentType == "shift" {
+			newType = " (shift route)"
+		} else if h.NewAssignmentType != nil && *h.NewAssignmentType == "manual" {
+			newType = " (one-off task)"
+		}
+
 		if h.PreviousAssignedUserName != nil && h.NewAssignedUserName != nil {
-			return "Reassigned from " + *h.PreviousAssignedUserName + " to " + *h.NewAssignedUserName
+			return "Reassigned from " + *h.PreviousAssignedUserName + prevType + " to " + *h.NewAssignedUserName + newType
 		} else if h.NewAssignedUserName != nil {
-			return "Reassigned to " + *h.NewAssignedUserName
+			return "Reassigned to " + *h.NewAssignedUserName + newType
 		}
 		return "Reassigned"
 
 	case "unassigned":
-		if h.PreviousAssignedUserName != nil {
+		if h.PreviousAssignmentType != nil && *h.PreviousAssignmentType == "shift" && h.PreviousAssignedUserName != nil {
+			return "Unassigned from " + *h.PreviousAssignedUserName + "'s shift (removed from route)"
+		} else if h.PreviousAssignmentType != nil && *h.PreviousAssignmentType == "manual" && h.PreviousAssignedUserName != nil {
+			return "Unassigned from " + *h.PreviousAssignedUserName + " (one-off task removed)"
+		} else if h.PreviousAssignedUserName != nil {
 			return "Unassigned from " + *h.PreviousAssignedUserName
 		}
-		return "Unassigned"
+		return "Unassigned (returned to unassigned pool)"
 
 	case "completed":
-		return "Completed"
+		return "Move completed successfully"
 
 	case "cancelled":
 		if h.Notes != nil && *h.Notes != "" {
-			return "Cancelled: " + *h.Notes
+			return "Move cancelled - Reason: " + *h.Notes
 		}
-		return "Cancelled"
+		return "Move cancelled"
 
 	case "updated":
-		return "Updated move details"
+		if h.Notes != nil && *h.Notes != "" {
+			return *h.Notes
+		}
+		return "Updated move request details (date/location/notes modified)"
 
 	default:
 		return "Modified"
