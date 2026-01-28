@@ -1879,6 +1879,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			// false positives. The coordinates comparison below is more reliable.
 
 			// Compare coordinates (if both lat/lng provided)
+			// We use coordinates for reliable comparison, but display formatted addresses
 			if req.NewLatitude != nil && req.NewLongitude != nil {
 				oldLat := moveRequest.NewLatitude
 				oldLng := moveRequest.NewLongitude
@@ -1891,22 +1892,24 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 							  (oldLng != nil && newLng != nil && *oldLng != *newLng)
 
 				if latChanged || lngChanged {
-					oldCoords := ""
-					if oldLat != nil && oldLng != nil {
-						oldCoords = fmt.Sprintf("%.6f, %.6f", *oldLat, *oldLng)
+					// Get old address (stored as single formatted string in database)
+					var oldAddressPtr *string
+					if moveRequest.NewAddress != nil && *moveRequest.NewAddress != "" {
+						oldAddressPtr = moveRequest.NewAddress
 					}
-					newCoords := fmt.Sprintf("%.6f, %.6f", *newLat, *newLng)
 
-					oldCoordsPtr := &oldCoords
-					if oldCoords == "" {
-						oldCoordsPtr = nil
+					// Format new address from request (separate fields)
+					var newAddressPtr *string
+					if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
+						newAddr := fmt.Sprintf("%s, %s %s", *req.NewStreet, *req.NewCity, *req.NewZip)
+						newAddressPtr = &newAddr
 					}
 
 					changes = append(changes, ChangeDetail{
-						Field: "coordinates",
-						Label: "Coordinates",
-						Old:   oldCoordsPtr,
-						New:   &newCoords,
+						Field: "new_location",
+						Label: "New Location",
+						Old:   oldAddressPtr,
+						New:   newAddressPtr,
 					})
 				}
 			}
