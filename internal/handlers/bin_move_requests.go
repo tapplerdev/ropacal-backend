@@ -1927,10 +1927,13 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				}
 			}
 
-			notes := "Updated move details"
-			err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes, metadataJSON)
-			if err != nil {
-				log.Printf("Warning: Failed to log move request update: %v", err)
+			// Only log "updated" history entry if there are actual changes
+			if len(changes) > 0 {
+				notes := "Updated move details"
+				err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes, metadataJSON)
+				if err != nil {
+					log.Printf("Warning: Failed to log move request update: %v", err)
+				}
 			}
 		}
 
