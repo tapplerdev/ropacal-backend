@@ -1783,8 +1783,10 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 					log.Printf("Warning: Failed to log move request reassignment: %v", err)
 				}
 			}
-		} else {
-			// Simple field update (no assignment change)
+		} else if req.ScheduledDate != nil || req.MoveType != nil || req.Reason != nil || req.Notes != nil ||
+			(req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil) ||
+			req.NewLatitude != nil || req.NewLongitude != nil {
+			// Only log "updated" if move detail fields (not just assignment) were actually provided
 			notes := "Updated move details (date/location/notes)"
 			err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes)
 			if err != nil {
