@@ -20,6 +20,18 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// stringPtrEqual compares two string pointers for equality
+// Returns true if both are nil or both point to the same string value
+func stringPtrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
 // calculateUrgency determines the urgency level based on status and scheduled date
 // Returns "resolved" for completed/cancelled moves, otherwise calculates time-based urgency
 func calculateUrgency(status string, scheduledDate int64) string {
@@ -1447,24 +1459,38 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			if req.AssignedShiftID != nil {
 				if *req.AssignedShiftID == "" {
 					updates = append(updates, "assigned_shift_id = NULL")
+					// Only mark as changed if it was previously set
+					if moveRequest.AssignedShiftID != nil {
+						assignmentChanged = true
+					}
 				} else {
 					updates = append(updates, fmt.Sprintf("assigned_shift_id = $%d", argCount))
 					args = append(args, *req.AssignedShiftID)
 					argCount++
+					// Only mark as changed if the value is different
+					if !stringPtrEqual(moveRequest.AssignedShiftID, req.AssignedShiftID) {
+						assignmentChanged = true
+					}
 				}
-				assignmentChanged = true
 			}
 
 			if req.AssignedUserID != nil {
 				if *req.AssignedUserID == "" {
 					updates = append(updates, "assigned_user_id = NULL")
+					// Only mark as changed if it was previously set
+					if moveRequest.AssignedUserID != nil {
+						assignmentChanged = true
+					}
 				} else {
 					updates = append(updates, fmt.Sprintf("assigned_user_id = $%d", argCount))
 					args = append(args, *req.AssignedUserID)
 					argCount++
 					affectedDriverIDs = append(affectedDriverIDs, *req.AssignedUserID)
+					// Only mark as changed if the value is different
+					if !stringPtrEqual(moveRequest.AssignedUserID, req.AssignedUserID) {
+						assignmentChanged = true
+					}
 				}
-				assignmentChanged = true
 			}
 
 			// Determine final assignment state (after potential updates)
