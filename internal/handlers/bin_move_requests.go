@@ -1874,26 +1874,9 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				}
 			}
 
-			// Compare address (NewStreet, NewCity, NewZip)
-			if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
-				oldAddress := ""
-				if moveRequest.NewAddress != nil {
-					oldAddress = *moveRequest.NewAddress
-				}
-				newAddress := fmt.Sprintf("%s, %s, %s", *req.NewStreet, *req.NewCity, *req.NewZip)
-				if oldAddress != newAddress {
-					oldAddrPtr := &oldAddress
-					if oldAddress == "" {
-						oldAddrPtr = nil
-					}
-					changes = append(changes, ChangeDetail{
-						Field: "address",
-						Label: "New Address",
-						Old:   oldAddrPtr,
-						New:   &newAddress,
-					})
-				}
-			}
+			// NOTE: We don't compare address strings because the format can vary
+			// (e.g., "Street, City 12345" vs "Street, City, 12345"). This causes
+			// false positives. The coordinates comparison below is more reliable.
 
 			// Compare coordinates (if both lat/lng provided)
 			if req.NewLatitude != nil && req.NewLongitude != nil {
