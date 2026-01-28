@@ -21,12 +21,13 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Query with JOINs to get driver names, shift info, and previous fill percentage
+		// Query with JOINs to get driver names, shift info, bin location, and previous fill percentage
 		type CheckWithEnhancedData struct {
 			models.Check
 			CheckedByName          *string `db:"checked_by_name"`
 			ShiftStatus            *string `db:"shift_status"`
 			PreviousFillPercentage *int    `db:"previous_fill_percentage"`
+			BinLocation            *string `db:"bin_location"`
 		}
 
 		var checksWithData []CheckWithEnhancedData
@@ -43,10 +44,12 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 				c.move_request_id,
 				u.name AS checked_by_name,
 				s.status AS shift_status,
-				LAG(c.fill_percentage) OVER (ORDER BY c.checked_on) AS previous_fill_percentage
+				LAG(c.fill_percentage) OVER (ORDER BY c.checked_on) AS previous_fill_percentage,
+				CONCAT(b.current_street, ', ', b.city, ', ', b.zip) AS bin_location
 			FROM checks c
 			LEFT JOIN users u ON c.checked_by = u.id
 			LEFT JOIN shifts s ON c.shift_id = s.id
+			LEFT JOIN bins b ON c.bin_id = b.id
 			WHERE c.bin_id = $1
 			ORDER BY c.checked_on DESC
 		`, binID)
@@ -62,6 +65,7 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 			response.CheckedByName = checkData.CheckedByName
 			response.ShiftStatus = checkData.ShiftStatus
 			response.PreviousFillPercentage = checkData.PreviousFillPercentage
+			response.BinLocation = checkData.BinLocation
 			responses[i] = response
 		}
 
