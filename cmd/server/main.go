@@ -230,6 +230,11 @@ func main() {
 			// FCM token registration
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
 
+			// Route Task endpoints (task-based shift system)
+			r.Get("/shifts/{shiftId}/tasks", handlers.GetShiftTasks(db))
+			r.Get("/shifts/{shiftId}/tasks/detailed", handlers.GetShiftTasksDetailed(db))
+			r.Put("/shifts/tasks/{taskId}/complete", handlers.CompleteTask(db, wsHub))
+
 			// Potential Locations (drivers can create requests)
 			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub))
 
@@ -250,6 +255,9 @@ func main() {
 			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService))
 			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
+
+			// Task-based shift creation (agnostic shift builder)
+			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db))
 
 			// One-time data migration endpoints (can be removed after use)
 			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
