@@ -1787,8 +1787,162 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			(req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil) ||
 			req.NewLatitude != nil || req.NewLongitude != nil {
 			// Only log "updated" if move detail fields (not just assignment) were actually provided
-			notes := "Updated move details (date/location/notes)"
-			err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes)
+
+			// Build metadata JSON with old/new value comparisons
+			type ChangeDetail struct {
+				Field         string  `json:"field"`
+				Label         string  `json:"label"`
+				Old           *string `json:"old,omitempty"`
+				New           *string `json:"new,omitempty"`
+				OldFormatted  *string `json:"old_formatted,omitempty"`
+				NewFormatted  *string `json:"new_formatted,omitempty"`
+				OldTimestamp  *int64  `json:"old_timestamp,omitempty"`
+				NewTimestamp  *int64  `json:"new_timestamp,omitempty"`
+			}
+
+			type MetadataStruct struct {
+				Changes []ChangeDetail `json:"changes"`
+			}
+
+			var changes []ChangeDetail
+
+			// Compare scheduled_date
+			if req.ScheduledDate != nil && *req.ScheduledDate != moveRequest.ScheduledDate {
+				oldDate := time.Unix(moveRequest.ScheduledDate, 0).Format("Jan 2, 2006")
+				newDate := time.Unix(*req.ScheduledDate, 0).Format("Jan 2, 2006")
+				changes = append(changes, ChangeDetail{
+					Field:        "scheduled_date",
+					Label:        "Scheduled Date",
+					OldFormatted: &oldDate,
+					NewFormatted: &newDate,
+					OldTimestamp: &moveRequest.ScheduledDate,
+					NewTimestamp: req.ScheduledDate,
+				})
+			}
+
+			// Compare move_type
+			if req.MoveType != nil && *req.MoveType != moveRequest.MoveType {
+				old := moveRequest.MoveType
+				new := *req.MoveType
+				changes = append(changes, ChangeDetail{
+					Field: "move_type",
+					Label: "Move Type",
+					Old:   &old,
+					New:   &new,
+				})
+			}
+
+			// Compare reason
+			if req.Reason != nil {
+				oldReason := ""
+				if moveRequest.Reason != nil {
+					oldReason = *moveRequest.Reason
+				}
+				newReason := *req.Reason
+				if oldReason != newReason {
+					oldReasonPtr := &oldReason
+					if oldReason == "" {
+						oldReasonPtr = nil
+					}
+					changes = append(changes, ChangeDetail{
+						Field: "reason",
+						Label: "Reason",
+						Old:   oldReasonPtr,
+						New:   &newReason,
+					})
+				}
+			}
+
+			// Compare notes
+			if req.Notes != nil {
+				oldNotes := ""
+				if moveRequest.Notes != nil {
+					oldNotes = *moveRequest.Notes
+				}
+				newNotes := *req.Notes
+				if oldNotes != newNotes {
+					oldNotesPtr := &oldNotes
+					if oldNotes == "" {
+						oldNotesPtr = nil
+					}
+					changes = append(changes, ChangeDetail{
+						Field: "notes",
+						Label: "Notes",
+						Old:   oldNotesPtr,
+						New:   &newNotes,
+					})
+				}
+			}
+
+			// Compare address (NewStreet, NewCity, NewZip)
+			if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
+				oldAddress := ""
+				if moveRequest.NewAddress != nil {
+					oldAddress = *moveRequest.NewAddress
+				}
+				newAddress := fmt.Sprintf("%s, %s, %s", *req.NewStreet, *req.NewCity, *req.NewZip)
+				if oldAddress != newAddress {
+					oldAddrPtr := &oldAddress
+					if oldAddress == "" {
+						oldAddrPtr = nil
+					}
+					changes = append(changes, ChangeDetail{
+						Field: "address",
+						Label: "New Address",
+						Old:   oldAddrPtr,
+						New:   &newAddress,
+					})
+				}
+			}
+
+			// Compare coordinates (if both lat/lng provided)
+			if req.NewLatitude != nil && req.NewLongitude != nil {
+				oldLat := moveRequest.NewLatitude
+				oldLng := moveRequest.NewLongitude
+				newLat := req.NewLatitude
+				newLng := req.NewLongitude
+
+				latChanged := (oldLat == nil && newLat != nil) || (oldLat != nil && newLat == nil) ||
+							  (oldLat != nil && newLat != nil && *oldLat != *newLat)
+				lngChanged := (oldLng == nil && newLng != nil) || (oldLng != nil && newLng == nil) ||
+							  (oldLng != nil && newLng != nil && *oldLng != *newLng)
+
+				if latChanged || lngChanged {
+					oldCoords := ""
+					if oldLat != nil && oldLng != nil {
+						oldCoords = fmt.Sprintf("%.6f, %.6f", *oldLat, *oldLng)
+					}
+					newCoords := fmt.Sprintf("%.6f, %.6f", *newLat, *newLng)
+
+					oldCoordsPtr := &oldCoords
+					if oldCoords == "" {
+						oldCoordsPtr = nil
+					}
+
+					changes = append(changes, ChangeDetail{
+						Field: "coordinates",
+						Label: "Coordinates",
+						Old:   oldCoordsPtr,
+						New:   &newCoords,
+					})
+				}
+			}
+
+			// Build metadata JSON
+			var metadataJSON *string
+			if len(changes) > 0 {
+				metadata := MetadataStruct{Changes: changes}
+				metadataBytes, err := json.Marshal(metadata)
+				if err == nil {
+					metadataStr := string(metadataBytes)
+					metadataJSON = &metadataStr
+				} else {
+					log.Printf("Warning: Failed to marshal metadata JSON: %v", err)
+				}
+			}
+
+			notes := "Updated move details"
+			err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes, metadataJSON)
 			if err != nil {
 				log.Printf("Warning: Failed to log move request update: %v", err)
 			}

@@ -216,13 +216,13 @@ func LogMoveRequestCancelled(db *sqlx.DB, moveRequestID string, actorID string, 
 }
 
 // LogMoveRequestUpdated logs when a move request details are updated
-func LogMoveRequestUpdated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, notes *string) error {
+func LogMoveRequestUpdated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, notes *string, metadata *string) error {
 	historyID := uuid.New().String()
 
 	query := `
 		INSERT INTO move_request_history (
-			id, move_request_id, action_type, actor_id, actor_name, actor_role, notes, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			id, move_request_id, action_type, actor_id, actor_name, actor_role, notes, metadata, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 
 	_, err := db.Exec(query,
@@ -233,6 +233,7 @@ func LogMoveRequestUpdated(db *sqlx.DB, moveRequestID string, actorID string, ac
 		actorName,
 		"manager",
 		notes,
+		metadata,
 		time.Now().Unix(),
 	)
 
