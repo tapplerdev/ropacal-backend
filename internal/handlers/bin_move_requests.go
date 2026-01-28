@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
@@ -193,6 +194,19 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			return
 		}
 
+		// Log history: move request created
+		var userName string
+		err = db.Get(&userName, `SELECT name FROM users WHERE id = $1`, userID)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch user name for history: %v", err)
+			userName = "Unknown User"
+		}
+		err = helpers.LogMoveRequestCreated(db, id, userID, userName)
+		if err != nil {
+			log.Printf("Warning: Failed to log move request creation: %v", err)
+			// Don't fail the request, just log the warning
+		}
+
 		// Update bin status to pending_move
 		_, err = db.Exec(`
 			UPDATE bins
@@ -307,8 +321,24 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 		log.Printf("🚚 [ASSIGN TO SHIFT] Found bin - Number: %s", bin.BinNumber)
 
+		// Get manager ID and name from context
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			log.Printf("❌ [ASSIGN TO SHIFT] User not authenticated")
+			http.Error(w, "User not authenticated", http.StatusUnauthorized)
+			return
+		}
+		managerID := userClaims.UserID
+
+		var managerName string
+		err = db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch manager name: %v", err)
+			managerName = "Unknown Manager"
+		}
+
 		// Call the assignment logic
-		err = assignMoveToShift(db, wsHub, fcmService, moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition)
+		err = assignMoveToShift(db, wsHub, fcmService, moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition, managerID, managerName)
 		if err != nil {
 			log.Printf("❌ [ASSIGN TO SHIFT] Error assigning move to shift: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -324,8 +354,25 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 }
 
 // assignMoveToShift inserts move at specified position in shift and re-optimizes route
-func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string, insertAfterBinID *string, insertPosition *string) error {
+func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string, insertAfterBinID *string, insertPosition *string, managerID string, managerName string) error {
 	log.Printf("🚚 ASSIGN MOVE: Assigning move request for bin #%d to shift", bin.BinNumber)
+
+	// Store previous assignment info for history logging
+	previousAssignedShiftID := moveRequest.AssignedShiftID
+	var previousAssignedUserID *string
+	var previousAssignedUserName *string
+	var previousAssignmentType *string
+
+	if moveRequest.AssignedUserID != nil {
+		previousAssignedUserID = moveRequest.AssignedUserID
+		var prevUserName string
+		if err := db.Get(&prevUserName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID); err == nil {
+			previousAssignedUserName = &prevUserName
+		}
+	}
+	if moveRequest.AssignmentType != nil {
+		previousAssignmentType = moveRequest.AssignmentType
+	}
 
 	// 1. Find shift (use provided ID or auto-find active shift)
 	var activeShift models.Shift
@@ -546,6 +593,29 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	`, activeShift.ID, moveRequestStatus, now, moveRequest.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update move request: %w", err)
+	}
+
+	// Get driver info from shift
+	var driverName string
+	err = db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, activeShift.DriverID)
+	if err != nil {
+		log.Printf("Warning: Failed to fetch driver name for history: %v", err)
+		driverName = "Unknown Driver"
+	}
+
+	// Log history: check if reassignment or new assignment
+	newAssignmentType := "shift"
+	if previousAssignedShiftID == nil && previousAssignedUserID == nil {
+		// New assignment
+		helpers.LogMoveRequestAssigned(db, moveRequest.ID, managerID, managerName,
+			newAssignmentType, &activeShift.DriverID, &driverName, &activeShift.ID)
+	} else {
+		// Reassignment
+		helpers.LogMoveRequestReassigned(db, moveRequest.ID, managerID, managerName,
+			previousAssignmentType, &newAssignmentType,
+			previousAssignedUserID, &activeShift.DriverID,
+			previousAssignedUserName, &driverName,
+			previousAssignedShiftID, &activeShift.ID)
 	}
 
 	// Update shift total_bins count
@@ -1560,6 +1630,23 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("[UPDATE MOVE] ✅ Successfully updated move request: %s", id)
 
+		// Log history: move request updated
+		if assignmentChanged {
+			// Assignment was changed - log as "updated" with note
+			notes := "Assignment updated via direct edit"
+			err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes)
+			if err != nil {
+				log.Printf("Warning: Failed to log move request update: %v", err)
+			}
+		} else {
+			// Simple field update (no assignment change)
+			notes := "Updated move details (date/location/notes)"
+			err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes)
+			if err != nil {
+				log.Printf("Warning: Failed to log move request update: %v", err)
+			}
+		}
+
 		// Fetch updated move request for response (with user/driver names via JOIN)
 		var updatedMove struct {
 			models.BinMoveRequest
@@ -1781,6 +1868,14 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
+		// Get manager ID from context
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			http.Error(w, "User not authenticated", http.StatusUnauthorized)
+			return
+		}
+		managerID := userClaims.UserID
+
 		now := time.Now().Unix()
 
 		// Update move request status to cancelled
@@ -1793,6 +1888,19 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			log.Printf("Error cancelling move request: %v", err)
 			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
 			return
+		}
+
+		// Log history: move request cancelled by manager
+		var managerName string
+		err = db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch manager name for history: %v", err)
+			managerName = "Unknown Manager"
+		}
+		reason := "Cancelled by manager"
+		err = helpers.LogMoveRequestCancelled(db, id, managerID, managerName, &reason)
+		if err != nil {
+			log.Printf("Warning: Failed to log move request cancellation: %v", err)
 		}
 
 		// Update bin status back to active
@@ -1960,6 +2068,32 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ [ASSIGN TO USER] Move request %s assigned to user %s for manual completion", id, req.UserID)
 
+		// Log history: move request manually assigned to user
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			log.Printf("Warning: Could not get manager context for history logging")
+		} else {
+			managerID := userClaims.UserID
+			var managerName string
+			err = db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID)
+			if err != nil {
+				log.Printf("Warning: Failed to fetch manager name for history: %v", err)
+				managerName = "Unknown Manager"
+			}
+
+			var userName string
+			err = db.Get(&userName, `SELECT name FROM users WHERE id = $1`, req.UserID)
+			if err != nil {
+				log.Printf("Warning: Failed to fetch assigned user name for history: %v", err)
+				userName = "Unknown User"
+			}
+
+			err = helpers.LogMoveRequestAssigned(db, id, managerID, managerName, "manual", &req.UserID, &userName, nil)
+			if err != nil {
+				log.Printf("Warning: Failed to log move request assignment: %v", err)
+			}
+		}
+
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"message": "Move request assigned successfully",
@@ -2025,6 +2159,18 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		log.Printf("[MANUAL MOVE] ✅ Move request marked as completed")
+
+		// Log history: move request manually completed by manager
+		var managerName string
+		err = db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, userID)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch manager name for history: %v", err)
+			managerName = "Unknown Manager"
+		}
+		err = helpers.LogMoveRequestCompleted(db, moveRequest.ID, userID, managerName)
+		if err != nil {
+			log.Printf("Warning: Failed to log move request completion: %v", err)
+		}
 
 		if moveRequest.MoveType == "pickup_only" {
 			// Pickup for retirement or storage
@@ -2258,9 +2404,70 @@ func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ [CLEAR ASSIGNMENT] Assignment cleared successfully for move request %s", id)
 
+		// Log history: move request unassigned
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			log.Printf("Warning: Could not get manager context for history logging")
+		} else {
+			managerID := userClaims.UserID
+			var managerName string
+			err = db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID)
+			if err != nil {
+				log.Printf("Warning: Failed to fetch manager name for history: %v", err)
+				managerName = "Unknown Manager"
+			}
+
+			// Get previous assignment info
+			var previousUserID *string
+			var previousUserName *string
+			var previousShiftID *string
+
+			if moveRequest.AssignedUserID != nil {
+				previousUserID = moveRequest.AssignedUserID
+				var userName string
+				err = db.Get(&userName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID)
+				if err == nil {
+					previousUserName = &userName
+				}
+			}
+
+			if moveRequest.AssignedShiftID != nil {
+				previousShiftID = moveRequest.AssignedShiftID
+			}
+
+			err = helpers.LogMoveRequestUnassigned(db, id, managerID, managerName,
+				moveRequest.AssignmentType, previousUserID, previousUserName, previousShiftID)
+			if err != nil {
+				log.Printf("Warning: Failed to log move request unassignment: %v", err)
+			}
+		}
+
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"message": "Assignment cleared successfully",
 		})
+	}
+}
+
+// GetMoveRequestHistory retrieves the full audit trail for a move request
+// GET /api/manager/bins/move-requests/:id/history
+func GetMoveRequestHistory(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			http.Error(w, "Missing move request ID", http.StatusBadRequest)
+			return
+		}
+
+		// Get history using helper
+		history, err := helpers.GetMoveRequestHistory(db, id)
+		if err != nil {
+			log.Printf("Error fetching move request history: %v", err)
+			http.Error(w, "Failed to fetch history", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(history)
 	}
 }

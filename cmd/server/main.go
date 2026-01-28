@@ -265,6 +265,7 @@ func main() {
 			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(db))
 			r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(db))
 			r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(db))
+			r.Get("/manager/bins/move-requests/{id}/history", handlers.GetMoveRequestHistory(db)) // Get audit trail
 
 			// Bin check recommendations (7-day stale bin flagging)
 			r.Post("/manager/bins/flag-stale", handlers.FlagStaleBins(db))

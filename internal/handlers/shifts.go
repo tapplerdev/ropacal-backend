@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
@@ -2373,6 +2374,22 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 		return fmt.Errorf("failed to complete move request: %w", err)
 	}
 	log.Printf("[MOVE] ✅ Move request marked as completed")
+
+	// Log history: move request completed by driver
+	if moveRequest.AssignedUserID != nil {
+		var driverName string
+		err = db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch driver name for history: %v", err)
+			driverName = "Unknown Driver"
+		}
+		err = helpers.LogMoveRequestCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName)
+		if err != nil {
+			log.Printf("Warning: Failed to log move request completion: %v", err)
+		}
+	} else {
+		log.Printf("Warning: Move request completed without assigned user ID")
+	}
 
 	// Broadcast move request completion to dashboard
 	hub.BroadcastToRole("admin", map[string]interface{}{
