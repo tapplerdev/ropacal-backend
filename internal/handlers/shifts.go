@@ -918,10 +918,13 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("[DIAGNOSTIC]    Shift Bin ID: %d (waypoint-specific ID)", req.ShiftBinID)
 		log.Printf("[DIAGNOSTIC]    Bin ID: %s (deprecated)", req.BinID)
+		log.Printf("[DIAGNOSTIC] 🔍 FILL PERCENTAGE DEBUG:")
 		if req.UpdatedFillPercentage != nil {
-			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: %d%%", *req.UpdatedFillPercentage)
+			log.Printf("[DIAGNOSTIC]    ✅ Received non-null fill_percentage from mobile app: %d%%", *req.UpdatedFillPercentage)
+			log.Printf("[DIAGNOSTIC]    📊 This value WILL be written to database")
 		} else {
-			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: null (not assessed)")
+			log.Printf("[DIAGNOSTIC]    ⚠️  Received NULL fill_percentage from mobile app")
+			log.Printf("[DIAGNOSTIC]    📊 Database will store NULL (incident report or no assessment)")
 		}
 		if req.PhotoUrl != nil {
 			log.Printf("[DIAGNOSTIC]    Photo URL: %s", *req.PhotoUrl)
@@ -980,6 +983,12 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		if req.ShiftBinID > 0 {
 			// NEW: Use shift_bin_id to mark specific waypoint (proper for move requests with multiple waypoints)
 			log.Printf("[DIAGNOSTIC] 🆕 Using shift_bin_id=%d (correct approach for move requests)", req.ShiftBinID)
+			log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
+			if req.UpdatedFillPercentage != nil {
+				log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
+			} else {
+				log.Printf("[DIAGNOSTIC]    Writing value: NULL")
+			}
 			routeBinQuery := `UPDATE shift_bins
 							  SET is_completed = 1,
 								  completed_at = $1,
@@ -1085,6 +1094,12 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Insert check record into checks table and get the ID back
 		log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
+		log.Printf("[DIAGNOSTIC] 💾 CHECKS TABLE INSERT - fill_percentage value:")
+		if req.UpdatedFillPercentage != nil {
+			log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: %d%%", *req.UpdatedFillPercentage)
+		} else {
+			log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: NULL")
+		}
 		var checkID *int
 		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id)
 					   VALUES ($1, $2, $3, $4, $5, $6, $7)
