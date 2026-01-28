@@ -21,14 +21,16 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Query with JOIN to get driver names
-		type CheckWithName struct {
+		// Query with JOINs to get driver names, shift info, and previous fill percentage
+		type CheckWithEnhancedData struct {
 			models.Check
-			CheckedByName *string `db:"checked_by_name"`
+			CheckedByName          *string `db:"checked_by_name"`
+			ShiftStatus            *string `db:"shift_status"`
+			PreviousFillPercentage *int    `db:"previous_fill_percentage"`
 		}
 
-		var checksWithNames []CheckWithName
-		err := db.Select(&checksWithNames, `
+		var checksWithData []CheckWithEnhancedData
+		err := db.Select(&checksWithData, `
 			SELECT
 				c.id,
 				c.bin_id,
@@ -37,9 +39,14 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 				c.checked_on,
 				c.photo_url,
 				c.checked_by,
-				u.name AS checked_by_name
+				c.shift_id,
+				c.move_request_id,
+				u.name AS checked_by_name,
+				s.status AS shift_status,
+				LAG(c.fill_percentage) OVER (ORDER BY c.checked_on) AS previous_fill_percentage
 			FROM checks c
 			LEFT JOIN users u ON c.checked_by = u.id
+			LEFT JOIN shifts s ON c.shift_id = s.id
 			WHERE c.bin_id = $1
 			ORDER BY c.checked_on DESC
 		`, binID)
@@ -49,10 +56,12 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Convert to response format
-		responses := make([]models.CheckResponse, len(checksWithNames))
-		for i, checkWithName := range checksWithNames {
-			response := checkWithName.Check.ToCheckResponse()
-			response.CheckedByName = checkWithName.CheckedByName
+		responses := make([]models.CheckResponse, len(checksWithData))
+		for i, checkData := range checksWithData {
+			response := checkData.Check.ToCheckResponse()
+			response.CheckedByName = checkData.CheckedByName
+			response.ShiftStatus = checkData.ShiftStatus
+			response.PreviousFillPercentage = checkData.PreviousFillPercentage
 			responses[i] = response
 		}
 

@@ -592,6 +592,22 @@ func Migrate(db *sqlx.DB) error {
 		// Create index on move_request_id for faster lookups
 		`CREATE INDEX IF NOT EXISTS idx_checks_move_request_id ON checks(move_request_id)`,
 
+		// Migration: Add shift_id column to checks table for shift tracking
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS shift_id TEXT`,
+
+		// Add foreign key constraint for shift_id in checks
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='checks_shift_id_fkey' AND table_name='checks') THEN
+				ALTER TABLE checks ADD CONSTRAINT checks_shift_id_fkey
+					FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		// Create index on shift_id in checks for faster lookups
+		`CREATE INDEX IF NOT EXISTS idx_checks_shift_id ON checks(shift_id)`,
+
 		// Migration: Add stop_type and move_request_id columns to shift_bins table for move request waypoint tracking
 		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS stop_type TEXT DEFAULT 'collection'`,
 		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS move_request_id TEXT`,
