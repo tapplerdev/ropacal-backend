@@ -7,9 +7,9 @@ import (
 
 // Warehouse constants - all routes end here
 const (
-	WAREHOUSE_LAT     = 11.1867045
-	WAREHOUSE_LNG     = -74.2362302
-	WAREHOUSE_ADDRESS = "Cl. 29 #1-65, Gaira, Santa Marta, Magdalena"
+	WAREHOUSE_LAT     = 37.3382
+	WAREHOUSE_LNG     = -121.8863
+	WAREHOUSE_ADDRESS = "Downtown San Jose, CA"
 )
 
 // GetWarehouseLocation returns the default warehouse location

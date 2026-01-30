@@ -916,6 +916,10 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		totalDistanceKm := totalDistanceMeters / 1000.0
 		totalDurationHours := totalDurationSeconds / 3600.0
 
+		// Add 15 minutes per location for service time
+		serviceTimeHours := float64(len(req.Locations)) * (15.0 / 60.0)
+		totalDurationHours += serviceTimeHours
+
 		response := struct {
 			Success            bool            `json:"success"`
 			Message            string          `json:"message"`
@@ -1080,6 +1084,10 @@ func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
 		// Calculate totals
 		totalDistanceKm := trip.Distance / 1000.0
 		totalDurationHours := trip.Duration / 3600.0
+
+		// Add 15 minutes per location for service time
+		serviceTimeHours := float64(len(req.Locations)) * (15.0 / 60.0)
+		totalDurationHours += serviceTimeHours
 
 		response := struct {
 			Success            bool            `json:"success"`
