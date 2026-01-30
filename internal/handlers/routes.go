@@ -1301,8 +1301,8 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 				log.Printf("      ✅ New coordinates set (no previous coords)")
 			}
 
-			// Auto-update if enabled and safe
-			if req.AutoUpdate && !needsReview && result.GeocodeSuccess {
+			// Auto-update if enabled (updates all bins including flagged ones)
+			if req.AutoUpdate && result.GeocodeSuccess {
 				_, err := db.Exec(`
 					UPDATE bins
 					SET latitude = $1, longitude = $2, updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
@@ -1314,7 +1314,11 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 					result.ErrorMessage = fmt.Sprintf("Update failed: %v", err)
 				} else {
 					updatedCount++
-					log.Printf("      💾 Database updated")
+					if needsReview {
+						log.Printf("      💾 Database updated (FLAGGED - moved %.2f km)", distance)
+					} else {
+						log.Printf("      💾 Database updated")
+					}
 				}
 			}
 
