@@ -1219,13 +1219,13 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 
 		// Fetch all bins from database
 		type Bin struct {
-			ID            string  `db:"id"`
-			BinNumber     int     `db:"bin_number"`
-			CurrentStreet string  `db:"current_street"`
-			City          string  `db:"city"`
-			Zip           string  `db:"zip"`
-			Latitude      float64 `db:"latitude"`
-			Longitude     float64 `db:"longitude"`
+			ID            string         `db:"id"`
+			BinNumber     int            `db:"bin_number"`
+			CurrentStreet string         `db:"current_street"`
+			City          string         `db:"city"`
+			Zip           string         `db:"zip"`
+			Latitude      sql.NullFloat64 `db:"latitude"`
+			Longitude     sql.NullFloat64 `db:"longitude"`
 		}
 
 		var bins []Bin
@@ -1252,12 +1252,22 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 			log.Printf("   [%d/%d] Processing Bin #%d: %s, %s, %s",
 				i+1, len(bins), bin.BinNumber, bin.CurrentStreet, bin.City, bin.Zip)
 
+			// Get old coordinates (0 if NULL)
+			oldLat := 0.0
+			oldLng := 0.0
+			if bin.Latitude.Valid {
+				oldLat = bin.Latitude.Float64
+			}
+			if bin.Longitude.Valid {
+				oldLng = bin.Longitude.Float64
+			}
+
 			result := services.GeocodeResult{
 				BinID:        bin.ID,
 				BinNumber:    bin.BinNumber,
 				Address:      fmt.Sprintf("%s, %s, %s", bin.CurrentStreet, bin.City, bin.Zip),
-				OldLatitude:  bin.Latitude,
-				OldLongitude: bin.Longitude,
+				OldLatitude:  oldLat,
+				OldLongitude: oldLng,
 			}
 
 			// Geocode the address
@@ -1277,7 +1287,7 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 
 			// Compare coordinates
 			distance, needsReview := geocodingService.CompareCoordinates(
-				bin.Latitude, bin.Longitude, newLat, newLng,
+				oldLat, oldLng, newLat, newLng,
 			)
 			result.DistanceMoved = distance
 			result.NeedsReview = needsReview
@@ -1285,7 +1295,7 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 			if needsReview {
 				log.Printf("      ⚠️  FLAGGED: Coordinates moved %.2f km (>1km threshold)", distance)
 				flaggedCount++
-			} else if bin.Latitude != 0 && bin.Longitude != 0 {
+			} else if oldLat != 0 && oldLng != 0 {
 				log.Printf("      ✅ Minor change: %.2f km", distance)
 			} else {
 				log.Printf("      ✅ New coordinates set (no previous coords)")
