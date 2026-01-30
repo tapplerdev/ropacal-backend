@@ -916,10 +916,6 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		totalDistanceKm := totalDistanceMeters / 1000.0
 		totalDurationHours := totalDurationSeconds / 3600.0
 
-		// Add 5 minutes per location for service time
-		serviceTimeHours := float64(len(req.Locations)) * (5.0 / 60.0)
-		totalDurationHours += serviceTimeHours
-
 		response := struct {
 			Success            bool            `json:"success"`
 			Message            string          `json:"message"`
@@ -929,7 +925,6 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			EstimatedDuration  string          `json:"estimated_duration"`
 			DurationHours      float64         `json:"duration_hours"`
 			OptimizedOrder     []OptimizedStop `json:"optimized_order"`
-			ServiceDuration    string          `json:"service_duration_per_stop"`
 			Provider           string          `json:"provider"`
 		}{
 			Success:            true,
@@ -940,7 +935,6 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			EstimatedDuration:  fmt.Sprintf("%.1f hours (%.0f minutes)", totalDurationHours, totalDurationHours*60),
 			DurationHours:      totalDurationHours,
 			OptimizedOrder:     optimizedStops,
-			ServiceDuration:    "5 minutes (300 seconds)",
 			Provider:           "HERE Maps Waypoints Sequence API v8",
 		}
 
