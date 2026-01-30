@@ -780,25 +780,30 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		warehouseLoc := services.GetWarehouseLocation()
 
 		// Build HERE Waypoints Sequence API v8 request
-		// Format: start=lat,lng&destination1=lat,lng&destination2=lat,lng&end=lat,lng
-		apiURL := "https://wse.ls.hereapi.com/2/findsequence.json"
+		// Format: start=warehouse;lat,lng&destination1=name;lat,lng&end=warehouse;lat,lng
+		apiURL := "https://wps.hereapi.com/v8/findsequence2"
 
 		// Build query parameters
 		params := url.Values{}
 		params.Add("apiKey", HereAPIKey)
 		params.Add("mode", "fastest;car;traffic:disabled")
-		params.Add("start", fmt.Sprintf("geo!%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
-		params.Add("end", fmt.Sprintf("geo!%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
+		params.Add("improveFor", "time")
+		params.Add("start", fmt.Sprintf("warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
+		params.Add("end", fmt.Sprintf("warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
 
 		// Add all locations as destinations
 		for i, loc := range req.Locations {
 			destKey := fmt.Sprintf("destination%d", i+1)
-			params.Add(destKey, fmt.Sprintf("geo!%.6f,%.6f", loc.Latitude, loc.Longitude))
+			name := loc.Name
+			if name == "" {
+				name = fmt.Sprintf("location%d", i+1)
+			}
+			params.Add(destKey, fmt.Sprintf("%s;%.6f,%.6f", name, loc.Latitude, loc.Longitude))
 		}
 
 		// Make request to HERE API
 		fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
-		log.Printf("🌐 Calling HERE Waypoints Sequence API...")
+		log.Printf("🌐 Calling HERE Waypoints Sequence API v8...")
 
 		resp, err := http.Get(fullURL)
 		if err != nil {
@@ -815,24 +820,25 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Parse HERE response
+		// Parse HERE v8 response
 		var hereResp struct {
 			Results []struct {
 				Waypoints []struct {
-					ID            string  `json:"id"`
-					Lat           float64 `json:"lat"`
-					Lng           float64 `json:"lng"`
-					Sequence      int     `json:"sequence"`
-					EstimatedTime string  `json:"estimatedTime,omitempty"`
+					ID                string  `json:"id"`
+					Lat               float64 `json:"lat"`
+					Lng               float64 `json:"lng"`
+					Sequence          int     `json:"sequence"`
+					EstimatedArrival  string  `json:"estimatedArrival,omitempty"`
+					EstimatedDeparture string `json:"estimatedDeparture,omitempty"`
 				} `json:"waypoints"`
-				Distance      int `json:"distance"` // meters
-				Time          int `json:"time"`     // seconds
-				Interconnects []struct {
+				Distance      string `json:"distance"` // meters (string in v8)
+				Time          string `json:"time"`     // seconds (string in v8)
+				Interconnections []struct {
 					FromWaypoint string `json:"fromWaypoint"`
 					ToWaypoint   string `json:"toWaypoint"`
 					Distance     int    `json:"distance"` // meters
 					Time         int    `json:"time"`     // seconds
-				} `json:"interconnects"`
+				} `json:"interconnections"`
 			} `json:"results"`
 		}
 
@@ -859,27 +865,33 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			Sequence  int     `json:"sequence"`
 		}
 
+		// Create a map of location names to indices
+		nameToIndex := make(map[string]int)
+		for i, loc := range req.Locations {
+			name := loc.Name
+			if name == "" {
+				name = fmt.Sprintf("location%d", i+1)
+			}
+			nameToIndex[name] = i
+		}
+
 		optimizedStops := []OptimizedStop{}
 		for _, waypoint := range result.Waypoints {
 			// Skip start and end (warehouse)
-			if waypoint.ID == "start" || waypoint.ID == "end" {
+			if waypoint.ID == "warehouse" {
 				continue
 			}
 
-			// Extract destination index from ID (e.g., "destination1" -> 0)
-			var destIndex int
-			fmt.Sscanf(waypoint.ID, "destination%d", &destIndex)
-			destIndex-- // Convert to 0-based index
-
-			if destIndex >= 0 && destIndex < len(req.Locations) {
-				originalLoc := req.Locations[destIndex]
+			// Find the index using the waypoint ID (which is the location name)
+			if idx, exists := nameToIndex[waypoint.ID]; exists {
+				originalLoc := req.Locations[idx]
 				name := originalLoc.Name
 				if name == "" {
-					name = fmt.Sprintf("Location %d", destIndex+1)
+					name = fmt.Sprintf("Location %d", idx+1)
 				}
 
 				optimizedStops = append(optimizedStops, OptimizedStop{
-					Index:     destIndex,
+					Index:     idx,
 					Name:      name,
 					Latitude:  originalLoc.Latitude,
 					Longitude: originalLoc.Longitude,
@@ -888,9 +900,10 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		// Calculate total distance and duration
-		totalDistanceMeters := float64(result.Distance)
-		totalDurationSeconds := float64(result.Time)
+		// Calculate total distance and duration (v8 returns strings)
+		var totalDistanceMeters, totalDurationSeconds float64
+		fmt.Sscanf(result.Distance, "%f", &totalDistanceMeters)
+		fmt.Sscanf(result.Time, "%f", &totalDurationSeconds)
 
 		totalDistanceKm := totalDistanceMeters / 1000.0
 		totalDurationHours := totalDurationSeconds / 3600.0
