@@ -790,6 +790,7 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		params.Add("improveFor", "time")
 		params.Add("start", fmt.Sprintf("start-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
 		params.Add("end", fmt.Sprintf("end-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
+		log.Printf("📍 Warehouse: lat=%.6f, lng=%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude)
 
 		// Add all locations as destinations
 		for i, loc := range req.Locations {
@@ -799,11 +800,18 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 				name = fmt.Sprintf("location%d", i+1)
 			}
 			params.Add(destKey, fmt.Sprintf("%s;%.6f,%.6f", name, loc.Latitude, loc.Longitude))
+			log.Printf("📍 Destination %d (%s): lat=%.6f, lng=%.6f", i+1, name, loc.Latitude, loc.Longitude)
 		}
 
 		// Make request to HERE API
 		fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
 		log.Printf("🌐 Calling HERE Waypoints Sequence API v8...")
+		log.Printf("🔗 URL (without full API key): %s?mode=%s&improveFor=%s&start=%s&end=%s&...",
+			apiURL,
+			params.Get("mode"),
+			params.Get("improveFor"),
+			params.Get("start"),
+			params.Get("end"))
 
 		resp, err := http.Get(fullURL)
 		if err != nil {
