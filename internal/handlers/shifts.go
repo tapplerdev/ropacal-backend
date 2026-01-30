@@ -1054,55 +1054,67 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Mark bin as completed in shift_bins table
+		// Mark task as completed in route_tasks table
 		now := time.Now().Unix()
 
-		var result sql.Result
+		log.Printf("[DIAGNOSTIC] 🔍 Finding task in route_tasks table...")
+		log.Printf("[DIAGNOSTIC]    Shift ID: %s", shift.ID)
+		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
 
-		// Use shift_bin_id if provided (new elegant approach), otherwise fall back to bin_id (deprecated)
-		if req.ShiftBinID > 0 {
-			// NEW: Use shift_bin_id to mark specific waypoint (proper for move requests with multiple waypoints)
-			log.Printf("[DIAGNOSTIC] 🆕 Using shift_bin_id=%d (correct approach for move requests)", req.ShiftBinID)
-			log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
-			if req.UpdatedFillPercentage != nil {
-				log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
-			} else {
-				log.Printf("[DIAGNOSTIC]    Writing value: NULL")
-			}
-			routeBinQuery := `UPDATE shift_bins
-							  SET is_completed = 1,
-								  completed_at = $1,
-								  updated_fill_percentage = $2
-							  WHERE id = $3
-							  AND shift_id = $4
-							  AND is_completed = 0`
-			result, err = db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, req.ShiftBinID, shift.ID)
-		} else {
-			// DEPRECATED: Use bin_id (only works for regular bins, causes issues with move requests)
-			log.Printf("[DIAGNOSTIC] ⚠️  Using bin_id=%s (deprecated - causes issues with move requests!)", req.BinID)
-			routeBinQuery := `UPDATE shift_bins
-							  SET is_completed = 1,
-								  completed_at = $1,
-								  updated_fill_percentage = $2
-							  WHERE shift_id = $3
-							  AND bin_id = $4
-							  AND is_completed = 0`
-			result, err = db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, shift.ID, req.BinID)
+		// Find the next incomplete task for this bin in this shift
+		var taskID string
+		var taskType string
+		err = db.QueryRow(`
+			SELECT id, task_type
+			FROM route_tasks
+			WHERE shift_id = $1
+			  AND bin_id = $2
+			  AND is_completed = 0
+			ORDER BY sequence_order ASC
+			LIMIT 1
+		`, shift.ID, req.BinID).Scan(&taskID, &taskType)
+
+		if err == sql.ErrNoRows {
+			log.Printf("[DIAGNOSTIC] ⚠️  Task not found in route or already completed")
+			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
+			return
 		}
 		if err != nil {
-			log.Printf("❌ Error marking bin as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
+			log.Printf("❌ Error finding task: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
+			return
+		}
+
+		log.Printf("[DIAGNOSTIC] ✅ Found task: ID=%s, Type=%s", taskID, taskType)
+		log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
+		if req.UpdatedFillPercentage != nil {
+			log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
+		} else {
+			log.Printf("[DIAGNOSTIC]    Writing value: NULL")
+		}
+
+		// Update the task as completed
+		updateQuery := `UPDATE route_tasks
+						SET is_completed = 1,
+							completed_at = $1,
+							updated_fill_percentage = $2,
+							updated_at = $3
+						WHERE id = $4`
+		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
+		if err != nil {
+			log.Printf("❌ Error marking task as completed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
 			return
 		}
 
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {
-			log.Printf("[DIAGNOSTIC] ⚠️  Bin not found in route or already completed")
-			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
+			log.Printf("[DIAGNOSTIC] ⚠️  Task update affected 0 rows")
+			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
 			return
 		}
 
-		log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in route_bins table")
+		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
 
 		// Check if this bin is part of a move request
 		var moveRequest models.BinMoveRequest
@@ -1116,24 +1128,12 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		if moveErr == nil {
 			// This is a MOVE REQUEST bin!
 			log.Printf("[DIAGNOSTIC] 🚚 Detected move request: %s (type: %s)", moveRequest.ID, moveRequest.MoveType)
-			// Get the stop_type of the current waypoint to determine if this is pickup or dropoff
-			var stopType string
-			stopTypeErr := db.Get(&stopType, `
-			SELECT stop_type FROM shift_bins
-			WHERE id = $1
-		`, req.ShiftBinID)
-
-			if stopTypeErr != nil {
-				log.Printf("[DIAGNOSTIC] Error getting stop_type: %v", stopTypeErr)
-				// Fallback: assume it's a dropoff if we can't determine
-				stopType = "dropoff"
-			}
-
-			log.Printf("[DIAGNOSTIC] Stop type: %s", stopType)
+			// Use task_type from route_tasks (already fetched above)
+			log.Printf("[DIAGNOSTIC] Task type: %s", taskType)
 
 			// Only finalize move request (update bin location, mark complete) when DROPOFF is completed
-			// For pickup, we just mark the waypoint complete (already done above) and continue
-			if stopType == "dropoff" {
+			// For pickup, we just mark the task complete (already done above) and continue
+			if taskType == "dropoff" {
 				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
 				err = handleMoveRequestCompletion(db, hub, moveRequest, req, now)
 				if err != nil {
