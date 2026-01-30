@@ -127,6 +127,69 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// GetShiftByID retrieves a specific shift by its ID (manager/admin only)
+func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shiftID := chi.URLParam(r, "shiftId")
+		log.Printf("📥 REQUEST: GET /api/manager/shifts/%s", shiftID)
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+
+		var shift models.Shift
+		query := `SELECT * FROM shifts WHERE id = $1`
+
+		err := db.Get(&shift, query, shiftID)
+		if err == sql.ErrNoRows {
+			log.Printf("📤 RESPONSE: 404 - Shift not found")
+			utils.RespondError(w, http.StatusNotFound, "Shift not found")
+			return
+		}
+		if err != nil {
+			log.Printf("❌ Error getting shift: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Database error")
+			return
+		}
+
+		// Get route tasks with details
+		bins, err := getRouteBinsWithDetails(db, shift.ID)
+		if err != nil {
+			log.Printf("❌ Error fetching route tasks: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route tasks")
+			return
+		}
+
+		log.Printf("📤 RESPONSE: 200 OK")
+		log.Printf("   Shift ID: %s", shift.ID)
+		log.Printf("   Status: %s", shift.Status)
+		log.Printf("   Tasks: %d/%d (%d task details)", shift.CompletedBins, shift.TotalBins, len(bins))
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"id":                  shift.ID,
+				"driver_id":           shift.DriverID,
+				"route_id":            shift.RouteID,
+				"status":              shift.Status,
+				"start_time":          shift.StartTime,
+				"end_time":            shift.EndTime,
+				"total_pause_seconds": shift.TotalPauseSeconds,
+				"pause_start_time":    shift.PauseStartTime,
+				"total_bins":          shift.TotalBins,
+				"completed_bins":      shift.CompletedBins,
+				"bins":                bins,
+				"created_at":          shift.CreatedAt,
+				"updated_at":          shift.UpdatedAt,
+			},
+		})
+	}
+}
+
 // StartShift starts an assigned shift
 func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1558,101 +1621,44 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 	return logicalTotal, logicalCompleted
 }
 
-// getRouteBinsWithDetails fetches route bins with full bin details
-// Supports both route_tasks (new system) and shift_bins (legacy system)
+// getRouteBinsWithDetails fetches route tasks with full details
+// ONLY uses route_tasks table (new unified task system)
 func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
-	// Check if shift has route_tasks (new system)
-	var hasRouteTasks bool
-	err := db.Get(&hasRouteTasks, `SELECT EXISTS(SELECT 1 FROM route_tasks WHERE shift_id = $1)`, shiftID)
-	if err != nil {
-		log.Printf("⚠️  Error checking for route_tasks: %v", err)
-		hasRouteTasks = false
-	}
-
-	if hasRouteTasks {
-		// Query route_tasks table (new system)
-		query := `
-			SELECT
-				0 as id,  -- route_tasks doesn't have auto-increment id
-				rt.shift_id,
-				COALESCE(rt.bin_id, '') as bin_id,
-				rt.sequence_order,
-				rt.is_completed,
-				rt.completed_at,
-				rt.updated_fill_percentage,
-				rt.created_at,
-				COALESCE(b.bin_number, 0) as bin_number,
-				COALESCE(rt.address, '') as current_street,
-				COALESCE(b.city, '') as city,
-				COALESCE(b.zip, '') as zip,
-				COALESCE(b.fill_percentage, 0) as fill_percentage,
-				rt.latitude,
-				rt.longitude,
-				rt.task_type as stop_type,
-				rt.move_request_id,
-				rt.address as original_address,
-				rt.destination_address as new_address,
-				rt.move_type
-			FROM route_tasks rt
-			LEFT JOIN bins b ON rt.bin_id = b.id
-			WHERE rt.shift_id = $1
-			ORDER BY rt.sequence_order ASC`
-
-		var bins []models.ShiftBinWithDetails
-		err := db.Select(&bins, query, shiftID)
-		if err != nil {
-			return nil, err
-		}
-
-		log.Printf("📦 Loaded %d tasks from route_tasks table", len(bins))
-		return bins, nil
-	}
-
-	// Fall back to shift_bins table (legacy system)
+	// Query route_tasks table
 	query := `
 		SELECT
-			rb.id,
-			rb.shift_id,
-			rb.bin_id,
-			rb.sequence_order,
-			rb.is_completed,
-			rb.completed_at,
-			rb.updated_fill_percentage,
-			rb.created_at,
-			b.bin_number,
-			CASE
-				WHEN rb.stop_type = 'dropoff' AND mr.new_address IS NOT NULL THEN mr.new_address
-				ELSE b.current_street
-			END as current_street,
-			b.city,
-			b.zip,
+			0 as id,  -- route_tasks uses string id, not auto-increment
+			rt.shift_id,
+			COALESCE(rt.bin_id, '') as bin_id,
+			rt.sequence_order,
+			rt.is_completed,
+			rt.completed_at,
+			rt.updated_fill_percentage,
+			rt.created_at,
+			COALESCE(b.bin_number, 0) as bin_number,
+			COALESCE(rt.address, '') as current_street,
+			COALESCE(b.city, '') as city,
+			COALESCE(b.zip, '') as zip,
 			COALESCE(b.fill_percentage, 0) as fill_percentage,
-			CASE
-				WHEN rb.stop_type = 'dropoff' AND mr.new_latitude IS NOT NULL THEN mr.new_latitude
-				ELSE b.latitude
-			END as latitude,
-			CASE
-				WHEN rb.stop_type = 'dropoff' AND mr.new_longitude IS NOT NULL THEN mr.new_longitude
-				ELSE b.longitude
-			END as longitude,
-			rb.stop_type,
-			rb.move_request_id,
-			mr.original_address,
-			mr.new_address,
-			mr.move_type
-		FROM shift_bins rb
-		JOIN bins b ON rb.bin_id = b.id
-		LEFT JOIN bin_move_requests mr ON rb.move_request_id = mr.id
-		WHERE rb.shift_id = $1
-		ORDER BY rb.sequence_order ASC`
+			rt.latitude,
+			rt.longitude,
+			rt.task_type as stop_type,
+			rt.move_request_id,
+			rt.address as original_address,
+			rt.destination_address as new_address,
+			rt.move_type
+		FROM route_tasks rt
+		LEFT JOIN bins b ON rt.bin_id = b.id
+		WHERE rt.shift_id = $1
+		ORDER BY rt.sequence_order ASC`
 
 	var bins []models.ShiftBinWithDetails
-	err = db.Select(&bins, query, shiftID)
+	err := db.Select(&bins, query, shiftID)
 	if err != nil {
 		return nil, err
 	}
 
-	log.Printf("📦 Loaded %d bins from shift_bins table (legacy)", len(bins))
+	log.Printf("📦 Loaded %d tasks from route_tasks table", len(bins))
 	return bins, nil
 }
 
