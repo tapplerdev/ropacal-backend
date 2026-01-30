@@ -149,6 +149,21 @@ func CreateShiftWithTasks(
 			log.Printf("   ℹ️  Task #%d: Not a pickup task or has coordinates - using provided values: lat=%.6f, lon=%.6f", i+1, lat, lon)
 		}
 
+		// For warehouse_stop tasks, ALWAYS use shift's warehouse coordinates
+		// This ensures consistency - shift warehouse is single source of truth
+		if taskType == "warehouse_stop" {
+			log.Printf("   🏭 Task #%d: Warehouse stop detected - overriding with shift warehouse coordinates", i+1)
+			lat = warehouseLat
+			lon = warehouseLon
+			log.Printf("   ✅ Task #%d: Using shift warehouse: %.6f, %.6f", i+1, lat, lon)
+
+			// Also override address if not provided or empty
+			if addr, ok := taskData["address"]; !ok || addr == nil || addr == "" {
+				taskData["address"] = warehouseAddr
+				log.Printf("   ✅ Task #%d: Set warehouse address: %s", i+1, warehouseAddr)
+			}
+		}
+
 		// Convert task_data to JSON if present
 		var taskDataJSON interface{}
 		if td, ok := taskData["task_data"]; ok && td != nil {
