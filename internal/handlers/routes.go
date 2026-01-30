@@ -3,6 +3,8 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -472,7 +474,7 @@ func DuplicateRoute(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// OptimizeRoutePreview returns an optimized route order without saving to database
+// OptimizeRoutePreview returns an optimized route order using Mapbox Optimization API
 func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -493,7 +495,13 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("🎯 Optimizing route preview for %d bins", len(req.BinIDs))
+		// Mapbox Optimization API has a 12 waypoint limit on free tier
+		if len(req.BinIDs) > 12 {
+			http.Error(w, "Cannot optimize more than 12 bins (Mapbox API limit)", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("🎯 Optimizing route preview for %d bins using Mapbox API", len(req.BinIDs))
 
 		// Fetch bins from database
 		query := `
@@ -515,64 +523,101 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Convert to optimizer format
-		binsToOptimize := make([]services.BinWithPriority, len(bins))
-		for i, bin := range bins {
-			binsToOptimize[i] = services.BinWithPriority{
-				ID:             bin.ID,
-				Latitude:       *bin.Latitude,
-				Longitude:      *bin.Longitude,
-				FillPercentage: *bin.FillPercentage,
-				CurrentStreet:  bin.CurrentStreet,
-			}
+		// Determine start location (warehouse)
+		warehouseLoc := services.GetWarehouseLocation()
+		startLocation := services.Location{
+			Latitude:  warehouseLoc.Latitude,
+			Longitude: warehouseLoc.Longitude,
 		}
 
-		// Determine start location
-		var startLocation services.Location
 		if req.StartLocation != nil {
 			startLocation = services.Location{
 				Latitude:  req.StartLocation.Latitude,
 				Longitude: req.StartLocation.Longitude,
 			}
-			log.Printf("📍 Using provided start location: (%.6f, %.6f)",
-				startLocation.Latitude, startLocation.Longitude)
-		} else {
-			// Default to first bin
-			startLocation = services.Location{
-				Latitude:  *bins[0].Latitude,
-				Longitude: *bins[0].Longitude,
+		}
+
+		log.Printf("📍 Start location: (%.6f, %.6f)", startLocation.Latitude, startLocation.Longitude)
+
+		// Build Mapbox Optimization API URL
+		// Format: lng,lat;lng,lat;lng,lat
+		coordinates := fmt.Sprintf("%.6f,%.6f", startLocation.Longitude, startLocation.Latitude)
+		binIndexMap := make(map[int]string) // Map Mapbox waypoint index to bin ID
+
+		for i, bin := range bins {
+			coordinates += fmt.Sprintf(";%.6f,%.6f", *bin.Longitude, *bin.Latitude)
+			binIndexMap[i+1] = bin.ID // +1 because warehouse is at index 0
+		}
+
+		// Mapbox Optimization API endpoint
+		mapboxToken := "pk.eyJ1IjoiYmlubHl5YWkiLCJhIjoiY21pNzN4bzlhMDVheTJpcHdqd2FtYjhpeSJ9.sQM8WHE2C9zWH0xG107xhw"
+		mapboxURL := fmt.Sprintf(
+			"https://api.mapbox.com/optimized-trips/v1/mapbox/driving/%s?source=first&destination=last&roundtrip=true&overview=full&geometries=geojson&access_token=%s",
+			coordinates,
+			mapboxToken,
+		)
+
+		log.Printf("🌐 Calling Mapbox Optimization API...")
+
+		// Make request to Mapbox
+		resp, err := http.Get(mapboxURL)
+		if err != nil {
+			log.Printf("❌ Mapbox API error: %v", err)
+			http.Error(w, "Failed to call Mapbox API", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("❌ Mapbox API returned status %d: %s", resp.StatusCode, string(body))
+			http.Error(w, "Mapbox API request failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse Mapbox response
+		var mapboxResponse struct {
+			Code  string `json:"code"`
+			Trips []struct {
+				Distance float64 `json:"distance"` // meters
+				Duration float64 `json:"duration"` // seconds
+				Waypoints []struct {
+					WaypointIndex int `json:"waypoint_index"`
+					TripsIndex    int `json:"trips_index"`
+				} `json:"waypoints"`
+			} `json:"trips"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&mapboxResponse); err != nil {
+			log.Printf("❌ Failed to parse Mapbox response: %v", err)
+			http.Error(w, "Failed to parse Mapbox response", http.StatusInternalServerError)
+			return
+		}
+
+		if mapboxResponse.Code != "Ok" || len(mapboxResponse.Trips) == 0 {
+			log.Printf("❌ Mapbox API returned code: %s", mapboxResponse.Code)
+			http.Error(w, "Mapbox optimization failed", http.StatusInternalServerError)
+			return
+		}
+
+		trip := mapboxResponse.Trips[0]
+		log.Printf("✅ Mapbox optimized route: %.2f km, %.2f minutes",
+			trip.Distance/1000, trip.Duration/60)
+
+		// Extract optimized bin order from waypoints
+		// Skip first and last waypoints (warehouse start/end)
+		optimizedBinIDs := make([]string, 0, len(bins))
+		for _, waypoint := range trip.Waypoints {
+			// Skip warehouse (index 0)
+			if waypoint.WaypointIndex == 0 {
+				continue
 			}
-			log.Printf("📍 Using first bin as start location: %s", bins[0].CurrentStreet)
+			if binID, exists := binIndexMap[waypoint.WaypointIndex]; exists {
+				optimizedBinIDs = append(optimizedBinIDs, binID)
+			}
 		}
 
-		// Optimize route using TSP algorithm
-		optimizer := services.NewRouteOptimizer()
-		optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
-
-		// Build response with distance calculations
-		type BinInSequence struct {
-			ID                     string  `json:"id"`
-			BinNumber              int     `json:"bin_number"`
-			CurrentStreet          string  `json:"current_street"`
-			Latitude               float64 `json:"latitude"`
-			Longitude              float64 `json:"longitude"`
-			FillPercentage         int     `json:"fill_percentage"`
-			SequenceOrder          int     `json:"sequence_order"`
-			DistanceFromPreviousKm float64 `json:"distance_from_previous_km"`
-		}
-
-		response := struct {
-			OptimizedBinIDs      []string        `json:"optimized_bin_ids"`
-			TotalDistanceKm      float64         `json:"total_distance_km"`
-			EstimatedDurationHrs float64         `json:"estimated_duration_hours"`
-			Bins                 []BinInSequence `json:"bins"`
-		}{
-			OptimizedBinIDs: make([]string, len(optimizedBins)),
-			Bins:            make([]BinInSequence, len(optimizedBins)),
-		}
-
-		totalDistance := 0.0
-		currentLoc := startLocation
+		log.Printf("🔄 Optimized bin order: %v", optimizedBinIDs)
 
 		// Create map for quick lookup of bin details
 		binMap := make(map[string]models.Bin)
@@ -580,58 +625,54 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 			binMap[bin.ID] = bin
 		}
 
-		for i, optimizedBin := range optimizedBins {
-			binLoc := services.Location{
-				Latitude:  optimizedBin.Latitude,
-				Longitude: optimizedBin.Longitude,
-			}
-
-			// Calculate distance from previous location
-			distance := haversineDistance(
-				currentLoc.Latitude, currentLoc.Longitude,
-				binLoc.Latitude, binLoc.Longitude,
-			)
-			totalDistance += distance
-
-			// Get original bin details
-			originalBin := binMap[optimizedBin.ID]
-
-			response.OptimizedBinIDs[i] = optimizedBin.ID
-			response.Bins[i] = BinInSequence{
-				ID:                     optimizedBin.ID,
-				BinNumber:              originalBin.BinNumber,
-				CurrentStreet:          optimizedBin.CurrentStreet,
-				Latitude:               optimizedBin.Latitude,
-				Longitude:              optimizedBin.Longitude,
-				FillPercentage:         optimizedBin.FillPercentage,
-				SequenceOrder:          i + 1,
-				DistanceFromPreviousKm: distance,
-			}
-
-			currentLoc = binLoc
+		// Build response with bin details in optimized order
+		type BinInSequence struct {
+			ID             string  `json:"id"`
+			BinNumber      int     `json:"bin_number"`
+			CurrentStreet  string  `json:"current_street"`
+			Latitude       float64 `json:"latitude"`
+			Longitude      float64 `json:"longitude"`
+			FillPercentage int     `json:"fill_percentage"`
+			SequenceOrder  int     `json:"sequence_order"`
 		}
 
-		// Add distance from last bin to warehouse
-		warehouseLoc := services.GetWarehouseLocation()
-		distanceToWarehouse := haversineDistance(
-			currentLoc.Latitude, currentLoc.Longitude,
-			warehouseLoc.Latitude, warehouseLoc.Longitude,
-		)
-		totalDistance += distanceToWarehouse
+		binsInSequence := make([]BinInSequence, len(optimizedBinIDs))
+		for i, binID := range optimizedBinIDs {
+			bin := binMap[binID]
+			binsInSequence[i] = BinInSequence{
+				ID:             bin.ID,
+				BinNumber:      bin.BinNumber,
+				CurrentStreet:  bin.CurrentStreet,
+				Latitude:       *bin.Latitude,
+				Longitude:      *bin.Longitude,
+				FillPercentage: *bin.FillPercentage,
+				SequenceOrder:  i + 1,
+			}
+		}
 
-		log.Printf("🏭 Distance to warehouse from last bin: %.2f km", distanceToWarehouse)
+		// Use Mapbox's distance and duration (convert to km and hours)
+		totalDistanceKm := trip.Distance / 1000.0
+		durationHours := trip.Duration / 3600.0
 
-		// Estimate duration: (distance / avg_speed) + (bins * time_per_bin)
-		avgSpeedKmh := 30.0  // 30 km/h average speed
-		minutesPerBin := 5.0 // 5 minutes per bin collection
-		travelTimeHours := totalDistance / avgSpeedKmh
+		// Add collection time (5 minutes per bin)
+		minutesPerBin := 5.0
 		collectionTimeHours := (float64(len(bins)) * minutesPerBin) / 60.0
+		totalDurationHours := durationHours + collectionTimeHours
 
-		response.TotalDistanceKm = totalDistance
-		response.EstimatedDurationHrs = travelTimeHours + collectionTimeHours
+		response := struct {
+			OptimizedBinIDs      []string        `json:"optimized_bin_ids"`
+			TotalDistanceKm      float64         `json:"total_distance_km"`
+			EstimatedDurationHrs float64         `json:"estimated_duration_hours"`
+			Bins                 []BinInSequence `json:"bins"`
+		}{
+			OptimizedBinIDs:      optimizedBinIDs,
+			TotalDistanceKm:      totalDistanceKm,
+			EstimatedDurationHrs: totalDurationHours,
+			Bins:                 binsInSequence,
+		}
 
-		log.Printf("✅ Route optimized: %.2f km, %.2f hours",
-			response.TotalDistanceKm, response.EstimatedDurationHrs)
+		log.Printf("✅ Route optimized: %.2f km, %.2f hours (including %.0f min collection time)",
+			response.TotalDistanceKm, response.EstimatedDurationHrs, float64(len(bins))*minutesPerBin)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
