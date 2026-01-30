@@ -74,7 +74,7 @@ func GetShiftTasksDetailed(db *sqlx.DB) http.HandlerFunc {
 }
 
 // CreateShiftWithTasks creates a new shift with tasks (Manager only)
-func CreateShiftWithTasks(db *sqlx.DB) http.HandlerFunc {
+func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/manager/shifts/create-with-tasks")
 
@@ -128,6 +128,26 @@ func CreateShiftWithTasks(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		log.Printf("📤 RESPONSE: 201 - Created shift %s with %d tasks", shiftID, taskCount)
+
+		// Broadcast shift creation to driver via WebSocket
+		shiftNotification := map[string]interface{}{
+			"type": "shift_created",
+			"data": map[string]interface{}{
+				"shift_id":   shiftID,
+				"status":     "ready",
+				"task_count": taskCount,
+				"created_at": time.Now().Unix(),
+			},
+		}
+
+		// Send to specific driver
+		hub.BroadcastToUser(req.DriverID, shiftNotification)
+		log.Printf("📡 WebSocket: Broadcasted new shift to driver %s", req.DriverID)
+
+		// Also notify managers
+		hub.BroadcastToRole("manager", shiftNotification)
+		log.Printf("📡 WebSocket: Broadcasted new shift to managers")
+
 		utils.RespondJSON(w, http.StatusCreated, map[string]interface{}{
 			"success": true,
 			"data": models.CreateShiftWithTasksResponse{

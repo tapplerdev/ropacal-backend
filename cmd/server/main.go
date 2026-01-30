@@ -257,7 +257,7 @@ func main() {
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
 
 			// Task-based shift creation (agnostic shift builder)
-			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db))
+			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub))
 
 			// One-time data migration endpoints (can be removed after use)
 			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
