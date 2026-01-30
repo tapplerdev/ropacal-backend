@@ -7,9 +7,9 @@ import (
 
 // Warehouse constants - all routes end here
 const (
-	WAREHOUSE_LAT     = 37.3009357
-	WAREHOUSE_LNG     = -121.9493848
-	WAREHOUSE_ADDRESS = "1185 Campbell Ave, San Jose, CA 95126, United States"
+	WAREHOUSE_LAT     = 11.1867045
+	WAREHOUSE_LNG     = -74.2362302
+	WAREHOUSE_ADDRESS = "Cl. 29 #1-65, Gaira, Santa Marta, Magdalena"
 )
 
 // GetWarehouseLocation returns the default warehouse location
@@ -43,8 +43,8 @@ func NewRouteOptimizer() *RouteOptimizer {
 	return &RouteOptimizer{}
 }
 
-// OptimizeRoute optimizes bin order using weighted nearest neighbor TSP
-// Prioritizes high fill percentage bins and minimizes total distance
+// OptimizeRoute optimizes bin order using nearest neighbor TSP
+// Minimizes total distance by always selecting the closest remaining bin
 func (ro *RouteOptimizer) OptimizeRoute(
 	bins []BinWithPriority,
 	startLocation Location,
@@ -67,11 +67,11 @@ func (ro *RouteOptimizer) OptimizeRoute(
 
 	current := startLocation
 
-	// Weighted nearest neighbor algorithm
-	// Combines distance minimization with fill percentage priority
+	// Nearest neighbor algorithm - pure distance-based TSP
+	// Always selects the closest remaining bin from current location
 	for len(remaining) > 0 {
 		bestIdx := 0
-		bestScore := math.MaxFloat64
+		bestDistance := math.MaxFloat64
 
 		for i, bin := range remaining {
 			// Calculate straight-line distance (Haversine)
@@ -82,18 +82,9 @@ func (ro *RouteOptimizer) OptimizeRoute(
 				bin.Longitude,
 			)
 
-			// Weight factor: prioritize high fill percentage
-			// Higher fill % = lower score = higher priority
-			// fillWeight reduces the score based on how full the bin is
-			fillWeight := float64(100-bin.FillPercentage) * 0.01 // 0.0 to 1.0
-
-			// Final score = distance * fillWeight
-			// Example: 80% full bin 5km away: 5 * 0.2 = 1.0
-			// Example: 70% full bin 3km away: 3 * 0.3 = 0.9 (chosen first)
-			score := distance * (1.0 + fillWeight)
-
-			if score < bestScore {
-				bestScore = score
+			// Select the nearest bin (shortest distance)
+			if distance < bestDistance {
+				bestDistance = distance
 				bestIdx = i
 			}
 		}
@@ -102,8 +93,8 @@ func (ro *RouteOptimizer) OptimizeRoute(
 		bestBin := remaining[bestIdx]
 		optimized = append(optimized, bestBin)
 
-		log.Printf("   Step %d: Selected bin at %s (%.1f%% full, score: %.2f)",
-			len(optimized), bestBin.CurrentStreet, float64(bestBin.FillPercentage), bestScore)
+		log.Printf("   Step %d: Selected bin at %s (%.1f%% full, distance: %.2f km)",
+			len(optimized), bestBin.CurrentStreet, float64(bestBin.FillPercentage), bestDistance)
 
 		// Update current location to the bin we just added
 		current = Location{
