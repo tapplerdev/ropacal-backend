@@ -115,6 +115,32 @@ func CreateShiftWithTasks(
 		lat, _ := taskData["latitude"].(float64)
 		lon, _ := taskData["longitude"].(float64)
 
+		// For move_request pickup tasks with 0,0 coordinates, look up bin coordinates
+		if taskType == "move_request" {
+			moveType, _ := taskData["move_type"].(string)
+			if moveType == "pickup" && lat == 0 && lon == 0 {
+				// Get bin_id from task data
+				if binIDInterface, ok := taskData["bin_id"]; ok && binIDInterface != nil {
+					binID, _ := binIDInterface.(string)
+					if binID != "" {
+						// Look up bin coordinates from bins table
+						var binCoords struct {
+							Latitude  float64 `db:"latitude"`
+							Longitude float64 `db:"longitude"`
+						}
+						err := tx.Get(&binCoords, "SELECT latitude, longitude FROM bins WHERE id = $1", binID)
+						if err == nil && binCoords.Latitude != 0 && binCoords.Longitude != 0 {
+							lat = binCoords.Latitude
+							lon = binCoords.Longitude
+							log.Printf("   ✅ Task #%d: Populated pickup coordinates from bin %s: %.6f, %.6f", i+1, binID, lat, lon)
+						} else if err != nil {
+							log.Printf("   ⚠️  Task #%d: Failed to lookup bin coordinates for %s: %v", i+1, binID, err)
+						}
+					}
+				}
+			}
+		}
+
 		// Convert task_data to JSON if present
 		var taskDataJSON []byte
 		if td, ok := taskData["task_data"]; ok && td != nil {
