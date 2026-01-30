@@ -585,14 +585,14 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("📡 Raw Mapbox Response: %s", string(bodyBytes))
 
 		var mapboxResponse struct {
-			Code  string `json:"code"`
+			Code      string `json:"code"`
+			Waypoints []struct {
+				WaypointIndex int `json:"waypoint_index"`
+				TripsIndex    int `json:"trips_index"`
+			} `json:"waypoints"` // At root level!
 			Trips []struct {
 				Distance float64 `json:"distance"` // meters
 				Duration float64 `json:"duration"` // seconds
-				Waypoints []struct {
-					WaypointIndex int `json:"waypoint_index"`
-					TripsIndex    int `json:"trips_index"`
-				} `json:"waypoints"`
 			} `json:"trips"`
 		}
 
@@ -613,8 +613,8 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 			trip.Distance/1000, trip.Duration/60)
 
 		// Debug: Log waypoints from Mapbox
-		log.Printf("📊 Mapbox returned %d waypoints:", len(trip.Waypoints))
-		for i, wp := range trip.Waypoints {
+		log.Printf("📊 Mapbox returned %d waypoints:", len(mapboxResponse.Waypoints))
+		for i, wp := range mapboxResponse.Waypoints {
 			log.Printf("   Waypoint %d: WaypointIndex=%d, TripsIndex=%d", i, wp.WaypointIndex, wp.TripsIndex)
 		}
 		log.Printf("📊 BinIndexMap: %+v", binIndexMap)
@@ -622,7 +622,7 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		// Extract optimized bin order from waypoints
 		// Skip first and last waypoints (warehouse start/end)
 		optimizedBinIDs := make([]string, 0, len(bins))
-		for i, waypoint := range trip.Waypoints {
+		for i, waypoint := range mapboxResponse.Waypoints {
 			log.Printf("   Processing waypoint %d: index=%d", i, waypoint.WaypointIndex)
 
 			// Skip warehouse (index 0) - it appears at start and potentially end
