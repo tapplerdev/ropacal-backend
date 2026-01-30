@@ -235,6 +235,20 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
+
+	// Check if shift has any bins in shift_bins table (for backward compatibility)
+	// Shifts with only route_tasks (move requests, placements, etc.) won't have shift_bins entries
+	var hasShiftBins bool
+	err = db.Get(&hasShiftBins,
+		`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1)`,
+		shift.ID,
+	)
+	if err != nil {
+		log.Printf("❌ Error checking for shift_bins: %v", err)
+		hasShiftBins = false
+	}
+
+	if hasShiftBins {
 		// If shift needs optimization (sequence_order = 0), do it now using driver's current location
 		// Check if any bin has sequence_order = 0 (unoptimized)
 		var needsFullOptimization bool
@@ -425,6 +439,9 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		}
 
+	} else {
+		log.Printf("ℹ️  Shift has no collection bins, skipping optimization")
+	}
 		// Update shift to active
 		now := time.Now().Unix()
 		updateQuery := `UPDATE shifts
