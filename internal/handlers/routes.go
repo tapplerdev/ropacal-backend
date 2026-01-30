@@ -1196,3 +1196,152 @@ func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(response)
 	}
 }
+
+// BinBatchGeocodeRequest represents the request body for batch geocoding bins
+type BinBatchGeocodeRequest struct {
+	AutoUpdate bool `json:"auto_update"` // If true, automatically update DB for changes <1km
+}
+
+// BatchGeocodeBins - Batch geocode all bins and compare with existing coordinates
+func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📍 Starting batch geocoding operation...")
+
+		// Parse request
+		var req BinBatchGeocodeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			// Default to false if no body provided
+			req.AutoUpdate = false
+		}
+
+		// Create geocoding service
+		geocodingService := services.NewHEREGeocodingService(HereAPIKey)
+
+		// Fetch all bins from database
+		type Bin struct {
+			ID            string  `db:"id"`
+			BinNumber     int     `db:"bin_number"`
+			CurrentStreet string  `db:"current_street"`
+			City          string  `db:"city"`
+			Zip           string  `db:"zip"`
+			Latitude      float64 `db:"latitude"`
+			Longitude     float64 `db:"longitude"`
+		}
+
+		var bins []Bin
+		err := db.Select(&bins, `
+			SELECT id, bin_number, current_street, city, zip, latitude, longitude
+			FROM bins
+			ORDER BY bin_number ASC
+		`)
+		if err != nil {
+			log.Printf("❌ Failed to fetch bins: %v", err)
+			http.Error(w, "Failed to fetch bins from database", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("   Found %d bins to geocode", len(bins))
+
+		// Process each bin
+		results := make([]services.GeocodeResult, 0, len(bins))
+		updatedCount := 0
+		flaggedCount := 0
+		errorCount := 0
+
+		for i, bin := range bins {
+			log.Printf("   [%d/%d] Processing Bin #%d: %s, %s, %s",
+				i+1, len(bins), bin.BinNumber, bin.CurrentStreet, bin.City, bin.Zip)
+
+			result := services.GeocodeResult{
+				BinID:        bin.ID,
+				BinNumber:    bin.BinNumber,
+				Address:      fmt.Sprintf("%s, %s, %s", bin.CurrentStreet, bin.City, bin.Zip),
+				OldLatitude:  bin.Latitude,
+				OldLongitude: bin.Longitude,
+			}
+
+			// Geocode the address
+			newLat, newLng, err := geocodingService.GeocodeAddress(bin.CurrentStreet, bin.City, bin.Zip)
+			if err != nil {
+				log.Printf("      ❌ Geocoding failed: %v", err)
+				result.GeocodeSuccess = false
+				result.ErrorMessage = err.Error()
+				errorCount++
+				results = append(results, result)
+				continue
+			}
+
+			result.NewLatitude = newLat
+			result.NewLongitude = newLng
+			result.GeocodeSuccess = true
+
+			// Compare coordinates
+			distance, needsReview := geocodingService.CompareCoordinates(
+				bin.Latitude, bin.Longitude, newLat, newLng,
+			)
+			result.DistanceMoved = distance
+			result.NeedsReview = needsReview
+
+			if needsReview {
+				log.Printf("      ⚠️  FLAGGED: Coordinates moved %.2f km (>1km threshold)", distance)
+				flaggedCount++
+			} else if bin.Latitude != 0 && bin.Longitude != 0 {
+				log.Printf("      ✅ Minor change: %.2f km", distance)
+			} else {
+				log.Printf("      ✅ New coordinates set (no previous coords)")
+			}
+
+			// Auto-update if enabled and safe
+			if req.AutoUpdate && !needsReview && result.GeocodeSuccess {
+				_, err := db.Exec(`
+					UPDATE bins
+					SET latitude = $1, longitude = $2, updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+					WHERE id = $3
+				`, newLat, newLng, bin.ID)
+
+				if err != nil {
+					log.Printf("      ❌ Failed to update database: %v", err)
+					result.ErrorMessage = fmt.Sprintf("Update failed: %v", err)
+				} else {
+					updatedCount++
+					log.Printf("      💾 Database updated")
+				}
+			}
+
+			results = append(results, result)
+		}
+
+		log.Printf("✅ Batch geocoding complete!")
+		log.Printf("   Total bins processed: %d", len(bins))
+		log.Printf("   Successfully geocoded: %d", len(bins)-errorCount)
+		log.Printf("   Failed geocoding: %d", errorCount)
+		log.Printf("   Flagged for review (>1km): %d", flaggedCount)
+		if req.AutoUpdate {
+			log.Printf("   Database updated: %d bins", updatedCount)
+		}
+
+		// Build response
+		response := struct {
+			Success         bool                       `json:"success"`
+			Message         string                     `json:"message"`
+			TotalBins       int                        `json:"total_bins"`
+			GeocodeSuccess  int                        `json:"geocode_success"`
+			GeocodeFailed   int                        `json:"geocode_failed"`
+			FlaggedForReview int                        `json:"flagged_for_review"`
+			AutoUpdated     int                        `json:"auto_updated"`
+			Results         []services.GeocodeResult   `json:"results"`
+		}{
+			Success:         true,
+			Message:         "Batch geocoding completed",
+			TotalBins:       len(bins),
+			GeocodeSuccess:  len(bins) - errorCount,
+			GeocodeFailed:   errorCount,
+			FlaggedForReview: flaggedCount,
+			AutoUpdated:     updatedCount,
+			Results:         results,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
+}

@@ -171,6 +171,7 @@ func main() {
 		r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub))
 		r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
 		r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
+		r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
 
 		// Checks endpoints
 		r.Get("/bins/{id}/checks", handlers.GetChecks(db))
