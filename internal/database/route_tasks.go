@@ -115,9 +115,15 @@ func CreateShiftWithTasks(
 		lat, _ := taskData["latitude"].(float64)
 		lon, _ := taskData["longitude"].(float64)
 
+		log.Printf("   🔍 Task #%d DEBUG: Received task_type='%s', lat=%.6f, lon=%.6f", i+1, taskType, lat, lon)
+
 		// For move_request pickup tasks with 0,0 coordinates, look up bin coordinates
+		moveType, _ := taskData["move_type"].(string)
+		log.Printf("   🔍 Task #%d DEBUG: move_type='%s'", i+1, moveType)
+		log.Printf("   🔍 Task #%d DEBUG: Checking if taskType=='move_request': %v", i+1, taskType == "move_request")
+
 		if taskType == "move_request" {
-			moveType, _ := taskData["move_type"].(string)
+			log.Printf("   ✅ Task #%d: Matched 'move_request' condition", i+1)
 			if moveType == "pickup" && lat == 0 && lon == 0 {
 				// Get bin_id from task data
 				if binIDInterface, ok := taskData["bin_id"]; ok && binIDInterface != nil {
@@ -139,6 +145,9 @@ func CreateShiftWithTasks(
 					}
 				}
 			}
+		} else {
+			log.Printf("   ❌ Task #%d: Did NOT match 'move_request' condition - coordinate lookup SKIPPED", i+1)
+			log.Printf("   ℹ️  Task #%d: Will insert task with lat=%.6f, lon=%.6f AS-IS", i+1, lat, lon)
 		}
 
 		// Convert task_data to JSON if present
