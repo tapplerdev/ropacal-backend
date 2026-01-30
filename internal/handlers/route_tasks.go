@@ -127,6 +127,52 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
+		log.Printf("✅ Shift %s created with %d tasks", shiftID, taskCount)
+
+		// Update move requests that were included in this shift
+		log.Printf("🔍 Checking for move requests in tasks...")
+		moveRequestUpdates := make(map[string]bool) // Track unique move request IDs
+		for _, task := range req.Tasks {
+			if moveReqID, ok := task["move_request_id"].(string); ok && moveReqID != "" {
+				moveRequestUpdates[moveReqID] = true
+			}
+		}
+
+		if len(moveRequestUpdates) > 0 {
+			log.Printf("📝 Found %d move request(s) to update", len(moveRequestUpdates))
+			now := time.Now().Unix()
+
+			for moveReqID := range moveRequestUpdates {
+				log.Printf("   🚚 Updating move request %s", moveReqID)
+				log.Printf("      - Status: pending → in_progress")
+				log.Printf("      - Assigned to shift: %s", shiftID)
+				log.Printf("      - Assigned to driver: %s", req.DriverID)
+
+				updateQuery := `UPDATE bin_move_requests
+								SET status = 'in_progress',
+									assigned_shift_id = $1,
+									assigned_driver_id = $2,
+									updated_at = $3
+								WHERE id = $4
+								AND status = 'pending'`
+
+				result, err := db.Exec(updateQuery, shiftID, req.DriverID, now, moveReqID)
+				if err != nil {
+					log.Printf("      ❌ Error updating move request %s: %v", moveReqID, err)
+					continue
+				}
+
+				rowsAffected, _ := result.RowsAffected()
+				if rowsAffected == 0 {
+					log.Printf("      ⚠️  Move request %s not updated (already assigned or not found)", moveReqID)
+				} else {
+					log.Printf("      ✅ Move request %s updated successfully", moveReqID)
+				}
+			}
+		} else {
+			log.Printf("   ℹ️  No move requests in this shift")
+		}
+
 		log.Printf("📤 RESPONSE: 201 - Created shift %s with %d tasks", shiftID, taskCount)
 
 		// Broadcast shift creation to driver via WebSocket

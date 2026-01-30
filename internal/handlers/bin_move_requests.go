@@ -892,9 +892,14 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 // GET /api/manager/bins/move-requests?status=pending&urgency=urgent
 func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/manager/bins/move-requests")
+
 		// Parse query params
 		status := r.URL.Query().Get("status")
 		urgency := r.URL.Query().Get("urgency")
+		assigned := r.URL.Query().Get("assigned")
+
+		log.Printf("   Query params: status=%s, urgency=%s, assigned=%s", status, urgency, assigned)
 
 		// Build query
 		query := `
@@ -1025,6 +1030,16 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 					responses[i].DriverName = &userName // Set unified field
 				}
 			}
+		}
+
+		log.Printf("📤 RESPONSE: 200 - Returning %d move requests", len(responses))
+		for i, resp := range responses {
+			driverInfo := "Unassigned"
+			if resp.DriverName != nil {
+				driverInfo = *resp.DriverName
+			}
+			log.Printf("   %d. Move Request %s - Bin #%d - Status: %s - Assigned to: %s",
+				i+1, resp.ID[:8], resp.BinNumber, resp.Status, driverInfo)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
