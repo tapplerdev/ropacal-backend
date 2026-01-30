@@ -205,12 +205,14 @@ func CreateShiftWithTasks(
 		// Only create shift_bins for collection tasks (bins to collect)
 		if taskType == "collection" {
 			binSequence++
-			binID := getString("bin_id")
-			if binID != nil {
-				_, err = tx.Exec(shiftBinsQuery, shiftID, binID, binSequence, now)
-				if err != nil {
-					log.Printf("⚠️  Warning: Failed to create shift_bins entry for task %d: %v", i+1, err)
-					// Don't fail the whole transaction for this
+			if binIDVal, ok := taskData["bin_id"]; ok && binIDVal != nil {
+				binID, _ := binIDVal.(string)
+				if binID != "" {
+					_, err = tx.Exec(shiftBinsQuery, shiftID, binID, binSequence, now)
+					if err != nil {
+						log.Printf("⚠️  Warning: Failed to create shift_bins entry for task %d: %v", i+1, err)
+						// Don't fail the whole transaction for this
+					}
 				}
 			}
 		}
