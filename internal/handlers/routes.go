@@ -929,6 +929,7 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			EstimatedDuration  string          `json:"estimated_duration"`
 			DurationHours      float64         `json:"duration_hours"`
 			OptimizedOrder     []OptimizedStop `json:"optimized_order"`
+			ServiceDuration    string          `json:"service_duration_per_stop"`
 			Provider           string          `json:"provider"`
 		}{
 			Success:            true,
@@ -939,6 +940,7 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			EstimatedDuration:  fmt.Sprintf("%.1f hours (%.0f minutes)", totalDurationHours, totalDurationHours*60),
 			DurationHours:      totalDurationHours,
 			OptimizedOrder:     optimizedStops,
+			ServiceDuration:    "15 minutes (900 seconds)",
 			Provider:           "HERE Maps Waypoints Sequence API v8",
 		}
 
@@ -1098,6 +1100,7 @@ func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
 			EstimatedDuration  string          `json:"estimated_duration"`
 			DurationHours      float64         `json:"duration_hours"`
 			OptimizedOrder     []OptimizedStop `json:"optimized_order"`
+			ServiceDuration    string          `json:"service_duration_per_stop"`
 			Provider           string          `json:"provider"`
 		}{
 			Success:            true,
@@ -1108,6 +1111,7 @@ func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
 			EstimatedDuration:  fmt.Sprintf("%.1f hours (%.0f minutes)", totalDurationHours, totalDurationHours*60),
 			DurationHours:      totalDurationHours,
 			OptimizedOrder:     optimizedStops,
+			ServiceDuration:    "15 minutes (900 seconds)",
 			Provider:           "Mapbox Optimization API v1",
 		}
 
