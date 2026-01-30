@@ -778,6 +778,11 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		enableTraffic := r.URL.Query().Get("enableTraffic") == "true"
 		departureTime := r.URL.Query().Get("departureTime") // ISO 8601 format
 
+		// If traffic is enabled but no departure time specified, use current time
+		if enableTraffic && departureTime == "" {
+			departureTime = time.Now().Format(time.RFC3339)
+		}
+
 		log.Printf("🧪 Testing HERE route optimization for %d locations", len(req.Locations))
 		if enableTraffic {
 			log.Printf("🚦 Traffic: ENABLED")
