@@ -816,8 +816,8 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 
 		// Add departure time if provided (for historical traffic patterns)
 		if departureTime != "" && enableTraffic {
-			params.Add("departureTime", departureTime)
-			log.Printf("📅 Adding departureTime to HERE API: %s", departureTime)
+			params.Add("departure", departureTime) // HERE API uses "departure" not "departureTime"
+			log.Printf("📅 Adding departure to HERE API: %s", departureTime)
 		}
 		params.Add("start", fmt.Sprintf("start-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
 		params.Add("end", fmt.Sprintf("end-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
@@ -839,11 +839,11 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("🌐 Calling HERE Waypoints Sequence API v8...")
 
 		if enableTraffic {
-			log.Printf("🔗 URL (traffic enabled): %s?mode=%s&improveFor=%s&departureTime=%s&start=%s&end=%s&...",
+			log.Printf("🔗 URL (traffic enabled): %s?mode=%s&improveFor=%s&departure=%s&start=%s&end=%s&...",
 				apiURL,
 				params.Get("mode"),
 				params.Get("improveFor"),
-				params.Get("departureTime"),
+				params.Get("departure"),
 				params.Get("start"),
 				params.Get("end"))
 		} else {
