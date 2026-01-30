@@ -774,7 +774,21 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// Get optional query parameters for testing traffic features
+		enableTraffic := r.URL.Query().Get("enableTraffic") == "true"
+		departureTime := r.URL.Query().Get("departureTime") // ISO 8601 format
+
 		log.Printf("🧪 Testing HERE route optimization for %d locations", len(req.Locations))
+		if enableTraffic {
+			log.Printf("🚦 Traffic: ENABLED")
+			if departureTime != "" {
+				log.Printf("⏰ Departure Time: %s", departureTime)
+			} else {
+				log.Printf("⏰ Departure Time: NOW (current traffic)")
+			}
+		} else {
+			log.Printf("🚦 Traffic: DISABLED (theoretical optimal)")
+		}
 
 		// Get warehouse location
 		warehouseLoc := services.GetWarehouseLocation()
@@ -786,8 +800,19 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		// Build query parameters
 		params := url.Values{}
 		params.Add("apiKey", HereAPIKey)
-		params.Add("mode", "fastest;car;traffic:disabled")
+
+		// Configure traffic mode
+		trafficMode := "traffic:disabled"
+		if enableTraffic {
+			trafficMode = "traffic:enabled"
+		}
+		params.Add("mode", fmt.Sprintf("fastest;car;%s", trafficMode))
 		params.Add("improveFor", "time")
+
+		// Add departure time if provided (for historical traffic patterns)
+		if departureTime != "" && enableTraffic {
+			params.Add("departureTime", departureTime)
+		}
 		params.Add("start", fmt.Sprintf("start-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
 		params.Add("end", fmt.Sprintf("end-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
 		log.Printf("📍 Warehouse: lat=%.6f, lng=%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude)
@@ -920,6 +945,16 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		serviceTimeHours := float64(len(req.Locations)) * (15.0 / 60.0)
 		totalDurationHours += serviceTimeHours
 
+		// Build traffic info message
+		trafficInfo := "Disabled (theoretical optimal)"
+		if enableTraffic {
+			if departureTime != "" {
+				trafficInfo = fmt.Sprintf("Enabled (historical traffic for %s)", departureTime)
+			} else {
+				trafficInfo = "Enabled (current live traffic)"
+			}
+		}
+
 		response := struct {
 			Success            bool            `json:"success"`
 			Message            string          `json:"message"`
@@ -930,6 +965,8 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			DurationHours      float64         `json:"duration_hours"`
 			OptimizedOrder     []OptimizedStop `json:"optimized_order"`
 			ServiceDuration    string          `json:"service_duration_per_stop"`
+			TrafficMode        string          `json:"traffic_mode"`
+			DepartureTime      string          `json:"departure_time,omitempty"`
 			Provider           string          `json:"provider"`
 		}{
 			Success:            true,
@@ -941,6 +978,8 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			DurationHours:      totalDurationHours,
 			OptimizedOrder:     optimizedStops,
 			ServiceDuration:    "15 minutes (900 seconds)",
+			TrafficMode:        trafficInfo,
+			DepartureTime:      departureTime,
 			Provider:           "HERE Maps Waypoints Sequence API v8",
 		}
 
