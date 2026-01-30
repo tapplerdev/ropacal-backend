@@ -1559,7 +1559,56 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 }
 
 // getRouteBinsWithDetails fetches route bins with full bin details
+// Supports both route_tasks (new system) and shift_bins (legacy system)
 func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
+	// Check if shift has route_tasks (new system)
+	var hasRouteTasks bool
+	err := db.Get(&hasRouteTasks, `SELECT EXISTS(SELECT 1 FROM route_tasks WHERE shift_id = $1)`, shiftID)
+	if err != nil {
+		log.Printf("⚠️  Error checking for route_tasks: %v", err)
+		hasRouteTasks = false
+	}
+
+	if hasRouteTasks {
+		// Query route_tasks table (new system)
+		query := `
+			SELECT
+				0 as id,  -- route_tasks doesn't have auto-increment id
+				rt.shift_id,
+				COALESCE(rt.bin_id, '') as bin_id,
+				rt.sequence_order,
+				rt.is_completed,
+				rt.completed_at,
+				rt.updated_fill_percentage,
+				rt.created_at,
+				COALESCE(b.bin_number, 0) as bin_number,
+				COALESCE(rt.address, '') as current_street,
+				COALESCE(b.city, '') as city,
+				COALESCE(b.zip, '') as zip,
+				COALESCE(b.fill_percentage, 0) as fill_percentage,
+				rt.latitude,
+				rt.longitude,
+				rt.task_type as stop_type,
+				rt.move_request_id,
+				rt.address as original_address,
+				rt.destination_address as new_address,
+				rt.move_type
+			FROM route_tasks rt
+			LEFT JOIN bins b ON rt.bin_id = b.id
+			WHERE rt.shift_id = $1
+			ORDER BY rt.sequence_order ASC`
+
+		var bins []models.ShiftBinWithDetails
+		err := db.Select(&bins, query, shiftID)
+		if err != nil {
+			return nil, err
+		}
+
+		log.Printf("📦 Loaded %d tasks from route_tasks table", len(bins))
+		return bins, nil
+	}
+
+	// Fall back to shift_bins table (legacy system)
 	query := `
 		SELECT
 			rb.id,
@@ -1598,11 +1647,12 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 		ORDER BY rb.sequence_order ASC`
 
 	var bins []models.ShiftBinWithDetails
-	err := db.Select(&bins, query, shiftID)
+	err = db.Select(&bins, query, shiftID)
 	if err != nil {
 		return nil, err
 	}
 
+	log.Printf("📦 Loaded %d bins from shift_bins table (legacy)", len(bins))
 	return bins, nil
 }
 
