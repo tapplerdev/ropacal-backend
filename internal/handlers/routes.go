@@ -788,8 +788,8 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		params.Add("apiKey", HereAPIKey)
 		params.Add("mode", "fastest;car;traffic:disabled")
 		params.Add("improveFor", "time")
-		params.Add("start", fmt.Sprintf("warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
-		params.Add("end", fmt.Sprintf("warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
+		params.Add("start", fmt.Sprintf("start-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
+		params.Add("end", fmt.Sprintf("end-warehouse;%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
 
 		// Add all locations as destinations
 		for i, loc := range req.Locations {
@@ -878,7 +878,7 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		optimizedStops := []OptimizedStop{}
 		for _, waypoint := range result.Waypoints {
 			// Skip start and end (warehouse)
-			if waypoint.ID == "warehouse" {
+			if waypoint.ID == "start-warehouse" || waypoint.ID == "end-warehouse" {
 				continue
 			}
 
