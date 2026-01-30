@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"time"
 
 	"ropacal-backend/internal/models"
@@ -17,6 +18,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+)
+
+// HERE Maps API credentials
+const (
+	HereAppID  = "Ne2aZIKc9CIno1Fw4RyB"
+	HereAPIKey = "0kdpGpu5ZODbrzc6QDiPmSarJSD_6BpqyCdm3ghNuzc"
 )
 
 // GetRoutes returns all route blueprints
@@ -737,4 +744,189 @@ func joinStrings(strs []string, sep string) string {
 		result += sep + s
 	}
 	return result
+}
+
+// TestHereOptimization - Test endpoint for HERE Waypoints Sequence API with raw coordinates
+// This endpoint doesn't require database bins - just send coordinates directly
+func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Locations []struct {
+				Name      string  `json:"name"`
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			} `json:"locations"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Locations) == 0 {
+			http.Error(w, "locations cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		// HERE Waypoints Sequence API supports up to 202 waypoints
+		if len(req.Locations) > 202 {
+			http.Error(w, "Cannot optimize more than 202 locations (HERE API limit)", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("🧪 Testing HERE route optimization for %d locations", len(req.Locations))
+
+		// Get warehouse location
+		warehouseLoc := services.GetWarehouseLocation()
+
+		// Build HERE Waypoints Sequence API v8 request
+		// Format: start=lat,lng&destination1=lat,lng&destination2=lat,lng&end=lat,lng
+		apiURL := "https://wse.ls.hereapi.com/2/findsequence.json"
+
+		// Build query parameters
+		params := url.Values{}
+		params.Add("apiKey", HereAPIKey)
+		params.Add("mode", "fastest;car;traffic:disabled")
+		params.Add("start", fmt.Sprintf("geo!%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
+		params.Add("end", fmt.Sprintf("geo!%.6f,%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude))
+
+		// Add all locations as destinations
+		for i, loc := range req.Locations {
+			destKey := fmt.Sprintf("destination%d", i+1)
+			params.Add(destKey, fmt.Sprintf("geo!%.6f,%.6f", loc.Latitude, loc.Longitude))
+		}
+
+		// Make request to HERE API
+		fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
+		log.Printf("🌐 Calling HERE Waypoints Sequence API...")
+
+		resp, err := http.Get(fullURL)
+		if err != nil {
+			log.Printf("❌ HERE API error: %v", err)
+			http.Error(w, "Failed to call HERE API", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("❌ HERE API returned status %d: %s", resp.StatusCode, string(body))
+			http.Error(w, "HERE API request failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse HERE response
+		var hereResp struct {
+			Results []struct {
+				Waypoints []struct {
+					ID            string  `json:"id"`
+					Lat           float64 `json:"lat"`
+					Lng           float64 `json:"lng"`
+					Sequence      int     `json:"sequence"`
+					EstimatedTime string  `json:"estimatedTime,omitempty"`
+				} `json:"waypoints"`
+				Distance      int `json:"distance"` // meters
+				Time          int `json:"time"`     // seconds
+				Interconnects []struct {
+					FromWaypoint string `json:"fromWaypoint"`
+					ToWaypoint   string `json:"toWaypoint"`
+					Distance     int    `json:"distance"` // meters
+					Time         int    `json:"time"`     // seconds
+				} `json:"interconnects"`
+			} `json:"results"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&hereResp); err != nil {
+			log.Printf("❌ Failed to parse HERE response: %v", err)
+			http.Error(w, "Failed to parse HERE response", http.StatusInternalServerError)
+			return
+		}
+
+		if len(hereResp.Results) == 0 {
+			log.Printf("❌ HERE optimization failed: no results")
+			http.Error(w, "Route optimization failed", http.StatusInternalServerError)
+			return
+		}
+
+		result := hereResp.Results[0]
+
+		// Extract optimized order (excluding start and end which are warehouse)
+		type OptimizedStop struct {
+			Index     int     `json:"index"`
+			Name      string  `json:"name"`
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+			Sequence  int     `json:"sequence"`
+		}
+
+		optimizedStops := []OptimizedStop{}
+		for _, waypoint := range result.Waypoints {
+			// Skip start and end (warehouse)
+			if waypoint.ID == "start" || waypoint.ID == "end" {
+				continue
+			}
+
+			// Extract destination index from ID (e.g., "destination1" -> 0)
+			var destIndex int
+			fmt.Sscanf(waypoint.ID, "destination%d", &destIndex)
+			destIndex-- // Convert to 0-based index
+
+			if destIndex >= 0 && destIndex < len(req.Locations) {
+				originalLoc := req.Locations[destIndex]
+				name := originalLoc.Name
+				if name == "" {
+					name = fmt.Sprintf("Location %d", destIndex+1)
+				}
+
+				optimizedStops = append(optimizedStops, OptimizedStop{
+					Index:     destIndex,
+					Name:      name,
+					Latitude:  originalLoc.Latitude,
+					Longitude: originalLoc.Longitude,
+					Sequence:  waypoint.Sequence,
+				})
+			}
+		}
+
+		// Calculate total distance and duration
+		totalDistanceMeters := float64(result.Distance)
+		totalDurationSeconds := float64(result.Time)
+
+		totalDistanceKm := totalDistanceMeters / 1000.0
+		totalDurationHours := totalDurationSeconds / 3600.0
+
+		// Add 5 minutes per location for service time
+		serviceTimeHours := float64(len(req.Locations)) * (5.0 / 60.0)
+		totalDurationHours += serviceTimeHours
+
+		response := struct {
+			Success            bool            `json:"success"`
+			Message            string          `json:"message"`
+			TotalStops         int             `json:"total_stops"`
+			TotalDistanceKm    float64         `json:"total_distance_km"`
+			TotalDistanceMiles float64         `json:"total_distance_miles"`
+			EstimatedDuration  string          `json:"estimated_duration"`
+			DurationHours      float64         `json:"duration_hours"`
+			OptimizedOrder     []OptimizedStop `json:"optimized_order"`
+			ServiceDuration    string          `json:"service_duration_per_stop"`
+			Provider           string          `json:"provider"`
+		}{
+			Success:            true,
+			Message:            "Route optimization completed successfully using HERE Maps",
+			TotalStops:         len(req.Locations),
+			TotalDistanceKm:    totalDistanceKm,
+			TotalDistanceMiles: totalDistanceKm * 0.621371,
+			EstimatedDuration:  fmt.Sprintf("%.1f hours (%.0f minutes)", totalDurationHours, totalDurationHours*60),
+			DurationHours:      totalDurationHours,
+			OptimizedOrder:     optimizedStops,
+			ServiceDuration:    "5 minutes (300 seconds)",
+			Provider:           "HERE Maps Waypoints Sequence API v8",
+		}
+
+		log.Printf("✅ HERE test optimization complete: %.2f km, %.2f hours, %d stops",
+			response.TotalDistanceKm, response.DurationHours, len(optimizedStops))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
 }

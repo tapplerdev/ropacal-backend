@@ -186,6 +186,7 @@ func main() {
 		r.Get("/routes/{id}", handlers.GetRoute(db))
 		r.Post("/routes", handlers.CreateRoute(db))
 		r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
+		r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db)) // Testing endpoint for HERE Maps API
 		r.Patch("/routes/{id}", handlers.UpdateRoute(db))
 		r.Delete("/routes/{id}", handlers.DeleteRoute(db))
 		r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
