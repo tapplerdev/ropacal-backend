@@ -945,3 +945,168 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(response)
 	}
 }
+
+// TestMapboxOptimization - Test endpoint for Mapbox Optimization API v1
+func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Same request structure as HERE test endpoint
+		var req struct {
+			Locations []struct {
+				Name      string  `json:"name"`
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			} `json:"locations"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Locations) == 0 {
+			http.Error(w, "locations cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		// Mapbox Optimization v1 supports up to 12 waypoints (including start/end)
+		// Since we add warehouse at both ends, max locations = 12 - 2 = 10
+		if len(req.Locations) > 10 {
+			http.Error(w, "Cannot optimize more than 10 locations (Mapbox v1 limit: 12 waypoints including warehouse at start/end)", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("🧪 Testing Mapbox route optimization for %d locations", len(req.Locations))
+
+		// Get warehouse location
+		warehouseLoc := services.GetWarehouseLocation()
+		log.Printf("📍 Warehouse: lat=%.6f, lng=%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude)
+
+		// Build Mapbox Optimization API URL
+		// Format: warehouse;location1;location2;...;warehouse
+		coordinates := fmt.Sprintf("%.6f,%.6f", warehouseLoc.Longitude, warehouseLoc.Latitude)
+
+		for i, loc := range req.Locations {
+			coordinates += fmt.Sprintf(";%.6f,%.6f", loc.Longitude, loc.Latitude)
+			log.Printf("📍 Destination %d (%s): lat=%.6f, lng=%.6f", i+1, loc.Name, loc.Latitude, loc.Longitude)
+		}
+
+		// Add warehouse at the end for explicit round trip
+		coordinates += fmt.Sprintf(";%.6f,%.6f", warehouseLoc.Longitude, warehouseLoc.Latitude)
+
+		mapboxToken := "pk.eyJ1IjoiYmlubHl5YWkiLCJhIjoiY21pNzN4bzlhMDVheTJpcHdqd2FtYjhpeSJ9.sQM8WHE2C9zWH0xG107xhw"
+		mapboxURL := fmt.Sprintf(
+			"https://api.mapbox.com/optimized-trips/v1/mapbox/driving/%s?source=first&destination=last&roundtrip=false&overview=full&geometries=geojson&access_token=%s",
+			coordinates,
+			mapboxToken,
+		)
+
+		log.Printf("🌐 Calling Mapbox Optimization API v1...")
+		log.Printf("🔗 Coordinates: %s", coordinates)
+
+		// Make request to Mapbox
+		resp, err := http.Get(mapboxURL)
+		if err != nil {
+			log.Printf("❌ Mapbox API error: %v", err)
+			http.Error(w, "Failed to call Mapbox API", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("❌ Mapbox API returned status %d: %s", resp.StatusCode, string(body))
+			http.Error(w, "Mapbox API request failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse Mapbox response
+		var mapboxResponse struct {
+			Code      string `json:"code"`
+			Waypoints []struct {
+				WaypointIndex int `json:"waypoint_index"`
+				TripsIndex    int `json:"trips_index"`
+			} `json:"waypoints"`
+			Trips []struct {
+				Distance float64 `json:"distance"` // meters
+				Duration float64 `json:"duration"` // seconds
+			} `json:"trips"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&mapboxResponse); err != nil {
+			log.Printf("❌ Failed to parse Mapbox response: %v", err)
+			http.Error(w, "Failed to parse Mapbox response", http.StatusInternalServerError)
+			return
+		}
+
+		if mapboxResponse.Code != "Ok" || len(mapboxResponse.Trips) == 0 {
+			log.Printf("❌ Mapbox optimization failed: code=%s", mapboxResponse.Code)
+			http.Error(w, "Route optimization failed", http.StatusInternalServerError)
+			return
+		}
+
+		trip := mapboxResponse.Trips[0]
+
+		// Extract optimized order (excluding warehouse at start and end)
+		type OptimizedStop struct {
+			Index     int     `json:"index"`
+			Name      string  `json:"name"`
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+			Sequence  int     `json:"sequence"`
+		}
+
+		optimizedStops := []OptimizedStop{}
+		for i, waypoint := range mapboxResponse.Waypoints {
+			// Skip first (warehouse start) and last (warehouse end)
+			if i == 0 || i == len(mapboxResponse.Waypoints)-1 {
+				continue
+			}
+
+			// waypoint.WaypointIndex gives us the original index in coordinates string
+			// Subtract 1 to get the index in req.Locations (since warehouse is at 0)
+			originalIdx := waypoint.WaypointIndex - 1
+			if originalIdx >= 0 && originalIdx < len(req.Locations) {
+				loc := req.Locations[originalIdx]
+				optimizedStops = append(optimizedStops, OptimizedStop{
+					Index:     originalIdx,
+					Name:      loc.Name,
+					Latitude:  loc.Latitude,
+					Longitude: loc.Longitude,
+					Sequence:  i, // Position in optimized route
+				})
+			}
+		}
+
+		// Calculate totals
+		totalDistanceKm := trip.Distance / 1000.0
+		totalDurationHours := trip.Duration / 3600.0
+
+		response := struct {
+			Success            bool            `json:"success"`
+			Message            string          `json:"message"`
+			TotalStops         int             `json:"total_stops"`
+			TotalDistanceKm    float64         `json:"total_distance_km"`
+			TotalDistanceMiles float64         `json:"total_distance_miles"`
+			EstimatedDuration  string          `json:"estimated_duration"`
+			DurationHours      float64         `json:"duration_hours"`
+			OptimizedOrder     []OptimizedStop `json:"optimized_order"`
+			Provider           string          `json:"provider"`
+		}{
+			Success:            true,
+			Message:            "Route optimization completed successfully using Mapbox",
+			TotalStops:         len(req.Locations),
+			TotalDistanceKm:    totalDistanceKm,
+			TotalDistanceMiles: totalDistanceKm * 0.621371,
+			EstimatedDuration:  fmt.Sprintf("%.1f hours (%.0f minutes)", totalDurationHours, totalDurationHours*60),
+			DurationHours:      totalDurationHours,
+			OptimizedOrder:     optimizedStops,
+			Provider:           "Mapbox Optimization API v1",
+		}
+
+		log.Printf("✅ Mapbox test optimization complete: %.2f km, %.2f hours, %d stops",
+			response.TotalDistanceKm, response.DurationHours, len(optimizedStops))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
+}
