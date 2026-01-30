@@ -191,6 +191,35 @@ func CreateShiftWithTasks(
 		}
 	}
 
+	// Populate shift_bins table for backward compatibility with StartShift handler
+	// Extract all collection tasks (bins to collect) and create shift_bins entries
+	shiftBinsQuery := `
+		INSERT INTO shift_bins (
+			shift_id, bin_id, sequence_order, is_completed, created_at
+		) VALUES ($1, $2, $3, 0, $4)
+	`
+
+	binSequence := 0
+	for i, taskData := range tasks {
+		taskType, _ := taskData["task_type"].(string)
+		// Only create shift_bins for collection tasks (bins to collect)
+		if taskType == "collection" {
+			binSequence++
+			binID := getString("bin_id")
+			if binID != nil {
+				_, err = tx.Exec(shiftBinsQuery, shiftID, binID, binSequence, now)
+				if err != nil {
+					log.Printf("⚠️  Warning: Failed to create shift_bins entry for task %d: %v", i+1, err)
+					// Don't fail the whole transaction for this
+				}
+			}
+		}
+	}
+
+	if binSequence > 0 {
+		log.Printf("✅ Created %d shift_bins entries for backward compatibility", binSequence)
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to commit transaction: %w", err)
