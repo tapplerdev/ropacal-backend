@@ -142,7 +142,7 @@ func CreateShiftWithTasks(
 		}
 
 		// Convert task_data to JSON if present
-		var taskDataJSON []byte
+		var taskDataJSON interface{}
 		if td, ok := taskData["task_data"]; ok && td != nil {
 			taskDataJSON, _ = json.Marshal(td)
 		}
