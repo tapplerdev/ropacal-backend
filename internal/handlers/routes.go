@@ -575,7 +575,15 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Parse Mapbox response
+		// Parse Mapbox response - first read the raw body for debugging
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("❌ Failed to read Mapbox response body: %v", err)
+			http.Error(w, "Failed to read Mapbox response", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("📡 Raw Mapbox Response: %s", string(bodyBytes))
+
 		var mapboxResponse struct {
 			Code  string `json:"code"`
 			Trips []struct {
@@ -588,7 +596,7 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 			} `json:"trips"`
 		}
 
-		if err := json.NewDecoder(resp.Body).Decode(&mapboxResponse); err != nil {
+		if err := json.Unmarshal(bodyBytes, &mapboxResponse); err != nil {
 			log.Printf("❌ Failed to parse Mapbox response: %v", err)
 			http.Error(w, "Failed to parse Mapbox response", http.StatusInternalServerError)
 			return
@@ -604,16 +612,30 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("✅ Mapbox optimized route: %.2f km, %.2f minutes",
 			trip.Distance/1000, trip.Duration/60)
 
+		// Debug: Log waypoints from Mapbox
+		log.Printf("📊 Mapbox returned %d waypoints:", len(trip.Waypoints))
+		for i, wp := range trip.Waypoints {
+			log.Printf("   Waypoint %d: WaypointIndex=%d, TripsIndex=%d", i, wp.WaypointIndex, wp.TripsIndex)
+		}
+		log.Printf("📊 BinIndexMap: %+v", binIndexMap)
+
 		// Extract optimized bin order from waypoints
 		// Skip first and last waypoints (warehouse start/end)
 		optimizedBinIDs := make([]string, 0, len(bins))
-		for _, waypoint := range trip.Waypoints {
-			// Skip warehouse (index 0)
+		for i, waypoint := range trip.Waypoints {
+			log.Printf("   Processing waypoint %d: index=%d", i, waypoint.WaypointIndex)
+
+			// Skip warehouse (index 0) - it appears at start and potentially end
 			if waypoint.WaypointIndex == 0 {
+				log.Printf("   → Skipping warehouse waypoint")
 				continue
 			}
+
 			if binID, exists := binIndexMap[waypoint.WaypointIndex]; exists {
+				log.Printf("   → Found bin ID: %s", binID)
 				optimizedBinIDs = append(optimizedBinIDs, binID)
+			} else {
+				log.Printf("   → ⚠️ No bin found for waypoint index %d", waypoint.WaypointIndex)
 			}
 		}
 
