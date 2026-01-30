@@ -151,7 +151,8 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				updateQuery := `UPDATE bin_move_requests
 								SET status = 'in_progress',
 									assigned_shift_id = $1,
-									assigned_driver_id = $2,
+									assigned_user_id = $2,
+									assignment_type = 'shift',
 									updated_at = $3
 								WHERE id = $4
 								AND status = 'pending'`
