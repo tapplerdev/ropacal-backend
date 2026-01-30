@@ -955,6 +955,24 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		fmt.Sscanf(result.Distance, "%f", &totalDistanceMeters)
 		fmt.Sscanf(result.Time, "%f", &totalDurationSeconds)
 
+		log.Printf("📊 HERE API Top-Level Fields:")
+		log.Printf("   Distance (result.Distance): %s meters = %.2f km", result.Distance, totalDistanceMeters/1000.0)
+		log.Printf("   Time (result.Time): %s seconds = %.2f minutes", result.Time, totalDurationSeconds/60.0)
+
+		// Calculate sum of interconnections (actual route segments)
+		var interconnectionDistanceSum float64
+		var interconnectionTimeSum float64
+		log.Printf("🔗 HERE API Interconnections (route segments):")
+		for i, conn := range result.Interconnections {
+			log.Printf("   Segment %d: %s → %s | Distance: %.0f m | Time: %.0f sec",
+				i+1, conn.FromWaypoint, conn.ToWaypoint, conn.Distance, conn.Time)
+			interconnectionDistanceSum += conn.Distance
+			interconnectionTimeSum += conn.Time
+		}
+		log.Printf("📐 SUM of Interconnections:")
+		log.Printf("   Total Distance: %.2f km (%.2f miles)", interconnectionDistanceSum/1000.0, (interconnectionDistanceSum/1000.0)*0.621371)
+		log.Printf("   Total Time: %.2f minutes", interconnectionTimeSum/60.0)
+
 		totalDistanceKm := totalDistanceMeters / 1000.0
 		totalDurationHours := totalDurationSeconds / 3600.0
 
