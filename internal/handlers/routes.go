@@ -828,7 +828,7 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Parse HERE v8 response
+		// Parse HERE v8 response (separate struct from Mapbox)
 		var hereResp struct {
 			Results []struct {
 				Waypoints []struct {
@@ -842,10 +842,10 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 				Distance      string `json:"distance"` // meters (string in v8)
 				Time          string `json:"time"`     // seconds (string in v8)
 				Interconnections []struct {
-					FromWaypoint string `json:"fromWaypoint"`
-					ToWaypoint   string `json:"toWaypoint"`
-					Distance     int    `json:"distance"` // meters
-					Time         int    `json:"time"`     // seconds
+					FromWaypoint string  `json:"fromWaypoint"`
+					ToWaypoint   string  `json:"toWaypoint"`
+					Distance     float64 `json:"distance"` // meters (can be float in HERE)
+					Time         float64 `json:"time"`     // seconds (can be float in HERE)
 				} `json:"interconnections"`
 			} `json:"results"`
 		}
