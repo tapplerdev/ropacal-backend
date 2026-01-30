@@ -523,34 +523,36 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get warehouse location (will be the destination)
+		// Determine start location (warehouse)
 		warehouseLoc := services.GetWarehouseLocation()
-		log.Printf("📍 Warehouse destination: (%.6f, %.6f)", warehouseLoc.Latitude, warehouseLoc.Longitude)
+		startLocation := services.Location{
+			Latitude:  warehouseLoc.Latitude,
+			Longitude: warehouseLoc.Longitude,
+		}
+
+		if req.StartLocation != nil {
+			startLocation = services.Location{
+				Latitude:  req.StartLocation.Latitude,
+				Longitude: req.StartLocation.Longitude,
+			}
+		}
+
+		log.Printf("📍 Start location: (%.6f, %.6f)", startLocation.Latitude, startLocation.Longitude)
 
 		// Build Mapbox Optimization API URL
-		// Format: bin1;bin2;bin3;warehouse
-		// Mapbox will pick the best starting bin with source=any
-		coordinates := ""
+		// Format: lng,lat;lng,lat;lng,lat
+		coordinates := fmt.Sprintf("%.6f,%.6f", startLocation.Longitude, startLocation.Latitude)
 		binIndexMap := make(map[int]string) // Map Mapbox waypoint index to bin ID
 
 		for i, bin := range bins {
-			if i > 0 {
-				coordinates += ";"
-			}
-			coordinates += fmt.Sprintf("%.6f,%.6f", *bin.Longitude, *bin.Latitude)
-			binIndexMap[i] = bin.ID // Bins start at index 0 now (no warehouse at start)
+			coordinates += fmt.Sprintf(";%.6f,%.6f", *bin.Longitude, *bin.Latitude)
+			binIndexMap[i+1] = bin.ID // +1 because warehouse is at index 0
 		}
 
-		// Add warehouse as final destination
-		coordinates += fmt.Sprintf(";%.6f,%.6f", warehouseLoc.Longitude, warehouseLoc.Latitude)
-
 		// Mapbox Optimization API endpoint
-		// source=any: Mapbox picks the best starting bin
-		// destination=last: Route ends at warehouse
-		// roundtrip=false: One-way trip (bins → warehouse)
 		mapboxToken := "pk.eyJ1IjoiYmlubHl5YWkiLCJhIjoiY21pNzN4bzlhMDVheTJpcHdqd2FtYjhpeSJ9.sQM8WHE2C9zWH0xG107xhw"
 		mapboxURL := fmt.Sprintf(
-			"https://api.mapbox.com/optimized-trips/v1/mapbox/driving/%s?source=any&destination=last&roundtrip=false&overview=full&geometries=geojson&access_token=%s",
+			"https://api.mapbox.com/optimized-trips/v1/mapbox/driving/%s?source=first&destination=last&roundtrip=true&overview=full&geometries=geojson&access_token=%s",
 			coordinates,
 			mapboxToken,
 		)
@@ -618,15 +620,14 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("📊 BinIndexMap: %+v", binIndexMap)
 
 		// Extract optimized bin order from waypoints
-		// Skip last waypoint (warehouse destination at index len(bins))
-		warehouseIndex := len(bins) // Warehouse is the last coordinate
+		// Skip first and last waypoints (warehouse start/end)
 		optimizedBinIDs := make([]string, 0, len(bins))
 		for i, waypoint := range mapboxResponse.Waypoints {
 			log.Printf("   Processing waypoint %d: index=%d", i, waypoint.WaypointIndex)
 
-			// Skip warehouse (last index)
-			if waypoint.WaypointIndex == warehouseIndex {
-				log.Printf("   → Skipping warehouse waypoint (index %d)", warehouseIndex)
+			// Skip warehouse (index 0) - it appears at start and potentially end
+			if waypoint.WaypointIndex == 0 {
+				log.Printf("   → Skipping warehouse waypoint")
 				continue
 			}
 
