@@ -345,8 +345,8 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
 
 		if needsFullOptimization {
-			// Case 1: Custom bin selection - Full TSP optimization from driver's location
-			log.Printf("🔄 Custom route - performing full TSP optimization from driver location")
+			// Case 1: Custom bin selection - Full HERE Maps optimization from driver's location
+			log.Printf("🔄 Custom route - performing HERE Maps route optimization from driver location")
 
 			// Fetch all bins assigned to this shift
 			var binDetails []struct {
@@ -370,51 +370,118 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				return
 			}
 
-			log.Printf("📦 Fetched %d bins for optimization", len(binDetails))
+			log.Printf("📦 Fetched %d bins for HERE Maps optimization", len(binDetails))
 
-			// Convert to optimizer format
-			binsToOptimize := make([]services.BinWithPriority, len(binDetails))
+			// Call HERE Maps Waypoints Sequence API
+			hereService := services.NewHEREWaypointsService(HereAPIKey)
+
+			// Convert bins to waypoint format
+			waypoints := make([]services.HEREWaypoint, len(binDetails))
 			for i, bin := range binDetails {
-				binsToOptimize[i] = services.BinWithPriority{
-					ID:             bin.ID,
-					Latitude:       bin.Latitude,
-					Longitude:      bin.Longitude,
-					FillPercentage: bin.FillPercentage,
-					CurrentStreet:  bin.CurrentStreet,
+				waypoints[i] = services.HEREWaypoint{
+					ID:        bin.ID,
+					Name:      bin.CurrentStreet,
+					Latitude:  bin.Latitude,
+					Longitude: bin.Longitude,
 				}
 			}
 
-			// Optimize route using TSP algorithm from driver's current location
-			optimizer := services.NewRouteOptimizer()
-			startLocation := services.OptimizerLocation{
-				Latitude:  driverLocation.Latitude,
-				Longitude: driverLocation.Longitude,
-			}
-			optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
+			// Get warehouse location (end point)
+			warehouseLoc := services.GetWarehouseLocation()
 
-			log.Printf("🎯 Route optimized! Order: %v", func() []string {
-				streets := make([]string, len(optimizedBins))
-				for i, b := range optimizedBins {
-					streets[i] = b.CurrentStreet
+			// Optimize route with current time for real-time traffic
+			departureTime := time.Now().Format(time.RFC3339)
+			optimizationResult, err := hereService.OptimizeWaypoints(
+				driverLocation.Latitude,
+				driverLocation.Longitude,
+				warehouseLoc.Latitude,
+				warehouseLoc.Longitude,
+				waypoints,
+				departureTime,
+			)
+
+			if err != nil {
+				log.Printf("❌ HERE Maps optimization failed: %v", err)
+				log.Printf("⚠️  Falling back to simple nearest-neighbor optimization")
+
+				// Fallback to simple TSP optimization
+				binsToOptimize := make([]services.BinWithPriority, len(binDetails))
+				for i, bin := range binDetails {
+					binsToOptimize[i] = services.BinWithPriority{
+						ID:             bin.ID,
+						Latitude:       bin.Latitude,
+						Longitude:      bin.Longitude,
+						FillPercentage: bin.FillPercentage,
+						CurrentStreet:  bin.CurrentStreet,
+					}
 				}
-				return streets
-			}())
 
-			// Update shift_bins with optimized sequence_order
-			for i, bin := range optimizedBins {
-				updateQuery := `UPDATE shift_bins
-								SET sequence_order = $1
-								WHERE shift_id = $2 AND bin_id = $3`
+				optimizer := services.NewRouteOptimizer()
+				startLocation := services.OptimizerLocation{
+					Latitude:  driverLocation.Latitude,
+					Longitude: driverLocation.Longitude,
+				}
+				optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
 
-				_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
+				// Update shift_bins with optimized sequence_order
+				for i, bin := range optimizedBins {
+					updateQuery := `UPDATE shift_bins
+									SET sequence_order = $1
+									WHERE shift_id = $2 AND bin_id = $3`
+
+					_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
+					if err != nil {
+						log.Printf("❌ Error updating bin sequence: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to optimize route")
+						return
+					}
+				}
+
+				log.Printf("✅ Fallback optimization complete with %d bins", len(optimizedBins))
+			} else {
+				log.Printf("🎯 HERE Maps optimization successful! Order: %v", optimizationResult.OptimizedOrder)
+
+				// Update shift_bins with HERE Maps optimized sequence_order
+				for i, waypointID := range optimizationResult.OptimizedOrder {
+					updateQuery := `UPDATE shift_bins
+									SET sequence_order = $1
+									WHERE shift_id = $2 AND bin_id = $3`
+
+					_, err = db.Exec(updateQuery, i+1, shift.ID, waypointID)
+					if err != nil {
+						log.Printf("❌ Error updating bin sequence: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to save optimized route")
+						return
+					}
+				}
+
+				// Save optimization metadata to shifts table
+				optimizationMetadata := models.OptimizationMetadata{
+					TotalDistanceKm:      optimizationResult.TotalDistanceKm,
+					TotalDurationSeconds: optimizationResult.TotalDurationSeconds,
+					OptimizedAt:          time.Now().Format(time.RFC3339),
+					EstimatedCompletion:  time.Now().Add(time.Duration(optimizationResult.TotalDurationSeconds) * time.Second).Format(time.RFC3339),
+				}
+
+				metadataJSON, err := json.Marshal(optimizationMetadata)
 				if err != nil {
-					log.Printf("❌ Error updating bin sequence: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to optimize route")
-					return
+					log.Printf("⚠️  Error marshaling optimization metadata: %v", err)
+					// Continue anyway - this is not critical
+				} else {
+					updateMetadataQuery := `UPDATE shifts SET optimization_metadata = $1, updated_at = $2 WHERE id = $3`
+					_, err = db.Exec(updateMetadataQuery, metadataJSON, time.Now().Unix(), shift.ID)
+					if err != nil {
+						log.Printf("⚠️  Error saving optimization metadata: %v", err)
+						// Continue anyway - this is not critical
+					} else {
+						log.Printf("✅ Saved optimization metadata: %.2f km, %.0f min",
+							optimizationMetadata.TotalDistanceKm,
+							float64(optimizationMetadata.TotalDurationSeconds)/60.0)
+					}
 				}
-			}
 
-			log.Printf("✅ Full TSP optimization complete with %d bins", len(optimizedBins))
+				log.Printf("✅ HERE Maps optimization complete with %d bins", len(optimizationResult.OptimizedOrder))
+			}
 		} else {
 			// Case 2: Pre-defined route - Rotate sequence to start from closest bin
 			log.Printf("🔄 Pre-defined route - rotating sequence to start from closest bin")

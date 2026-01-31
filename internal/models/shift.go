@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -17,24 +18,33 @@ const (
 	ShiftStatusCancelled ShiftStatus = "cancelled" // Cancelled by manager
 )
 
+// OptimizationMetadata contains HERE Maps route optimization data
+type OptimizationMetadata struct {
+	TotalDistanceKm      float64 `json:"total_distance_km"`
+	TotalDurationSeconds int     `json:"total_duration_seconds"`
+	OptimizedAt          string  `json:"optimized_at"`           // ISO 8601 timestamp
+	EstimatedCompletion  string  `json:"estimated_completion"`   // ISO 8601 timestamp
+}
+
 // Shift represents a driver's work shift
 type Shift struct {
-	ID                 string      `json:"id" db:"id"`
-	DriverID           string      `json:"driver_id" db:"driver_id"`
-	RouteID            *string     `json:"route_id" db:"route_id"`
-	Status             ShiftStatus `json:"status" db:"status"`
-	StartTime          *int64      `json:"start_time" db:"start_time"`
-	EndTime            *int64      `json:"end_time" db:"end_time"`
-	TotalPauseSeconds  int         `json:"total_pause_seconds" db:"total_pause_seconds"`
-	PauseStartTime     *int64      `json:"pause_start_time" db:"pause_start_time"`
-	TotalBins          int         `json:"total_bins" db:"total_bins"`
-	CompletedBins      int         `json:"completed_bins" db:"completed_bins"`
-	TruckBinCapacity   *int        `json:"truck_bin_capacity" db:"truck_bin_capacity"`
-	WarehouseLatitude  *float64    `json:"warehouse_latitude" db:"warehouse_latitude"`
-	WarehouseLongitude *float64    `json:"warehouse_longitude" db:"warehouse_longitude"`
-	WarehouseAddress   *string     `json:"warehouse_address" db:"warehouse_address"`
-	CreatedAt          int64       `json:"created_at" db:"created_at"`
-	UpdatedAt          int64       `json:"updated_at" db:"updated_at"`
+	ID                   string                `json:"id" db:"id"`
+	DriverID             string                `json:"driver_id" db:"driver_id"`
+	RouteID              *string               `json:"route_id" db:"route_id"`
+	Status               ShiftStatus           `json:"status" db:"status"`
+	StartTime            *int64                `json:"start_time" db:"start_time"`
+	EndTime              *int64                `json:"end_time" db:"end_time"`
+	TotalPauseSeconds    int                   `json:"total_pause_seconds" db:"total_pause_seconds"`
+	PauseStartTime       *int64                `json:"pause_start_time" db:"pause_start_time"`
+	TotalBins            int                   `json:"total_bins" db:"total_bins"`
+	CompletedBins        int                   `json:"completed_bins" db:"completed_bins"`
+	TruckBinCapacity     *int                  `json:"truck_bin_capacity" db:"truck_bin_capacity"`
+	WarehouseLatitude    *float64              `json:"warehouse_latitude" db:"warehouse_latitude"`
+	WarehouseLongitude   *float64              `json:"warehouse_longitude" db:"warehouse_longitude"`
+	WarehouseAddress     *string               `json:"warehouse_address" db:"warehouse_address"`
+	OptimizationMetadata *OptimizationMetadata `json:"optimization_metadata,omitempty" db:"optimization_metadata"`
+	CreatedAt            int64                 `json:"created_at" db:"created_at"`
+	UpdatedAt            int64                 `json:"updated_at" db:"updated_at"`
 }
 
 // FCMToken represents a Firebase Cloud Messaging token for a user
@@ -135,4 +145,18 @@ func FromNullString(n sql.NullString) *string {
 		return nil
 	}
 	return &n.String
+}
+
+// Scan implements the sql.Scanner interface for OptimizationMetadata
+func (om *OptimizationMetadata) Scan(value interface{}) error {
+	if value == nil {
+		return nil
+	}
+
+	bytes, ok := value.([]byte)
+	if !ok {
+		return nil
+	}
+
+	return json.Unmarshal(bytes, om)
 }
