@@ -682,7 +682,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 				startLng = moveRequest.OriginalLongitude
 			}
 
-			insertedMoveLocation := services.OptimizerLocation{
+			insertedMoveLocation := services.Location{
 				Latitude:  startLat,
 				Longitude: startLng,
 			}
@@ -892,14 +892,9 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 // GET /api/manager/bins/move-requests?status=pending&urgency=urgent
 func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("📥 REQUEST: GET /api/manager/bins/move-requests")
-
 		// Parse query params
 		status := r.URL.Query().Get("status")
 		urgency := r.URL.Query().Get("urgency")
-		assigned := r.URL.Query().Get("assigned")
-
-		log.Printf("   Query params: status=%s, urgency=%s, assigned=%s", status, urgency, assigned)
 
 		// Build query
 		query := `
@@ -1030,16 +1025,6 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 					responses[i].DriverName = &userName // Set unified field
 				}
 			}
-		}
-
-		log.Printf("📤 RESPONSE: 200 - Returning %d move requests", len(responses))
-		for i, resp := range responses {
-			driverInfo := "Unassigned"
-			if resp.DriverName != nil {
-				driverInfo = *resp.DriverName
-			}
-			log.Printf("   %d. Move Request %s - Bin #%d - Status: %s - Assigned to: %s",
-				i+1, resp.ID[:8], resp.BinNumber, resp.Status, driverInfo)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1474,38 +1459,27 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			if req.AssignedShiftID != nil {
 				if *req.AssignedShiftID == "" {
 					updates = append(updates, "assigned_shift_id = NULL")
-					// Only mark as changed if it was previously set
-					if moveRequest.AssignedShiftID != nil {
-						assignmentChanged = true
-					}
 				} else {
 					updates = append(updates, fmt.Sprintf("assigned_shift_id = $%d", argCount))
 					args = append(args, *req.AssignedShiftID)
 					argCount++
-					// Only mark as changed if the value is different
-					if !stringPtrEqual(moveRequest.AssignedShiftID, req.AssignedShiftID) {
-						assignmentChanged = true
-					}
 				}
+				// Only mark as changed if the value is different
+			if !stringPtrEqual(moveRequest.AssignedShiftID, req.AssignedShiftID) {
+				assignmentChanged = true
+			}
 			}
 
 			if req.AssignedUserID != nil {
 				if *req.AssignedUserID == "" {
 					updates = append(updates, "assigned_user_id = NULL")
-					// Only mark as changed if it was previously set
-					if moveRequest.AssignedUserID != nil {
-						assignmentChanged = true
-					}
 				} else {
 					updates = append(updates, fmt.Sprintf("assigned_user_id = $%d", argCount))
 					args = append(args, *req.AssignedUserID)
 					argCount++
 					affectedDriverIDs = append(affectedDriverIDs, *req.AssignedUserID)
-					// Only mark as changed if the value is different
-					if !stringPtrEqual(moveRequest.AssignedUserID, req.AssignedUserID) {
-						assignmentChanged = true
-					}
 				}
+				assignmentChanged = true
 			}
 
 			// Determine final assignment state (after potential updates)
@@ -1798,157 +1772,12 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 					log.Printf("Warning: Failed to log move request reassignment: %v", err)
 				}
 			}
-		} else if req.ScheduledDate != nil || req.MoveType != nil || req.Reason != nil || req.Notes != nil ||
-			(req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil) ||
-			req.NewLatitude != nil || req.NewLongitude != nil {
-			// Only log "updated" if move detail fields (not just assignment) were actually provided
-
-			// Build metadata JSON with old/new value comparisons
-			type ChangeDetail struct {
-				Field         string  `json:"field"`
-				Label         string  `json:"label"`
-				Old           *string `json:"old,omitempty"`
-				New           *string `json:"new,omitempty"`
-				OldFormatted  *string `json:"old_formatted,omitempty"`
-				NewFormatted  *string `json:"new_formatted,omitempty"`
-				OldTimestamp  *int64  `json:"old_timestamp,omitempty"`
-				NewTimestamp  *int64  `json:"new_timestamp,omitempty"`
-			}
-
-			type MetadataStruct struct {
-				Changes []ChangeDetail `json:"changes"`
-			}
-
-			var changes []ChangeDetail
-
-			// Compare scheduled_date
-			if req.ScheduledDate != nil && *req.ScheduledDate != moveRequest.ScheduledDate {
-				oldDate := time.Unix(moveRequest.ScheduledDate, 0).Format("Jan 2, 2006")
-				newDate := time.Unix(*req.ScheduledDate, 0).Format("Jan 2, 2006")
-				changes = append(changes, ChangeDetail{
-					Field:        "scheduled_date",
-					Label:        "Scheduled Date",
-					OldFormatted: &oldDate,
-					NewFormatted: &newDate,
-					OldTimestamp: &moveRequest.ScheduledDate,
-					NewTimestamp: req.ScheduledDate,
-				})
-			}
-
-			// Compare move_type
-			if req.MoveType != nil && *req.MoveType != moveRequest.MoveType {
-				old := moveRequest.MoveType
-				new := *req.MoveType
-				changes = append(changes, ChangeDetail{
-					Field: "move_type",
-					Label: "Move Type",
-					Old:   &old,
-					New:   &new,
-				})
-			}
-
-			// Compare reason
-			if req.Reason != nil {
-				oldReason := ""
-				if moveRequest.Reason != nil {
-					oldReason = *moveRequest.Reason
-				}
-				newReason := *req.Reason
-				if oldReason != newReason {
-					oldReasonPtr := &oldReason
-					if oldReason == "" {
-						oldReasonPtr = nil
-					}
-					changes = append(changes, ChangeDetail{
-						Field: "reason",
-						Label: "Reason",
-						Old:   oldReasonPtr,
-						New:   &newReason,
-					})
-				}
-			}
-
-			// Compare notes
-			if req.Notes != nil {
-				oldNotes := ""
-				if moveRequest.Notes != nil {
-					oldNotes = *moveRequest.Notes
-				}
-				newNotes := *req.Notes
-				if oldNotes != newNotes {
-					oldNotesPtr := &oldNotes
-					if oldNotes == "" {
-						oldNotesPtr = nil
-					}
-					changes = append(changes, ChangeDetail{
-						Field: "notes",
-						Label: "Notes",
-						Old:   oldNotesPtr,
-						New:   &newNotes,
-					})
-				}
-			}
-
-			// NOTE: We don't compare address strings because the format can vary
-			// (e.g., "Street, City 12345" vs "Street, City, 12345"). This causes
-			// false positives. The coordinates comparison below is more reliable.
-
-			// Compare coordinates (if both lat/lng provided)
-			// We use coordinates for reliable comparison, but display formatted addresses
-			if req.NewLatitude != nil && req.NewLongitude != nil {
-				oldLat := moveRequest.NewLatitude
-				oldLng := moveRequest.NewLongitude
-				newLat := req.NewLatitude
-				newLng := req.NewLongitude
-
-				latChanged := (oldLat == nil && newLat != nil) || (oldLat != nil && newLat == nil) ||
-							  (oldLat != nil && newLat != nil && *oldLat != *newLat)
-				lngChanged := (oldLng == nil && newLng != nil) || (oldLng != nil && newLng == nil) ||
-							  (oldLng != nil && newLng != nil && *oldLng != *newLng)
-
-				if latChanged || lngChanged {
-					// Get old address (stored as single formatted string in database)
-					var oldAddressPtr *string
-					if moveRequest.NewAddress != nil && *moveRequest.NewAddress != "" {
-						oldAddressPtr = moveRequest.NewAddress
-					}
-
-					// Format new address from request (separate fields)
-					var newAddressPtr *string
-					if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
-						newAddr := fmt.Sprintf("%s, %s %s", *req.NewStreet, *req.NewCity, *req.NewZip)
-						newAddressPtr = &newAddr
-					}
-
-					changes = append(changes, ChangeDetail{
-						Field: "new_location",
-						Label: "New Location",
-						Old:   oldAddressPtr,
-						New:   newAddressPtr,
-					})
-				}
-			}
-
-			// Build metadata JSON
-			var metadataJSON *string
-			if len(changes) > 0 {
-				metadata := MetadataStruct{Changes: changes}
-				metadataBytes, err := json.Marshal(metadata)
-				if err == nil {
-					metadataStr := string(metadataBytes)
-					metadataJSON = &metadataStr
-				} else {
-					log.Printf("Warning: Failed to marshal metadata JSON: %v", err)
-				}
-			}
-
-			// Only log "updated" history entry if there are actual changes
-			if len(changes) > 0 {
-				notes := "Updated move details"
-				err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes, metadataJSON)
-				if err != nil {
-					log.Printf("Warning: Failed to log move request update: %v", err)
-				}
+		} else {
+			// Simple field update (no assignment change)
+			notes := "Updated move details (date/location/notes)"
+			err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes)
+			if err != nil {
+				log.Printf("Warning: Failed to log move request update: %v", err)
 			}
 		}
 

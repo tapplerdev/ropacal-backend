@@ -7,17 +7,14 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"strings"
 	"time"
 
-	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
@@ -109,82 +106,19 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"pause_start_time":    shift.PauseStartTime,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"bins":                bins,
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
-			},
-		})
-	}
-}
-
-// GetShiftByID retrieves a specific shift by its ID (manager/admin only)
-func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		shiftID := chi.URLParam(r, "shiftId")
-		log.Printf("📥 REQUEST: GET /api/manager/shifts/%s", shiftID)
-
-		userClaims, ok := middleware.GetUserFromContext(r)
-		if !ok {
-			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
-			return
-		}
-
-		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
-
-		var shift models.Shift
-		query := `SELECT * FROM shifts WHERE id = $1`
-
-		err := db.Get(&shift, query, shiftID)
-		if err == sql.ErrNoRows {
-			log.Printf("📤 RESPONSE: 404 - Shift not found")
-			utils.RespondError(w, http.StatusNotFound, "Shift not found")
-			return
-		}
-		if err != nil {
-			log.Printf("❌ Error getting shift: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Database error")
-			return
-		}
-
-		// Get route tasks with details
-		bins, err := getRouteBinsWithDetails(db, shift.ID)
-		if err != nil {
-			log.Printf("❌ Error fetching route tasks: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route tasks")
-			return
-		}
-
-		log.Printf("📤 RESPONSE: 200 OK")
-		log.Printf("   Shift ID: %s", shift.ID)
-		log.Printf("   Status: %s", shift.Status)
-		log.Printf("   Tasks: %d/%d (%d task details)", shift.CompletedBins, shift.TotalBins, len(bins))
-
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"pause_start_time":    shift.PauseStartTime,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"bins":                bins,
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
+				"id":                   shift.ID,
+				"driver_id":            shift.DriverID,
+				"route_id":             shift.RouteID,
+				"status":               shift.Status,
+				"start_time":           shift.StartTime,
+				"end_time":             shift.EndTime,
+				"total_pause_seconds":  shift.TotalPauseSeconds,
+				"pause_start_time":     shift.PauseStartTime,
+				"total_bins":           shift.TotalBins,
+				"completed_bins":       shift.CompletedBins,
+				"bins":                 bins,
+				"created_at":           shift.CreatedAt,
+				"updated_at":           shift.UpdatedAt,
 			},
 		})
 	}
@@ -204,65 +138,65 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
 		// Check if driver has any existing active or paused shift
-		var existingShift models.Shift
-		existingQuery := `SELECT * FROM shifts
+	var existingShift models.Shift
+	existingQuery := `SELECT * FROM shifts
 					  WHERE driver_id = $1
 					  AND (status = 'active' OR status = 'paused')
 					  LIMIT 1`
 
-		existingErr := db.Get(&existingShift, existingQuery, userClaims.UserID)
-		if existingErr == nil {
-			// Found an existing active/paused shift - auto-end it
-			log.Printf("⚠️  Found existing %s shift (%s), auto-ending it before starting new shift", existingShift.Status, existingShift.ID)
+	existingErr := db.Get(&existingShift, existingQuery, userClaims.UserID)
+	if existingErr == nil {
+		// Found an existing active/paused shift - auto-end it
+		log.Printf("⚠️  Found existing %s shift (%s), auto-ending it before starting new shift", existingShift.Status, existingShift.ID)
 
-			endNow := time.Now().Unix()
-			totalPause := int64(existingShift.TotalPauseSeconds)
-			if existingShift.PauseStartTime != nil {
-				totalPause += endNow - *existingShift.PauseStartTime
-			}
+		endNow := time.Now().Unix()
+		totalPause := int64(existingShift.TotalPauseSeconds)
+		if existingShift.PauseStartTime != nil {
+			totalPause += endNow - *existingShift.PauseStartTime
+		}
 
-			// Calculate completion rate for history
-			completionRate := 0.0
-			if existingShift.TotalBins > 0 {
-				completionRate = (float64(existingShift.CompletedBins) / float64(existingShift.TotalBins)) * 100
-			}
+		// Calculate completion rate for history
+		completionRate := 0.0
+		if existingShift.TotalBins > 0 {
+			completionRate = (float64(existingShift.CompletedBins) / float64(existingShift.TotalBins)) * 100
+		}
 
-			// Determine end reason - auto-ended because driver started new shift
-			endReason := "manual_end"
-			if existingShift.CompletedBins >= existingShift.TotalBins {
-				endReason = "completed"
-			}
+		// Determine end reason - auto-ended because driver started new shift
+		endReason := "manual_end"
+		if existingShift.CompletedBins >= existingShift.TotalBins {
+			endReason = "completed"
+		}
 
-			// Insert into shift_history
-			historyQuery := `INSERT INTO shift_history (
+		// Insert into shift_history
+		historyQuery := `INSERT INTO shift_history (
 			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 			total_pause_seconds, total_bins, completed_bins, completion_rate,
 			end_reason, ended_by_user_id, end_reason_metadata
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
-			_, histErr := db.Exec(
-				historyQuery,
-				existingShift.ID,
-				existingShift.DriverID,
-				existingShift.RouteID,
-				existingShift.StartTime,
-				endNow,
-				existingShift.CreatedAt,
-				endNow,
-				totalPause,
-				existingShift.TotalBins,
-				existingShift.CompletedBins,
-				completionRate,
-				endReason,
-				nil, // Driver action
-				nil, // No metadata
-			)
-			if histErr != nil {
-				log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
-				// Continue anyway
-			}
+		_, histErr := db.Exec(
+			historyQuery,
+			existingShift.ID,
+			existingShift.DriverID,
+			existingShift.RouteID,
+			existingShift.StartTime,
+			endNow,
+			existingShift.CreatedAt,
+			endNow,
+			totalPause,
+			existingShift.TotalBins,
+			existingShift.CompletedBins,
+			completionRate,
+			endReason,
+			nil, // Driver action
+			nil, // No metadata
+		)
+		if histErr != nil {
+			log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
+			// Continue anyway
+		}
 
-			endQuery := `UPDATE shifts
+		endQuery := `UPDATE shifts
 					 SET status = 'ended',
 						 end_time = $1,
 						 total_pause_seconds = $2,
@@ -270,16 +204,16 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 						 updated_at = $3
 					 WHERE id = $4`
 
-			_, err := db.Exec(endQuery, endNow, totalPause, endNow, existingShift.ID)
-			if err != nil {
-				log.Printf("❌ Error auto-ending existing shift: %v", err)
-				// Don't fail - continue with starting new shift
-			} else {
-				log.Printf("✅ Auto-ended existing shift %s (saved to history)", existingShift.ID)
-			}
+		_, err := db.Exec(endQuery, endNow, totalPause, endNow, existingShift.ID)
+		if err != nil {
+			log.Printf("❌ Error auto-ending existing shift: %v", err)
+			// Don't fail - continue with starting new shift
+		} else {
+			log.Printf("✅ Auto-ended existing shift %s (saved to history)", existingShift.ID)
 		}
+	}
 
-		// Check if driver has a ready shift
+	// Check if driver has a ready shift
 		var shift models.Shift
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
@@ -298,213 +232,6 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-
-	// Check if shift has any bins in shift_bins table (for backward compatibility)
-	// Shifts with only route_tasks (move requests, placements, etc.) won't have shift_bins entries
-	var hasShiftBins bool
-	err = db.Get(&hasShiftBins,
-		`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1)`,
-		shift.ID,
-	)
-	if err != nil {
-		log.Printf("❌ Error checking for shift_bins: %v", err)
-		hasShiftBins = false
-	}
-
-	if hasShiftBins {
-		// If shift needs optimization (sequence_order = 0), do it now using driver's current location
-		// Check if any bin has sequence_order = 0 (unoptimized)
-		var needsFullOptimization bool
-		err = db.Get(&needsFullOptimization,
-			`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1 AND sequence_order = 0)`,
-			shift.ID,
-		)
-		if err != nil {
-			log.Printf("❌ Error checking if shift needs optimization: %v", err)
-			needsFullOptimization = false // Default to false on error
-		}
-
-		// Get driver's CURRENT location (needed for both optimization types)
-		var driverLocation struct {
-			Latitude  float64 `db:"latitude"`
-			Longitude float64 `db:"longitude"`
-		}
-
-		locationErr := db.Get(&driverLocation,
-			`SELECT latitude, longitude FROM driver_current_location
-				 WHERE driver_id = $1 AND is_connected = true`,
-			userClaims.UserID,
-		)
-
-		if locationErr != nil {
-			log.Printf("❌ Driver location not available: %v", locationErr)
-			utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
-			return
-		}
-
-		log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
-
-		if needsFullOptimization {
-			// Case 1: Custom bin selection - Full TSP optimization from driver's location
-			log.Printf("🔄 Custom route - performing full TSP optimization from driver location")
-
-			// Fetch all bins assigned to this shift
-			var binDetails []struct {
-				ID             string  `db:"id"`
-				CurrentStreet  string  `db:"current_street"`
-				Latitude       float64 `db:"latitude"`
-				Longitude      float64 `db:"longitude"`
-				FillPercentage int     `db:"fill_percentage"`
-			}
-
-			binQuery := `
-				SELECT b.id, b.current_street, b.latitude, b.longitude, COALESCE(b.fill_percentage, 0) as fill_percentage
-				FROM bins b
-				JOIN shift_bins sb ON b.id = sb.bin_id
-				WHERE sb.shift_id = $1
-			`
-			err = db.Select(&binDetails, binQuery, shift.ID)
-			if err != nil {
-				log.Printf("❌ Error fetching bins: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
-				return
-			}
-
-			log.Printf("📦 Fetched %d bins for optimization", len(binDetails))
-
-			// Convert to optimizer format
-			binsToOptimize := make([]services.BinWithPriority, len(binDetails))
-			for i, bin := range binDetails {
-				binsToOptimize[i] = services.BinWithPriority{
-					ID:             bin.ID,
-					Latitude:       bin.Latitude,
-					Longitude:      bin.Longitude,
-					FillPercentage: bin.FillPercentage,
-					CurrentStreet:  bin.CurrentStreet,
-				}
-			}
-
-			// Optimize route using TSP algorithm from driver's current location
-			optimizer := services.NewRouteOptimizer()
-			startLocation := services.OptimizerLocation{
-				Latitude:  driverLocation.Latitude,
-				Longitude: driverLocation.Longitude,
-			}
-			optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
-
-			log.Printf("🎯 Route optimized! Order: %v", func() []string {
-				streets := make([]string, len(optimizedBins))
-				for i, b := range optimizedBins {
-					streets[i] = b.CurrentStreet
-				}
-				return streets
-			}())
-
-			// Update shift_bins with optimized sequence_order
-			for i, bin := range optimizedBins {
-				updateQuery := `UPDATE shift_bins
-								SET sequence_order = $1
-								WHERE shift_id = $2 AND bin_id = $3`
-
-				_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
-				if err != nil {
-					log.Printf("❌ Error updating bin sequence: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to optimize route")
-					return
-				}
-			}
-
-			log.Printf("✅ Full TSP optimization complete with %d bins", len(optimizedBins))
-		} else {
-			// Case 2: Pre-defined route - Rotate sequence to start from closest bin
-			log.Printf("🔄 Pre-defined route - rotating sequence to start from closest bin")
-
-			// Fetch bins with their current sequence order
-			var binDetails []struct {
-				ID            string  `db:"id"`
-				CurrentStreet string  `db:"current_street"`
-				Latitude      float64 `db:"latitude"`
-				Longitude     float64 `db:"longitude"`
-				SequenceOrder int     `db:"sequence_order"`
-			}
-
-			binQuery := `
-			SELECT b.id, b.current_street, b.latitude, b.longitude, sb.sequence_order
-			FROM bins b
-			JOIN shift_bins sb ON b.id = sb.bin_id
-			WHERE sb.shift_id = $1
-			ORDER BY sb.sequence_order
-		`
-			err = db.Select(&binDetails, binQuery, shift.ID)
-			if err != nil {
-				log.Printf("❌ Error fetching bins: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
-				return
-			}
-
-			log.Printf("📦 Fetched %d bins from pre-defined route", len(binDetails))
-
-			// Find closest bin to driver's current location using Haversine distance
-			closestIdx := 0
-			minDistance := math.MaxFloat64
-
-			for i, bin := range binDetails {
-				distance := haversineDistance(
-					driverLocation.Latitude, driverLocation.Longitude,
-					bin.Latitude, bin.Longitude,
-				)
-				if distance < minDistance {
-					minDistance = distance
-					closestIdx = i
-				}
-			}
-
-			log.Printf("🎯 Closest bin to driver: %s (%.2f km away)", binDetails[closestIdx].CurrentStreet, minDistance)
-
-			// Rotate the sequence to start from closest bin
-			// Example: [A, B, C, D, E] with closest = C becomes [C, D, E, A, B]
-			rotatedBins := make([]struct {
-				ID            string  `db:"id"`
-				CurrentStreet string  `db:"current_street"`
-				Latitude      float64 `db:"latitude"`
-				Longitude     float64 `db:"longitude"`
-				SequenceOrder int     `db:"sequence_order"`
-			}, len(binDetails))
-
-			for i := 0; i < len(binDetails); i++ {
-				srcIdx := (closestIdx + i) % len(binDetails)
-				rotatedBins[i] = binDetails[srcIdx]
-			}
-
-			log.Printf("🔄 Rotated order: %v", func() []string {
-				streets := make([]string, len(rotatedBins))
-				for i, b := range rotatedBins {
-					streets[i] = b.CurrentStreet
-				}
-				return streets
-			}())
-
-			// Update shift_bins with rotated sequence_order
-			for i, bin := range rotatedBins {
-				updateQuery := `UPDATE shift_bins
-							SET sequence_order = $1
-							WHERE shift_id = $2 AND bin_id = $3`
-
-				_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
-				if err != nil {
-					log.Printf("❌ Error updating bin sequence: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to rotate route")
-					return
-				}
-			}
-
-			log.Printf("✅ Route rotation complete with %d bins", len(rotatedBins))
-
-		}
-
-	} else {
-		log.Printf("ℹ️  Shift has no collection bins, skipping optimization")
-	}
 		// Update shift to active
 		now := time.Now().Unix()
 		updateQuery := `UPDATE shifts
@@ -533,27 +260,6 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			rowsAffected, _ := result.RowsAffected()
 			if rowsAffected > 0 {
 				log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
-
-				// Broadcast move request status update to dashboard
-				hub.BroadcastToRole("admin", map[string]interface{}{
-					"type": "move_request_status_updated",
-					"data": map[string]interface{}{
-						"shift_id":    shift.ID,
-						"new_status":  "in_progress",
-						"count":       rowsAffected,
-						"updated_at":  now,
-					},
-				})
-				hub.BroadcastToRole("manager", map[string]interface{}{
-					"type": "move_request_status_updated",
-					"data": map[string]interface{}{
-						"shift_id":    shift.ID,
-						"new_status":  "in_progress",
-						"count":       rowsAffected,
-						"updated_at":  now,
-					},
-				})
-				log.Printf("📡 Broadcast move_request_status_updated to managers: %d move requests → in_progress", rowsAffected)
 			}
 		}
 
@@ -760,7 +466,7 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"status":              shift.Status,
+				"status":               shift.Status,
 				"total_pause_seconds": shift.TotalPauseSeconds,
 			},
 		})
@@ -814,8 +520,8 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Count incidents reported during this shift
 		var incidentStats struct {
-			TotalIncidents    int `db:"total_incidents"`
-			FieldObservations int `db:"field_observations"`
+			TotalIncidents     int `db:"total_incidents"`
+			FieldObservations  int `db:"field_observations"`
 		}
 		err = db.Get(&incidentStats, `
 			SELECT
@@ -851,18 +557,18 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			shift.DriverID,
 			shift.RouteID,
 			shift.StartTime,
-			endTime, // end_time
+			endTime,                         // end_time
 			shift.CreatedAt,
-			now,        // ended_at (when history record created)
-			totalPause, // total_pause_seconds
+			now,                             // ended_at (when history record created)
+			totalPause,                      // total_pause_seconds
 			shift.TotalBins,
 			shift.CompletedBins,
 			completionRate,
 			incidentStats.TotalIncidents,    // NEW: incidents_reported
 			incidentStats.FieldObservations, // NEW: field_observations
 			endReason,
-			nil, // ended_by_user_id (NULL - driver action)
-			nil, // end_reason_metadata (NULL for basic driver ends)
+			nil,                             // ended_by_user_id (NULL - driver action)
+			nil,                             // end_reason_metadata (NULL for basic driver ends)
 		)
 		if err != nil {
 			log.Printf("❌ Error inserting shift history: %v", err)
@@ -978,17 +684,15 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Parse request body
 		var req struct {
-			ShiftBinID            int     `json:"shift_bin_id"`                      // ID of shift_bins record (identifies specific waypoint)
-			BinID                 string  `json:"bin_id"`                            // DEPRECATED: Use shift_bin_id instead
+			BinID                 string  `json:"bin_id"`
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
-			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
 
 			// Incident reporting fields (all optional)
-			HasIncident         bool    `json:"has_incident"`
-			IncidentType        *string `json:"incident_type,omitempty"`
-			IncidentPhotoUrl    *string `json:"incident_photo_url,omitempty"`
-			IncidentDescription *string `json:"incident_description,omitempty"`
+			HasIncident           bool    `json:"has_incident"`
+			IncidentType          *string `json:"incident_type,omitempty"`
+			IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
+			IncidentDescription   *string `json:"incident_description,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			log.Printf("[DIAGNOSTIC] ❌ Error decoding request body: %v", err)
@@ -996,15 +700,11 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[DIAGNOSTIC]    Shift Bin ID: %d (waypoint-specific ID)", req.ShiftBinID)
-		log.Printf("[DIAGNOSTIC]    Bin ID: %s (deprecated)", req.BinID)
-		log.Printf("[DIAGNOSTIC] 🔍 FILL PERCENTAGE DEBUG:")
+		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
 		if req.UpdatedFillPercentage != nil {
-			log.Printf("[DIAGNOSTIC]    ✅ Received non-null fill_percentage from mobile app: %d%%", *req.UpdatedFillPercentage)
-			log.Printf("[DIAGNOSTIC]    📊 This value WILL be written to database")
+			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: %d%%", *req.UpdatedFillPercentage)
 		} else {
-			log.Printf("[DIAGNOSTIC]    ⚠️  Received NULL fill_percentage from mobile app")
-			log.Printf("[DIAGNOSTIC]    📊 Database will store NULL (incident report or no assessment)")
+			log.Printf("[DIAGNOSTIC]    Updated Fill Percentage: null (not assessed)")
 		}
 		if req.PhotoUrl != nil {
 			log.Printf("[DIAGNOSTIC]    Photo URL: %s", *req.PhotoUrl)
@@ -1054,67 +754,31 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Mark task as completed in route_tasks table
+		// Mark bin as completed in route_bins table
 		now := time.Now().Unix()
+		routeBinQuery := `UPDATE shift_bins
+						  SET is_completed = 1,
+							  completed_at = $1,
+							  updated_fill_percentage = $2
+						  WHERE shift_id = $3
+						  AND bin_id = $4
+						  AND is_completed = 0`
 
-		log.Printf("[DIAGNOSTIC] 🔍 Finding task in route_tasks table...")
-		log.Printf("[DIAGNOSTIC]    Shift ID: %s", shift.ID)
-		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
-
-		// Find the next incomplete task for this bin in this shift
-		var taskID string
-		var taskType string
-		err = db.QueryRow(`
-			SELECT id, task_type
-			FROM route_tasks
-			WHERE shift_id = $1
-			  AND bin_id = $2
-			  AND is_completed = 0
-			ORDER BY sequence_order ASC
-			LIMIT 1
-		`, shift.ID, req.BinID).Scan(&taskID, &taskType)
-
-		if err == sql.ErrNoRows {
-			log.Printf("[DIAGNOSTIC] ⚠️  Task not found in route or already completed")
-			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
-			return
-		}
+		result, err := db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, shift.ID, req.BinID)
 		if err != nil {
-			log.Printf("❌ Error finding task: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
-			return
-		}
-
-		log.Printf("[DIAGNOSTIC] ✅ Found task: ID=%s, Type=%s", taskID, taskType)
-		log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
-		if req.UpdatedFillPercentage != nil {
-			log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
-		} else {
-			log.Printf("[DIAGNOSTIC]    Writing value: NULL")
-		}
-
-		// Update the task as completed
-		updateQuery := `UPDATE route_tasks
-						SET is_completed = 1,
-							completed_at = $1,
-							updated_fill_percentage = $2,
-							updated_at = $3
-						WHERE id = $4`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
-		if err != nil {
-			log.Printf("❌ Error marking task as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+			log.Printf("❌ Error marking bin as completed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
 			return
 		}
 
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {
-			log.Printf("[DIAGNOSTIC] ⚠️  Task update affected 0 rows")
-			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
+			log.Printf("[DIAGNOSTIC] ⚠️  Bin not found in route or already completed")
+			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
 			return
 		}
 
-		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
+		log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in route_bins table")
 
 		// Check if this bin is part of a move request
 		var moveRequest models.BinMoveRequest
@@ -1122,26 +786,16 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			SELECT * FROM bin_move_requests
 			WHERE bin_id = $1
 			AND assigned_shift_id = $2
-			AND status IN ('assigned', 'in_progress')
+			AND status = 'in_progress'
 		`, req.BinID, shift.ID)
 
 		if moveErr == nil {
 			// This is a MOVE REQUEST bin!
 			log.Printf("[DIAGNOSTIC] 🚚 Detected move request: %s (type: %s)", moveRequest.ID, moveRequest.MoveType)
-			// Use task_type from route_tasks (already fetched above)
-			log.Printf("[DIAGNOSTIC] Task type: %s", taskType)
-
-			// Only finalize move request (update bin location, mark complete) when DROPOFF is completed
-			// For pickup, we just mark the task complete (already done above) and continue
-			if taskType == "dropoff" {
-				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
-				err = handleMoveRequestCompletion(db, hub, moveRequest, req, now)
-				if err != nil {
-					log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
-					// Don't fail - just log
-				}
-			} else {
-				log.Printf("[DIAGNOSTIC] This is the PICKUP - move request remains in_progress")
+			err = handleMoveRequestCompletion(db, moveRequest, req, now)
+			if err != nil {
+				log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
+				// Don't fail - just log
 			}
 		} else {
 			// Regular bin check - update fill percentage and last_checked_at
@@ -1174,19 +828,13 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Insert check record into checks table and get the ID back
 		log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
-		log.Printf("[DIAGNOSTIC] 💾 CHECKS TABLE INSERT - fill_percentage value:")
-		if req.UpdatedFillPercentage != nil {
-			log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: %d%%", *req.UpdatedFillPercentage)
-		} else {
-			log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: NULL")
-		}
 		var checkID *int
-		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id)
-					   VALUES ($1, $2, $3, $4, $5, $6, $7)
+		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
+					   VALUES ($1, $2, $3, $4, $5, $6)
 					   RETURNING id`
 
 		var returnedID int
-		err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID).Scan(&returnedID)
+		err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl).Scan(&returnedID)
 		if err != nil {
 			log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
 			// Don't fail the request - the bin is already marked complete
@@ -1321,40 +969,35 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			bins = []models.ShiftBinWithDetails{}
 		}
 
-		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
-		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
-		log.Printf("[DIAGNOSTIC] 🔢 Logical counts: %d completed / %d total (Physical: %d/%d)",
-			logicalCompleted, logicalTotal, shift.CompletedBins, shift.TotalBins)
-
 		// Broadcast WebSocket update with bins
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": map[string]interface{}{
-				"id":             shift.ID,
-				"status":         shift.Status,
-				"completed_bins": logicalCompleted,
-				"total_bins":     logicalTotal,
-				"bins":           bins,
+				"id":                  shift.ID,
+				"status":              shift.Status,
+				"completed_bins":      shift.CompletedBins,
+				"total_bins":          shift.TotalBins,
+				"bins":                bins,
 			},
 		})
 
-		log.Printf("[DIAGNOSTIC] ✅ Bin completed: %d/%d (logical)", logicalCompleted, logicalTotal)
+		log.Printf("[DIAGNOSTIC] ✅ Bin completed: %d/%d", shift.CompletedBins, shift.TotalBins)
 
 		completionPercentage := 0.0
-		if logicalTotal > 0 {
-			completionPercentage = float64(logicalCompleted) / float64(logicalTotal) * 100
+		if shift.TotalBins > 0 {
+			completionPercentage = float64(shift.CompletedBins) / float64(shift.TotalBins) * 100
 		}
 
 		response := models.CompleteBinResponse{
-			CompletedBins:        logicalCompleted,
-			TotalBins:            logicalTotal,
+			CompletedBins:        shift.CompletedBins,
+			TotalBins:            shift.TotalBins,
 			CompletionPercentage: completionPercentage,
 			CheckID:              checkID,
 			IncidentID:           createdIncidentID,
 		}
 
 		log.Printf("[DIAGNOSTIC] 📤 RESPONSE: 200 OK")
-		log.Printf("[DIAGNOSTIC]    Completed: %d/%d (%.1f%%) [LOGICAL COUNTS]", logicalCompleted, logicalTotal, completionPercentage)
+		log.Printf("[DIAGNOSTIC]    Completed: %d/%d (%.1f%%)", shift.CompletedBins, shift.TotalBins, completionPercentage)
 		log.Printf("[DIAGNOSTIC]    Photo uploaded: %v", req.PhotoUrl != nil)
 		if checkID != nil {
 			log.Printf("[DIAGNOSTIC]    Check ID: %d (available for incident linking)", *checkID)
@@ -1456,201 +1099,46 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
+				"id":                 shift.ID,
+				"driver_id":          shift.DriverID,
+				"route_id":           shift.RouteID,
+				"status":             shift.Status,
+				"start_time":         shift.StartTime,
+				"end_time":           shift.EndTime,
 				"total_pause_seconds": shift.TotalPauseSeconds,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
-				"bins":                bins,
+				"total_bins":         shift.TotalBins,
+				"completed_bins":     shift.CompletedBins,
+				"created_at":         shift.CreatedAt,
+				"updated_at":         shift.UpdatedAt,
+				"bins":               bins,
 			},
 		})
 	}
 }
 
-// GetShiftMoveRequests returns all move requests assigned to a shift
-func GetShiftMoveRequests(db *sqlx.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("📥 REQUEST: GET /api/driver/shift-move-requests")
-
-		userClaims, ok := middleware.GetUserFromContext(r)
-		if !ok {
-			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
-			return
-		}
-
-		shiftID := r.URL.Query().Get("shift_id")
-		if shiftID == "" {
-			utils.RespondError(w, http.StatusBadRequest, "shift_id query parameter is required")
-			return
-		}
-
-		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
-		log.Printf("   Shift ID: %s", shiftID)
-
-		// Verify shift exists and belongs to the driver
-		var shift models.Shift
-		err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, userClaims.UserID)
-		if err != nil {
-			log.Printf("❌ Error fetching shift: %v", err)
-			utils.RespondError(w, http.StatusNotFound, "Shift not found")
-			return
-		}
-
-		// Query move requests for this shift with bin details
-		query := `
-			SELECT
-				mr.id,
-				mr.bin_id,
-				mr.scheduled_date,
-				mr.urgency,
-				mr.requested_by,
-				mr.status,
-				mr.original_latitude,
-				mr.original_longitude,
-				mr.original_address,
-				mr.new_latitude,
-				mr.new_longitude,
-				mr.new_address,
-				mr.move_type,
-				mr.disposal_action,
-				mr.reason,
-				mr.notes,
-				mr.assignment_type,
-				mr.assigned_shift_id,
-				mr.assigned_user_id,
-				mr.completed_at,
-				mr.created_at,
-				mr.updated_at,
-				b.bin_number,
-				b.current_street,
-				b.city,
-				b.zip
-			FROM bin_move_requests mr
-			JOIN bins b ON mr.bin_id = b.id
-			WHERE mr.assigned_shift_id = $1
-			ORDER BY mr.scheduled_date ASC`
-
-		type MoveRequestWithBinDetails struct {
-			models.BinMoveRequest
-			BinNumber     int    `db:"bin_number"`
-			CurrentStreet string `db:"current_street"`
-			City          string `db:"city"`
-			Zip           string `db:"zip"`
-		}
-
-		var moveRequests []MoveRequestWithBinDetails
-		err = db.Select(&moveRequests, query, shiftID)
-		if err != nil {
-			log.Printf("❌ Error fetching move requests: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch move requests")
-			return
-		}
-
-		log.Printf("✅ Found %d move requests for shift", len(moveRequests))
-		log.Printf("📤 RESPONSE: 200 OK")
-
-		// Convert to response format
-		responses := make([]models.BinMoveRequestResponse, 0, len(moveRequests))
-		for _, mr := range moveRequests {
-			resp := mr.BinMoveRequest.ToBinMoveRequestResponse()
-			resp.BinNumber = mr.BinNumber
-			resp.CurrentStreet = mr.CurrentStreet
-			resp.City = mr.City
-			resp.Zip = mr.Zip
-			responses = append(responses, resp)
-		}
-
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"data":    responses,
-		})
-	}
-}
-
-// calculateLogicalBinCounts groups move request pickup+dropoff as one logical bin
-// Returns (logicalTotal, logicalCompleted)
-func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
-	processedMoveRequests := make(map[string]bool)
-	logicalTotal := 0
-	logicalCompleted := 0
-
-	for _, bin := range bins {
-		// If it's part of a move request
-		if bin.MoveRequestID != nil && *bin.MoveRequestID != "" {
-			moveReqID := *bin.MoveRequestID
-
-			// Only count once per move request (not per waypoint)
-			if !processedMoveRequests[moveReqID] {
-				logicalTotal++
-				processedMoveRequests[moveReqID] = true
-
-				// Check if BOTH waypoints are completed
-				pickupCompleted := false
-				dropoffCompleted := false
-
-				for _, b := range bins {
-					if b.MoveRequestID != nil && *b.MoveRequestID == moveReqID {
-						if b.StopType == "pickup" && b.IsCompleted == 1 {
-							pickupCompleted = true
-						}
-						if b.StopType == "dropoff" && b.IsCompleted == 1 {
-							dropoffCompleted = true
-						}
-					}
-				}
-
-				if pickupCompleted && dropoffCompleted {
-					logicalCompleted++
-				}
-			}
-		} else {
-			// Regular collection bin
-			logicalTotal++
-			if bin.IsCompleted == 1 {
-				logicalCompleted++
-			}
-		}
-	}
-
-	return logicalTotal, logicalCompleted
-}
-
-// getRouteBinsWithDetails fetches route tasks with full details
-// ONLY uses route_tasks table (new unified task system)
+// getRouteBinsWithDetails fetches route bins with full bin details
 func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
-	// Query route_tasks table
 	query := `
 		SELECT
-			0 as id,  -- route_tasks uses string id, not auto-increment
-			rt.shift_id,
-			COALESCE(rt.bin_id, '') as bin_id,
-			rt.sequence_order,
-			rt.is_completed,
-			rt.completed_at,
-			rt.updated_fill_percentage,
-			rt.created_at,
-			COALESCE(b.bin_number, 0) as bin_number,
-			COALESCE(rt.address, '') as current_street,
-			COALESCE(b.city, '') as city,
-			COALESCE(b.zip, '') as zip,
-			COALESCE(b.fill_percentage, 0) as fill_percentage,
-			rt.latitude,
-			rt.longitude,
-			rt.task_type as stop_type,
-			rt.move_request_id,
-			rt.address as original_address,
-			rt.destination_address as new_address,
-			rt.move_type
-		FROM route_tasks rt
-		LEFT JOIN bins b ON rt.bin_id = b.id
-		WHERE rt.shift_id = $1
-		ORDER BY rt.sequence_order ASC`
+			rb.id,
+			rb.shift_id,
+			rb.bin_id,
+			rb.sequence_order,
+			rb.is_completed,
+			rb.completed_at,
+			rb.updated_fill_percentage,
+			rb.created_at,
+			b.bin_number,
+			b.current_street,
+			b.city,
+			b.zip,
+			b.fill_percentage,
+			b.latitude,
+			b.longitude
+		FROM shift_bins rb
+		JOIN bins b ON rb.bin_id = b.id
+		WHERE rb.shift_id = $1
+		ORDER BY rb.sequence_order ASC`
 
 	var bins []models.ShiftBinWithDetails
 	err := db.Select(&bins, query, shiftID)
@@ -1658,7 +1146,6 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 		return nil, err
 	}
 
-	log.Printf("📦 Loaded %d tasks from route_tasks table", len(bins))
 	return bins, nil
 }
 
@@ -1695,9 +1182,51 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		}
 
 		log.Printf("📋 Assigning route %s to driver %s with %d bins", req.RouteID, req.DriverID, len(req.BinIDs))
-		log.Printf("🔄 Route will be optimized when driver starts shift (based on actual location)")
+
+		// Check if driver is online and has recent location
+		var driverLocation struct {
+			Latitude    float64 `db:"latitude"`
+			Longitude   float64 `db:"longitude"`
+			IsConnected bool    `db:"is_connected"`
+			UpdatedAt   int64   `db:"updated_at"`
+		}
 
 		now := time.Now().Unix()
+		locationQuery := `
+			SELECT latitude, longitude, is_connected, updated_at
+			FROM driver_current_location
+			WHERE driver_id = $1
+		`
+
+		err := db.Get(&driverLocation, locationQuery, req.DriverID)
+		if err == sql.ErrNoRows {
+			log.Printf("❌ Driver is not online (no location data)")
+			utils.RespondError(w, http.StatusBadRequest, "Driver is not online. Ask driver to log in and enable location.")
+			return
+		}
+		if err != nil {
+			log.Printf("❌ Error checking driver location: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to check driver status")
+			return
+		}
+
+		// Check if driver is connected
+		if !driverLocation.IsConnected {
+			log.Printf("❌ Driver is not connected (is_connected = false)")
+			utils.RespondError(w, http.StatusBadRequest, "Driver is not online. Ask driver to log in and enable location.")
+			return
+		}
+
+		// Check if location is recent (updated within last 30 seconds)
+		timeSinceUpdate := now - driverLocation.UpdatedAt
+		if timeSinceUpdate > 30 {
+			log.Printf("❌ Driver location is stale (last update: %ds ago)", timeSinceUpdate)
+			utils.RespondError(w, http.StatusBadRequest, "Driver location is not available. Ask driver to ensure GPS is enabled.")
+			return
+		}
+
+		log.Printf("✅ Driver is online with recent location (%.6f, %.6f) - updated %ds ago",
+			driverLocation.Latitude, driverLocation.Longitude, timeSinceUpdate)
 
 		// Start transaction
 		tx, err := db.Beginx()
@@ -1730,7 +1259,73 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			return
 		}
 
-		// Create new shift (route optimization will happen when driver starts)
+		// Fetch full bin details for TSP optimization
+		binQuery := `SELECT id, current_street, latitude, longitude, fill_percentage FROM bins WHERE id IN (?)`
+		binQuery, binArgs, err := sqlx.In(binQuery, req.BinIDs)
+		if err != nil {
+			log.Printf("❌ Error building bin query: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
+			return
+		}
+		binQuery = tx.Rebind(binQuery)
+
+		var binDetails []struct {
+			ID             string  `db:"id"`
+			CurrentStreet  string  `db:"current_street"`
+			Latitude       float64 `db:"latitude"`
+			Longitude      float64 `db:"longitude"`
+			FillPercentage int     `db:"fill_percentage"`
+		}
+		err = tx.Select(&binDetails, binQuery, binArgs...)
+		if err != nil {
+			log.Printf("❌ Error fetching bin details: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
+			return
+		}
+
+		// Convert to optimizer format
+		binsToOptimize := make([]services.BinWithPriority, len(binDetails))
+		for i, bin := range binDetails {
+			binsToOptimize[i] = services.BinWithPriority{
+				ID:             bin.ID,
+				Latitude:       bin.Latitude,
+				Longitude:      bin.Longitude,
+				FillPercentage: bin.FillPercentage,
+				CurrentStreet:  bin.CurrentStreet,
+			}
+		}
+
+		// Optimize route using TSP algorithm
+		optimizer := services.NewRouteOptimizer()
+		startLocation := services.Location{
+			Latitude:  driverLocation.Latitude,
+			Longitude: driverLocation.Longitude,
+		}
+		optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
+
+		// Calculate total distance including return to warehouse
+		totalDistance := 0.0
+		currentLat, currentLng := driverLocation.Latitude, driverLocation.Longitude
+		for _, bin := range optimizedBins {
+			distance := haversineDistanceKm(currentLat, currentLng, bin.Latitude, bin.Longitude)
+			totalDistance += distance
+			currentLat, currentLng = bin.Latitude, bin.Longitude
+		}
+		// Add distance from last bin to warehouse
+		warehouse := services.GetWarehouseLocation()
+		distanceToWarehouse := haversineDistanceKm(currentLat, currentLng, warehouse.Latitude, warehouse.Longitude)
+		totalDistance += distanceToWarehouse
+
+		log.Printf("🎯 Route optimized! Order: %v", func() []string {
+			streets := make([]string, len(optimizedBins))
+			for i, b := range optimizedBins {
+				streets[i] = b.CurrentStreet
+			}
+			return streets
+		}())
+		log.Printf("📏 Total route distance: %.2f km (includes %.2f km return to warehouse)", totalDistance, distanceToWarehouse)
+
+		// Create new shift
 		shiftID := uuid.New().String()
 		totalBins := len(req.BinIDs)
 
@@ -1744,53 +1339,16 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			return
 		}
 
-		// Insert bins - preserve route sequence if from pre-defined route, otherwise mark as unoptimized
-		// Check if this is from a pre-defined route (has bins in route_bins table)
-		var routeBins []struct {
-			BinID         string `db:"bin_id"`
-			SequenceOrder int    `db:"sequence_order"`
-		}
+		// Insert route bins with OPTIMIZED sequence order
+		for i, bin := range optimizedBins {
+			routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
+							  VALUES ($1, $2, $3, $4)`
 
-		if req.RouteID != "" && req.RouteID != "custom" {
-			// Try to get pre-defined route bins with sequence
-			routeBinsQuery := `SELECT bin_id, sequence_order FROM route_bins
-							   WHERE route_id = $1
-							   ORDER BY sequence_order`
-			err = tx.Select(&routeBins, routeBinsQuery, req.RouteID)
-			if err != nil && err != sql.ErrNoRows {
-				log.Printf("❌ Error fetching route_bins: %v", err)
-				// Continue anyway - will treat as custom
-				routeBins = nil
-			}
-		}
-
-		// If we found pre-defined route bins, use their sequence
-		if len(routeBins) > 0 {
-			log.Printf("✅ Using pre-defined route sequence with %d bins", len(routeBins))
-			for _, rb := range routeBins {
-				routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
-								  VALUES ($1, $2, $3, $4)`
-
-				_, err = tx.Exec(routeBinQuery, shiftID, rb.BinID, rb.SequenceOrder, now)
-				if err != nil {
-					log.Printf("❌ Error inserting shift_bin: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
-					return
-				}
-			}
-		} else {
-			// Custom selection or route without pre-defined bins - insert with sequence_order = 0
-			log.Printf("ℹ️  Custom bin selection - will optimize from driver's start location")
-			for _, binID := range req.BinIDs {
-				routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
-								  VALUES ($1, $2, 0, $3)`
-
-				_, err = tx.Exec(routeBinQuery, shiftID, binID, now)
-				if err != nil {
-					log.Printf("❌ Error inserting shift_bin: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
-					return
-				}
+			_, err = tx.Exec(routeBinQuery, shiftID, bin.ID, i+1, now)
+			if err != nil {
+				log.Printf("❌ Error inserting route_bin: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to route")
+				return
 			}
 		}
 
@@ -2438,12 +1996,10 @@ func executeMerge(db *sqlx.DB, primaryZone, secondaryZone models.NoGoZone, now i
 }
 
 // handleMoveRequestCompletion handles move request completion logic
-func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest models.BinMoveRequest, req struct {
-	ShiftBinID            int     `json:"shift_bin_id"`
+func handleMoveRequestCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest, req struct {
 	BinID                 string  `json:"bin_id"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
 	PhotoUrl              *string `json:"photo_url,omitempty"`
-	MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
 	HasIncident           bool    `json:"has_incident"`
 	IncidentType          *string `json:"incident_type,omitempty"`
 	IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
@@ -2462,43 +2018,6 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 		return fmt.Errorf("failed to complete move request: %w", err)
 	}
 	log.Printf("[MOVE] ✅ Move request marked as completed")
-
-	// Log history: move request completed by driver
-	if moveRequest.AssignedUserID != nil {
-		var driverName string
-		err = db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID)
-		if err != nil {
-			log.Printf("Warning: Failed to fetch driver name for history: %v", err)
-			driverName = "Unknown Driver"
-		}
-		err = helpers.LogMoveRequestCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName)
-		if err != nil {
-			log.Printf("Warning: Failed to log move request completion: %v", err)
-		}
-	} else {
-		log.Printf("Warning: Move request completed without assigned user ID")
-	}
-
-	// Broadcast move request completion to dashboard
-	hub.BroadcastToRole("admin", map[string]interface{}{
-		"type": "move_request_status_updated",
-		"data": map[string]interface{}{
-			"move_request_id": moveRequest.ID,
-			"bin_id":          moveRequest.BinID,
-			"new_status":      "completed",
-			"completed_at":    now,
-		},
-	})
-	hub.BroadcastToRole("manager", map[string]interface{}{
-		"type": "move_request_status_updated",
-		"data": map[string]interface{}{
-			"move_request_id": moveRequest.ID,
-			"bin_id":          moveRequest.BinID,
-			"new_status":      "completed",
-			"completed_at":    now,
-		},
-	})
-	log.Printf("📡 Broadcast move_request_status_updated to managers: Move request %s → completed", moveRequest.ID)
 
 	if moveRequest.MoveType == "pickup_only" {
 		// Pickup for retirement or storage
@@ -2544,60 +2063,13 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 		}
 
 		// Record the move in moves table
-		// Parse address into separate fields
-		var fromStreet, fromCity, fromZip, toStreet, toCity, toZip *string
-
-		// Parse original address
-		if moveRequest.OriginalAddress != "" {
-			parts := strings.Split(moveRequest.OriginalAddress, ", ")
-			if len(parts) >= 2 {
-				street := parts[0]
-				fromStreet = &street
-				cityZip := strings.TrimSpace(parts[1])
-				cityZipParts := strings.Split(cityZip, " ")
-				if len(cityZipParts) >= 2 {
-					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
-					zip := cityZipParts[len(cityZipParts)-1]
-					fromCity = &city
-					fromZip = &zip
-				}
-			}
-		}
-
-		// Parse new address
-		if moveRequest.NewAddress != nil {
-			parts := strings.Split(*moveRequest.NewAddress, ", ")
-			if len(parts) >= 2 {
-				street := parts[0]
-				toStreet = &street
-				cityZip := strings.TrimSpace(parts[1])
-				cityZipParts := strings.Split(cityZip, " ")
-				if len(cityZipParts) >= 2 {
-					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
-					zip := cityZipParts[len(cityZipParts)-1]
-					toCity = &city
-					toZip = &zip
-				}
-			}
-		}
-
 		_, err = db.Exec(`
-			INSERT INTO moves (
-				bin_id, moved_from, moved_to, moved_on,
-				move_type, from_street, from_city, from_zip,
-				to_street, to_city, to_zip,
-				move_request_id, shift_id
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			INSERT INTO moves (bin_id, moved_from, moved_to, moved_on)
+			VALUES ($1, $2, $3, $4)
 		`, moveRequest.BinID,
 			moveRequest.OriginalAddress,
 			*moveRequest.NewAddress,
-			now,
-			"shift", // move_type
-			fromStreet, fromCity, fromZip,
-			toStreet, toCity, toZip,
-			moveRequest.ID,
-			moveRequest.AssignedShiftID)
+			now)
 		if err != nil {
 			log.Printf("[MOVE] ⚠️  Failed to record move: %v", err)
 			// Don't fail - move is already completed
@@ -2607,326 +2079,4 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 	}
 
 	return nil
-}
-
-// CancelShift cancels a specific shift
-// PUT /api/manager/shifts/:id/cancel
-func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		shiftID := chi.URLParam(r, "id")
-		log.Printf("❌ REQUEST: PUT /api/manager/shifts/%s/cancel", shiftID)
-
-		if shiftID == "" {
-			utils.RespondError(w, http.StatusBadRequest, "shift_id is required")
-			return
-		}
-
-		now := time.Now().Unix()
-
-		// Get shift details for websocket/FCM notifications
-		var shift models.Shift
-		err := db.Get(&shift, "SELECT * FROM shifts WHERE id = $1", shiftID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				utils.RespondError(w, http.StatusNotFound, "Shift not found")
-				return
-			}
-			log.Printf("❌ Error fetching shift: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift")
-			return
-		}
-
-		// Only allow cancelling active, paused, or ready shifts
-		if shift.Status != "active" && shift.Status != "paused" && shift.Status != "ready" {
-			utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Cannot cancel shift with status: %s", shift.Status))
-			return
-		}
-
-		// Start transaction
-		tx, err := db.Beginx()
-		if err != nil {
-			log.Printf("❌ Error starting transaction: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to start transaction")
-			return
-		}
-		defer tx.Rollback()
-
-		// 1. Update shift status to cancelled
-		_, err = tx.Exec(`
-			UPDATE shifts
-			SET status = 'cancelled', updated_at = $1
-			WHERE id = $2
-		`, now, shiftID)
-		if err != nil {
-			log.Printf("❌ Error updating shift status: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to cancel shift")
-			return
-		}
-
-		// 2. Return all in_progress move requests to pending
-		result, err := tx.Exec(`
-			UPDATE bin_move_requests
-			SET status = 'pending',
-			    assigned_shift_id = NULL,
-			    updated_at = $1
-			WHERE assigned_shift_id = $2
-			AND status = 'in_progress'
-		`, now, shiftID)
-		if err != nil {
-			log.Printf("⚠️  Error returning move requests to pending: %v", err)
-			// Don't fail - continue
-		} else {
-			rowsAffected, _ := result.RowsAffected()
-			if rowsAffected > 0 {
-				log.Printf("✅ Returned %d move request(s) to pending status", rowsAffected)
-			}
-		}
-
-		// 3. Delete shift_bins entries (cleanup)
-		_, err = tx.Exec(`DELETE FROM shift_bins WHERE shift_id = $1`, shiftID)
-		if err != nil {
-			log.Printf("⚠️  Error deleting shift_bins: %v", err)
-			// Don't fail - continue
-		}
-
-		// Commit transaction
-		if err := tx.Commit(); err != nil {
-			log.Printf("❌ Error committing transaction: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to commit cancellation")
-			return
-		}
-
-		log.Printf("✅ Shift %s cancelled successfully", shiftID)
-
-		// 4. Send WebSocket notification to driver's mobile app
-		wsHub.BroadcastToUser(shift.DriverID, map[string]interface{}{
-			"type": "shift_cancelled",
-			"data": map[string]interface{}{
-				"shift_id":     shiftID,
-				"cancelled_at": now,
-				"message":      "Your shift has been cancelled by management",
-			},
-		})
-		log.Printf("📡 Sent shift_cancelled websocket to driver %s", shift.DriverID)
-
-		// 5. Send FCM push notification to driver
-		if fcmService != nil {
-			// Get driver's FCM token
-			var fcmToken sql.NullString
-			err = db.Get(&fcmToken, "SELECT fcm_token FROM users WHERE id = $1", shift.DriverID)
-			if err == nil && fcmToken.Valid && fcmToken.String != "" {
-				fcmErr := fcmService.SendShiftUpdateNotification(
-					fcmToken.String,
-					shiftID,
-					"shift_cancelled",
-				)
-				if fcmErr != nil {
-					log.Printf("⚠️  Failed to send FCM notification: %v", fcmErr)
-				} else {
-					log.Printf("📱 Sent FCM notification to driver")
-				}
-			}
-		}
-
-		// 6. Broadcast to dashboard (managers/admins)
-		wsHub.BroadcastToRole("admin", map[string]interface{}{
-			"type": "shift_cancelled",
-			"data": map[string]interface{}{
-				"shift_id":     shiftID,
-				"driver_id":    shift.DriverID,
-				"cancelled_at": now,
-			},
-		})
-		wsHub.BroadcastToRole("manager", map[string]interface{}{
-			"type": "shift_cancelled",
-			"data": map[string]interface{}{
-				"shift_id":     shiftID,
-				"driver_id":    shift.DriverID,
-				"cancelled_at": now,
-			},
-		})
-
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"message": "Shift cancelled successfully",
-			"data": map[string]interface{}{
-				"shift_id":     shiftID,
-				"driver_id":    shift.DriverID,
-				"cancelled_at": now,
-			},
-		})
-	}
-}
-
-// CancelAllActiveShifts cancels all active or paused shifts
-// POST /api/manager/shifts/cancel-all-active
-func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("❌ REQUEST: POST /api/manager/shifts/cancel-all-active")
-
-		now := time.Now().Unix()
-
-		// Get all active/paused shifts
-		var shifts []models.Shift
-		err := db.Select(&shifts, `
-			SELECT * FROM shifts
-			WHERE status IN ('active', 'paused', 'ready')
-		`)
-		if err != nil {
-			log.Printf("❌ Error fetching active shifts: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch active shifts")
-			return
-		}
-
-		if len(shifts) == 0 {
-			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-				"success": true,
-				"message": "No active shifts to cancel",
-				"data": map[string]interface{}{
-					"cancelled_count": 0,
-				},
-			})
-			return
-		}
-
-		log.Printf("📋 Found %d active/paused shift(s) to cancel", len(shifts))
-
-		// Start transaction
-		tx, err := db.Beginx()
-		if err != nil {
-			log.Printf("❌ Error starting transaction: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to start transaction")
-			return
-		}
-		defer tx.Rollback()
-
-		// Collect shift IDs
-		shiftIDs := make([]string, len(shifts))
-		for i, shift := range shifts {
-			shiftIDs[i] = shift.ID
-		}
-
-		// 1. Update all shifts to cancelled
-		query, args, err := sqlx.In(`
-			UPDATE shifts
-			SET status = 'cancelled', updated_at = ?
-			WHERE id IN (?)
-		`, now, shiftIDs)
-		if err != nil {
-			log.Printf("❌ Error building update query: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to build query")
-			return
-		}
-		query = tx.Rebind(query)
-		_, err = tx.Exec(query, args...)
-		if err != nil {
-			log.Printf("❌ Error updating shifts: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to cancel shifts")
-			return
-		}
-
-		// 2. Return all in_progress move requests to pending
-		moveQuery, moveArgs, err := sqlx.In(`
-			UPDATE bin_move_requests
-			SET status = 'pending',
-			    assigned_shift_id = NULL,
-			    updated_at = ?
-			WHERE assigned_shift_id IN (?)
-			AND status = 'in_progress'
-		`, now, shiftIDs)
-		if err != nil {
-			log.Printf("⚠️  Error building move request query: %v", err)
-		} else {
-			moveQuery = tx.Rebind(moveQuery)
-			result, err := tx.Exec(moveQuery, moveArgs...)
-			if err != nil {
-				log.Printf("⚠️  Error returning move requests to pending: %v", err)
-			} else {
-				rowsAffected, _ := result.RowsAffected()
-				if rowsAffected > 0 {
-					log.Printf("✅ Returned %d move request(s) to pending status", rowsAffected)
-				}
-			}
-		}
-
-		// 3. Delete shift_bins entries
-		deleteQuery, deleteArgs, err := sqlx.In(`DELETE FROM shift_bins WHERE shift_id IN (?)`, shiftIDs)
-		if err != nil {
-			log.Printf("⚠️  Error building delete query: %v", err)
-		} else {
-			deleteQuery = tx.Rebind(deleteQuery)
-			_, err = tx.Exec(deleteQuery, deleteArgs...)
-			if err != nil {
-				log.Printf("⚠️  Error deleting shift_bins: %v", err)
-			}
-		}
-
-		// Commit transaction
-		if err := tx.Commit(); err != nil {
-			log.Printf("❌ Error committing transaction: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to commit cancellations")
-			return
-		}
-
-		log.Printf("✅ Cancelled %d shift(s) successfully", len(shifts))
-
-		// 4. Send notifications to each affected driver
-		for _, shift := range shifts {
-			// WebSocket notification
-			wsHub.BroadcastToUser(shift.DriverID, map[string]interface{}{
-				"type": "shift_cancelled",
-				"data": map[string]interface{}{
-					"shift_id":     shift.ID,
-					"cancelled_at": now,
-					"message":      "Your shift has been cancelled by management",
-				},
-			})
-
-			// FCM push notification
-			if fcmService != nil {
-				var fcmToken sql.NullString
-				err = db.Get(&fcmToken, "SELECT fcm_token FROM users WHERE id = $1", shift.DriverID)
-				if err == nil && fcmToken.Valid && fcmToken.String != "" {
-					fcmErr := fcmService.SendShiftUpdateNotification(
-						fcmToken.String,
-						shift.ID,
-						"shift_cancelled",
-					)
-					if fcmErr != nil {
-						log.Printf("⚠️  Failed to send FCM to driver %s: %v", shift.DriverID, fcmErr)
-					}
-				}
-			}
-		}
-
-		log.Printf("📡 Sent notifications to %d driver(s)", len(shifts))
-
-		// 5. Broadcast to dashboard
-		wsHub.BroadcastToRole("admin", map[string]interface{}{
-			"type": "bulk_shifts_cancelled",
-			"data": map[string]interface{}{
-				"cancelled_count": len(shifts),
-				"shift_ids":       shiftIDs,
-				"cancelled_at":    now,
-			},
-		})
-		wsHub.BroadcastToRole("manager", map[string]interface{}{
-			"type": "bulk_shifts_cancelled",
-			"data": map[string]interface{}{
-				"cancelled_count": len(shifts),
-				"shift_ids":       shiftIDs,
-				"cancelled_at":    now,
-			},
-		})
-
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"message": fmt.Sprintf("Successfully cancelled %d shift(s)", len(shifts)),
-			"data": map[string]interface{}{
-				"cancelled_count": len(shifts),
-				"shift_ids":       shiftIDs,
-				"cancelled_at":    now,
-			},
-		})
-	}
 }

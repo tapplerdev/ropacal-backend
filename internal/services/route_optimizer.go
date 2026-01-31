@@ -13,15 +13,15 @@ const (
 )
 
 // GetWarehouseLocation returns the default warehouse location
-func GetWarehouseLocation() Location {
-	return Location{
+func GetWarehouseLocation() OptimizerLocation {
+	return OptimizerLocation{
 		Latitude:  WAREHOUSE_LAT,
 		Longitude: WAREHOUSE_LNG,
 	}
 }
 
-// Location represents a geographic point
-type Location struct {
+// OptimizerLocation represents a geographic point for route optimization
+type OptimizerLocation struct {
 	Latitude  float64
 	Longitude float64
 }
@@ -47,7 +47,7 @@ func NewRouteOptimizer() *RouteOptimizer {
 // Minimizes total distance by always selecting the closest remaining bin
 func (ro *RouteOptimizer) OptimizeRoute(
 	bins []BinWithPriority,
-	startLocation Location,
+	startLocation OptimizerLocation,
 ) []BinWithPriority {
 	if len(bins) == 0 {
 		return bins
@@ -97,7 +97,7 @@ func (ro *RouteOptimizer) OptimizeRoute(
 			len(optimized), bestBin.CurrentStreet, float64(bestBin.FillPercentage), bestDistance)
 
 		// Update current location to the bin we just added
-		current = Location{
+		current = OptimizerLocation{
 			Latitude:  bestBin.Latitude,
 			Longitude: bestBin.Longitude,
 		}
@@ -117,7 +117,7 @@ func (ro *RouteOptimizer) OptimizeRoute(
 			bin.Longitude,
 		)
 		totalDistance += distance
-		routePoint = Location{
+		routePoint = OptimizerLocation{
 			Latitude:  bin.Latitude,
 			Longitude: bin.Longitude,
 		}

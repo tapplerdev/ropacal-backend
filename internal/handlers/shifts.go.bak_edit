@@ -127,69 +127,6 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// GetShiftByID retrieves a specific shift by its ID (manager/admin only)
-func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		shiftID := chi.URLParam(r, "shiftId")
-		log.Printf("📥 REQUEST: GET /api/manager/shifts/%s", shiftID)
-
-		userClaims, ok := middleware.GetUserFromContext(r)
-		if !ok {
-			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
-			return
-		}
-
-		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
-
-		var shift models.Shift
-		query := `SELECT * FROM shifts WHERE id = $1`
-
-		err := db.Get(&shift, query, shiftID)
-		if err == sql.ErrNoRows {
-			log.Printf("📤 RESPONSE: 404 - Shift not found")
-			utils.RespondError(w, http.StatusNotFound, "Shift not found")
-			return
-		}
-		if err != nil {
-			log.Printf("❌ Error getting shift: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Database error")
-			return
-		}
-
-		// Get route tasks with details
-		bins, err := getRouteBinsWithDetails(db, shift.ID)
-		if err != nil {
-			log.Printf("❌ Error fetching route tasks: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route tasks")
-			return
-		}
-
-		log.Printf("📤 RESPONSE: 200 OK")
-		log.Printf("   Shift ID: %s", shift.ID)
-		log.Printf("   Status: %s", shift.Status)
-		log.Printf("   Tasks: %d/%d (%d task details)", shift.CompletedBins, shift.TotalBins, len(bins))
-
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"pause_start_time":    shift.PauseStartTime,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"bins":                bins,
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
-			},
-		})
-	}
-}
-
 // StartShift starts an assigned shift
 func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -298,20 +235,6 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-
-	// Check if shift has any bins in shift_bins table (for backward compatibility)
-	// Shifts with only route_tasks (move requests, placements, etc.) won't have shift_bins entries
-	var hasShiftBins bool
-	err = db.Get(&hasShiftBins,
-		`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1)`,
-		shift.ID,
-	)
-	if err != nil {
-		log.Printf("❌ Error checking for shift_bins: %v", err)
-		hasShiftBins = false
-	}
-
-	if hasShiftBins {
 		// If shift needs optimization (sequence_order = 0), do it now using driver's current location
 		// Check if any bin has sequence_order = 0 (unoptimized)
 		var needsFullOptimization bool
@@ -386,7 +309,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 			// Optimize route using TSP algorithm from driver's current location
 			optimizer := services.NewRouteOptimizer()
-			startLocation := services.OptimizerLocation{
+			startLocation := services.Location{
 				Latitude:  driverLocation.Latitude,
 				Longitude: driverLocation.Longitude,
 			}
@@ -502,9 +425,6 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		}
 
-	} else {
-		log.Printf("ℹ️  Shift has no collection bins, skipping optimization")
-	}
 		// Update shift to active
 		now := time.Now().Unix()
 		updateQuery := `UPDATE shifts
@@ -1054,67 +974,55 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Mark task as completed in route_tasks table
+		// Mark bin as completed in shift_bins table
 		now := time.Now().Unix()
 
-		log.Printf("[DIAGNOSTIC] 🔍 Finding task in route_tasks table...")
-		log.Printf("[DIAGNOSTIC]    Shift ID: %s", shift.ID)
-		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
+		var result sql.Result
 
-		// Find the next incomplete task for this bin in this shift
-		var taskID string
-		var taskType string
-		err = db.QueryRow(`
-			SELECT id, task_type
-			FROM route_tasks
-			WHERE shift_id = $1
-			  AND bin_id = $2
-			  AND is_completed = 0
-			ORDER BY sequence_order ASC
-			LIMIT 1
-		`, shift.ID, req.BinID).Scan(&taskID, &taskType)
-
-		if err == sql.ErrNoRows {
-			log.Printf("[DIAGNOSTIC] ⚠️  Task not found in route or already completed")
-			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
-			return
-		}
-		if err != nil {
-			log.Printf("❌ Error finding task: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
-			return
-		}
-
-		log.Printf("[DIAGNOSTIC] ✅ Found task: ID=%s, Type=%s", taskID, taskType)
-		log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
-		if req.UpdatedFillPercentage != nil {
-			log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
+		// Use shift_bin_id if provided (new elegant approach), otherwise fall back to bin_id (deprecated)
+		if req.ShiftBinID > 0 {
+			// NEW: Use shift_bin_id to mark specific waypoint (proper for move requests with multiple waypoints)
+			log.Printf("[DIAGNOSTIC] 🆕 Using shift_bin_id=%d (correct approach for move requests)", req.ShiftBinID)
+			log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
+			if req.UpdatedFillPercentage != nil {
+				log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
+			} else {
+				log.Printf("[DIAGNOSTIC]    Writing value: NULL")
+			}
+			routeBinQuery := `UPDATE shift_bins
+							  SET is_completed = 1,
+								  completed_at = $1,
+								  updated_fill_percentage = $2
+							  WHERE id = $3
+							  AND shift_id = $4
+							  AND is_completed = 0`
+			result, err = db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, req.ShiftBinID, shift.ID)
 		} else {
-			log.Printf("[DIAGNOSTIC]    Writing value: NULL")
+			// DEPRECATED: Use bin_id (only works for regular bins, causes issues with move requests)
+			log.Printf("[DIAGNOSTIC] ⚠️  Using bin_id=%s (deprecated - causes issues with move requests!)", req.BinID)
+			routeBinQuery := `UPDATE shift_bins
+							  SET is_completed = 1,
+								  completed_at = $1,
+								  updated_fill_percentage = $2
+							  WHERE shift_id = $3
+							  AND bin_id = $4
+							  AND is_completed = 0`
+			result, err = db.Exec(routeBinQuery, now, req.UpdatedFillPercentage, shift.ID, req.BinID)
 		}
-
-		// Update the task as completed
-		updateQuery := `UPDATE route_tasks
-						SET is_completed = 1,
-							completed_at = $1,
-							updated_fill_percentage = $2,
-							updated_at = $3
-						WHERE id = $4`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
 		if err != nil {
-			log.Printf("❌ Error marking task as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+			log.Printf("❌ Error marking bin as completed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
 			return
 		}
 
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {
-			log.Printf("[DIAGNOSTIC] ⚠️  Task update affected 0 rows")
-			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
+			log.Printf("[DIAGNOSTIC] ⚠️  Bin not found in route or already completed")
+			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
 			return
 		}
 
-		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
+		log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in route_bins table")
 
 		// Check if this bin is part of a move request
 		var moveRequest models.BinMoveRequest
@@ -1128,12 +1036,24 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		if moveErr == nil {
 			// This is a MOVE REQUEST bin!
 			log.Printf("[DIAGNOSTIC] 🚚 Detected move request: %s (type: %s)", moveRequest.ID, moveRequest.MoveType)
-			// Use task_type from route_tasks (already fetched above)
-			log.Printf("[DIAGNOSTIC] Task type: %s", taskType)
+			// Get the stop_type of the current waypoint to determine if this is pickup or dropoff
+			var stopType string
+			stopTypeErr := db.Get(&stopType, `
+			SELECT stop_type FROM shift_bins
+			WHERE id = $1
+		`, req.ShiftBinID)
+
+			if stopTypeErr != nil {
+				log.Printf("[DIAGNOSTIC] Error getting stop_type: %v", stopTypeErr)
+				// Fallback: assume it's a dropoff if we can't determine
+				stopType = "dropoff"
+			}
+
+			log.Printf("[DIAGNOSTIC] Stop type: %s", stopType)
 
 			// Only finalize move request (update bin location, mark complete) when DROPOFF is completed
-			// For pickup, we just mark the task complete (already done above) and continue
-			if taskType == "dropoff" {
+			// For pickup, we just mark the waypoint complete (already done above) and continue
+			if stopType == "dropoff" {
 				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
 				err = handleMoveRequestCompletion(db, hub, moveRequest, req, now)
 				if err != nil {
@@ -1621,36 +1541,44 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 	return logicalTotal, logicalCompleted
 }
 
-// getRouteBinsWithDetails fetches route tasks with full details
-// ONLY uses route_tasks table (new unified task system)
+// getRouteBinsWithDetails fetches route bins with full bin details
 func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
-	// Query route_tasks table
 	query := `
 		SELECT
-			0 as id,  -- route_tasks uses string id, not auto-increment
-			rt.shift_id,
-			COALESCE(rt.bin_id, '') as bin_id,
-			rt.sequence_order,
-			rt.is_completed,
-			rt.completed_at,
-			rt.updated_fill_percentage,
-			rt.created_at,
-			COALESCE(b.bin_number, 0) as bin_number,
-			COALESCE(rt.address, '') as current_street,
-			COALESCE(b.city, '') as city,
-			COALESCE(b.zip, '') as zip,
+			rb.id,
+			rb.shift_id,
+			rb.bin_id,
+			rb.sequence_order,
+			rb.is_completed,
+			rb.completed_at,
+			rb.updated_fill_percentage,
+			rb.created_at,
+			b.bin_number,
+			CASE
+				WHEN rb.stop_type = 'dropoff' AND mr.new_address IS NOT NULL THEN mr.new_address
+				ELSE b.current_street
+			END as current_street,
+			b.city,
+			b.zip,
 			COALESCE(b.fill_percentage, 0) as fill_percentage,
-			rt.latitude,
-			rt.longitude,
-			rt.task_type as stop_type,
-			rt.move_request_id,
-			rt.address as original_address,
-			rt.destination_address as new_address,
-			rt.move_type
-		FROM route_tasks rt
-		LEFT JOIN bins b ON rt.bin_id = b.id
-		WHERE rt.shift_id = $1
-		ORDER BY rt.sequence_order ASC`
+			CASE
+				WHEN rb.stop_type = 'dropoff' AND mr.new_latitude IS NOT NULL THEN mr.new_latitude
+				ELSE b.latitude
+			END as latitude,
+			CASE
+				WHEN rb.stop_type = 'dropoff' AND mr.new_longitude IS NOT NULL THEN mr.new_longitude
+				ELSE b.longitude
+			END as longitude,
+			rb.stop_type,
+			rb.move_request_id,
+			mr.original_address,
+			mr.new_address,
+			mr.move_type
+		FROM shift_bins rb
+		JOIN bins b ON rb.bin_id = b.id
+		LEFT JOIN bin_move_requests mr ON rb.move_request_id = mr.id
+		WHERE rb.shift_id = $1
+		ORDER BY rb.sequence_order ASC`
 
 	var bins []models.ShiftBinWithDetails
 	err := db.Select(&bins, query, shiftID)
@@ -1658,7 +1586,6 @@ func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWith
 		return nil, err
 	}
 
-	log.Printf("📦 Loaded %d tasks from route_tasks table", len(bins))
 	return bins, nil
 }
 
