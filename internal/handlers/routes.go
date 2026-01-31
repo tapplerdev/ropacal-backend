@@ -1360,10 +1360,10 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// GoogleFleetCredentials - Constants for Google Fleet Routing API
+// GoogleFleetCredentials - Constants for Google Route Optimization API (Fleet Routing)
 const (
-	GoogleAPIKey  = "" // Add your Google API key here
-	GoogleProjectID = "" // Add your Google Cloud project ID here
+	GoogleAPIKey    = "AIzaSyAH7PTzTVJrud5KqsDmWEw67mQkiA0Co4Y" // Google Maps API Key
+	GoogleProjectID = "solar-climber-478020-k6"                 // Google Cloud Project ID
 )
 
 // TestGoogleFleetOptimization - Test endpoint for Google Route Optimization API (Fleet Routing)
