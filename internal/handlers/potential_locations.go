@@ -70,6 +70,7 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 				&loc.ConvertedToBinID,
 				&loc.ConvertedAt,
 				&loc.ConvertedByUserID,
+				&loc.ConvertedViaShiftID,
 				&binNumber,
 			)
 			if err != nil {
