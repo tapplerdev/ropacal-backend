@@ -1885,7 +1885,7 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 // getRouteBinsWithDetails fetches route tasks with full details
 // ONLY uses route_tasks table (new unified task system)
 func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
-	// Query route_tasks table
+	// ONLY query route_tasks table (new unified task system)
 	query := `
 		SELECT
 			0 as id,  -- route_tasks uses string id, not auto-increment
