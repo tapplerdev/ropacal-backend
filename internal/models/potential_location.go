@@ -16,9 +16,10 @@ type PotentialLocation struct {
 	Notes             *string  `json:"notes,omitempty" db:"notes"`
 	CreatedAt         int64    `json:"created_at" db:"created_at"`
 	UpdatedAt         int64    `json:"updated_at" db:"updated_at"`
-	ConvertedToBinID  *string  `json:"converted_to_bin_id,omitempty" db:"converted_to_bin_id"`
-	ConvertedAt       *int64   `json:"converted_at,omitempty" db:"converted_at"`
-	ConvertedByUserID *string  `json:"converted_by_user_id,omitempty" db:"converted_by_user_id"`
+	ConvertedToBinID    *string `json:"converted_to_bin_id,omitempty" db:"converted_to_bin_id"`
+	ConvertedAt         *int64  `json:"converted_at,omitempty" db:"converted_at"`
+	ConvertedByUserID   *string `json:"converted_by_user_id,omitempty" db:"converted_by_user_id"`
+	ConvertedViaShiftID *string `json:"converted_via_shift_id,omitempty" db:"converted_via_shift_id"`
 }
 
 // PotentialLocationResponse is what we send to the client with ISO timestamps
@@ -34,10 +35,11 @@ type PotentialLocationResponse struct {
 	RequestedByName   string   `json:"requested_by_name"`
 	Notes             *string  `json:"notes,omitempty"`
 	CreatedAtIso      string   `json:"created_at_iso"`
-	ConvertedToBinID  *string  `json:"converted_to_bin_id,omitempty"`
-	ConvertedAtIso    *string  `json:"converted_at_iso,omitempty"`
-	ConvertedByUserID *string  `json:"converted_by_user_id,omitempty"`
-	BinNumber         *int     `json:"bin_number,omitempty"` // From JOIN with bins table
+	ConvertedToBinID    *string `json:"converted_to_bin_id,omitempty"`
+	ConvertedAtIso      *string `json:"converted_at_iso,omitempty"`
+	ConvertedByUserID   *string `json:"converted_by_user_id,omitempty"`
+	ConvertedViaShiftID *string `json:"converted_via_shift_id,omitempty"`
+	BinNumber           *int    `json:"bin_number,omitempty"` // From JOIN with bins table
 }
 
 // CreatePotentialLocationRequest is the request body for POST /api/potential-locations
@@ -58,19 +60,20 @@ type ConvertToBinRequest struct {
 // ToPotentialLocationResponse converts a PotentialLocation to PotentialLocationResponse
 func (pl *PotentialLocation) ToPotentialLocationResponse() PotentialLocationResponse {
 	resp := PotentialLocationResponse{
-		ID:                pl.ID,
-		Address:           pl.Address,
-		Street:            pl.Street,
-		City:              pl.City,
-		Zip:               pl.Zip,
-		Latitude:          pl.Latitude,
-		Longitude:         pl.Longitude,
-		RequestedByUserID: pl.RequestedByUserID,
-		RequestedByName:   pl.RequestedByName,
-		Notes:             pl.Notes,
-		CreatedAtIso:      time.Unix(pl.CreatedAt, 0).Format(time.RFC3339),
-		ConvertedToBinID:  pl.ConvertedToBinID,
-		ConvertedByUserID: pl.ConvertedByUserID,
+		ID:                  pl.ID,
+		Address:             pl.Address,
+		Street:              pl.Street,
+		City:                pl.City,
+		Zip:                 pl.Zip,
+		Latitude:            pl.Latitude,
+		Longitude:           pl.Longitude,
+		RequestedByUserID:   pl.RequestedByUserID,
+		RequestedByName:     pl.RequestedByName,
+		Notes:               pl.Notes,
+		CreatedAtIso:        time.Unix(pl.CreatedAt, 0).Format(time.RFC3339),
+		ConvertedToBinID:    pl.ConvertedToBinID,
+		ConvertedByUserID:   pl.ConvertedByUserID,
+		ConvertedViaShiftID: pl.ConvertedViaShiftID,
 	}
 
 	if pl.ConvertedAt != nil {

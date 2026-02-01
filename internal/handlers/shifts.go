@@ -1220,6 +1220,104 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			} else {
 				log.Printf("[DIAGNOSTIC] This is the PICKUP - move request remains in_progress")
 			}
+		} else if taskType == "placement" {
+			// PLACEMENT task - create new bin from potential location
+			log.Printf("[DIAGNOSTIC] 📍 Detected PLACEMENT task - creating new bin...")
+
+			// Get placement details from route_tasks table
+			var potentialLocationID *string
+			var newBinNumber *int
+			err = db.QueryRow(`
+				SELECT potential_location_id, new_bin_number
+				FROM route_tasks
+				WHERE id = $1
+			`, taskID).Scan(&potentialLocationID, &newBinNumber)
+
+			if err != nil || potentialLocationID == nil || newBinNumber == nil {
+				log.Printf("[DIAGNOSTIC] ❌ Error fetching placement details: %v", err)
+				log.Printf("[DIAGNOSTIC] ⚠️  potential_location_id=%v, new_bin_number=%v", potentialLocationID, newBinNumber)
+			} else {
+				log.Printf("[DIAGNOSTIC]    Potential Location ID: %s", *potentialLocationID)
+				log.Printf("[DIAGNOSTIC]    Pre-assigned Bin Number: %d", *newBinNumber)
+
+				// Fetch potential location details
+				var potentialLocation models.PotentialLocation
+				err = db.Get(&potentialLocation, "SELECT * FROM potential_locations WHERE id = $1", *potentialLocationID)
+				if err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error fetching potential location: %v", err)
+				} else {
+					log.Printf("[DIAGNOSTIC]    Location: %s, %s %s", potentialLocation.Street, potentialLocation.City, potentialLocation.Zip)
+
+					// Create new bin with pre-assigned bin_number
+					newBinID := uuid.New().String()
+					binInsertQuery := `
+						INSERT INTO bins (
+							id, bin_number, current_street, city, zip,
+							latitude, longitude, status, fill_percentage,
+							last_checked_at, created_by_user_id, created_at, updated_at
+						) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+					`
+
+					_, err = db.Exec(
+						binInsertQuery,
+						newBinID,
+						*newBinNumber,
+						potentialLocation.Street,
+						potentialLocation.City,
+						potentialLocation.Zip,
+						potentialLocation.Latitude,
+						potentialLocation.Longitude,
+						"active",
+						0, // New bins start at 0% fill
+						now,
+						userClaims.UserID,
+						now,
+						now,
+					)
+
+					if err != nil {
+						log.Printf("[DIAGNOSTIC] ❌ Error creating bin: %v", err)
+					} else {
+						log.Printf("[DIAGNOSTIC] ✅ Created new Bin #%d (ID: %s)", *newBinNumber, newBinID)
+
+						// Update potential_location record (mark as converted via shift)
+						_, err = db.Exec(`
+							UPDATE potential_locations
+							SET converted_to_bin_id = $1,
+								converted_at = $2,
+								converted_by_user_id = $3,
+								converted_via_shift_id = $4,
+								updated_at = $5
+							WHERE id = $6
+						`, newBinID, now, userClaims.UserID, shift.ID, now, *potentialLocationID)
+
+						if err != nil {
+							log.Printf("[DIAGNOSTIC] ❌ Error updating potential_location: %v", err)
+						} else {
+							log.Printf("[DIAGNOSTIC] ✅ Potential location marked as converted (via shift %s)", shift.ID)
+
+							// Broadcast WebSocket event to managers
+							if hub != nil {
+								binCreatedMsg := websocket.WebSocketMessage{
+									Type: "bin_created",
+									Data: map[string]interface{}{
+										"bin_id":     newBinID,
+										"bin_number": *newBinNumber,
+										"street":     potentialLocation.Street,
+										"city":       potentialLocation.City,
+										"zip":        potentialLocation.Zip,
+										"status":     "active",
+										"created_by": "driver_placement",
+										"shift_id":   shift.ID,
+									},
+								}
+								hub.BroadcastToRole("manager", binCreatedMsg)
+								log.Printf("[DIAGNOSTIC] 📡 Broadcast bin_created event to managers")
+							}
+						}
+					}
+				}
+			}
 		} else {
 			// Regular bin check - update fill percentage and last_checked_at
 			if req.UpdatedFillPercentage != nil {
