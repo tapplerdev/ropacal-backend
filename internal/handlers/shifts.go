@@ -1092,11 +1092,8 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("[DIAGNOSTIC]    🚨 INCIDENT REPORTED: %s", *req.IncidentType)
 		}
 
-		// Validate: at least photo OR fill percentage required (unless incident is being reported)
-		if !req.HasIncident && req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
-			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
-			return
-		}
+		// Note: Validation for photo/fill percentage is deferred until we know the stop type
+		// Warehouse stops don't require photo or fill percentage
 
 		// Validate fill percentage if provided
 		if req.UpdatedFillPercentage != nil && (*req.UpdatedFillPercentage < 0 || *req.UpdatedFillPercentage > 100) {
@@ -1131,38 +1128,105 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Mark task as completed in route_tasks table
+		// Mark task/bin as completed (supports both route_tasks and shift_bins systems)
 		now := time.Now().Unix()
 
-		log.Printf("[DIAGNOSTIC] 🔍 Finding task in route_tasks table...")
-		log.Printf("[DIAGNOSTIC]    Shift ID: %s", shift.ID)
-		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
-
-		// Find the next incomplete task for this bin in this shift
+		// Determine which system this shift uses and find the task/bin
 		var taskID string
 		var taskType string
-		err = db.QueryRow(`
-			SELECT id, task_type
-			FROM route_tasks
-			WHERE shift_id = $1
-			  AND bin_id = $2
-			  AND is_completed = 0
-			ORDER BY sequence_order ASC
-			LIMIT 1
-		`, shift.ID, req.BinID).Scan(&taskID, &taskType)
+		var shiftBinID int
+		var usesTaskSystem bool
 
-		if err == sql.ErrNoRows {
-			log.Printf("[DIAGNOSTIC] ⚠️  Task not found in route or already completed")
-			utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
+		log.Printf("[DIAGNOSTIC] 🔍 Determining which system to use (route_tasks vs shift_bins)...")
+		log.Printf("[DIAGNOSTIC]    Shift ID: %s", shift.ID)
+		log.Printf("[DIAGNOSTIC]    Shift Bin ID: %d", req.ShiftBinID)
+		log.Printf("[DIAGNOSTIC]    Bin ID (deprecated): %s", req.BinID)
+
+		// Try route_tasks first (new task-based system)
+		if req.BinID != "" {
+			log.Printf("[DIAGNOSTIC] 🔍 Trying route_tasks table (new system)...")
+			err = db.QueryRow(`
+				SELECT id, task_type
+				FROM route_tasks
+				WHERE shift_id = $1
+				  AND bin_id = $2
+				  AND is_completed = 0
+				ORDER BY sequence_order ASC
+				LIMIT 1
+			`, shift.ID, req.BinID).Scan(&taskID, &taskType)
+
+			if err == nil {
+				usesTaskSystem = true
+				log.Printf("[DIAGNOSTIC] ✅ Found in route_tasks: ID=%s, Type=%s", taskID, taskType)
+			} else if err != sql.ErrNoRows {
+				log.Printf("❌ Error querying route_tasks: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
+				return
+			}
+		}
+
+		// Fallback to shift_bins (legacy system)
+		if !usesTaskSystem {
+			log.Printf("[DIAGNOSTIC] 🔍 Trying shift_bins table (legacy system)...")
+
+			// If shift_bin_id is provided, use it directly
+			if req.ShiftBinID > 0 {
+				err = db.QueryRow(`
+					SELECT id, stop_type
+					FROM shift_bins
+					WHERE id = $1
+					  AND shift_id = $2
+					  AND is_completed = 0
+				`, req.ShiftBinID, shift.ID).Scan(&shiftBinID, &taskType)
+			} else if req.BinID != "" {
+				// Fallback to finding by bin_id
+				err = db.QueryRow(`
+					SELECT id, stop_type
+					FROM shift_bins
+					WHERE shift_id = $1
+					  AND bin_id = $2
+					  AND is_completed = 0
+					ORDER BY sequence_order ASC
+					LIMIT 1
+				`, shift.ID, req.BinID).Scan(&shiftBinID, &taskType)
+			} else {
+				// Find warehouse stop (bin_id is empty for warehouse)
+				err = db.QueryRow(`
+					SELECT id, stop_type
+					FROM shift_bins
+					WHERE shift_id = $1
+					  AND stop_type = 'warehouse_stop'
+					  AND is_completed = 0
+					ORDER BY sequence_order ASC
+					LIMIT 1
+				`, shift.ID).Scan(&shiftBinID, &taskType)
+			}
+
+			if err == sql.ErrNoRows {
+				log.Printf("[DIAGNOSTIC] ⚠️  Task not found in shift_bins or already completed")
+				utils.RespondError(w, http.StatusBadRequest, "Bin not found in route or already completed")
+				return
+			}
+			if err != nil {
+				log.Printf("❌ Error querying shift_bins: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
+				return
+			}
+
+			usesTaskSystem = false
+			log.Printf("[DIAGNOSTIC] ✅ Found in shift_bins: ID=%d, StopType=%s", shiftBinID, taskType)
+		}
+
+		// Validate: at least photo OR fill percentage required (unless incident or warehouse)
+		if !req.HasIncident && taskType != "warehouse_stop" && req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
+			log.Printf("[DIAGNOSTIC] ⚠️  Validation failed: warehouse_stop=%v, photo=%v, fill=%v",
+				taskType == "warehouse_stop", req.PhotoUrl != nil, req.UpdatedFillPercentage != nil)
+			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
 			return
 		}
-		if err != nil {
-			log.Printf("❌ Error finding task: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
-			return
-		}
 
-		log.Printf("[DIAGNOSTIC] ✅ Found task: ID=%s, Type=%s", taskID, taskType)
+		log.Printf("[DIAGNOSTIC] ✅ Using %s system for stop type: %s",
+			map[bool]string{true: "route_tasks", false: "shift_bins"}[usesTaskSystem], taskType)
 		log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
 		if req.UpdatedFillPercentage != nil {
 			log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
@@ -1170,28 +1234,44 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("[DIAGNOSTIC]    Writing value: NULL")
 		}
 
-		// Update the task as completed
-		updateQuery := `UPDATE route_tasks
-						SET is_completed = 1,
-							completed_at = $1,
-							updated_fill_percentage = $2,
-							updated_at = $3
-						WHERE id = $4`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
-		if err != nil {
-			log.Printf("❌ Error marking task as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
-			return
+		// Update the task/bin as completed (different query for each system)
+		var result sql.Result
+		if usesTaskSystem {
+			// Update route_tasks
+			updateQuery := `UPDATE route_tasks
+							SET is_completed = 1,
+								completed_at = $1,
+								updated_fill_percentage = $2,
+								updated_at = $3
+							WHERE id = $4`
+			result, err = db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
+			if err != nil {
+				log.Printf("❌ Error marking task as completed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+				return
+			}
+			log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
+		} else {
+			// Update shift_bins
+			updateQuery := `UPDATE shift_bins
+							SET is_completed = 1,
+								completed_at = $1
+							WHERE id = $2`
+			result, err = db.Exec(updateQuery, now, shiftBinID)
+			if err != nil {
+				log.Printf("❌ Error marking bin as completed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
+				return
+			}
+			log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in shift_bins table")
 		}
 
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {
-			log.Printf("[DIAGNOSTIC] ⚠️  Task update affected 0 rows")
+			log.Printf("[DIAGNOSTIC] ⚠️  Update affected 0 rows")
 			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
 			return
 		}
-
-		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
 
 		// Check if this bin is part of a move request
 		var moveRequest models.BinMoveRequest
@@ -1348,36 +1428,41 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Insert check record into checks table and get the ID back
-		log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
-		log.Printf("[DIAGNOSTIC] 💾 CHECKS TABLE INSERT - fill_percentage value:")
-		if req.UpdatedFillPercentage != nil {
-			log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: %d%%", *req.UpdatedFillPercentage)
-		} else {
-			log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: NULL")
-		}
+		// Insert check record into checks table (only for bin-related stops, not warehouse)
 		var checkID *int
-		checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id)
-					   VALUES ($1, $2, $3, $4, $5, $6, $7)
-					   RETURNING id`
-
-		var returnedID int
-		err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID).Scan(&returnedID)
-		if err != nil {
-			log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
-			// Don't fail the request - the bin is already marked complete
-			log.Printf("[DIAGNOSTIC] ⚠️  Continuing despite check insert error...")
-			checkID = nil
-		} else {
-			checkID = &returnedID
-			if req.PhotoUrl != nil {
-				log.Printf("[DIAGNOSTIC] ✅ Check record inserted with photo_url (ID: %d)", returnedID)
+		if req.BinID != "" && taskType != "warehouse_stop" {
+			log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
+			log.Printf("[DIAGNOSTIC] 💾 CHECKS TABLE INSERT - fill_percentage value:")
+			if req.UpdatedFillPercentage != nil {
+				log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: %d%%", *req.UpdatedFillPercentage)
 			} else {
-				log.Printf("[DIAGNOSTIC] ✅ Check record inserted without photo (ID: %d)", returnedID)
+				log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: NULL")
 			}
 
-			// Auto-resolve any pending check recommendations for this bin
-			autoResolveCheckRecommendation(db, req.BinID, userClaims.UserID, now)
+			checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id)
+						   VALUES ($1, $2, $3, $4, $5, $6, $7)
+						   RETURNING id`
+
+			var returnedID int
+			err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID).Scan(&returnedID)
+			if err != nil {
+				log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
+				// Don't fail the request - the bin is already marked complete
+				log.Printf("[DIAGNOSTIC] ⚠️  Continuing despite check insert error...")
+				checkID = nil
+			} else {
+				checkID = &returnedID
+				if req.PhotoUrl != nil {
+					log.Printf("[DIAGNOSTIC] ✅ Check record inserted with photo_url (ID: %d)", returnedID)
+				} else {
+					log.Printf("[DIAGNOSTIC] ✅ Check record inserted without photo (ID: %d)", returnedID)
+				}
+
+				// Auto-resolve any pending check recommendations for this bin
+				autoResolveCheckRecommendation(db, req.BinID, userClaims.UserID, now)
+			}
+		} else {
+			log.Printf("[DIAGNOSTIC] ⏭️  Skipping check record insert (warehouse stop or no bin_id)")
 		}
 
 		// Create incident if reported
