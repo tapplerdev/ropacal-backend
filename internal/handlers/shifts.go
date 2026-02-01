@@ -1298,9 +1298,10 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 							// Broadcast WebSocket event to managers
 							if hub != nil {
-								binCreatedMsg := websocket.WebSocketMessage{
-									Type: "bin_created",
+								binCreatedMsg := websocket.Message{
+									UserID: "",
 									Data: map[string]interface{}{
+										"type": "bin_created",
 										"bin_id":     newBinID,
 										"bin_number": *newBinNumber,
 										"street":     potentialLocation.Street,
