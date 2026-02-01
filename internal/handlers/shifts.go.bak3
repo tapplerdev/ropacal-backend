@@ -1128,78 +1128,44 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Mark task as completed (route_tasks ONLY - unified task system)
-		now := time.Now().Unix()
-
-		log.Printf("[DIAGNOSTIC] 🔍 Finding task in route_tasks table...")
-		log.Printf("[DIAGNOSTIC]    Shift ID: %s", shift.ID)
-		log.Printf("[DIAGNOSTIC]    Bin ID: %s", req.BinID)
-
-		// Find the next incomplete task in this shift
-		var taskID string
-		var taskType string
-
-		if req.BinID != "" {
-			// Collection/Pickup/Dropoff task - has bin_id
-			log.Printf("[DIAGNOSTIC] 🔍 Looking for task with bin_id...")
-			err = db.QueryRow(`
-				SELECT id, task_type
-				FROM route_tasks
-				WHERE shift_id = $1
-				  AND bin_id = $2
-				  AND is_completed = 0
-				ORDER BY sequence_order ASC
-				LIMIT 1
-			`, shift.ID, req.BinID).Scan(&taskID, &taskType)
+		log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
+		if req.UpdatedFillPercentage != nil {
+			log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
 		} else {
-			// Warehouse or Placement task - no bin_id
-			log.Printf("[DIAGNOSTIC] 🔍 Looking for warehouse/placement task...")
-			err = db.QueryRow(`
-				SELECT id, task_type
-				FROM route_tasks
-				WHERE shift_id = $1
-				  AND is_completed = 0
-				  AND (task_type = 'warehouse_stop' OR task_type = 'placement')
-				ORDER BY sequence_order ASC
-				LIMIT 1
-			`, shift.ID).Scan(&taskID, &taskType)
+			log.Printf("[DIAGNOSTIC]    Writing value: NULL")
 		}
 
-		if err == sql.ErrNoRows {
-			log.Printf("[DIAGNOSTIC] ⚠️  Task not found in route or already completed")
-			utils.RespondError(w, http.StatusBadRequest, "Task not found in route or already completed")
-			return
+		// Update the task/bin as completed (different query for each system)
+		var result sql.Result
+		if usesTaskSystem {
+			// Update route_tasks
+			updateQuery := `UPDATE route_tasks
+							SET is_completed = 1,
+								completed_at = $1,
+								updated_fill_percentage = $2,
+								updated_at = $3
+							WHERE id = $4`
+			result, err = db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
+			if err != nil {
+				log.Printf("❌ Error marking task as completed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+				return
+			}
+			log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
+		} else {
+			// Update shift_bins
+			updateQuery := `UPDATE shift_bins
+							SET is_completed = 1,
+								completed_at = $1
+							WHERE id = $2`
+			result, err = db.Exec(updateQuery, now, shiftBinID)
+			if err != nil {
+				log.Printf("❌ Error marking bin as completed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
+				return
+			}
+			log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in shift_bins table")
 		}
-		if err != nil {
-			log.Printf("❌ Error querying route_tasks: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
-			return
-		}
-
-		log.Printf("[DIAGNOSTIC] ✅ Found task: ID=%s, Type=%s", taskID, taskType)
-
-		// Validate: at least photo OR fill percentage required (unless incident or warehouse)
-		if !req.HasIncident && taskType != "warehouse_stop" && req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
-			log.Printf("[DIAGNOSTIC] ⚠️  Validation failed: task_type=%s, photo=%v, fill=%v",
-				taskType, req.PhotoUrl != nil, req.UpdatedFillPercentage != nil)
-			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
-			return
-		}
-		// Update the task as completed
-		updateQuery := `UPDATE route_tasks
-						SET is_completed = 1,
-							completed_at = $1,
-							updated_fill_percentage = $2,
-							updated_at = $3
-						WHERE id = $4`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
-		if err != nil {
-			log.Printf("❌ Error marking task as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
-			return
-		}
-
-		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
 
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {

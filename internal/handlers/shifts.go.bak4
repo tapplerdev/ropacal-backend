@@ -1185,21 +1185,44 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
 			return
 		}
-		// Update the task as completed
-		updateQuery := `UPDATE route_tasks
-						SET is_completed = 1,
-							completed_at = $1,
-							updated_fill_percentage = $2,
-							updated_at = $3
-						WHERE id = $4`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
-		if err != nil {
-			log.Printf("❌ Error marking task as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
-			return
+		log.Printf("[DIAGNOSTIC] 💾 About to write fill_percentage to database:")
+		if req.UpdatedFillPercentage != nil {
+			log.Printf("[DIAGNOSTIC]    Writing value: %d%%", *req.UpdatedFillPercentage)
+		} else {
+			log.Printf("[DIAGNOSTIC]    Writing value: NULL")
 		}
 
-		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
+		// Update the task/bin as completed (different query for each system)
+		var result sql.Result
+		if usesTaskSystem {
+			// Update route_tasks
+			updateQuery := `UPDATE route_tasks
+							SET is_completed = 1,
+								completed_at = $1,
+								updated_fill_percentage = $2,
+								updated_at = $3
+							WHERE id = $4`
+			result, err = db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
+			if err != nil {
+				log.Printf("❌ Error marking task as completed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+				return
+			}
+			log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
+		} else {
+			// Update shift_bins
+			updateQuery := `UPDATE shift_bins
+							SET is_completed = 1,
+								completed_at = $1
+							WHERE id = $2`
+			result, err = db.Exec(updateQuery, now, shiftBinID)
+			if err != nil {
+				log.Printf("❌ Error marking bin as completed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to complete bin")
+				return
+			}
+			log.Printf("[DIAGNOSTIC] ✅ Bin marked as completed in shift_bins table")
+		}
 
 		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {

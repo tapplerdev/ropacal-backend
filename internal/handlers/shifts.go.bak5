@@ -1185,28 +1185,6 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
 			return
 		}
-		// Update the task as completed
-		updateQuery := `UPDATE route_tasks
-						SET is_completed = 1,
-							completed_at = $1,
-							updated_fill_percentage = $2,
-							updated_at = $3
-						WHERE id = $4`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
-		if err != nil {
-			log.Printf("❌ Error marking task as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
-			return
-		}
-
-		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
-
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected == 0 {
-			log.Printf("[DIAGNOSTIC] ⚠️  Update affected 0 rows")
-			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
-			return
-		}
 
 		// Check if this bin is part of a move request
 		var moveRequest models.BinMoveRequest
