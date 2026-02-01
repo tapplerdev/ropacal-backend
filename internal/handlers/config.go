@@ -1,0 +1,104 @@
+package handlers
+
+import (
+	"database/sql"
+	"encoding/json"
+	"log"
+	"net/http"
+
+	"github.com/jmoiron/sqlx"
+	"ropacal-backend/internal/models"
+)
+
+// GetWarehouseLocation returns the current warehouse location from config
+func GetWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var configValue []byte
+		err := db.QueryRow(`
+			SELECT value
+			FROM config
+			WHERE key = 'warehouse_location'
+		`).Scan(&configValue)
+
+		if err == sql.ErrNoRows {
+			log.Printf("⚠️  Warehouse location not configured in database")
+			http.Error(w, `{"error":"Warehouse location not configured"}`, http.StatusNotFound)
+			return
+		}
+
+		if err != nil {
+			log.Printf("❌ Failed to fetch warehouse location: %v", err)
+			http.Error(w, `{"error":"Failed to fetch warehouse location"}`, http.StatusInternalServerError)
+			return
+		}
+
+		var warehouse models.WarehouseLocation
+		if err := json.Unmarshal(configValue, &warehouse); err != nil {
+			log.Printf("❌ Failed to parse warehouse location: %v", err)
+			http.Error(w, `{"error":"Failed to parse warehouse location"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(warehouse)
+	}
+}
+
+// UpdateWarehouseLocation updates the warehouse location in config
+func UpdateWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var input models.WarehouseLocation
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			http.Error(w, `{"error":"Invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Validate coordinates
+		if input.Latitude < -90 || input.Latitude > 90 {
+			http.Error(w, `{"error":"Latitude must be between -90 and 90"}`, http.StatusBadRequest)
+			return
+		}
+		if input.Longitude < -180 || input.Longitude > 180 {
+			http.Error(w, `{"error":"Longitude must be between -180 and 180"}`, http.StatusBadRequest)
+			return
+		}
+		if input.Address == "" {
+			http.Error(w, `{"error":"Address is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Marshal to JSON
+		warehouseJSON, err := json.Marshal(input)
+		if err != nil {
+			log.Printf("❌ Failed to marshal warehouse data: %v", err)
+			http.Error(w, `{"error":"Failed to marshal warehouse data"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Update or insert warehouse location (no user tracking for now)
+		_, err = db.Exec(`
+			INSERT INTO config (key, value, updated_by, updated_at)
+			VALUES ('warehouse_location', $1, 'system', CURRENT_TIMESTAMP)
+			ON CONFLICT (key)
+			DO UPDATE SET
+				value = EXCLUDED.value,
+				updated_by = 'system',
+				updated_at = CURRENT_TIMESTAMP
+		`, warehouseJSON)
+
+		if err != nil {
+			log.Printf("❌ Failed to update warehouse location: %v", err)
+			http.Error(w, `{"error":"Failed to update warehouse location"}`, http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("✅ Warehouse location updated: %.6f, %.6f - %s",
+			input.Latitude, input.Longitude, input.Address)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message":  "Warehouse location updated successfully",
+			"location": input,
+		})
+	}
+}

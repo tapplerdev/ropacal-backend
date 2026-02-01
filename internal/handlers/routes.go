@@ -531,7 +531,7 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Determine start location (warehouse)
-		warehouseLoc := services.GetWarehouseLocation()
+		warehouseLoc := services.GetWarehouseLocation(db)
 		startLocation := services.OptimizerLocation{
 			Latitude:  warehouseLoc.Latitude,
 			Longitude: warehouseLoc.Longitude,
@@ -796,7 +796,7 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get warehouse location
-		warehouseLoc := services.GetWarehouseLocation()
+		warehouseLoc := services.GetWarehouseLocation(db)
 
 		// Build HERE Waypoints Sequence API v8 request
 		// Format: start=warehouse;lat,lng&destination1=name;lat,lng&end=warehouse;lat,lng
@@ -1058,7 +1058,7 @@ func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("🧪 Testing Mapbox route optimization for %d locations", len(req.Locations))
 
 		// Get warehouse location
-		warehouseLoc := services.GetWarehouseLocation()
+		warehouseLoc := services.GetWarehouseLocation(db)
 		log.Printf("📍 Warehouse: lat=%.6f, lng=%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude)
 
 		// Build Mapbox Optimization API URL

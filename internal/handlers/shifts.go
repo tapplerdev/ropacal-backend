@@ -387,7 +387,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 
 			// Get warehouse location (end point)
-			warehouseLoc := services.GetWarehouseLocation()
+			warehouseLoc := services.GetWarehouseLocation(db)
 
 			// Optimize route with current time for real-time traffic
 			departureTime := time.Now().Format(time.RFC3339)

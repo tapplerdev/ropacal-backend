@@ -164,6 +164,10 @@ func main() {
 		r.Post("/geocoding/forward", handlers.Geocode())
 		r.Post("/geocoding/forward/batch", handlers.BatchGeocode())
 
+		// Config endpoints (warehouse location)
+		r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
+		r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db))
+
 		// Bins endpoints
 		r.Get("/bins", handlers.GetBins(db))
 		r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering

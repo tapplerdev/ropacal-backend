@@ -1,22 +1,56 @@
 package services
 
 import (
+	"database/sql"
+	"encoding/json"
 	"log"
 	"math"
 )
 
-// Warehouse constants - all routes end here
-const (
-	WAREHOUSE_LAT     = 37.34692
-	WAREHOUSE_LNG     = -121.92984
-	WAREHOUSE_ADDRESS = "1185 Campbell Ave, San Jose, CA 95126"
-)
+// RETIRED: Warehouse constants - now fetched from database config table
+// Keeping for reference and fallback purposes
+// const (
+// 	WAREHOUSE_LAT     = 37.34692
+// 	WAREHOUSE_LNG     = -121.92984
+// 	WAREHOUSE_ADDRESS = "1185 Campbell Ave, San Jose, CA 95126"
+// )
 
-// GetWarehouseLocation returns the default warehouse location
-func GetWarehouseLocation() OptimizerLocation {
+// GetWarehouseLocation fetches warehouse location from database config
+// Falls back to default San Jose location if not configured
+func GetWarehouseLocation(db interface{ QueryRow(query string, args ...interface{}) *sql.Row }) OptimizerLocation {
+	var configValue []byte
+	err := db.QueryRow(`
+		SELECT value
+		FROM config
+		WHERE key = 'warehouse_location'
+	`).Scan(&configValue)
+
+	if err != nil {
+		// Fallback to default warehouse location if not found
+		log.Printf("⚠️  Failed to fetch warehouse from config (using default): %v", err)
+		return OptimizerLocation{
+			Latitude:  37.3009357,  // San Jose, CA
+			Longitude: -121.9493848,
+		}
+	}
+
+	var warehouse struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+		Address   string  `json:"address"`
+	}
+
+	if err := json.Unmarshal(configValue, &warehouse); err != nil {
+		log.Printf("⚠️  Failed to parse warehouse config (using default): %v", err)
+		return OptimizerLocation{
+			Latitude:  37.3009357,
+			Longitude: -121.9493848,
+		}
+	}
+
 	return OptimizerLocation{
-		Latitude:  WAREHOUSE_LAT,
-		Longitude: WAREHOUSE_LNG,
+		Latitude:  warehouse.Latitude,
+		Longitude: warehouse.Longitude,
 	}
 }
 
