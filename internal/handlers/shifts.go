@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
@@ -92,7 +93,7 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get route bins with details
+		// Get route bins with details (for backward compatibility)
 		bins, err := getRouteBinsWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
@@ -100,11 +101,19 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// Also get tasks from route_tasks table (new task-based system)
+		tasks, err := database.GetShiftTasks(db, shift.ID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
+			tasks = []models.RouteTask{} // Empty tasks array on error
+		}
+
 		log.Printf("📤 RESPONSE: 200 OK")
 		log.Printf("   Shift ID: %s", shift.ID)
 		log.Printf("   Status: %s", shift.Status)
 		log.Printf("   Route: %v", shift.RouteID)
 		log.Printf("   Bins: %d/%d (%d bin details)", shift.CompletedBins, shift.TotalBins, len(bins))
+		log.Printf("   Tasks: %d (new task-based system)", len(tasks))
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
@@ -119,7 +128,8 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 				"pause_start_time":    shift.PauseStartTime,
 				"total_bins":          shift.TotalBins,
 				"completed_bins":      shift.CompletedBins,
-				"bins":                bins,
+				"bins":                bins, // Legacy field
+				"tasks":               tasks, // New task-based field
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
 			},
