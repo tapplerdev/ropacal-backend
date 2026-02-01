@@ -260,7 +260,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("⚠️  Warning: Could not fetch shift for WebSocket: %v", err)
 		} else {
 			// Get route bins for full shift data
-			bins, err := getRouteBinsWithDetails(db, shift.ID)
+			bins, err := getShiftTasksWithDetails(db, shift.ID)
 			if err != nil {
 				log.Printf("⚠️  Warning: Could not fetch bins for WebSocket: %v", err)
 			} else {

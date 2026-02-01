@@ -94,7 +94,7 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get route bins with details (for backward compatibility)
-		bins, err := getRouteBinsWithDetails(db, shift.ID)
+		bins, err := getShiftTasksWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route bins")
@@ -167,7 +167,7 @@ func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get route tasks with details
-		bins, err := getRouteBinsWithDetails(db, shift.ID)
+		bins, err := getShiftTasksWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route tasks: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route tasks")
@@ -638,7 +638,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
 		// Get route bins with details for WebSocket broadcast
-		bins, err := getRouteBinsWithDetails(db, shift.ID)
+		bins, err := getShiftTasksWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins for WebSocket: %v", err)
 			bins = []models.ShiftBinWithDetails{} // Empty array on error
@@ -1039,8 +1039,8 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	}
 }
 
-// CompleteBin marks a bin as completed
-func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+// CompleteShiftBin marks a task as completed within an active shift (collection, pickup, dropoff, warehouse, placement)
+func CompleteShiftBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Printf("[DIAGNOSTIC] 📥 REQUEST: POST /api/driver/shift/complete-bin")
@@ -1511,7 +1511,7 @@ func CompleteBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
 		// Get updated bins list
-		bins, err := getRouteBinsWithDetails(db, shift.ID)
+		bins, err := getShiftTasksWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
 			bins = []models.ShiftBinWithDetails{}
@@ -1639,7 +1639,7 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get all bins with details for this shift
-		bins, err := getRouteBinsWithDetails(db, shiftID)
+		bins, err := getShiftTasksWithDetails(db, shiftID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
 			bins = []models.ShiftBinWithDetails{} // Return empty array on error
@@ -1817,9 +1817,9 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 	return logicalTotal, logicalCompleted
 }
 
-// getRouteBinsWithDetails fetches route tasks with full details
+// getShiftTasksWithDetails fetches shift tasks with full details
 // ONLY uses route_tasks table (new unified task system)
-func getRouteBinsWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
+func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
 	// ONLY query route_tasks table (new unified task system)
 	query := `
 		SELECT
@@ -2002,7 +2002,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
 
 		// Get route bins with details
-		bins, err := getRouteBinsWithDetails(db, shiftID)
+		bins, err := getShiftTasksWithDetails(db, shiftID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route bins")

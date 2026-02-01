@@ -719,7 +719,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	var updatedShift models.Shift
 	db.Get(&updatedShift, `SELECT * FROM shifts WHERE id = $1`, activeShift.ID)
 
-	updatedBins, err := getRouteBinsWithDetails(db, activeShift.ID)
+	updatedBins, err := getShiftTasksWithDetails(db, activeShift.ID)
 	if err != nil {
 		log.Printf("⚠️  Failed to fetch updated bins: %v", err)
 		updatedBins = []models.ShiftBinWithDetails{}

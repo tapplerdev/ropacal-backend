@@ -224,7 +224,7 @@ func main() {
 			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub))
 			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub))
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
-			r.Post("/driver/shift/complete-bin", handlers.CompleteBin(db, wsHub))
+			r.Post("/driver/shift/complete-bin", handlers.CompleteShiftBin(db, wsHub))
 
 			// Shift history
 			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
@@ -246,7 +246,7 @@ func main() {
 			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub))
 
 			// Incident reporting (drivers can report both check-based and field observations)
-			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteBin)
+			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteShiftBin)
 			// r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
 		})
 

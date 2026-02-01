@@ -32,7 +32,7 @@ type RouteTask struct {
 
 	// Placement task fields
 	PotentialLocationID *string `json:"potential_location_id,omitempty" db:"potential_location_id"`
-	NewBinNumber        *string `json:"new_bin_number,omitempty" db:"new_bin_number"`
+	NewBinNumber        *int    `json:"new_bin_number,omitempty" db:"new_bin_number"`
 
 	// Move request task fields
 	MoveRequestID        *string  `json:"move_request_id,omitempty" db:"move_request_id"`
