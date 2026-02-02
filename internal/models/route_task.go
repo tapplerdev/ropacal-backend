@@ -55,9 +55,9 @@ type RouteTask struct {
 	UpdatedFillPercentage *int   `json:"updated_fill_percentage,omitempty" db:"updated_fill_percentage"`
 
 	// Metadata
-	TaskData  json.RawMessage `json:"task_data,omitempty" db:"task_data"`
-	CreatedAt int64           `json:"created_at" db:"created_at"`
-	UpdatedAt *int64          `json:"updated_at,omitempty" db:"updated_at"`
+	TaskData  *json.RawMessage `json:"task_data,omitempty" db:"task_data"`
+	CreatedAt int64            `json:"created_at" db:"created_at"`
+	UpdatedAt *int64           `json:"updated_at,omitempty" db:"updated_at"`
 }
 
 // CreateShiftWithTasksRequest represents the request to create a shift with tasks
