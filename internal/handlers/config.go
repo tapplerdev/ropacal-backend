@@ -8,6 +8,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/websocket"
 )
 
 // GetWarehouseLocation returns the current warehouse location from config
@@ -45,7 +46,7 @@ func GetWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // UpdateWarehouseLocation updates the warehouse location in config
-func UpdateWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
+func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var input models.WarehouseLocation
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -94,6 +95,18 @@ func UpdateWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ Warehouse location updated: %.6f, %.6f - %s",
 			input.Latitude, input.Longitude, input.Address)
+
+		// Broadcast warehouse location update to all managers/admins via WebSocket
+		log.Printf("📡 Broadcasting warehouse_location_updated to managers/admins")
+		hub.BroadcastToRole("admin", map[string]interface{}{
+			"type": "warehouse_location_updated",
+			"data": input,
+		})
+		hub.BroadcastToRole("manager", map[string]interface{}{
+			"type": "warehouse_location_updated",
+			"data": input,
+		})
+		log.Printf("✅ Warehouse update broadcast sent")
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{

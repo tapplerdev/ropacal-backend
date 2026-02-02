@@ -166,7 +166,7 @@ func main() {
 
 		// Config endpoints (warehouse location)
 		r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
-		r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db))
+		r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub))
 
 		// Bins endpoints
 		r.Get("/bins", handlers.GetBins(db))
