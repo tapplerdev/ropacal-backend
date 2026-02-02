@@ -298,14 +298,39 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 			DriverEmail string `db:"driver_email" json:"driver_email"`
 		}
 
-		var shifts []ShiftWithDriver
+		type ShiftResponse struct {
+			ShiftWithDriver
+			EstimatedCompletionTime *int64   `json:"estimated_completion_time,omitempty"` // Unix timestamp
+			TotalDistanceMiles      *float64 `json:"total_distance_miles,omitempty"`
+		}
+
+		var shifts []ShiftResponse
 		for rows.Next() {
 			var shift ShiftWithDriver
 			if err := rows.StructScan(&shift); err != nil {
 				log.Printf("❌ Error scanning shift: %v", err)
 				continue
 			}
-			shifts = append(shifts, shift)
+
+			// Create response with computed fields
+			shiftResp := ShiftResponse{
+				ShiftWithDriver: shift,
+			}
+
+			// Add computed fields if optimization metadata exists
+			if shift.OptimizationMetadata != nil {
+				// Convert distance from km to miles
+				distanceMiles := shift.OptimizationMetadata.TotalDistanceKm * 0.621371
+				shiftResp.TotalDistanceMiles = &distanceMiles
+
+				// Calculate estimated completion time (start_time + duration)
+				if shift.StartTime != nil {
+					estimatedCompletion := *shift.StartTime + int64(shift.OptimizationMetadata.TotalDurationSeconds)
+					shiftResp.EstimatedCompletionTime = &estimatedCompletion
+				}
+			}
+
+			shifts = append(shifts, shiftResp)
 		}
 
 		// Get total count for pagination
