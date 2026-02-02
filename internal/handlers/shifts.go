@@ -309,32 +309,15 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 
-	// Check if shift has any bins in shift_bins table (for backward compatibility)
-	// Shifts with only route_tasks (move requests, placements, etc.) won't have shift_bins entries
-	var hasShiftBins bool
-	err = db.Get(&hasShiftBins,
-		`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1)`,
-		shift.ID,
-	)
-	if err != nil {
-		log.Printf("❌ Error checking for shift_bins: %v", err)
-		hasShiftBins = false
-	}
+	// Smart Route Optimization Logic
+	// If lock_route_order is true, skip optimization (use manager's exact task order)
+	// If lock_route_order is false, run full route optimization with dynamic warehouse insertion
+	if shift.LockRouteOrder {
+		log.Printf("🔒 Route order is locked - skipping optimization and using manager's exact task sequence")
+	} else {
+		log.Printf("🚀 Route order unlocked - performing smart optimization with dynamic warehouse insertion")
 
-	if hasShiftBins {
-		// If shift needs optimization (sequence_order = 0), do it now using driver's current location
-		// Check if any bin has sequence_order = 0 (unoptimized)
-		var needsFullOptimization bool
-		err = db.Get(&needsFullOptimization,
-			`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1 AND sequence_order = 0)`,
-			shift.ID,
-		)
-		if err != nil {
-			log.Printf("❌ Error checking if shift needs optimization: %v", err)
-			needsFullOptimization = false // Default to false on error
-		}
-
-		// Get driver's CURRENT location (needed for both optimization types)
+		// Get driver's CURRENT location
 		var driverLocation struct {
 			Latitude  float64 `db:"latitude"`
 			Longitude float64 `db:"longitude"`
@@ -353,6 +336,79 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+
+		// Validate warehouse coordinates
+		if shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil {
+			log.Printf("❌ Warehouse coordinates not set for shift")
+			utils.RespondError(w, http.StatusInternalServerError, "Warehouse location not configured")
+			return
+		}
+
+		// Run segmented route optimization (optimizes between warehouse stops)
+		err = optimizeRouteInSegments(
+			db,
+			shift.ID,
+			driverLocation.Latitude,
+			driverLocation.Longitude,
+			*shift.WarehouseLatitude,
+			*shift.WarehouseLongitude,
+			HereAPIKey,
+		)
+
+		if err != nil {
+			log.Printf("❌ Segmented route optimization failed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Route optimization failed")
+			return
+		}
+
+		log.Printf("✅ Segmented route optimization complete")
+	}
+
+	// Old shift_bins optimization code (DEPRECATED - remove after migration)
+	// Get driver's CURRENT location (needed for both optimization types)
+	var driverLocation struct {
+		Latitude  float64 `db:"latitude"`
+		Longitude float64 `db:"longitude"`
+	}
+
+	locationErr := db.Get(&driverLocation,
+		`SELECT latitude, longitude FROM driver_current_location
+			 WHERE driver_id = $1 AND is_connected = true`,
+		userClaims.UserID,
+	)
+
+	if locationErr != nil {
+		log.Printf("❌ Driver location not available: %v", locationErr)
+		// Continue anyway for backward compatibility with old shifts
+		log.Printf("⚠️  Continuing without driver location for backward compatibility")
+	} else {
+		log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+	}
+
+	// Check if shift has any bins in shift_bins table (for backward compatibility)
+	// Shifts with only route_tasks (move requests, placements, etc.) won't have shift_bins entries
+	var hasShiftBins bool
+	err = db.Get(&hasShiftBins,
+		`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1)`,
+		shift.ID,
+	)
+	if err != nil {
+		log.Printf("❌ Error checking for shift_bins: %v", err)
+		hasShiftBins = false
+	}
+
+	if hasShiftBins && locationErr == nil {
+		// If shift needs optimization (sequence_order = 0), do it now using driver's current location
+		// Check if any bin has sequence_order = 0 (unoptimized)
+		var needsFullOptimization bool
+		err = db.Get(&needsFullOptimization,
+			`SELECT EXISTS(SELECT 1 FROM shift_bins WHERE shift_id = $1 AND sequence_order = 0)`,
+			shift.ID,
+		)
+		if err != nil {
+			log.Printf("❌ Error checking if shift needs optimization: %v", err)
+			needsFullOptimization = false // Default to false on error
+		}
 
 		if needsFullOptimization {
 			// Case 1: Custom bin selection - Full HERE Maps optimization from driver's location
@@ -412,43 +468,9 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 			if err != nil {
 				log.Printf("❌ HERE Maps optimization failed: %v", err)
-				log.Printf("⚠️  Falling back to simple nearest-neighbor optimization")
-
-				// Fallback to simple TSP optimization
-				binsToOptimize := make([]services.BinWithPriority, len(binDetails))
-				for i, bin := range binDetails {
-					binsToOptimize[i] = services.BinWithPriority{
-						ID:             bin.ID,
-						Latitude:       bin.Latitude,
-						Longitude:      bin.Longitude,
-						FillPercentage: bin.FillPercentage,
-						CurrentStreet:  bin.CurrentStreet,
-					}
-				}
-
-				optimizer := services.NewRouteOptimizer()
-				startLocation := services.OptimizerLocation{
-					Latitude:  driverLocation.Latitude,
-					Longitude: driverLocation.Longitude,
-				}
-				optimizedBins := optimizer.OptimizeRoute(binsToOptimize, startLocation)
-
-				// Update shift_bins with optimized sequence_order
-				for i, bin := range optimizedBins {
-					updateQuery := `UPDATE shift_bins
-									SET sequence_order = $1
-									WHERE shift_id = $2 AND bin_id = $3`
-
-					_, err = db.Exec(updateQuery, i+1, shift.ID, bin.ID)
-					if err != nil {
-						log.Printf("❌ Error updating bin sequence: %v", err)
-						utils.RespondError(w, http.StatusInternalServerError, "Failed to optimize route")
-						return
-					}
-				}
-
-				log.Printf("✅ Fallback optimization complete with %d bins", len(optimizedBins))
-			} else {
+				utils.RespondError(w, http.StatusInternalServerError, "Route optimization failed")
+				return
+			}
 				log.Printf("🎯 HERE Maps optimization successful! Order: %v", optimizationResult.OptimizedOrder)
 
 				// Update shift_bins with HERE Maps optimized sequence_order
@@ -3165,4 +3187,219 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			},
 		})
 	}
+}
+
+// ============================================================================
+// SEGMENTED ROUTE OPTIMIZATION
+// Manager places warehouse stops, we optimize tasks within each segment
+// ============================================================================
+
+// optimizeRouteInSegments performs route optimization between warehouse stops
+// Warehouse stops act as segment boundaries and stay in place
+func optimizeRouteInSegments(
+	db *sqlx.DB,
+	shiftID string,
+	driverLat, driverLon float64,
+	warehouseLat, warehouseLon float64,
+	hereAPIKey string,
+) error {
+	log.Printf("🚀 [SEGMENT OPTIMIZER] Starting segmented route optimization")
+
+	// Step 1: Fetch ALL tasks in order
+	var allTasks []models.RouteTask
+	query := `SELECT * FROM route_tasks WHERE shift_id = $1 ORDER BY sequence_order ASC`
+	err := db.Select(&allTasks, query, shiftID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch tasks: %w", err)
+	}
+
+	log.Printf("📋 [SEGMENT OPTIMIZER] Fetched %d tasks", len(allTasks))
+
+	if len(allTasks) == 0 {
+		log.Printf("✅ [SEGMENT OPTIMIZER] No tasks to optimize")
+		return nil
+	}
+
+	// Step 2: Split tasks into segments by warehouse stops
+	segments := [][]models.RouteTask{}
+	currentSegment := []models.RouteTask{}
+
+	for _, task := range allTasks {
+		if task.TaskType == "warehouse_stop" {
+			// Warehouse stop ends current segment
+			if len(currentSegment) > 0 {
+				segments = append(segments, currentSegment)
+				currentSegment = []models.RouteTask{}
+			}
+			// Warehouse stop is its own "segment" (single task)
+			segments = append(segments, []models.RouteTask{task})
+		} else {
+			currentSegment = append(currentSegment, task)
+		}
+	}
+
+	// Add final segment if exists
+	if len(currentSegment) > 0 {
+		segments = append(segments, currentSegment)
+	}
+
+	log.Printf("📦 [SEGMENT OPTIMIZER] Split into %d segments", len(segments))
+
+	// Step 3: Optimize each non-warehouse segment with HERE Maps
+	hereService := services.NewHEREWaypointsService(hereAPIKey)
+	optimizedTasks := []models.RouteTask{}
+	startLat, startLon := driverLat, driverLon // Track position for next segment
+
+	for segmentIdx, segment := range segments {
+		// Warehouse stops don't get optimized, just keep them
+		if len(segment) == 1 && segment[0].TaskType == "warehouse_stop" {
+			log.Printf("   Segment #%d: Warehouse stop (keeping as-is)", segmentIdx+1)
+			optimizedTasks = append(optimizedTasks, segment[0])
+			startLat, startLon = segment[0].Latitude, segment[0].Longitude
+			continue
+		}
+
+		// Single task segment - no optimization needed
+		if len(segment) == 1 {
+			log.Printf("   Segment #%d: Single task (no optimization needed)", segmentIdx+1)
+			optimizedTasks = append(optimizedTasks, segment[0])
+			startLat, startLon = segment[0].Latitude, segment[0].Longitude
+			continue
+		}
+
+		// Multiple tasks - optimize with HERE
+		log.Printf("   Segment #%d: Optimizing %d tasks...", segmentIdx+1, len(segment))
+		log.Printf("   📍 Segment start: (%.6f, %.6f)", startLat, startLon)
+
+		// Log original task order
+		log.Printf("   📋 Original task order:")
+		for i, task := range segment {
+			log.Printf("      %d. %s (%.6f, %.6f) - %s",
+				i+1, task.TaskType, task.Latitude, task.Longitude,
+				truncateAddress(task.Address))
+		}
+
+		waypoints := make([]services.HEREWaypoint, len(segment))
+		for i, task := range segment {
+			waypoints[i] = services.HEREWaypoint{
+				ID:        task.ID,
+				Name:      task.Address,
+				Latitude:  task.Latitude,
+				Longitude: task.Longitude,
+			}
+		}
+
+		// Determine segment end point (next warehouse or final warehouse)
+		endLat, endLon := warehouseLat, warehouseLon
+		if segmentIdx < len(segments)-1 && segments[segmentIdx+1][0].TaskType == "warehouse_stop" {
+			endLat = segments[segmentIdx+1][0].Latitude
+			endLon = segments[segmentIdx+1][0].Longitude
+		}
+		log.Printf("   🏁 Segment end: (%.6f, %.6f)", endLat, endLon)
+
+		departureTime := time.Now().Format(time.RFC3339)
+		log.Printf("   🚀 Calling HERE Maps API with %d waypoints...", len(waypoints))
+
+		result, err := hereService.OptimizeWaypoints(
+			startLat, startLon,
+			endLat, endLon,
+			waypoints,
+			departureTime,
+		)
+
+		if err != nil {
+			log.Printf("   ❌ HERE optimization failed for segment #%d: %v", segmentIdx+1, err)
+			log.Printf("   Using original order for this segment")
+			optimizedTasks = append(optimizedTasks, segment...)
+			if len(segment) > 0 {
+				lastTask := segment[len(segment)-1]
+				startLat, startLon = lastTask.Latitude, lastTask.Longitude
+			}
+			continue
+		}
+
+		log.Printf("   ✅ HERE Maps response: %.2f km, %d sec, %d waypoints",
+			result.TotalDistanceKm, result.TotalDurationSeconds, len(result.OptimizedOrder))
+
+		// Log the optimized order from HERE Maps
+		log.Printf("   🔄 Optimized task order from HERE Maps:")
+		taskMap := make(map[string]models.RouteTask)
+		for _, task := range segment {
+			taskMap[task.ID] = task
+		}
+
+		for i, taskID := range result.OptimizedOrder {
+			task := taskMap[taskID]
+			log.Printf("      %d. %s (%.6f, %.6f) - %s",
+				i+1, task.TaskType, task.Latitude, task.Longitude,
+				truncateAddress(task.Address))
+		}
+
+		// Check if order actually changed
+		orderChanged := false
+		for i, taskID := range result.OptimizedOrder {
+			if i < len(segment) && taskID != segment[i].ID {
+				orderChanged = true
+				break
+			}
+		}
+		if orderChanged {
+			log.Printf("   ⚡ Order CHANGED by HERE Maps optimization")
+		} else {
+			log.Printf("   ⏸️  Order UNCHANGED (already optimal or HERE kept original order)")
+		}
+
+		for _, taskID := range result.OptimizedOrder {
+			optimizedTasks = append(optimizedTasks, taskMap[taskID])
+		}
+
+		// Update start position for next segment
+		if len(result.OptimizedOrder) > 0 {
+			lastTask := taskMap[result.OptimizedOrder[len(result.OptimizedOrder)-1]]
+			startLat, startLon = lastTask.Latitude, lastTask.Longitude
+		}
+	}
+
+	// Step 4: Update sequence_order for all tasks
+	log.Printf("\n📝 [SEGMENT OPTIMIZER] Updating task sequence...")
+	now := time.Now().Unix()
+	updateQuery := `UPDATE route_tasks SET sequence_order = $1, updated_at = $2 WHERE id = $3`
+
+	for i, task := range optimizedTasks {
+		_, err := db.Exec(updateQuery, i+1, now, task.ID)
+		if err != nil {
+			log.Printf("❌ Failed to update task %s: %v", task.ID, err)
+			return fmt.Errorf("failed to update task sequence: %w", err)
+		}
+	}
+
+	log.Printf("✅ [SEGMENT OPTIMIZER] Route optimization complete - %d total tasks", len(optimizedTasks))
+	return nil
+}
+
+// Helper functions for route optimization
+func stringPtr(s string) *string { return &s }
+func intPtr(i int) *int          { return &i }
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// truncateAddress truncates an address string to max 50 characters for logging
+func truncateAddress(addr *string) string {
+	if addr == nil {
+		return "No address"
+	}
+	if len(*addr) <= 50 {
+		return *addr
+	}
+	return (*addr)[:47] + "..."
 }
