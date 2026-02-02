@@ -240,7 +240,7 @@ func main() {
 			// Route Task endpoints (task-based shift system)
 			r.Get("/shifts/{shiftId}/tasks", handlers.GetShiftTasks(db))
 			r.Get("/shifts/{shiftId}/tasks/detailed", handlers.GetShiftTasksDetailed(db))
-			r.Put("/shifts/tasks/{taskId}/complete", handlers.CompleteTask(db, wsHub))
+			r.Put("/shifts/tasks/{taskId}/complete", handlers.CompleteRouteTask(db, wsHub))
 
 			// Potential Locations (drivers can create requests)
 			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub))

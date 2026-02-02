@@ -205,8 +205,8 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	}
 }
 
-// CompleteTask marks a task as completed
-func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+// CompleteRouteTask marks a task as completed (RESTful endpoint)
+func CompleteRouteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: PUT /api/shifts/tasks/:taskId/complete")
 
