@@ -1273,10 +1273,11 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 						) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 					`
 
+					actualBinNumber := *newBinNumber
 					_, err = db.Exec(
 						binInsertQuery,
 						newBinID,
-						*newBinNumber,
+						actualBinNumber,
 						potentialLocation.Street,
 						potentialLocation.City,
 						potentialLocation.Zip,
@@ -1291,9 +1292,44 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 					)
 
 					if err != nil {
+						// Check if error is duplicate bin_number
+						if strings.Contains(err.Error(), "bins_bin_number_key") {
+							log.Printf("[DIAGNOSTIC] ⚠️  Bin #%d already exists, generating next available number...", actualBinNumber)
+
+							// Get next available bin number
+							var maxBinNumber int
+							err = db.QueryRow("SELECT COALESCE(MAX(bin_number), 0) FROM bins").Scan(&maxBinNumber)
+							if err != nil {
+								log.Printf("[DIAGNOSTIC] ❌ Error querying max bin number: %v", err)
+							} else {
+								actualBinNumber = maxBinNumber + 1
+								log.Printf("[DIAGNOSTIC] 🔢 Using next available bin number: %d", actualBinNumber)
+
+								// Retry insert with new bin number
+								_, err = db.Exec(
+									binInsertQuery,
+									newBinID,
+									actualBinNumber,
+									potentialLocation.Street,
+									potentialLocation.City,
+									potentialLocation.Zip,
+									potentialLocation.Latitude,
+									potentialLocation.Longitude,
+									"active",
+									0,
+									now,
+									userClaims.UserID,
+									now,
+									now,
+								)
+							}
+						}
+					}
+
+					if err != nil {
 						log.Printf("[DIAGNOSTIC] ❌ Error creating bin: %v", err)
 					} else {
-						log.Printf("[DIAGNOSTIC] ✅ Created new Bin #%d (ID: %s)", *newBinNumber, newBinID)
+						log.Printf("[DIAGNOSTIC] ✅ Created new Bin #%d (ID: %s)", actualBinNumber, newBinID)
 
 						// Update potential_location record (mark as converted via shift)
 						_, err = db.Exec(`
