@@ -34,9 +34,12 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 		query := fmt.Sprintf(`
 			SELECT
 				pl.*,
-				b.bin_number
+				b.bin_number,
+				u.name AS driver_name
 			FROM potential_locations pl
 			LEFT JOIN bins b ON b.id = pl.converted_to_bin_id
+			LEFT JOIN shifts s ON s.id = pl.converted_via_shift_id
+			LEFT JOIN users u ON u.id = s.driver_id
 			%s
 			ORDER BY pl.created_at DESC
 		`, whereClause)
@@ -53,6 +56,7 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 		for rows.Next() {
 			var loc models.PotentialLocation
 			var binNumber *int
+			var driverName *string
 
 			err := rows.Scan(
 				&loc.ID,
@@ -72,6 +76,7 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 				&loc.ConvertedByUserID,
 				&loc.ConvertedViaShiftID,
 				&binNumber,
+				&driverName,
 			)
 			if err != nil {
 				log.Printf("❌ [GET-POTENTIAL-LOCATIONS] Row scan failed: %v", err)
@@ -80,6 +85,7 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 
 			resp := loc.ToPotentialLocationResponse()
 			resp.BinNumber = binNumber
+			resp.ConvertedByDriverName = driverName
 			locations = append(locations, resp)
 		}
 
