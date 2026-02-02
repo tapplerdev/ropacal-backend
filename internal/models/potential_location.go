@@ -24,23 +24,24 @@ type PotentialLocation struct {
 
 // PotentialLocationResponse is what we send to the client with ISO timestamps
 type PotentialLocationResponse struct {
-	ID                   string   `json:"id"`
-	Address              string   `json:"address"`
-	Street               string   `json:"street"`
-	City                 string   `json:"city"`
-	Zip                  string   `json:"zip"`
-	Latitude             *float64 `json:"latitude,omitempty"`
-	Longitude            *float64 `json:"longitude,omitempty"`
-	RequestedByUserID    string   `json:"requested_by_user_id"`
-	RequestedByName      string   `json:"requested_by_name"`
-	Notes                *string  `json:"notes,omitempty"`
-	CreatedAtIso         string   `json:"created_at_iso"`
-	ConvertedToBinID     *string  `json:"converted_to_bin_id,omitempty"`
-	ConvertedAtIso       *string  `json:"converted_at_iso,omitempty"`
-	ConvertedByUserID    *string  `json:"converted_by_user_id,omitempty"`
-	ConvertedViaShiftID  *string  `json:"converted_via_shift_id,omitempty"`
-	ConvertedByDriverName *string `json:"converted_by_driver_name,omitempty"` // Driver who placed the bin (from shifts JOIN)
-	BinNumber            *int     `json:"bin_number,omitempty"`                // From JOIN with bins table
+	ID                    string   `json:"id"`
+	Address               string   `json:"address"`
+	Street                string   `json:"street"`
+	City                  string   `json:"city"`
+	Zip                   string   `json:"zip"`
+	Latitude              *float64 `json:"latitude,omitempty"`
+	Longitude             *float64 `json:"longitude,omitempty"`
+	RequestedByUserID     string   `json:"requested_by_user_id"`
+	RequestedByName       string   `json:"requested_by_name"`
+	Notes                 *string  `json:"notes,omitempty"`
+	CreatedAtIso          string   `json:"created_at_iso"`
+	ConvertedToBinID      *string  `json:"converted_to_bin_id,omitempty"`
+	ConvertedAtIso        *string  `json:"converted_at_iso,omitempty"`
+	ConvertedByUserID     *string  `json:"converted_by_user_id,omitempty"`
+	ConvertedViaShiftID   *string  `json:"converted_via_shift_id,omitempty"`
+	ConvertedByDriverName  *string `json:"converted_by_driver_name,omitempty"`  // Driver who placed the bin (from shifts JOIN)
+	ConvertedByManagerName *string `json:"converted_by_manager_name,omitempty"` // Manager who manually converted (from users JOIN)
+	BinNumber             *int     `json:"bin_number,omitempty"`                 // From JOIN with bins table
 }
 
 // CreatePotentialLocationRequest is the request body for POST /api/potential-locations
