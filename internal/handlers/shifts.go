@@ -1856,7 +1856,7 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 // getShiftTasksWithDetails fetches shift tasks with full details
 // ONLY uses route_tasks table (new unified task system)
 func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
-	// ONLY query route_tasks table (new unified task system)
+	// Query route_tasks table with enhanced fields for all task types
 	query := `
 		SELECT
 			rt.id as id,
@@ -1878,20 +1878,24 @@ func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWit
 			rt.move_request_id,
 			rt.address as original_address,
 			rt.destination_address as new_address,
-			rt.move_type
+			rt.move_type,
+			rt.potential_location_id,
+			rt.new_bin_number,
+			rt.warehouse_action,
+			rt.bins_to_load
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
 		WHERE rt.shift_id = $1
 		ORDER BY rt.sequence_order ASC`
 
-	var bins []models.ShiftBinWithDetails
-	err := db.Select(&bins, query, shiftID)
+	var tasks []models.ShiftBinWithDetails
+	err := db.Select(&tasks, query, shiftID)
 	if err != nil {
 		return nil, err
 	}
 
-	log.Printf("📦 Loaded %d tasks from route_tasks table", len(bins))
-	return bins, nil
+	log.Printf("📦 Loaded %d tasks from route_tasks table (all types)", len(tasks))
+	return tasks, nil
 }
 
 // AssignRoute assigns a route to a driver (manager only)

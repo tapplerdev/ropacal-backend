@@ -36,4 +36,12 @@ type ShiftBinWithDetails struct {
 	OriginalAddress       *string  `db:"original_address" json:"original_address"`
 	NewAddress            *string  `db:"new_address" json:"new_address"`
 	MoveType              *string  `db:"move_type" json:"move_type"`
+
+	// Placement task fields
+	PotentialLocationID *string `db:"potential_location_id" json:"potential_location_id"`
+	NewBinNumber        *int    `db:"new_bin_number" json:"new_bin_number"`
+
+	// Warehouse stop fields
+	WarehouseAction *string `db:"warehouse_action" json:"warehouse_action"`
+	BinsToLoad      *int    `db:"bins_to_load" json:"bins_to_load"`
 }
