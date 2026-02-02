@@ -164,10 +164,13 @@ func CreateShiftWithTasks(
 			}
 		}
 
-		// Convert task_data to JSON if present
+		// Convert task_data to JSON if present, default to empty object
 		var taskDataJSON interface{}
 		if td, ok := taskData["task_data"]; ok && td != nil {
 			taskDataJSON, _ = json.Marshal(td)
+		} else {
+			// Default to empty JSON object instead of NULL to prevent scan errors
+			taskDataJSON = []byte("{}")
 		}
 
 		// Helper function to get values with nil safety
