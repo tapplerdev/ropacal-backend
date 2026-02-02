@@ -449,6 +449,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 					Name:      bin.CurrentStreet,
 					Latitude:  bin.Latitude,
 					Longitude: bin.Longitude,
+					TaskType:  "collection", // All bins in shift_bins are collections
 				}
 			}
 
@@ -3289,6 +3290,7 @@ func optimizeRouteInSegments(
 				Name:      name,
 				Latitude:  task.Latitude,
 				Longitude: task.Longitude,
+				TaskType:  string(task.TaskType), // Pass task type for service time calculation
 			}
 		}
 

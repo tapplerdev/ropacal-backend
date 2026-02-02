@@ -16,6 +16,7 @@ type HEREWaypoint struct {
 	Name      string
 	Latitude  float64
 	Longitude float64
+	TaskType  string // e.g., "collection", "pickup", "dropoff", "placement", "warehouse_stop"
 }
 
 // HEREOptimizationResult contains the optimization results from HERE Maps
@@ -67,7 +68,18 @@ func (s *HEREWaypointsService) OptimizeWaypoints(
 	// Add all waypoints as destinations
 	for i, wp := range waypoints {
 		destinationID := fmt.Sprintf("dest-%d-%s", i, wp.ID[:8]) // Use first 8 chars of ID
-		params.Add(fmt.Sprintf("destination%d", i+1), fmt.Sprintf("%s;%.6f,%.6f", destinationID, wp.Latitude, wp.Longitude))
+
+		// Build destination string with coordinates
+		destStr := fmt.Sprintf("%s;%.6f,%.6f", destinationID, wp.Latitude, wp.Longitude)
+
+		// Add service time for collections (15 minutes = 900 seconds)
+		// This tells HERE Maps the driver will spend time at this stop
+		if wp.TaskType == "collection" {
+			destStr += ";st:900"
+			log.Printf("      Added 15min service time for collection at: %s", wp.Name)
+		}
+
+		params.Add(fmt.Sprintf("destination%d", i+1), destStr)
 	}
 
 	// Add end point (warehouse)
