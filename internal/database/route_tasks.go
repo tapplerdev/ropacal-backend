@@ -58,6 +58,7 @@ func CreateShiftWithTasks(
 	warehouseLat, warehouseLon float64,
 	warehouseAddr string,
 	tasks []map[string]interface{},
+	lockRouteOrder bool,
 ) (string, int, error) {
 	tx, err := db.Beginx()
 	if err != nil {
@@ -73,8 +74,8 @@ func CreateShiftWithTasks(
 		INSERT INTO shifts (
 			id, driver_id, status, total_bins, completed_bins,
 			truck_bin_capacity, warehouse_latitude, warehouse_longitude, warehouse_address,
-			created_at, updated_at
-		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9)
+			lock_route_order, created_at, updated_at
+		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10)
 	`
 
 	totalBins := len(tasks)
@@ -82,7 +83,7 @@ func CreateShiftWithTasks(
 		shiftQuery,
 		shiftID, driverID, totalBins, truckBinCapacity,
 		warehouseLat, warehouseLon, warehouseAddr,
-		now, now,
+		lockRouteOrder, now, now,
 	)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create shift: %w", err)

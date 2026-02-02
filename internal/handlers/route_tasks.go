@@ -120,6 +120,7 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			req.WarehouseLongitude,
 			req.WarehouseAddress,
 			req.Tasks,
+			req.LockRouteOrder,
 		)
 		if err != nil {
 			log.Printf("❌ Error: %v", err)

@@ -513,7 +513,6 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				}
 
 				log.Printf("✅ HERE Maps optimization complete with %d bins", len(optimizationResult.OptimizedOrder))
-			}
 		} else {
 			// Case 2: Pre-defined route - Rotate sequence to start from closest bin
 			log.Printf("🔄 Pre-defined route - rotating sequence to start from closest bin")
@@ -604,122 +603,122 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	} else {
 		log.Printf("ℹ️  Shift has no collection bins, skipping optimization")
 	}
-		// Update shift to active
-		now := time.Now().Unix()
-		updateQuery := `UPDATE shifts
-						SET status = 'active',
-							start_time = $1,
-							updated_at = $2
-						WHERE id = $3`
+	// Update shift to active
+	now := time.Now().Unix()
+	updateQuery := `UPDATE shifts
+					SET status = 'active',
+						start_time = $1,
+						updated_at = $2
+					WHERE id = $3`
 
-		_, err = db.Exec(updateQuery, now, now, shift.ID)
-		if err != nil {
-			log.Printf("❌ Error starting shift: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to start shift")
-			return
+	_, err = db.Exec(updateQuery, now, now, shift.ID)
+	if err != nil {
+		log.Printf("❌ Error starting shift: %v", err)
+		utils.RespondError(w, http.StatusInternalServerError, "Failed to start shift")
+		return
+	}
+
+	// Update all assigned move requests for this shift to in_progress
+	updateMovesQuery := `UPDATE bin_move_requests
+						 SET status = 'in_progress', updated_at = $1
+						 WHERE assigned_shift_id = $2
+						 AND status = 'assigned'`
+	result, err := db.Exec(updateMovesQuery, now, shift.ID)
+	if err != nil {
+		log.Printf("⚠️ Error updating move requests to in_progress: %v", err)
+		// Don't fail the request - continue
+	} else {
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected > 0 {
+			log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
+
+			// Broadcast move request status update to dashboard
+			hub.BroadcastToRole("admin", map[string]interface{}{
+				"type": "move_request_status_updated",
+				"data": map[string]interface{}{
+					"shift_id":    shift.ID,
+					"new_status":  "in_progress",
+					"count":       rowsAffected,
+					"updated_at":  now,
+				},
+			})
+			hub.BroadcastToRole("manager", map[string]interface{}{
+				"type": "move_request_status_updated",
+				"data": map[string]interface{}{
+					"shift_id":    shift.ID,
+					"new_status":  "in_progress",
+					"count":       rowsAffected,
+					"updated_at":  now,
+				},
+			})
+			log.Printf("📡 Broadcast move_request_status_updated to managers: %d move requests → in_progress", rowsAffected)
 		}
+	}
 
-		// Update all assigned move requests for this shift to in_progress
-		updateMovesQuery := `UPDATE bin_move_requests
-							 SET status = 'in_progress', updated_at = $1
-							 WHERE assigned_shift_id = $2
-							 AND status = 'assigned'`
-		result, err := db.Exec(updateMovesQuery, now, shift.ID)
-		if err != nil {
-			log.Printf("⚠️ Error updating move requests to in_progress: %v", err)
-			// Don't fail the request - continue
-		} else {
-			rowsAffected, _ := result.RowsAffected()
-			if rowsAffected > 0 {
-				log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
+	// Get updated shift
+	db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
-				// Broadcast move request status update to dashboard
-				hub.BroadcastToRole("admin", map[string]interface{}{
-					"type": "move_request_status_updated",
-					"data": map[string]interface{}{
-						"shift_id":    shift.ID,
-						"new_status":  "in_progress",
-						"count":       rowsAffected,
-						"updated_at":  now,
-					},
-				})
-				hub.BroadcastToRole("manager", map[string]interface{}{
-					"type": "move_request_status_updated",
-					"data": map[string]interface{}{
-						"shift_id":    shift.ID,
-						"new_status":  "in_progress",
-						"count":       rowsAffected,
-						"updated_at":  now,
-					},
-				})
-				log.Printf("📡 Broadcast move_request_status_updated to managers: %d move requests → in_progress", rowsAffected)
-			}
-		}
+	// Get route bins with details for WebSocket broadcast
+	bins, err := getShiftTasksWithDetails(db, shift.ID)
+	if err != nil {
+		log.Printf("❌ Error fetching route bins for WebSocket: %v", err)
+		bins = []models.ShiftBinWithDetails{} // Empty array on error
+	}
 
-		// Get updated shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
+	// Broadcast WebSocket update to driver (include bins!)
+	hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
+		"type": "shift_update",
+		"data": map[string]interface{}{
+			"id":                  shift.ID,
+			"driver_id":           shift.DriverID,
+			"route_id":            shift.RouteID,
+			"status":              shift.Status,
+			"start_time":          shift.StartTime,
+			"end_time":            shift.EndTime,
+			"total_pause_seconds": shift.TotalPauseSeconds,
+			"pause_start_time":    shift.PauseStartTime,
+			"total_bins":          shift.TotalBins,
+			"completed_bins":      shift.CompletedBins,
+			"bins":                bins, // ← Include route bins!
+			"created_at":          shift.CreatedAt,
+			"updated_at":          shift.UpdatedAt,
+		},
+	})
 
-		// Get route bins with details for WebSocket broadcast
-		bins, err := getShiftTasksWithDetails(db, shift.ID)
-		if err != nil {
-			log.Printf("❌ Error fetching route bins for WebSocket: %v", err)
-			bins = []models.ShiftBinWithDetails{} // Empty array on error
-		}
+	// Broadcast shift state change to all managers
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📡 BROADCASTING driver_shift_change TO MANAGERS")
+	log.Printf("   Driver ID: %s", shift.DriverID)
+	log.Printf("   Driver Email: %s", userClaims.Email)
+	log.Printf("   Status: %s", shift.Status)
+	log.Printf("   Shift ID: %s", shift.ID)
 
-		// Broadcast WebSocket update to driver (include bins!)
-		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
-			"type": "shift_update",
-			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"pause_start_time":    shift.PauseStartTime,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"bins":                bins, // ← Include route bins!
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
-			},
-		})
+	broadcastData := map[string]interface{}{
+		"type": "driver_shift_change",
+		"data": map[string]interface{}{
+			"driver_id": shift.DriverID,
+			"status":    shift.Status,
+			"shift_id":  shift.ID,
+		},
+	}
+	log.Printf("   Broadcast payload: %+v", broadcastData)
 
-		// Broadcast shift state change to all managers
-		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Printf("📡 BROADCASTING driver_shift_change TO MANAGERS")
-		log.Printf("   Driver ID: %s", shift.DriverID)
-		log.Printf("   Driver Email: %s", userClaims.Email)
-		log.Printf("   Status: %s", shift.Status)
-		log.Printf("   Shift ID: %s", shift.ID)
+	hub.BroadcastToRole("admin", broadcastData)
+	hub.BroadcastToRole("manager", broadcastData)
+	log.Printf("   ✅ BroadcastToRole('admin' + 'manager') called")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-		broadcastData := map[string]interface{}{
-			"type": "driver_shift_change",
-			"data": map[string]interface{}{
-				"driver_id": shift.DriverID,
-				"status":    shift.Status,
-				"shift_id":  shift.ID,
-			},
-		}
-		log.Printf("   Broadcast payload: %+v", broadcastData)
+	log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
+	log.Printf("📤 RESPONSE: 200 OK")
+	log.Printf("   Shift ID: %s", shift.ID)
+	log.Printf("   Status: %s", shift.Status)
+	log.Printf("   Start Time: %v", shift.StartTime)
+	log.Printf("   Route: %v", shift.RouteID)
 
-		hub.BroadcastToRole("admin", broadcastData)
-		hub.BroadcastToRole("manager", broadcastData)
-		log.Printf("   ✅ BroadcastToRole('admin' + 'manager') called")
-		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-		log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
-		log.Printf("📤 RESPONSE: 200 OK")
-		log.Printf("   Shift ID: %s", shift.ID)
-		log.Printf("   Status: %s", shift.Status)
-		log.Printf("   Start Time: %v", shift.StartTime)
-		log.Printf("   Route: %v", shift.RouteID)
-
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"data":    shift,
-		})
+	utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    shift,
+	})
 	}
 }
 
@@ -3281,9 +3280,13 @@ func optimizeRouteInSegments(
 
 		waypoints := make([]services.HEREWaypoint, len(segment))
 		for i, task := range segment {
+			name := ""
+			if task.Address != nil {
+				name = *task.Address
+			}
 			waypoints[i] = services.HEREWaypoint{
 				ID:        task.ID,
-				Name:      task.Address,
+				Name:      name,
 				Latitude:  task.Latitude,
 				Longitude: task.Longitude,
 			}

@@ -67,7 +67,8 @@ type CreateShiftWithTasksRequest struct {
 	WarehouseLatitude  float64                  `json:"warehouse_latitude"`
 	WarehouseLongitude float64                  `json:"warehouse_longitude"`
 	WarehouseAddress   string                   `json:"warehouse_address"`
-	Tasks              []map[string]interface{} `json:"tasks"` // Raw task data
+	LockRouteOrder     bool                     `json:"lock_route_order"` // If true, skip optimization on shift start
+	Tasks              []map[string]interface{} `json:"tasks"`            // Raw task data
 }
 
 // CompleteTaskRequest represents the request to complete a task
