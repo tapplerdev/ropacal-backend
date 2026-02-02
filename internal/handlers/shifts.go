@@ -1040,10 +1040,10 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 }
 
 // CompleteShiftBin marks a task as completed within an active shift (collection, pickup, dropoff, warehouse, placement)
-func CompleteShiftBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Printf("[DIAGNOSTIC] 📥 REQUEST: POST /api/driver/shift/complete-bin")
+		log.Printf("[DIAGNOSTIC] 📥 REQUEST: POST /api/driver/shift/complete-task")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -1055,8 +1055,8 @@ func CompleteShiftBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		// Parse request body
 		var req struct {
-			ShiftBinID            int     `json:"shift_bin_id"`                      // ID of shift_bins record (identifies specific waypoint)
-			BinID                 string  `json:"bin_id"`                            // DEPRECATED: Use shift_bin_id instead
+			TaskID                string     `json:"task_id"`                      // ID of shift_bins record (identifies specific waypoint)
+			BinID                 string  `json:"bin_id"`                            // DEPRECATED: Use task_id instead
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
 			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
@@ -1073,7 +1073,7 @@ func CompleteShiftBin(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[DIAGNOSTIC]    Shift Bin ID: %d (waypoint-specific ID)", req.ShiftBinID)
+		log.Printf("[DIAGNOSTIC]    Task ID: %s (route task UUID)", req.TaskID)
 		log.Printf("[DIAGNOSTIC]    Bin ID: %s (deprecated)", req.BinID)
 		log.Printf("[DIAGNOSTIC] 🔍 FILL PERCENTAGE DEBUG:")
 		if req.UpdatedFillPercentage != nil {
@@ -2635,7 +2635,7 @@ func executeMerge(db *sqlx.DB, primaryZone, secondaryZone models.NoGoZone, now i
 
 // handleMoveRequestCompletion handles move request completion logic
 func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest models.BinMoveRequest, req struct {
-	ShiftBinID            int     `json:"shift_bin_id"`
+	TaskID                string     `json:"task_id"`
 	BinID                 string  `json:"bin_id"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
 	PhotoUrl              *string `json:"photo_url,omitempty"`

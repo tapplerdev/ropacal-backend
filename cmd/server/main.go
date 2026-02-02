@@ -224,7 +224,7 @@ func main() {
 			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub))
 			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub))
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
-			r.Post("/driver/shift/complete-bin", handlers.CompleteShiftBin(db, wsHub))
+			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub))
 
 			// Shift history
 			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
