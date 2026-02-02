@@ -143,14 +143,33 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			log.Printf("📝 Found %d move request(s) to update", len(moveRequestUpdates))
 			now := time.Now().Unix()
 
+			// Get manager info for history logging
+			managerID := userClaims.UserID
+			var managerName string
+			err := db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID)
+			if err != nil {
+				log.Printf("⚠️  Warning: Failed to fetch manager name: %v", err)
+				managerName = "Unknown Manager"
+			}
+
+			// Get driver name for history logging
+			var driverName string
+			err = db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, req.DriverID)
+			if err != nil {
+				log.Printf("⚠️  Warning: Failed to fetch driver name: %v", err)
+				driverName = "Unknown Driver"
+			}
+
 			for moveReqID := range moveRequestUpdates {
 				log.Printf("   🚚 Updating move request %s", moveReqID)
-				log.Printf("      - Status: pending → in_progress")
+				log.Printf("      - Status: pending → assigned (shift is 'ready', not started yet)")
 				log.Printf("      - Assigned to shift: %s", shiftID)
-				log.Printf("      - Assigned to driver: %s", req.DriverID)
+				log.Printf("      - Assigned to driver: %s (%s)", req.DriverID, driverName)
 
+				// FIX: Set status to 'assigned' since newly created shifts have status 'ready'
+				// Only active shifts should set move requests to 'in_progress'
 				updateQuery := `UPDATE bin_move_requests
-								SET status = 'in_progress',
+								SET status = 'assigned',
 									assigned_shift_id = $1,
 									assigned_user_id = $2,
 									assignment_type = 'shift',
@@ -169,6 +188,17 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 					log.Printf("      ⚠️  Move request %s not updated (already assigned or not found)", moveReqID)
 				} else {
 					log.Printf("      ✅ Move request %s updated successfully", moveReqID)
+
+					// Log assignment history
+					log.Printf("      📝 Logging assignment to history...")
+					assignmentType := "shift"
+					err = helpers.LogMoveRequestAssigned(db, moveReqID, managerID, managerName,
+						assignmentType, &req.DriverID, &driverName, &shiftID)
+					if err != nil {
+						log.Printf("      ⚠️  WARNING: Failed to log assignment history: %v", err)
+					} else {
+						log.Printf("      ✅ Assignment history logged successfully")
+					}
 				}
 			}
 		} else {
