@@ -1823,7 +1823,7 @@ func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWit
 	// ONLY query route_tasks table (new unified task system)
 	query := `
 		SELECT
-			0 as id,  -- route_tasks uses string id, not auto-increment
+			rt.id as id,
 			rt.shift_id,
 			COALESCE(rt.bin_id, '') as bin_id,
 			rt.sequence_order,
