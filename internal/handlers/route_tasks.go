@@ -192,9 +192,10 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		hub.BroadcastToUser(req.DriverID, shiftNotification)
 		log.Printf("📡 WebSocket: Broadcasted new shift to driver %s", req.DriverID)
 
-		// Also notify managers
+		// Also notify managers and admins
 		hub.BroadcastToRole("manager", shiftNotification)
-		log.Printf("📡 WebSocket: Broadcasted new shift to managers")
+		hub.BroadcastToRole("admin", shiftNotification)
+		log.Printf("📡 WebSocket: Broadcasted new shift to managers and admins")
 
 		utils.RespondJSON(w, http.StatusCreated, map[string]interface{}{
 			"success": true,
