@@ -16,7 +16,7 @@ type ShiftBin struct {
 
 // ShiftBinWithDetails extends ShiftBin with bin details for API responses
 type ShiftBinWithDetails struct {
-	ID                    int      `db:"id" json:"id"`
+	ID                    string   `db:"id" json:"id"`
 	ShiftID               string   `db:"shift_id" json:"shift_id"`
 	BinID                 string   `db:"bin_id" json:"bin_id"`
 	SequenceOrder         int      `db:"sequence_order" json:"sequence_order"`
