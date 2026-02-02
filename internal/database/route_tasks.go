@@ -29,7 +29,16 @@ func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 
 // GetShiftTasksDetailed retrieves tasks with JOINed data from related tables
 func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{}, error) {
-	query := `SELECT * FROM shift_tasks_detailed WHERE shift_id = $1 ORDER BY sequence_order ASC`
+	// Query route_tasks directly and LEFT JOIN with bins table to get bin_number for collection tasks
+	query := `
+		SELECT
+			rt.*,
+			COALESCE(rt.bin_number, b.bin_number::int) as bin_number
+		FROM route_tasks rt
+		LEFT JOIN bins b ON rt.bin_id = b.id
+		WHERE rt.shift_id = $1
+		ORDER BY rt.sequence_order ASC
+	`
 
 	rows, err := db.Queryx(query, shiftID)
 	if err != nil {
