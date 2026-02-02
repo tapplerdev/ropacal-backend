@@ -265,7 +265,8 @@ func main() {
 
 			// Task-based shift creation (agnostic shift builder)
 			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub))
-			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))
+			r.Get("/manager/shifts", handlers.GetAllShifts(db))              // List all shifts with filtering (register first - exact match)
+			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))   // Get single shift (register after)
 
 			// One-time data migration endpoints (can be removed after use)
 			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -195,6 +196,142 @@ func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
 				"bins":                bins,
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
+			},
+		})
+	}
+}
+
+// GetAllShifts returns a list of all shifts with optional filtering
+// GET /api/manager/shifts
+// Query params: status, driver_id, start_date, end_date, limit, offset
+func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/manager/shifts")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+
+		// Parse query parameters
+		status := r.URL.Query().Get("status")
+		driverID := r.URL.Query().Get("driver_id")
+		startDate := r.URL.Query().Get("start_date") // Unix timestamp
+		endDate := r.URL.Query().Get("end_date")     // Unix timestamp
+		limitStr := r.URL.Query().Get("limit")
+		offsetStr := r.URL.Query().Get("offset")
+
+		// Default pagination
+		limit := 100
+		offset := 0
+
+		if limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 1000 {
+				limit = l
+			}
+		}
+		if offsetStr != "" {
+			if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+				offset = o
+			}
+		}
+
+		// Build query dynamically based on filters
+		query := `
+			SELECT s.*, u.name as driver_name, u.email as driver_email
+			FROM shifts s
+			LEFT JOIN users u ON s.driver_id = u.id
+			WHERE 1=1`
+		args := []interface{}{}
+		argIndex := 1
+
+		if status != "" {
+			query += fmt.Sprintf(" AND s.status = $%d", argIndex)
+			args = append(args, status)
+			argIndex++
+		}
+
+		if driverID != "" {
+			query += fmt.Sprintf(" AND s.driver_id = $%d", argIndex)
+			args = append(args, driverID)
+			argIndex++
+		}
+
+		if startDate != "" {
+			startTimestamp, err := strconv.ParseInt(startDate, 10, 64)
+			if err == nil {
+				query += fmt.Sprintf(" AND s.created_at >= $%d", argIndex)
+				args = append(args, startTimestamp)
+				argIndex++
+			}
+		}
+
+		if endDate != "" {
+			endTimestamp, err := strconv.ParseInt(endDate, 10, 64)
+			if err == nil {
+				query += fmt.Sprintf(" AND s.created_at <= $%d", argIndex)
+				args = append(args, endTimestamp)
+				argIndex++
+			}
+		}
+
+		// Add ordering and pagination
+		query += " ORDER BY s.created_at DESC"
+		query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIndex, argIndex+1)
+		args = append(args, limit, offset)
+
+		// Execute query
+		rows, err := db.Queryx(query, args...)
+		if err != nil {
+			log.Printf("❌ Error fetching shifts: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shifts")
+			return
+		}
+		defer rows.Close()
+
+		type ShiftWithDriver struct {
+			models.Shift
+			DriverName  string `db:"driver_name" json:"driver_name"`
+			DriverEmail string `db:"driver_email" json:"driver_email"`
+		}
+
+		var shifts []ShiftWithDriver
+		for rows.Next() {
+			var shift ShiftWithDriver
+			if err := rows.StructScan(&shift); err != nil {
+				log.Printf("❌ Error scanning shift: %v", err)
+				continue
+			}
+			shifts = append(shifts, shift)
+		}
+
+		// Get total count for pagination
+		countQuery := `SELECT COUNT(*) FROM shifts s WHERE 1=1`
+		if status != "" {
+			countQuery += " AND s.status = '" + status + "'"
+		}
+		if driverID != "" {
+			countQuery += " AND s.driver_id = '" + driverID + "'"
+		}
+
+		var totalCount int
+		db.Get(&totalCount, countQuery)
+
+		log.Printf("📤 RESPONSE: 200 OK")
+		log.Printf("   Found %d shifts (total: %d)", len(shifts), totalCount)
+		log.Printf("   Filters: status=%s, driver_id=%s, limit=%d, offset=%d",
+			status, driverID, limit, offset)
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"shifts":      shifts,
+				"total_count": totalCount,
+				"limit":       limit,
+				"offset":      offset,
 			},
 		})
 	}
