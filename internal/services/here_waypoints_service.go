@@ -99,11 +99,11 @@ func (s *HEREWaypointsService) OptimizeWaypoints(
 	var hereResp struct {
 		Results []struct {
 			Waypoints []struct {
-				ID               string `json:"id"`
-				Lat              string `json:"lat"`
-				Lng              string `json:"lng"`
-				Sequence         int    `json:"sequence"`
-				EstimatedArrival string `json:"estimatedArrival,omitempty"`
+				ID               string  `json:"id"`
+				Lat              float64 `json:"lat"`
+				Lng              float64 `json:"lng"`
+				Sequence         int     `json:"sequence"`
+				EstimatedArrival string  `json:"estimatedArrival,omitempty"`
 			} `json:"waypoints"`
 			Distance         string `json:"distance"` // Total distance in meters (string)
 			Time             string `json:"time"`     // Total time in seconds (string)
