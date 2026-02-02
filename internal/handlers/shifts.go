@@ -3300,6 +3300,23 @@ func optimizeRouteInSegments(
 		}
 		log.Printf("   🏁 Segment end: (%.6f, %.6f)", endLat, endLon)
 
+		// Calculate BEFORE optimization distance (straight-line Haversine estimate)
+		beforeDistanceKm := 0.0
+		beforeDistanceKm += haversineDistance(startLat, startLon, segment[0].Latitude, segment[0].Longitude)
+		for i := 0; i < len(segment)-1; i++ {
+			beforeDistanceKm += haversineDistance(
+				segment[i].Latitude, segment[i].Longitude,
+				segment[i+1].Latitude, segment[i+1].Longitude,
+			)
+		}
+		beforeDistanceKm += haversineDistance(
+			segment[len(segment)-1].Latitude, segment[len(segment)-1].Longitude,
+			endLat, endLon,
+		)
+
+		log.Printf("   📏 BEFORE optimization (original order):")
+		log.Printf("      Straight-line distance: %.2f km", beforeDistanceKm)
+
 		departureTime := time.Now().Format(time.RFC3339)
 		log.Printf("   🚀 Calling HERE Maps API with %d waypoints...", len(waypoints))
 
@@ -3321,8 +3338,19 @@ func optimizeRouteInSegments(
 			continue
 		}
 
-		log.Printf("   ✅ HERE Maps response: %.2f km, %d sec, %d waypoints",
-			result.TotalDistanceKm, result.TotalDurationSeconds, len(result.OptimizedOrder))
+		log.Printf("   📏 AFTER optimization (HERE Maps optimized):")
+		log.Printf("      Driving distance: %.2f km", result.TotalDistanceKm)
+		log.Printf("      Driving time: %d sec (%.1f min)", result.TotalDurationSeconds, float64(result.TotalDurationSeconds)/60.0)
+		log.Printf("   📊 OPTIMIZATION RESULT:")
+		savingsKm := beforeDistanceKm - result.TotalDistanceKm
+		savingsPercent := (savingsKm / beforeDistanceKm) * 100.0
+		if savingsKm > 0 {
+			log.Printf("      ✅ SAVED: %.2f km (%.1f%% improvement)", savingsKm, savingsPercent)
+		} else if savingsKm < 0 {
+			log.Printf("      ⚠️  Route LONGER by %.2f km (original was better)", -savingsKm)
+		} else {
+			log.Printf("      ⏸️  No distance change")
+		}
 
 		// Log the optimized order from HERE Maps
 		log.Printf("   🔄 Optimized task order from HERE Maps:")
