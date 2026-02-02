@@ -444,7 +444,9 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	now := time.Now().Unix()
 	isActiveShift := activeShift.Status == "active"
-	isFutureShift := activeShift.Status == "not_started"
+	isFutureShift := activeShift.Status == "ready"  // FIX: "ready" is the correct status for future shifts
+
+	log.Printf("   🔍 SHIFT STATUS DEBUG: status=%s, isActiveShift=%t, isFutureShift=%t", activeShift.Status, isActiveShift, isFutureShift)
 
 	// CASE 1: Active shift with specific insertAfterBinID
 	if isActiveShift && insertAfterBinID != nil && *insertAfterBinID != "" {
@@ -597,7 +599,11 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	moveRequestStatus := "assigned"
 	if isActiveShift {
 		moveRequestStatus = "in_progress"
+		log.Printf("   📊 Move request status: 'in_progress' (shift is ACTIVE)")
+	} else {
+		log.Printf("   📊 Move request status: 'assigned' (shift is NOT active, status=%s)", activeShift.Status)
 	}
+
 	_, err = tx.Exec(`
 		UPDATE bin_move_requests
 		SET assignment_type = 'shift', assigned_shift_id = $1, assigned_user_id = NULL, status = $2, updated_at = $3
@@ -619,15 +625,27 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	newAssignmentType := "shift"
 	if previousAssignedShiftID == nil && previousAssignedUserID == nil {
 		// New assignment
-		helpers.LogMoveRequestAssigned(db, moveRequest.ID, managerID, managerName,
+		log.Printf("   📝 Logging NEW assignment to history (driver: %s, shift: %s)", driverName, activeShift.ID)
+		err = helpers.LogMoveRequestAssigned(db, moveRequest.ID, managerID, managerName,
 			newAssignmentType, &activeShift.DriverID, &driverName, &activeShift.ID)
+		if err != nil {
+			log.Printf("   ⚠️  WARNING: Failed to log assignment history: %v", err)
+		} else {
+			log.Printf("   ✅ Assignment history logged successfully")
+		}
 	} else {
 		// Reassignment
-		helpers.LogMoveRequestReassigned(db, moveRequest.ID, managerID, managerName,
+		log.Printf("   📝 Logging REASSIGNMENT to history (from previous assignment to driver: %s, shift: %s)", driverName, activeShift.ID)
+		err = helpers.LogMoveRequestReassigned(db, moveRequest.ID, managerID, managerName,
 			previousAssignmentType, &newAssignmentType,
 			previousAssignedUserID, &activeShift.DriverID,
 			previousAssignedUserName, &driverName,
 			previousAssignedShiftID, &activeShift.ID)
+		if err != nil {
+			log.Printf("   ⚠️  WARNING: Failed to log reassignment history: %v", err)
+		} else {
+			log.Printf("   ✅ Reassignment history logged successfully")
+		}
 	}
 
 	// Update shift total_bins count
