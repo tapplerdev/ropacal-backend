@@ -3,11 +3,10 @@
 
 FROM ghcr.io/project-osrm/osrm-backend:latest
 
-# Install dependencies for downloading OSM data
-RUN apt-get update && apt-get install -y \
+# Install dependencies for downloading OSM data (Alpine Linux uses apk)
+RUN apk add --no-cache \
     curl \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
+    wget
 
 # Set working directory
 WORKDIR /data
