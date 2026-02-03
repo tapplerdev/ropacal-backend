@@ -239,6 +239,9 @@ func main() {
 			// Location tracking (sent every 10 seconds during active shift)
 			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub))
 
+			// OSRM test endpoint (for testing snap-to-roads integration)
+			r.Post("/test/osrm", handlers.TestOSRM(db, wsHub))
+
 			// FCM token registration
 			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
 
