@@ -20,10 +20,11 @@ const (
 
 // OptimizationMetadata contains HERE Maps route optimization data
 type OptimizationMetadata struct {
-	TotalDistanceKm      float64 `json:"total_distance_km"`
-	TotalDurationSeconds int     `json:"total_duration_seconds"`
-	OptimizedAt          string  `json:"optimized_at"`           // ISO 8601 timestamp
-	EstimatedCompletion  string  `json:"estimated_completion"`   // ISO 8601 timestamp
+	TotalDistanceKm        float64 `json:"total_distance_km"`
+	TotalDurationSeconds   int     `json:"total_duration_seconds"`
+	TotalDurationFormatted string  `json:"total_duration_formatted"` // Human-readable format: "2h 30m"
+	OptimizedAt            string  `json:"optimized_at"`             // ISO 8601 timestamp
+	EstimatedCompletion    string  `json:"estimated_completion"`     // ISO 8601 timestamp
 }
 
 // Shift represents a driver's work shift

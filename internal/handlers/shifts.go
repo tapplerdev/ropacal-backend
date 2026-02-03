@@ -651,11 +651,22 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				}
 
 				// Save optimization metadata to shifts table
+				// Format duration as "Xh Ym"
+				hours := optimizationResult.TotalDurationSeconds / 3600
+				minutes := (optimizationResult.TotalDurationSeconds % 3600) / 60
+				var durationFormatted string
+				if hours > 0 {
+					durationFormatted = fmt.Sprintf("%dh %dm", hours, minutes)
+				} else {
+					durationFormatted = fmt.Sprintf("%dm", minutes)
+				}
+
 				optimizationMetadata := models.OptimizationMetadata{
-					TotalDistanceKm:      optimizationResult.TotalDistanceKm,
-					TotalDurationSeconds: optimizationResult.TotalDurationSeconds,
-					OptimizedAt:          time.Now().Format(time.RFC3339),
-					EstimatedCompletion:  time.Now().Add(time.Duration(optimizationResult.TotalDurationSeconds) * time.Second).Format(time.RFC3339),
+					TotalDistanceKm:        optimizationResult.TotalDistanceKm,
+					TotalDurationSeconds:   optimizationResult.TotalDurationSeconds,
+					TotalDurationFormatted: durationFormatted,
+					OptimizedAt:            time.Now().Format(time.RFC3339),
+					EstimatedCompletion:    time.Now().Add(time.Duration(optimizationResult.TotalDurationSeconds) * time.Second).Format(time.RFC3339),
 				}
 
 				metadataJSON, err := json.Marshal(optimizationMetadata)
@@ -669,9 +680,10 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 						log.Printf("⚠️  Error saving optimization metadata: %v", err)
 						// Continue anyway - this is not critical
 					} else {
-						log.Printf("✅ Saved optimization metadata: %.2f km, %.0f min",
+						log.Printf("✅ Saved optimization metadata: %.2f km, %s, ETA: %s",
 							optimizationMetadata.TotalDistanceKm,
-							float64(optimizationMetadata.TotalDurationSeconds)/60.0)
+							optimizationMetadata.TotalDurationFormatted,
+							optimizationMetadata.EstimatedCompletion)
 					}
 				}
 
@@ -3412,6 +3424,10 @@ func optimizeRouteInSegments(
 	optimizedTasks := []models.RouteTask{}
 	startLat, startLon := driverLat, driverLon // Track position for next segment
 
+	// Track total optimization metadata across all segments
+	var totalDistanceKm float64
+	var totalDurationSeconds int
+
 	for segmentIdx, segment := range segments {
 		// Warehouse stops don't get optimized, just keep them
 		if len(segment) == 1 && segment[0].TaskType == "warehouse_stop" {
@@ -3505,6 +3521,11 @@ func optimizeRouteInSegments(
 		log.Printf("   📏 AFTER optimization (HERE Maps optimized):")
 		log.Printf("      Driving distance: %.2f km", result.TotalDistanceKm)
 		log.Printf("      Driving time: %d sec (%.1f min)", result.TotalDurationSeconds, float64(result.TotalDurationSeconds)/60.0)
+
+		// Accumulate total distance and duration for metadata
+		totalDistanceKm += result.TotalDistanceKm
+		totalDurationSeconds += result.TotalDurationSeconds
+
 		log.Printf("   📊 OPTIMIZATION RESULT:")
 		savingsKm := beforeDistanceKm - result.TotalDistanceKm
 		savingsPercent := (savingsKm / beforeDistanceKm) * 100.0
@@ -3565,6 +3586,47 @@ func optimizeRouteInSegments(
 		if err != nil {
 			log.Printf("❌ Failed to update task %s: %v", task.ID, err)
 			return fmt.Errorf("failed to update task sequence: %w", err)
+		}
+	}
+
+	// Step 5: Save optimization metadata to shifts table
+	log.Printf("\n💾 [SEGMENT OPTIMIZER] Saving optimization metadata...")
+	log.Printf("   Total Distance: %.2f km", totalDistanceKm)
+	log.Printf("   Total Duration: %d seconds (%.1f minutes)", totalDurationSeconds, float64(totalDurationSeconds)/60.0)
+
+	// Format duration as "Xh Ym"
+	hours := totalDurationSeconds / 3600
+	minutes := (totalDurationSeconds % 3600) / 60
+	var durationFormatted string
+	if hours > 0 {
+		durationFormatted = fmt.Sprintf("%dh %dm", hours, minutes)
+	} else {
+		durationFormatted = fmt.Sprintf("%dm", minutes)
+	}
+
+	optimizationMetadata := models.OptimizationMetadata{
+		TotalDistanceKm:        totalDistanceKm,
+		TotalDurationSeconds:   totalDurationSeconds,
+		TotalDurationFormatted: durationFormatted,
+		OptimizedAt:            time.Now().Format(time.RFC3339),
+		EstimatedCompletion:    time.Now().Add(time.Duration(totalDurationSeconds) * time.Second).Format(time.RFC3339),
+	}
+
+	metadataJSON, err := json.Marshal(optimizationMetadata)
+	if err != nil {
+		log.Printf("⚠️  Error marshaling optimization metadata: %v", err)
+		// Continue anyway - this is not critical
+	} else {
+		updateMetadataQuery := `UPDATE shifts SET optimization_metadata = $1, updated_at = $2 WHERE id = $3`
+		_, err = db.Exec(updateMetadataQuery, metadataJSON, time.Now().Unix(), shiftID)
+		if err != nil {
+			log.Printf("⚠️  Error saving optimization metadata: %v", err)
+			// Continue anyway - this is not critical
+		} else {
+			log.Printf("✅ Saved optimization metadata: %.2f km, %s, ETA: %s",
+				optimizationMetadata.TotalDistanceKm,
+				optimizationMetadata.TotalDurationFormatted,
+				optimizationMetadata.EstimatedCompletion)
 		}
 	}
 
