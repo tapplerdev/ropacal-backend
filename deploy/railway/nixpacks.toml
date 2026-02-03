@@ -1,0 +1,9 @@
+# Force Railway to use Docker builder instead of auto-detection
+[phases.setup]
+nixPkgs = []
+
+[phases.build]
+cmds = []
+
+[start]
+cmd = "echo 'Use Dockerfile instead'"

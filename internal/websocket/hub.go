@@ -22,8 +22,8 @@ type Hub struct {
 	// Unregister requests from clients
 	unregister chan *Client
 
-	// Roads API client for snap-to-roads functionality
-	roadsClient *roads.RoadsClient
+	// Road snapping service (can be Google Roads API or OSRM)
+	roadsClient roads.RoadSnapper
 
 	// Mutex for thread-safe client map access
 	mu sync.RWMutex
@@ -42,7 +42,7 @@ func NewHub() *Hub {
 		broadcast:   make(chan *Message, 256),
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
-		roadsClient: roads.NewRoadsClient(),
+		roadsClient: roads.NewRoadSnapperFromEnv(), // Uses SNAP_PROVIDER env var
 	}
 }
 
