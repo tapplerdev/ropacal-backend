@@ -331,7 +331,7 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			return
 		}
 
-		log.Printf("🚚 [ASSIGN TO SHIFT] Found bin - Number: %s", bin.BinNumber)
+		log.Printf("🚚 [ASSIGN TO SHIFT] Found bin - Number: %d", bin.BinNumber)
 
 		// Get manager ID and name from context
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -534,7 +534,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// Insert pickup waypoint for move request
 	pickupSeq := insertSequenceOrder
 	log.Printf("   🔍 DEBUG: About to insert PICKUP - insertSequenceOrder=%d, pickupSeq=%d", insertSequenceOrder, pickupSeq)
-	log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%d, sequence=%d, stop_type=pickup, move_request_id=%s",
+	log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, stop_type=pickup, move_request_id=%s",
 		activeShift.ID, moveRequest.BinID, pickupSeq, moveRequest.ID)
 
 	_, err = tx.Exec(`
@@ -550,7 +550,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	if moveRequest.MoveType == "relocation" {
 		dropoffSeq := insertSequenceOrder + 1
 		log.Printf("   🔍 DEBUG: About to insert DROPOFF - insertSequenceOrder=%d, dropoffSeq=%d", insertSequenceOrder, dropoffSeq)
-		log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%d, sequence=%d, stop_type=dropoff, move_request_id=%s",
+		log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, stop_type=dropoff, move_request_id=%s",
 			activeShift.ID, moveRequest.BinID, dropoffSeq, moveRequest.ID)
 
 		_, err = tx.Exec(`
@@ -2285,7 +2285,7 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("👤 [ASSIGN TO USER] Found move request - Status: %s, BinID: %s, CurrentType: %s", moveRequest.Status, moveRequest.BinID, moveRequest.AssignmentType)
+		log.Printf("👤 [ASSIGN TO USER] Found move request - Status: %s, BinID: %s, CurrentType: %v", moveRequest.Status, moveRequest.BinID, moveRequest.AssignmentType)
 
 		// Allow reassigning from any status except completed or cancelled
 		if moveRequest.Status == "completed" || moveRequest.Status == "cancelled" {
@@ -2624,7 +2624,7 @@ func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("🔄 [CLEAR ASSIGNMENT] Current state - Status: %s, Type: %s, ShiftID: %v, UserID: %v",
+		log.Printf("🔄 [CLEAR ASSIGNMENT] Current state - Status: %s, Type: %v, ShiftID: %v, UserID: %v",
 			moveRequest.Status, moveRequest.AssignmentType, moveRequest.AssignedShiftID, moveRequest.AssignedUserID)
 
 		// Only allow clearing assignments from pending or assigned moves
