@@ -168,14 +168,19 @@ func main() {
 		r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
 		r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub))
 
-		// Bins endpoints
+		// Bins endpoints (read-only - no auth required)
 		r.Get("/bins", handlers.GetBins(db))
 		r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering
-		r.Post("/bins", handlers.CreateBin(db, wsHub))
-		r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub))
-		r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
 		r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
-		r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
+
+		// Bins mutation endpoints (require authentication)
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Auth)
+			r.Post("/bins", handlers.CreateBin(db, wsHub))
+			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub))
+			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
+			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
+		})
 
 		// Checks endpoints
 		r.Get("/bins/{id}/checks", handlers.GetChecks(db))

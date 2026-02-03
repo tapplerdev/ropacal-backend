@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/websocket"
 
@@ -101,8 +102,15 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		id := uuid.New().String()
 		now := time.Now().Unix()
 
-		// Get user ID from context (if authenticated)
-		userID, _ := r.Context().Value("user_id").(string)
+		// Get user ID from context (required - auth middleware ensures this exists)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			log.Printf("❌ [CREATE-BIN] User not found in context")
+			http.Error(w, "Unauthorized: user not found in context", http.StatusUnauthorized)
+			return
+		}
+
+		log.Printf("[CREATE-BIN] Creating bin for user: %s (%s)", userClaims.Email, userClaims.UserID)
 
 		// Default fill_percentage to 0 if not provided
 		fillPercentage := 0
@@ -121,7 +129,7 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		`,
 			id, binNumber, req.CurrentStreet, req.City, req.Zip, req.Status,
 			fillPercentage, 0, 0, req.Latitude, req.Longitude,
-			&userID, now, now,
+			userClaims.UserID, now, now,
 		)
 
 		if err != nil {
