@@ -476,7 +476,7 @@ func Migrate(db *sqlx.DB) error {
 
 		// Migration: Update bins status constraint to include new statuses
 		`ALTER TABLE bins DROP CONSTRAINT IF EXISTS bins_status_check`,
-		`ALTER TABLE bins ADD CONSTRAINT bins_status_check CHECK(status IN ('active', 'missing', 'retired', 'in_storage', 'pending_move', 'needs_check'))`,
+		`ALTER TABLE bins ADD CONSTRAINT bins_status_check CHECK(status IN ('active', 'missing', 'retired', 'in_storage', 'pending_move'))`,
 
 		// Migration: Create bin_move_requests table
 		`CREATE TABLE IF NOT EXISTS bin_move_requests (

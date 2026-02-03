@@ -248,9 +248,24 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			args = append(args, now.Unix())
 		}
 
-		if addrChanged {
+		// Handle coordinates logic:
+		// 1. If coordinates provided in request → use them
+		// 2. Else if address changed → clear coordinates (set to NULL)
+		// 3. Otherwise → keep existing coordinates (no change)
+		if req.Latitude != nil && req.Longitude != nil {
+			// Coordinates provided - use them
+			paramCount++
+			query += `, latitude = $` + fmt.Sprintf("%d", paramCount)
+			args = append(args, *req.Latitude)
+
+			paramCount++
+			query += `, longitude = $` + fmt.Sprintf("%d", paramCount)
+			args = append(args, *req.Longitude)
+		} else if addrChanged {
+			// Address changed but no coordinates provided - clear them
 			query += `, latitude = NULL, longitude = NULL`
 		}
+		// Otherwise: keep existing coordinates (no change to query)
 
 		paramCount++
 		query += `, updated_at = $` + fmt.Sprintf("%d", paramCount) + ` WHERE id = $` + fmt.Sprintf("%d", paramCount+1)

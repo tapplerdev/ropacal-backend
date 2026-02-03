@@ -11,7 +11,7 @@ type Bin struct {
 	LastMoved       *int64   `json:"last_moved,omitempty" db:"last_moved"`           // Unix timestamp
 	LastChecked     *int64   `json:"last_checked,omitempty" db:"last_checked"`       // Unix timestamp
 	LastCheckedAt   *int64   `json:"last_checked_at,omitempty" db:"last_checked_at"` // Unix timestamp (for priority calc)
-	Status          string   `json:"status" db:"status"`                             // 'active', 'retired', 'in_storage', 'pending_move', 'needs_check'
+	Status          string   `json:"status" db:"status"`                             // 'active', 'missing', 'retired', 'in_storage', 'pending_move'
 	FillPercentage  *int     `json:"fill_percentage,omitempty" db:"fill_percentage"`
 	Checked         bool     `json:"checked" db:"checked"`
 	MoveRequested   bool     `json:"move_requested" db:"move_requested"`
@@ -48,16 +48,18 @@ type BinResponse struct {
 
 // UpdateBinRequest is the request body for PATCH /api/bins/:id
 type UpdateBinRequest struct {
-	CurrentStreet  string  `json:"current_street"`
-	City           string  `json:"city"`
-	Zip            string  `json:"zip"`
-	Status         string  `json:"status"`
-	Checked        bool    `json:"checked"`
-	FillPercentage *int    `json:"fill_percentage,omitempty"`
-	MoveRequested  bool    `json:"move_requested"`
-	CheckedFrom    *string `json:"checkedFrom,omitempty"`
-	CheckedOnIso   *string `json:"checkedOnIso,omitempty"`
-	PhotoUrl       *string `json:"photoUrl,omitempty"` // Optional photo URL from Cloudinary
+	CurrentStreet  string   `json:"current_street"`
+	City           string   `json:"city"`
+	Zip            string   `json:"zip"`
+	Status         string   `json:"status"`
+	Checked        bool     `json:"checked"`
+	FillPercentage *int     `json:"fill_percentage,omitempty"`
+	MoveRequested  bool     `json:"move_requested"`
+	Latitude       *float64 `json:"latitude,omitempty"`  // Optional - if provided, won't be cleared
+	Longitude      *float64 `json:"longitude,omitempty"` // Optional - if provided, won't be cleared
+	CheckedFrom    *string  `json:"checkedFrom,omitempty"`
+	CheckedOnIso   *string  `json:"checkedOnIso,omitempty"`
+	PhotoUrl       *string  `json:"photoUrl,omitempty"` // Optional photo URL from Cloudinary
 }
 
 // CreateBinRequest is the request body for POST /api/bins
