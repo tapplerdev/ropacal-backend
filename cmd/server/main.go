@@ -256,7 +256,7 @@ func main() {
 			r.Get("/driver/shift-move-requests", handlers.GetShiftMoveRequests(db))
 
 			// Location tracking (sent every 10 seconds during active shift)
-			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub))
+			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub, centrifugoClient))
 
 			// OSRM test endpoint (for testing snap-to-roads integration)
 			r.Post("/test/osrm", handlers.TestOSRM(db, wsHub))

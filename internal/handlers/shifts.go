@@ -16,6 +16,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 
@@ -2432,7 +2433,7 @@ func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 // UpdateLocation handles driver location updates (POST /api/driver/location)
 // Called every 10 seconds when driver is on active shift
-func UpdateLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func UpdateLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -2490,7 +2491,24 @@ func UpdateLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Broadcast location update to all connected managers via WebSocket
+		// Publish to Centrifugo for real-time streaming
+		if centrifugoClient != nil {
+			location := centrifugo.DriverLocation{
+				Latitude:  req.Latitude,
+				Longitude: req.Longitude,
+				Heading:   getFloat64Value(req.Heading),
+				Speed:     getFloat64Value(req.Speed),
+				Accuracy:  getFloat64Value(req.Accuracy),
+				Timestamp: req.Timestamp,
+			}
+
+			if err := centrifugoClient.PublishDriverLocation(r.Context(), userClaims.UserID, location); err != nil {
+				// Log error but don't fail the request - Centrifugo is non-critical
+				log.Printf("⚠️  Failed to publish location to Centrifugo: %v", err)
+			}
+		}
+
+		// Broadcast location update to all connected managers via WebSocket (legacy)
 		locationUpdate := map[string]interface{}{
 			"type": "driver_location_update",
 			"data": map[string]interface{}{
@@ -2517,6 +2535,14 @@ func UpdateLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			"id":      locationID,
 		})
 	}
+}
+
+// getFloat64Value safely extracts value from pointer or returns 0
+func getFloat64Value(val *float64) float64 {
+	if val == nil {
+		return 0
+	}
+	return *val
 }
 
 // GetAllDrivers returns all drivers regardless of shift status
