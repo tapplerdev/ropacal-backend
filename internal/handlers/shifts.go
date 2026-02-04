@@ -2441,6 +2441,12 @@ func UpdateLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 			return
 		}
 
+		// Only drivers can post location
+		if userClaims.Role != "driver" {
+			utils.RespondError(w, http.StatusForbidden, "Only drivers can post location")
+			return
+		}
+
 		var req struct {
 			Latitude  float64  `json:"latitude"`
 			Longitude float64  `json:"longitude"`
@@ -2456,83 +2462,142 @@ func UpdateLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 			return
 		}
 
-		// Validate required fields
-		if req.Latitude == 0 && req.Longitude == 0 {
+		// Validate coordinates
+		if req.Latitude < -90 || req.Latitude > 90 || req.Longitude < -180 || req.Longitude > 180 {
+			log.Printf("❌ Invalid coordinates: lat=%.6f, lng=%.6f", req.Latitude, req.Longitude)
 			utils.RespondError(w, http.StatusBadRequest, "Invalid coordinates")
 			return
 		}
 
-		// Insert location into database
-		query := `
-			INSERT INTO driver_locations (
-				driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			RETURNING id, created_at
+		log.Printf("📍 Location update from driver %s: (%.6f, %.6f)", userClaims.UserID, req.Latitude, req.Longitude)
+
+		// Default accuracy to 100m if not provided
+		accuracyValue := 100.0
+		if req.Accuracy != nil {
+			accuracyValue = *req.Accuracy
+		}
+
+		// Step 1: Snap to roads using OSRM (if hub has roadsClient and accuracy > 15m)
+		snappedLat := req.Latitude
+		snappedLng := req.Longitude
+
+		if hub != nil && hub.GetRoadsClient() != nil {
+			roadsClient := hub.GetRoadsClient()
+			newLat, newLng, err := roadsClient.SnapToRoad(req.Latitude, req.Longitude, accuracyValue)
+			if err == nil && (newLat != req.Latitude || newLng != req.Longitude) {
+				snappedLat = newLat
+				snappedLng = newLng
+				log.Printf("🗺️  Snapped to road: (%.6f, %.6f) → (%.6f, %.6f)", req.Latitude, req.Longitude, snappedLat, snappedLng)
+			}
+		}
+
+		// Step 2: Update driver_current_location (UPSERT for shift start validation)
+		currentLocationQuery := `
+			INSERT INTO driver_current_location (
+				driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp, is_connected, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, EXTRACT(EPOCH FROM NOW())::BIGINT)
+			ON CONFLICT (driver_id)
+			DO UPDATE SET
+				latitude = EXCLUDED.latitude,
+				longitude = EXCLUDED.longitude,
+				heading = EXCLUDED.heading,
+				speed = EXCLUDED.speed,
+				accuracy = EXCLUDED.accuracy,
+				shift_id = EXCLUDED.shift_id,
+				timestamp = EXCLUDED.timestamp,
+				is_connected = TRUE,
+				updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+			RETURNING updated_at
 		`
 
-		var locationID int
-		var createdAt int64
-
+		var updatedAt int64
 		err := db.QueryRow(
-			query,
+			currentLocationQuery,
 			userClaims.UserID,
-			req.Latitude,
-			req.Longitude,
+			req.Latitude,  // Store ORIGINAL GPS for audit
+			req.Longitude, // Store ORIGINAL GPS for audit
 			req.Heading,
 			req.Speed,
 			req.Accuracy,
 			req.ShiftID,
 			req.Timestamp,
-		).Scan(&locationID, &createdAt)
+		).Scan(&updatedAt)
 
 		if err != nil {
-			log.Printf("❌ Error saving location: %v", err)
+			log.Printf("❌ Error updating driver_current_location: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to save location")
 			return
 		}
 
-		// Publish to Centrifugo for real-time streaming
+		log.Printf("✅ Updated driver_current_location (original GPS for audit)")
+
+		// Step 3: Insert into driver_locations (historical log - optional)
+		// Note: This table may not exist in your schema, commenting out for now
+		// historicalQuery := `
+		// 	INSERT INTO driver_locations (
+		// 		driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp
+		// 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		// `
+		// _, _ = db.Exec(historicalQuery, userClaims.UserID, req.Latitude, req.Longitude, req.Heading, req.Speed, req.Accuracy, req.ShiftID, req.Timestamp)
+
+		// Step 4: Publish SNAPPED location to Centrifugo for managers
 		if centrifugoClient != nil {
-			location := centrifugo.DriverLocation{
-				Latitude:  req.Latitude,
-				Longitude: req.Longitude,
-				Heading:   getFloat64Value(req.Heading),
-				Speed:     getFloat64Value(req.Speed),
-				Accuracy:  getFloat64Value(req.Accuracy),
+			// Convert pointer fields to values (use 0 if nil)
+			heading := 0.0
+			if req.Heading != nil {
+				heading = *req.Heading
+			}
+			speed := 0.0
+			if req.Speed != nil {
+				speed = *req.Speed
+			}
+			accuracy := accuracyValue
+
+			locationData := centrifugo.DriverLocation{
+				Latitude:  snappedLat, // SNAPPED coordinates for display
+				Longitude: snappedLng, // SNAPPED coordinates for display
+				Heading:   heading,
+				Speed:     speed,
+				Accuracy:  accuracy,
 				Timestamp: req.Timestamp,
 			}
 
-			if err := centrifugoClient.PublishDriverLocation(r.Context(), userClaims.UserID, location); err != nil {
-				// Log error but don't fail the request - Centrifugo is non-critical
-				log.Printf("⚠️  Failed to publish location to Centrifugo: %v", err)
+			err := centrifugoClient.PublishDriverLocation(r.Context(), userClaims.UserID, locationData)
+			if err != nil {
+				log.Printf("⚠️  Failed to publish to Centrifugo: %v", err)
+				// Don't fail the request - location is already saved to DB
+			} else {
+				log.Printf("📤 Published snapped location to Centrifugo: driver:location:%s", userClaims.UserID)
 			}
 		}
 
-		// Broadcast location update to all connected managers via WebSocket (legacy)
+		// Step 5: Broadcast SNAPPED location to managers via legacy WebSocket
 		locationUpdate := map[string]interface{}{
 			"type": "driver_location_update",
 			"data": map[string]interface{}{
-				"id":         locationID,
 				"driver_id":  userClaims.UserID,
-				"latitude":   req.Latitude,
-				"longitude":  req.Longitude,
+				"latitude":   snappedLat, // SNAPPED for display
+				"longitude":  snappedLng, // SNAPPED for display
 				"heading":    req.Heading,
 				"speed":      req.Speed,
 				"accuracy":   req.Accuracy,
 				"shift_id":   req.ShiftID,
 				"timestamp":  req.Timestamp,
-				"created_at": createdAt,
+				"updated_at": updatedAt,
 			},
 		}
 
-		// Broadcast to all managers (users with role "admin")
 		hub.BroadcastToRole("admin", locationUpdate)
+		// log.Printf("📤 Broadcasted snapped location to managers via WebSocket")
 
 		// Return success response
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"message": "Location updated successfully",
-			"id":      locationID,
+			"success":    true,
+			"updated_at": updatedAt,
+			"snapped": map[string]interface{}{
+				"latitude":  snappedLat,
+				"longitude": snappedLng,
+			},
 		})
 	}
 }

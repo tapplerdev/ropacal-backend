@@ -177,3 +177,8 @@ func (h *Hub) GetConnectedClientIDs() []string {
 	}
 	return ids
 }
+
+// GetRoadsClient returns the road snapping client
+func (h *Hub) GetRoadsClient() roads.RoadSnapper {
+	return h.roadsClient
+}
