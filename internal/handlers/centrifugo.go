@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -211,14 +212,14 @@ type CentrifugoConnectionTokenResponse struct {
 // GetCentrifugoToken generates a connection token for the authenticated user
 func GetCentrifugoToken(centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Get user ID from context (set by auth middleware)
-		userIDValue := r.Context().Value("user_id")
-		if userIDValue == nil {
+		// Get user claims from context (set by auth middleware)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		userID := userIDValue.(string)
+		userID := userClaims.UserID
 
 		// Generate token valid for 24 hours
 		expiresAt := time.Now().Add(24 * time.Hour)
