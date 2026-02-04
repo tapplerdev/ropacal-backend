@@ -11,6 +11,14 @@ import (
 	"time"
 )
 
+const (
+	// GPS_RADIUS_MULTIPLIER defines how much to multiply GPS accuracy for OSRM radius
+	// Based on Lyft's research: 5x-10x provides best matching results
+	// Lower values = faster but more restrictive matching
+	// Higher values = slower but better matches for noisy GPS
+	GPS_RADIUS_MULTIPLIER = 5.0
+)
+
 // OSRMClient handles OSRM Map Matching API requests
 type OSRMClient struct {
 	baseURL    string
@@ -90,7 +98,8 @@ func (c *OSRMClient) SnapToRoad(lat, lng, accuracy float64) (float64, float64, e
 
 	// Snap single point using OSRM Match API
 	points := []LatLng{{Latitude: lat, Longitude: lng}}
-	radiuses := []float64{accuracy} // Use GPS accuracy as radius
+	// Multiply GPS accuracy by 5x (Lyft best practice for better matching)
+	radiuses := []float64{accuracy * GPS_RADIUS_MULTIPLIER}
 	timestamps := []int64{time.Now().Unix()}
 
 	snapped, err := c.matchPoints(points, radiuses, timestamps)
@@ -119,10 +128,10 @@ func (c *OSRMClient) SnapBatch(points []LatLng) ([]LatLng, error) {
 		return cached, nil
 	}
 
-	// Default radiuses (assume good GPS accuracy)
+	// Default radiuses (assume good GPS accuracy of ~10m, multiply by 5x)
 	radiuses := make([]float64, len(points))
 	for i := range radiuses {
-		radiuses[i] = 10.0 // 10m default radius
+		radiuses[i] = 10.0 * GPS_RADIUS_MULTIPLIER // 50m radius (10m * 5x)
 	}
 
 	// Timestamps (assume 5 seconds apart)
@@ -174,8 +183,9 @@ func (c *OSRMClient) matchPoints(points []LatLng, radiuses []float64, timestamps
 	timestampsStr := strings.Join(timestampsParam, ";")
 
 	// Build URL
+	// tidy=true enables OSRM's built-in noise reduction for GPS traces
 	url := fmt.Sprintf(
-		"%s/match/v1/driving/%s?radiuses=%s&timestamps=%s&overview=full&geometries=geojson&annotations=true",
+		"%s/match/v1/driving/%s?radiuses=%s&timestamps=%s&tidy=true&overview=full&geometries=geojson&annotations=true",
 		c.baseURL,
 		coordsParam,
 		radiusesStr,
