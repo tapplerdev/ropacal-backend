@@ -1,0 +1,241 @@
+package handlers
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"ropacal-backend/internal/services/centrifugo"
+
+	"github.com/jmoiron/sqlx"
+)
+
+// CentrifugoSubscribeRequest represents the subscribe proxy request from Centrifugo
+type CentrifugoSubscribeRequest struct {
+	ClientID  string                 `json:"client"`
+	Transport string                 `json:"transport"`
+	Protocol  string                 `json:"protocol"`
+	Encoding  string                 `json:"encoding"`
+	User      string                 `json:"user"`
+	Channel   string                 `json:"channel"`
+	Token     string                 `json:"token,omitempty"`
+	Data      map[string]interface{} `json:"data,omitempty"`
+}
+
+// CentrifugoSubscribeResponse represents the subscribe proxy response
+type CentrifugoSubscribeResponse struct {
+	Result *CentrifugoSubscribeResult `json:"result,omitempty"`
+	Error  *CentrifugoError           `json:"error,omitempty"`
+}
+
+// CentrifugoSubscribeResult represents successful subscription authorization
+type CentrifugoSubscribeResult struct {
+	// B64Data can be used to pass custom data to client
+	B64Data string `json:"b64data,omitempty"`
+	// ExpireAt is optional subscription expiration time (unix timestamp)
+	ExpireAt int64 `json:"expire_at,omitempty"`
+	// Info is optional JSON with subscription info
+	Info map[string]interface{} `json:"info,omitempty"`
+}
+
+// CentrifugoError represents an error response
+type CentrifugoError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// CentrifugoSubscribeProxy handles subscription authorization from Centrifugo
+func CentrifugoSubscribeProxy(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req CentrifugoSubscribeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ [Centrifugo] Invalid subscribe request: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
+				Error: &CentrifugoError{
+					Code:    400,
+					Message: "invalid request",
+				},
+			})
+			return
+		}
+
+		log.Printf("🔐 [Centrifugo] Subscribe request: user=%s channel=%s client=%s",
+			req.User, req.Channel, req.ClientID)
+
+		// Authorize subscription based on channel type
+		authorized, err := authorizeSubscription(db, req.User, req.Channel)
+		if err != nil {
+			log.Printf("❌ [Centrifugo] Authorization error for user=%s channel=%s: %v",
+				req.User, req.Channel, err)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
+				Error: &CentrifugoError{
+					Code:    403,
+					Message: "authorization failed",
+				},
+			})
+			return
+		}
+
+		if !authorized {
+			log.Printf("🚫 [Centrifugo] Subscription denied: user=%s channel=%s",
+				req.User, req.Channel)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
+				Error: &CentrifugoError{
+					Code:    403,
+					Message: "permission denied",
+				},
+			})
+			return
+		}
+
+		log.Printf("✅ [Centrifugo] Subscription authorized: user=%s channel=%s",
+			req.User, req.Channel)
+
+		// Return successful authorization
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
+			Result: &CentrifugoSubscribeResult{
+				Info: map[string]interface{}{
+					"user_id": req.User,
+					"channel": req.Channel,
+				},
+			},
+		})
+	}
+}
+
+// authorizeSubscription checks if a user is allowed to subscribe to a channel
+func authorizeSubscription(db *sqlx.DB, userID string, channel string) (bool, error) {
+	// Parse channel to determine type and resource ID
+	parts := strings.Split(channel, ":")
+	if len(parts) < 2 {
+		return false, fmt.Errorf("invalid channel format: %s", channel)
+	}
+
+	namespace := parts[0]    // driver, shift, manager
+	channelType := parts[1] // location, updates, notifications
+
+	switch namespace {
+	case "driver":
+		// Channel format: driver:location:{driverId}
+		if channelType == "location" && len(parts) == 3 {
+			driverID := parts[2]
+			// Check if user is the driver themselves OR a manager
+			return canViewDriverLocation(db, userID, driverID)
+		}
+
+	case "shift":
+		// Channel format: shift:updates:{shiftId}
+		if channelType == "updates" && len(parts) == 3 {
+			shiftID := parts[2]
+			// Check if user is assigned to this shift OR is a manager
+			return canViewShift(db, userID, shiftID)
+		}
+
+	case "manager":
+		// Channel format: manager:notifications:{managerId}
+		if channelType == "notifications" && len(parts) == 3 {
+			managerID := parts[2]
+			// Only the manager themselves can subscribe
+			return userID == managerID, nil
+		}
+	}
+
+	return false, fmt.Errorf("unknown channel format: %s", channel)
+}
+
+// canViewDriverLocation checks if user can view a driver's location
+func canViewDriverLocation(db *sqlx.DB, userID string, driverID string) (bool, error) {
+	// Allow if user is the driver themselves
+	if userID == driverID {
+		return true, nil
+	}
+
+	// Check if user is a manager (has manager role)
+	var role string
+	err := db.Get(&role, `SELECT role FROM users WHERE id = $1`, userID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get user role: %w", err)
+	}
+
+	// Managers can view all driver locations
+	return role == "admin" || role == "manager", nil
+}
+
+// canViewShift checks if user can view shift updates
+func canViewShift(db *sqlx.DB, userID string, shiftID string) (bool, error) {
+	// Check if user is assigned to this shift
+	var assignedDriverID sql.NullString
+	err := db.Get(&assignedDriverID, `SELECT assigned_driver_id FROM shifts WHERE id = $1`, shiftID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get shift: %w", err)
+	}
+
+	// Allow if user is assigned to this shift
+	if assignedDriverID.Valid && assignedDriverID.String == userID {
+		return true, nil
+	}
+
+	// Check if user is a manager
+	var role string
+	err = db.Get(&role, `SELECT role FROM users WHERE id = $1`, userID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get user role: %w", err)
+	}
+
+	return role == "admin" || role == "manager", nil
+}
+
+// CentrifugoConnectionTokenResponse represents token response
+type CentrifugoConnectionTokenResponse struct {
+	Token     string `json:"token"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+// GetCentrifugoToken generates a connection token for the authenticated user
+func GetCentrifugoToken(centrifugoClient *centrifugo.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get user ID from context (set by auth middleware)
+		userIDValue := r.Context().Value("user_id")
+		if userIDValue == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		userID := userIDValue.(string)
+
+		// Generate token valid for 24 hours
+		expiresAt := time.Now().Add(24 * time.Hour)
+		token, err := centrifugoClient.GenerateConnectionToken(userID, expiresAt)
+		if err != nil {
+			log.Printf("❌ [Centrifugo] Failed to generate token for user %s: %v", userID, err)
+			http.Error(w, "failed to generate token", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("🔑 [Centrifugo] Generated connection token for user %s (expires: %s)",
+			userID, expiresAt.Format(time.RFC3339))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(CentrifugoConnectionTokenResponse{
+			Token:     token,
+			ExpiresAt: expiresAt.Unix(),
+		})
+	}
+}

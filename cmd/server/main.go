@@ -9,6 +9,7 @@ import (
 	"ropacal-backend/internal/handlers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/services"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -121,6 +122,16 @@ func main() {
 		}
 	}
 
+	// Initialize Centrifugo client
+	log.Println("🔌 Initializing Centrifugo client...")
+	centrifugoClient, err := centrifugo.NewClient()
+	if err != nil {
+		log.Printf("⚠️  Failed to initialize Centrifugo client: %v (real-time messaging disabled)", err)
+		centrifugoClient = nil
+	} else {
+		log.Println("✅ Centrifugo client initialized")
+	}
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()
@@ -155,6 +166,9 @@ func main() {
 
 	// WebSocket endpoint (authentication handled in handler via query param)
 	r.Get("/ws", websocket.HandleWebSocket(wsHub, db))
+
+	// Centrifugo subscribe proxy endpoint (called by Centrifugo server for authorization)
+	r.Post("/api/centrifugo/subscribe", handlers.CentrifugoSubscribeProxy(db))
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
@@ -222,6 +236,11 @@ func main() {
 
 			// Auth status endpoint
 			r.Get("/auth/status", handlers.GetAuthStatus(db))
+
+			// Centrifugo connection token (for real-time WebSocket)
+			if centrifugoClient != nil {
+				r.Get("/centrifugo/token", handlers.GetCentrifugoToken(centrifugoClient))
+			}
 
 			// Shift management
 			r.Get("/driver/shift/current", handlers.GetCurrentShift(db))
