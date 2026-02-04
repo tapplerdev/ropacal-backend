@@ -61,8 +61,12 @@ type CentrifugoPublishResponse struct {
 }
 
 // CentrifugoPublishResult represents successful publication authorization
+// Can include modified data to publish instead of original
 type CentrifugoPublishResult struct {
-	// Empty for now - just indicates authorization success
+	// Data is the modified data to publish (if we want to change it)
+	Data map[string]interface{} `json:"data,omitempty"`
+	// SkipHistory tells Centrifugo not to save this to channel history
+	SkipHistory bool `json:"skip_history,omitempty"`
 }
 
 // CentrifugoError represents an error response

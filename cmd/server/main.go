@@ -10,6 +10,8 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/services/redis"
+	"ropacal-backend/internal/services/roads"
 	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -132,6 +134,28 @@ func main() {
 		log.Println("✅ Centrifugo client initialized")
 	}
 
+	// Initialize Redis client (for location caching)
+	log.Println("🔌 Initializing Redis client...")
+	redisClient, err := redis.NewClient()
+	if err != nil {
+		log.Printf("⚠️  Failed to initialize Redis client: %v (location caching disabled)", err)
+		redisClient = nil
+	} else {
+		log.Println("✅ Redis client initialized")
+	}
+
+	// Initialize OSRM client for road snapping
+	log.Println("🔌 Initializing OSRM client...")
+	osrmClient := roads.NewOSRMClient()
+	log.Println("✅ OSRM client initialized")
+
+	// Start background location batch writer (writes Redis → PostgreSQL every 30s)
+	if redisClient != nil {
+		batchWriter := services.NewLocationBatchWriter(db, redisClient)
+		batchWriter.Start()
+		log.Println("✅ Location batch writer started (30-second intervals)")
+	}
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()
@@ -170,6 +194,9 @@ func main() {
 	// Centrifugo proxy endpoints (called by Centrifugo server for authorization)
 	r.Post("/api/centrifugo/subscribe", handlers.CentrifugoSubscribeProxy(db))
 	r.Post("/api/centrifugo/publish", handlers.CentrifugoPublishProxy(db))
+
+	// Centrifugo location publish proxy (processes GPS data before broadcast)
+	r.Post("/api/centrifugo/publish-location", handlers.CentrifugoLocationPublishProxy(db, redisClient, osrmClient))
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
