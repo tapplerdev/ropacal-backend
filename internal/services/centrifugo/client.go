@@ -37,11 +37,16 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("CENTRIFUGO_TOKEN_HMAC_SECRET_KEY environment variable is required")
 	}
 
+	log.Printf("🔧 [Centrifugo] Initializing client - API URL: %s, API Key length: %d chars",
+		apiURL, len(apiKey))
+
 	// Create gocent client
 	client := gocent.New(gocent.Config{
 		Addr: apiURL,
 		Key:  apiKey,
 	})
+
+	log.Printf("✅ [Centrifugo] Client initialized successfully")
 
 	return &Client{
 		client:          client,
@@ -60,12 +65,15 @@ func (c *Client) PublishDriverLocation(ctx context.Context, driverID string, loc
 		return fmt.Errorf("failed to marshal location data: %w", err)
 	}
 
+	log.Printf("🔄 [Centrifugo] Attempting to publish to channel: %s", channel)
+
 	result, err := c.client.Publish(ctx, channel, data)
 	if err != nil {
+		log.Printf("❌ [Centrifugo] Publish failed - Channel: %s, Error: %v", channel, err)
 		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
 	}
 
-	log.Printf("📡 [Centrifugo] Published to %s (offset: %d, epoch: %s)",
+	log.Printf("✅ [Centrifugo] Successfully published to %s (offset: %d, epoch: %s)",
 		channel, result.Offset, result.Epoch)
 
 	return nil
