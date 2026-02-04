@@ -27,6 +27,17 @@ type CentrifugoSubscribeRequest struct {
 	Data      map[string]interface{} `json:"data,omitempty"`
 }
 
+// CentrifugoPublishRequest represents the publish proxy request from Centrifugo
+type CentrifugoPublishRequest struct {
+	ClientID  string                 `json:"client"`
+	Transport string                 `json:"transport"`
+	Protocol  string                 `json:"protocol"`
+	Encoding  string                 `json:"encoding"`
+	User      string                 `json:"user"`
+	Channel   string                 `json:"channel"`
+	Data      map[string]interface{} `json:"data"`
+}
+
 // CentrifugoSubscribeResponse represents the subscribe proxy response
 type CentrifugoSubscribeResponse struct {
 	Result *CentrifugoSubscribeResult `json:"result,omitempty"`
@@ -41,6 +52,17 @@ type CentrifugoSubscribeResult struct {
 	ExpireAt int64 `json:"expire_at,omitempty"`
 	// Info is optional JSON with subscription info
 	Info map[string]interface{} `json:"info,omitempty"`
+}
+
+// CentrifugoPublishResponse represents the publish proxy response
+type CentrifugoPublishResponse struct {
+	Result *CentrifugoPublishResult `json:"result,omitempty"`
+	Error  *CentrifugoError         `json:"error,omitempty"`
+}
+
+// CentrifugoPublishResult represents successful publication authorization
+type CentrifugoPublishResult struct {
+	// Empty for now - just indicates authorization success
 }
 
 // CentrifugoError represents an error response
@@ -201,6 +223,96 @@ func canViewShift(db *sqlx.DB, userID string, shiftID string) (bool, error) {
 	}
 
 	return role == "admin" || role == "manager", nil
+}
+
+// CentrifugoPublishProxy handles publication authorization from Centrifugo
+func CentrifugoPublishProxy(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req CentrifugoPublishRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ [Centrifugo] Invalid publish request: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+				Error: &CentrifugoError{
+					Code:    400,
+					Message: "invalid request",
+				},
+			})
+			return
+		}
+
+		log.Printf("🔐 [Centrifugo] Publish request: user=%s channel=%s client=%s",
+			req.User, req.Channel, req.ClientID)
+
+		// Authorize publication based on channel type
+		authorized, err := authorizePublication(db, req.User, req.Channel)
+		if err != nil {
+			log.Printf("❌ [Centrifugo] Authorization error for user=%s channel=%s: %v",
+				req.User, req.Channel, err)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+				Error: &CentrifugoError{
+					Code:    403,
+					Message: "authorization failed",
+				},
+			})
+			return
+		}
+
+		if !authorized {
+			log.Printf("🚫 [Centrifugo] Publication denied: user=%s channel=%s",
+				req.User, req.Channel)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+				Error: &CentrifugoError{
+					Code:    403,
+					Message: "permission denied",
+				},
+			})
+			return
+		}
+
+		log.Printf("✅ [Centrifugo] Publication authorized: user=%s channel=%s",
+			req.User, req.Channel)
+
+		// Return successful authorization
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+			Result: &CentrifugoPublishResult{},
+		})
+	}
+}
+
+// authorizePublication checks if a user is allowed to publish to a channel
+func authorizePublication(db *sqlx.DB, userID string, channel string) (bool, error) {
+	// Parse channel to determine type and resource ID
+	parts := strings.Split(channel, ":")
+	if len(parts) < 2 {
+		return false, fmt.Errorf("invalid channel format: %s", channel)
+	}
+
+	namespace := parts[0]    // driver, shift, manager
+	channelType := parts[1] // location, updates, notifications
+
+	switch namespace {
+	case "driver":
+		// Channel format: driver:location:{driverId}
+		if channelType == "location" && len(parts) == 3 {
+			driverID := parts[2]
+			// Only the driver themselves can publish to their own location channel
+			return userID == driverID, nil
+		}
+
+	case "shift":
+		// Drivers cannot publish to shift channels (backend only)
+		return false, nil
+
+	case "manager":
+		// Drivers cannot publish to manager channels (backend only)
+		return false, nil
+	}
+
+	return false, fmt.Errorf("unknown channel format: %s", channel)
 }
 
 // CentrifugoConnectionTokenResponse represents token response

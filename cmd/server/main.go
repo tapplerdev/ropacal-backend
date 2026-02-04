@@ -167,8 +167,9 @@ func main() {
 	// WebSocket endpoint (authentication handled in handler via query param)
 	r.Get("/ws", websocket.HandleWebSocket(wsHub, db))
 
-	// Centrifugo subscribe proxy endpoint (called by Centrifugo server for authorization)
+	// Centrifugo proxy endpoints (called by Centrifugo server for authorization)
 	r.Post("/api/centrifugo/subscribe", handlers.CentrifugoSubscribeProxy(db))
+	r.Post("/api/centrifugo/publish", handlers.CentrifugoPublishProxy(db))
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
