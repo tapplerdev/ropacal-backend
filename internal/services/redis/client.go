@@ -49,10 +49,10 @@ func NewClient() (*Client, error) {
 
 // SaveDriverLocation saves the current location of a driver to Redis
 // Key format: ropacal:driver:{driverID}:location
-// TTL: 1 hour (auto-expires if not updated)
+// TTL: 10 minutes (auto-expires if driver stops publishing)
 func (c *Client) SaveDriverLocation(ctx context.Context, driverID string, locationJSON string) error {
 	key := fmt.Sprintf("ropacal:driver:%s:location", driverID)
-	return c.Set(ctx, key, locationJSON, 1*time.Hour).Err()
+	return c.Set(ctx, key, locationJSON, 10*time.Minute).Err()
 }
 
 // GetDriverLocation retrieves the current location of a driver from Redis

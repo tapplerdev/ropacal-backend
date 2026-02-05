@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 
@@ -2613,11 +2615,30 @@ func getFloat64Value(val *float64) float64 {
 // GetAllDrivers returns all drivers regardless of shift status
 // Drivers with active shifts will show their current shift info
 // Drivers without active shifts will show status as 'inactive'
+// Location data comes from Redis (real-time current position)
 // GET /api/manager/drivers
-func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
+func GetAllDrivers(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Println("📋 GetAllDrivers: Fetching all drivers...")
 
+		ctx := context.Background()
+
+		// 1. Get all driver locations from Redis
+		var locations map[string]string
+		if redisClient != nil {
+			var err error
+			locations, err = redisClient.GetAllDriverLocations(ctx)
+			if err != nil {
+				log.Printf("⚠️ Redis error (non-fatal): %v", err)
+				locations = make(map[string]string)
+			} else {
+				log.Printf("📍 Found %d drivers with location data in Redis", len(locations))
+			}
+		} else {
+			locations = make(map[string]string)
+		}
+
+		// 2. Query database for all drivers
 		query := `
 			SELECT
 				u.id AS driver_id,
@@ -2629,18 +2650,9 @@ func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
 				s.start_time,
 				s.total_bins,
 				s.completed_bins,
-				s.updated_at,
-				dl.latitude,
-				dl.longitude
+				s.updated_at
 			FROM users u
 			LEFT JOIN shifts s ON u.id = s.driver_id AND s.status IN ('ready', 'active', 'paused')
-			LEFT JOIN (
-				-- Get the most recent location for each driver
-				SELECT DISTINCT ON (driver_id)
-					driver_id, latitude, longitude
-				FROM driver_locations
-				ORDER BY driver_id, timestamp DESC
-			) dl ON u.id = dl.driver_id
 			WHERE u.role = 'driver'
 			ORDER BY
 				CASE
@@ -2671,7 +2683,6 @@ func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
 			var shiftID, routeID, shiftStatus sql.NullString
 			var startTime, updatedAt sql.NullInt64
 			var totalBins, completedBins sql.NullInt32
-			var latitude, longitude sql.NullFloat64
 
 			err := rows.Scan(
 				&driver.DriverID,
@@ -2684,15 +2695,31 @@ func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
 				&totalBins,
 				&completedBins,
 				&updatedAt,
-				&latitude,
-				&longitude,
 			)
 			if err != nil {
 				log.Printf("❌ Row scan error: %v", err)
 				continue
 			}
 
-			// Set shift-related fields if driver has an active shift
+			// 3. Get location from Redis if available
+			if locationJSON, ok := locations[driver.DriverID]; ok {
+				var location LocationData
+				if err := json.Unmarshal([]byte(locationJSON), &location); err == nil {
+					driver.CurrentLocation = &DriverLocation{
+						Latitude:  location.Latitude,
+						Longitude: location.Longitude,
+					}
+
+					// Calculate location age
+					locationAge := time.Now().Unix() - (location.Timestamp / 1000)
+					t := location.Timestamp / 1000
+					driver.UpdatedAt = &t
+
+					log.Printf("   📍 %s: has location (age=%ds)", driver.DriverName, locationAge)
+				}
+			}
+
+			// 4. Set shift-related fields if driver has an active shift
 			if shiftID.Valid {
 				driver.ShiftID = &shiftID.String
 				driver.Status = shiftStatus.String
@@ -2710,23 +2737,11 @@ func GetAllDrivers(db *sqlx.DB) http.HandlerFunc {
 				if completedBins.Valid {
 					driver.CompletedBins = int(completedBins.Int32)
 				}
-				if updatedAt.Valid {
-					t := updatedAt.Int64
-					driver.UpdatedAt = &t
-				}
 			} else {
 				// No active shift - driver is inactive
 				driver.Status = "inactive"
 				driver.TotalBins = 0
 				driver.CompletedBins = 0
-			}
-
-			// Add location if available
-			if latitude.Valid && longitude.Valid {
-				driver.CurrentLocation = &DriverLocation{
-					Latitude:  latitude.Float64,
-					Longitude: longitude.Float64,
-				}
 			}
 
 			allDrivers = append(allDrivers, driver)

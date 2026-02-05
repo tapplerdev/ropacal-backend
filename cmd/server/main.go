@@ -352,8 +352,8 @@ func main() {
 			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub))
 
 			// Fleet management
-			r.Get("/manager/drivers", handlers.GetAllDrivers(db))
-			r.Get("/manager/active-drivers", handlers.GetActiveDrivers(db))
+			r.Get("/manager/drivers", handlers.GetAllDrivers(db, redisClient))
+			r.Get("/manager/active-drivers", handlers.GetActiveDrivers(db, redisClient))
 			r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
 
 			// User management
