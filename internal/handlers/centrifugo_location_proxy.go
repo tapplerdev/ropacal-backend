@@ -105,15 +105,17 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 			driverID, locationData.Latitude, locationData.Longitude, locationData.Accuracy)
 
 		// 4. Save ORIGINAL GPS to Redis (non-blocking)
-		ctx := context.Background()
-		go func() {
-			locationJSON, _ := json.Marshal(locationData)
-			if err := redisClient.SaveDriverLocation(ctx, driverID, string(locationJSON)); err != nil {
-				log.Printf("⚠️  [LocationProxy] Failed to save to Redis: %v", err)
-			} else {
-				log.Printf("✅ [LocationProxy] Saved to Redis: driver:%s", driverID)
-			}
-		}()
+		if redisClient != nil {
+			ctx := context.Background()
+			go func() {
+				locationJSON, _ := json.Marshal(locationData)
+				if err := redisClient.SaveDriverLocation(ctx, driverID, string(locationJSON)); err != nil {
+					log.Printf("⚠️  [LocationProxy] Failed to save to Redis: %v", err)
+				} else {
+					log.Printf("✅ [LocationProxy] Saved to Redis: driver:%s", driverID)
+				}
+			}()
+		}
 
 		// 5. OSRM road snapping (if accuracy > 15m)
 		snappedLat := locationData.Latitude
