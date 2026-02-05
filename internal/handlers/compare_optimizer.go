@@ -332,8 +332,14 @@ func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (
 
 	var hereResp struct {
 		Results []struct {
-			Distance string `json:"distance"`
-			Time     string `json:"time"`
+			Distance        string `json:"distance"`
+			Time            string `json:"time"`
+			Interconnections []struct {
+				FromWaypoint string  `json:"fromWaypoint"`
+				ToWaypoint   string  `json:"toWaypoint"`
+				Distance     float64 `json:"distance"`
+				Time         float64 `json:"time"`
+			} `json:"interconnections"`
 		} `json:"results"`
 	}
 
@@ -350,11 +356,42 @@ func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (
 	fmt.Sscanf(hereResp.Results[0].Distance, "%f", &distance)
 	fmt.Sscanf(hereResp.Results[0].Time, "%f", &duration)
 
+	// Build route sequence from interconnections
+	routeSequence := make([]map[string]interface{}, 0)
+	cumulativeTime := 0.0
+
+	if len(hereResp.Results[0].Interconnections) > 0 {
+		// Add start location
+		startWaypoint := hereResp.Results[0].Interconnections[0].FromWaypoint
+		routeSequence = append(routeSequence, map[string]interface{}{
+			"sequence":     1,
+			"waypoint":     startWaypoint,
+			"type":         getWaypointType(startWaypoint),
+			"task_info":    getTaskInfo(startWaypoint, tasks),
+			"arrival_time": formatSeconds(cumulativeTime),
+		})
+
+		// Add intermediate stops
+		for i, conn := range hereResp.Results[0].Interconnections {
+			cumulativeTime += conn.Time
+			routeSequence = append(routeSequence, map[string]interface{}{
+				"sequence":     i + 2,
+				"waypoint":     conn.ToWaypoint,
+				"type":         getWaypointType(conn.ToWaypoint),
+				"task_info":    getTaskInfo(conn.ToWaypoint, tasks),
+				"arrival_time": formatSeconds(cumulativeTime),
+				"distance_from_prev_meters": conn.Distance,
+				"time_from_prev_seconds":    conn.Time,
+			})
+		}
+	}
+
 	return map[string]interface{}{
 		"success":                true,
 		"total_distance_meters":  distance,
 		"total_duration_seconds": duration,
 		"total_duration_minutes": duration / 60,
+		"route_sequence":         routeSequence,
 	}, nil
 }
 
@@ -378,4 +415,54 @@ func getFasterOptimizer(mapboxDuration, hereDuration int) string {
 		return "mapbox"
 	}
 	return "heremaps"
+}
+
+func getWaypointType(waypoint string) string {
+	if waypoint == "warehouse-start" {
+		return "start"
+	}
+	if waypoint == "warehouse-end" {
+		return "end"
+	}
+	// Parse stop numbers like "stop1", "stop2", etc.
+	return "stop"
+}
+
+func getTaskInfo(waypoint string, tasks []TaskRow) map[string]interface{} {
+	// Extract stop number from waypoint (e.g., "stop1" -> 1)
+	var stopNum int
+	fmt.Sscanf(waypoint, "stop%d", &stopNum)
+
+	// Find the task by matching against the original task list
+	// Note: stopNum corresponds to the order we added tasks (non-warehouse tasks)
+	taskIdx := 0
+	for _, task := range tasks {
+		if task.Latitude != nil && task.Longitude != nil && task.TaskType != "warehouse_stop" {
+			taskIdx++
+			if taskIdx == stopNum {
+				return map[string]interface{}{
+					"task_type":  task.TaskType,
+					"bin_number": getIntValue(task.BinNumber),
+					"latitude":   *task.Latitude,
+					"longitude":  *task.Longitude,
+					"address":    getStringValue(task.Address),
+				}
+			}
+		}
+	}
+
+	// Warehouse waypoints
+	if waypoint == "warehouse-start" || waypoint == "warehouse-end" {
+		return map[string]interface{}{
+			"task_type": "warehouse",
+		}
+	}
+
+	return map[string]interface{}{}
+}
+
+func formatSeconds(seconds float64) string {
+	minutes := int(seconds) / 60
+	secs := int(seconds) % 60
+	return fmt.Sprintf("%02d:%02d", minutes, secs)
 }
