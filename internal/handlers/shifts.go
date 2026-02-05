@@ -366,7 +366,7 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 }
 
 // StartShift starts an assigned shift
-func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/driver/shift/start")
 
@@ -482,25 +482,37 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	} else {
 		log.Printf("🚀 Route order unlocked - performing smart optimization with dynamic warehouse insertion")
 
-		// Get driver's CURRENT location
+		// Get driver's CURRENT location from Redis (published via Centrifugo)
 		var driverLocation struct {
-			Latitude  float64 `db:"latitude"`
-			Longitude float64 `db:"longitude"`
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
 		}
 
-		locationErr := db.Get(&driverLocation,
-			`SELECT latitude, longitude FROM driver_current_location
-				 WHERE driver_id = $1 AND is_connected = true`,
-			userClaims.UserID,
-		)
+		if redisClient == nil {
+			log.Printf("❌ Redis client not available - cannot retrieve location")
+			utils.RespondError(w, http.StatusInternalServerError, "Location service unavailable")
+			return
+		}
+
+		ctx := context.Background()
+		locationJSON, locationErr := redisClient.GetDriverLocation(ctx, userClaims.UserID)
 
 		if locationErr != nil {
-			log.Printf("❌ Driver location not available: %v", locationErr)
+			log.Printf("❌ Driver location not available in Redis: %v", locationErr)
+			log.Printf("   This means the driver hasn't published their GPS location via the mobile app yet.")
+			log.Printf("   The mobile app publishes location to Centrifugo every 10 seconds when GPS is enabled.")
 			utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
 			return
 		}
 
-		log.Printf("✅ Got driver location: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+		// Parse location JSON from Redis
+		if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
+			log.Printf("❌ Failed to parse location JSON from Redis: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to parse location data")
+			return
+		}
+
+		log.Printf("✅ Got driver location from Redis: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
 
 		// Validate warehouse coordinates
 		if shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil {
