@@ -3161,7 +3161,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 
 // CancelShift cancels a specific shift
 // PUT /api/manager/shifts/:id/cancel
-func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
+func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		shiftID := chi.URLParam(r, "id")
 		log.Printf("❌ REQUEST: PUT /api/manager/shifts/%s/cancel", shiftID)
@@ -3248,7 +3248,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 
 		log.Printf("✅ Shift %s cancelled successfully", shiftID)
 
-		// 4. Send WebSocket notification to driver's mobile app
+		// 4. Send WebSocket notification to driver's mobile app (OLD - backward compatibility)
 		wsHub.BroadcastToUser(shift.DriverID, map[string]interface{}{
 			"type": "shift_cancelled",
 			"data": map[string]interface{}{
@@ -3257,7 +3257,23 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 				"message":      "Your shift has been cancelled by management",
 			},
 		})
-		log.Printf("📡 Sent shift_cancelled websocket to driver %s", shift.DriverID)
+		log.Printf("📡 Sent shift_cancelled websocket (old) to driver %s", shift.DriverID)
+
+		// 4b. Send Centrifugo notification via shift:updates channel (NEW)
+		if centrifugoClient != nil {
+			cancellationData := map[string]interface{}{
+				"type":         "shift_cancelled",
+				"shift_id":     shiftID,
+				"cancelled_at": now,
+				"message":      "Your shift has been cancelled by management",
+			}
+			err := centrifugoClient.PublishShiftUpdate(r.Context(), shiftID, cancellationData)
+			if err != nil {
+				log.Printf("⚠️  Failed to send Centrifugo shift cancellation: %v", err)
+			} else {
+				log.Printf("📡 Sent shift_cancelled via Centrifugo to shift:updates:%s", shiftID)
+			}
+		}
 
 		// 5. Send FCM push notification to driver
 		if fcmService != nil {

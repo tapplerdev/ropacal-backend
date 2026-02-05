@@ -240,6 +240,7 @@ func main() {
 		r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
 		r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))   // Testing endpoint for HERE Maps API
 		r.Post("/routes/test-mapbox-optimization", handlers.TestMapboxOptimization(db)) // Testing endpoint for Mapbox API v1
+		r.Get("/routes/test-mapbox-v2-access", handlers.TestMapboxOptimizationAccess()) // Test Mapbox Optimization v2 Beta access
 		r.Patch("/routes/{id}", handlers.UpdateRoute(db))
 		r.Delete("/routes/{id}", handlers.DeleteRoute(db))
 		r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
@@ -314,7 +315,7 @@ func main() {
 			r.Use(middleware.RequireRole("admin"))
 
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService))
-			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService))
+			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
 			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
 
