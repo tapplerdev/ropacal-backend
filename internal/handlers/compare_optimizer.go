@@ -91,6 +91,12 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("📋 Found %d tasks for shift", len(tasks))
 
+		// Log all tasks for debugging
+		for i, task := range tasks {
+			log.Printf("  Task %d: type=%s, id=%s, potentialLocID=%v, destLat=%v, destLon=%v",
+				i+1, task.TaskType, task.ID, task.PotentialLocationID, task.DestinationLatitude, task.DestinationLongitude)
+		}
+
 		// 3. Convert to optimization.RouteRequest
 		req := &optimization.RouteRequest{
 			Vehicles:       make([]optimization.Vehicle, 1),
@@ -140,9 +146,14 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 						FillPercentage: getIntValue(task.FillPercentage),
 					}
 					req.Collections = append(req.Collections, collection)
+				} else {
+					log.Printf("⚠️  Skipping collection task %s: missing required fields (binID=%v, lat=%v, lon=%v)",
+						task.ID, task.BinID != nil, task.Latitude != nil, task.Longitude != nil)
 				}
 
 			case "placement":
+				log.Printf("🔍 Processing placement task: id=%s, potentialLocID=%v, destLat=%v, destLon=%v",
+					task.ID, task.PotentialLocationID, task.DestinationLatitude, task.DestinationLongitude)
 				if task.PotentialLocationID != nil && task.DestinationLatitude != nil && task.DestinationLongitude != nil {
 					placement := optimization.Placement{
 						ID:                *task.PotentialLocationID,
@@ -159,6 +170,9 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 						DropoffDuration: 120,
 					}
 					req.Placements = append(req.Placements, placement)
+					log.Printf("✅ Added placement: %s", *task.PotentialLocationID)
+				} else {
+					log.Printf("⚠️  Skipping placement task %s: missing required fields", task.ID)
 				}
 
 			case "pickup":
