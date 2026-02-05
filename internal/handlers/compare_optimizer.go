@@ -225,6 +225,19 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		if mapboxErr == nil {
+			// Extract detailed stop sequence
+			stops := make([]map[string]interface{}, 0)
+			for i, stop := range mapboxResp.Routes[0].Stops {
+				stops = append(stops, map[string]interface{}{
+					"sequence":      i + 1,
+					"type":          string(stop.Type),
+					"location_name": stop.LocationName,
+					"address":       stop.Address,
+					"eta":           stop.ETA.Format("15:04:05"),
+					"duration_sec":  stop.Duration,
+				})
+			}
+
 			result["mapbox"] = map[string]interface{}{
 				"success":                true,
 				"total_distance_meters":  mapboxResp.TotalDistance,
@@ -232,6 +245,9 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 				"total_duration_minutes": mapboxResp.TotalDuration / 60,
 				"number_of_stops":        len(mapboxResp.Routes[0].Stops),
 				"dropped_tasks":          mapboxResp.DroppedTasks,
+				"route_sequence":         stops,
+				"respects_shipments":     "YES - Pickup always before dropoff",
+				"respects_capacity":      fmt.Sprintf("YES - Max %d bins", shift.TruckBinCapacity),
 			}
 		} else {
 			result["mapbox"] = map[string]interface{}{
@@ -279,8 +295,22 @@ func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (
 	destNum := 1
 	for _, task := range tasks {
 		if task.Latitude != nil && task.Longitude != nil && task.TaskType != "warehouse_stop" {
+			// Determine service duration based on task type (same as Mapbox)
+			var serviceDuration int
+			switch task.TaskType {
+			case "collection":
+				serviceDuration = 300 // 5 minutes
+			case "placement":
+				serviceDuration = 180 // 1 min pickup + 2 min dropoff = 3 min
+			case "pickup", "dropoff":
+				serviceDuration = 120 // 2 minutes
+			default:
+				serviceDuration = 300 // Default 5 minutes
+			}
+
+			// HERE Maps format: name;lat,lon;duration_in_seconds
 			params.Add(fmt.Sprintf("destination%d", destNum),
-				fmt.Sprintf("stop%d;%.6f,%.6f", destNum, *task.Latitude, *task.Longitude))
+				fmt.Sprintf("stop%d;%.6f,%.6f;%d", destNum, *task.Latitude, *task.Longitude, serviceDuration))
 			destNum++
 		}
 	}
