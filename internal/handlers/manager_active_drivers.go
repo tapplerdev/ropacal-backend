@@ -49,16 +49,7 @@ type AllDriverResponse struct {
 	UpdatedAt       *int64          `json:"updated_at,omitempty"`
 }
 
-// LocationData represents GPS data from Redis
-type LocationData struct {
-	Latitude  float64  `json:"latitude"`
-	Longitude float64  `json:"longitude"`
-	Heading   *float64 `json:"heading,omitempty"`
-	Speed     *float64 `json:"speed,omitempty"`
-	Accuracy  float64  `json:"accuracy"`
-	ShiftID   *string  `json:"shift_id,omitempty"`
-	Timestamp int64    `json:"timestamp"`
-}
+// Note: LocationData struct is defined in centrifugo_location_proxy.go
 
 // GetActiveDrivers returns all drivers publishing location data
 // Includes shift info if they're on an active shift
