@@ -211,6 +211,37 @@ func CreateShiftWithTasks(
 			return nil
 		}
 
+		// Auto-populate bin_number and fill_percentage from bins table if missing
+		// This ensures data integrity even if the client (dashboard/mobile) doesn't send these fields
+		if binIDInterface, ok := taskData["bin_id"]; ok && binIDInterface != nil {
+			binID, _ := binIDInterface.(string)
+			if binID != "" {
+				// Check if bin_number or fill_percentage is missing
+				_, hasBinNumber := taskData["bin_number"]
+				_, hasFillPercentage := taskData["fill_percentage"]
+
+				if !hasBinNumber || !hasFillPercentage {
+					var binData struct {
+						BinNumber      int `db:"bin_number"`
+						FillPercentage int `db:"fill_percentage"`
+					}
+					err := tx.Get(&binData, "SELECT bin_number, fill_percentage FROM bins WHERE id = $1", binID)
+					if err == nil {
+						if !hasBinNumber {
+							taskData["bin_number"] = binData.BinNumber
+							log.Printf("   ✅ Task #%d: Auto-populated bin_number=%d from bins table", i+1, binData.BinNumber)
+						}
+						if !hasFillPercentage {
+							taskData["fill_percentage"] = binData.FillPercentage
+							log.Printf("   ✅ Task #%d: Auto-populated fill_percentage=%d from bins table", i+1, binData.FillPercentage)
+						}
+					} else if err != nil {
+						log.Printf("   ⚠️  Task #%d: Failed to lookup bin data for %s: %v", i+1, binID, err)
+					}
+				}
+			}
+		}
+
 		_, err = tx.Exec(
 			taskQuery,
 			taskID, shiftID, i+1, taskType, lat, lon,
