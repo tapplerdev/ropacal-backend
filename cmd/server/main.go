@@ -323,6 +323,7 @@ func main() {
 			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub))
 			r.Get("/manager/shifts", handlers.GetAllShifts(db))              // List all shifts with filtering (register first - exact match)
 			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))   // Get single shift (register after)
+			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db)) // Compare Mapbox v2 optimization
 
 			// One-time data migration endpoints (can be removed after use)
 			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
