@@ -152,9 +152,10 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 				}
 
 			case "placement":
-				log.Printf("🔍 Processing placement task: id=%s, potentialLocID=%v, destLat=%v, destLon=%v",
-					task.ID, task.PotentialLocationID, task.DestinationLatitude, task.DestinationLongitude)
-				if task.PotentialLocationID != nil && task.DestinationLatitude != nil && task.DestinationLongitude != nil {
+				log.Printf("🔍 Processing placement task: id=%s, potentialLocID=%v, lat=%v, lon=%v",
+					task.ID, task.PotentialLocationID, task.Latitude, task.Longitude)
+				// For placement tasks, latitude/longitude contain the placement location coordinates
+				if task.PotentialLocationID != nil && task.Latitude != nil && task.Longitude != nil {
 					placement := optimization.Placement{
 						ID:                *task.PotentialLocationID,
 						NewBinNumber:      getIntValue(task.NewBinNumber),
@@ -162,9 +163,9 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 						PlacementLocation: optimization.Location{
 							ID:        *task.PotentialLocationID,
 							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
-							Latitude:  *task.DestinationLatitude,
-							Longitude: *task.DestinationLongitude,
-							Address:   getStringValue(task.DestinationAddress),
+							Latitude:  *task.Latitude,
+							Longitude: *task.Longitude,
+							Address:   getStringValue(task.Address),
 						},
 						PickupDuration:  60,
 						DropoffDuration: 120,
@@ -172,7 +173,8 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 					req.Placements = append(req.Placements, placement)
 					log.Printf("✅ Added placement: %s", *task.PotentialLocationID)
 				} else {
-					log.Printf("⚠️  Skipping placement task %s: missing required fields", task.ID)
+					log.Printf("⚠️  Skipping placement task %s: missing required fields (potentialLocID=%v, lat=%v, lon=%v)",
+						task.ID, task.PotentialLocationID != nil, task.Latitude != nil, task.Longitude != nil)
 				}
 
 			case "pickup":
