@@ -371,6 +371,14 @@ func (m *MapboxOptimizer) parseMapboxSolution(solution map[string]interface{}, o
 					Wait:         int(wait),
 				}
 
+				// Extract coordinates from the original request
+				if originalLoc := findLocationInRequest(location, originalReq); originalLoc != nil {
+					optimizedStop.Latitude = originalLoc.Latitude
+					optimizedStop.Longitude = originalLoc.Longitude
+					optimizedStop.Address = originalLoc.Address
+					optimizedStop.LocationName = originalLoc.Name
+				}
+
 				// Extract task references from services/pickups/dropoffs
 				if services, ok := stop["services"].([]interface{}); ok && len(services) > 0 {
 					if svc, ok := services[0].(string); ok {
@@ -395,4 +403,48 @@ func (m *MapboxOptimizer) parseMapboxSolution(solution map[string]interface{}, o
 	}
 
 	return response
+}
+
+// findLocationInRequest finds location details from the original request
+func findLocationInRequest(locationID string, req *RouteRequest) *Location {
+	// Check warehouse
+	if locationID == req.Vehicles[0].StartLocation.ID {
+		return &req.Vehicles[0].StartLocation
+	}
+
+	// Check collections
+	for _, c := range req.Collections {
+		if c.Location.ID == locationID {
+			return &c.Location
+		}
+	}
+
+	// Check placements
+	for _, p := range req.Placements {
+		if p.WarehouseLocation.ID == locationID {
+			return &p.WarehouseLocation
+		}
+		if p.PlacementLocation.ID == locationID {
+			return &p.PlacementLocation
+		}
+	}
+
+	// Check move requests
+	for _, m := range req.MoveRequests {
+		if m.PickupLocation.ID == locationID {
+			return &m.PickupLocation
+		}
+		if m.DropoffLocation.ID == locationID {
+			return &m.DropoffLocation
+		}
+	}
+
+	// Check warehouse stops
+	for _, w := range req.WarehouseStops {
+		if w.Location.ID == locationID {
+			return &w.Location
+		}
+	}
+
+	return nil
 }

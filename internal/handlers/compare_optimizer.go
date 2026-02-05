@@ -233,6 +233,8 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 					"type":          string(stop.Type),
 					"location_name": stop.LocationName,
 					"address":       stop.Address,
+					"latitude":      stop.Latitude,
+					"longitude":     stop.Longitude,
 					"eta":           stop.ETA.Format("15:04:05"),
 					"duration_sec":  stop.Duration,
 				})
