@@ -59,6 +59,17 @@ func GetActiveDrivers(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 
 		ctx := context.Background()
 
+		// Check if Redis is available
+		if redisClient == nil {
+			log.Println("⚠️  Redis client is nil - returning empty driver list")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"data":    []ActiveDriverResponse{},
+			})
+			return
+		}
+
 		// 1. Get all driver locations from Redis (source of truth for current location)
 		locations, err := redisClient.GetAllDriverLocations(ctx)
 		if err != nil {
