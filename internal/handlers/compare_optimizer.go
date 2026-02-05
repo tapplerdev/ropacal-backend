@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 
 	"ropacal-backend/internal/services/optimization"
 
@@ -13,7 +15,28 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// CompareOptimizerForShift compares the current route with Mapbox v2 optimization
+// TaskRow represents a route task row from the database
+type TaskRow struct {
+	ID                   string   `db:"id"`
+	TaskType             string   `db:"task_type"`
+	SequenceOrder        int      `db:"sequence_order"`
+	BinID                *string  `db:"bin_id"`
+	BinNumber            *int     `db:"bin_number"`
+	Latitude             *float64 `db:"latitude"`
+	Longitude            *float64 `db:"longitude"`
+	Address              *string  `db:"address"`
+	FillPercentage       *int     `db:"fill_percentage"`
+	NewBinNumber         *int     `db:"new_bin_number"`
+	MoveRequestID        *string  `db:"move_request_id"`
+	DestinationLatitude  *float64 `db:"destination_latitude"`
+	DestinationLongitude *float64 `db:"destination_longitude"`
+	DestinationAddress   *string  `db:"destination_address"`
+	PotentialLocationID  *string  `db:"potential_location_id"`
+	WarehouseAction      *string  `db:"warehouse_action"`
+	BinsToLoad           *int     `db:"bins_to_load"`
+}
+
+// CompareOptimizerForShift compares Mapbox v2 vs HERE Maps optimization
 func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		shiftID := chi.URLParam(r, "id")
@@ -47,41 +70,16 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("📦 Shift found: Driver=%s, Capacity=%d bins", shift.DriverID, shift.TruckBinCapacity)
 
-		// 2. Fetch all tasks for this shift
-		type TaskRow struct {
-			ID                  string   `db:"id"`
-			ShiftID             string   `db:"shift_id"`
-			TaskType            string   `db:"task_type"`
-			SequenceOrder       int      `db:"sequence_order"`
-			BinID               *string  `db:"bin_id"`
-			BinNumber           *int     `db:"bin_number"`
-			Latitude            *float64 `db:"latitude"`
-			Longitude           *float64 `db:"longitude"`
-			Address             *string  `db:"address"`
-			FillPercentage      *int     `db:"fill_percentage"`
-			NewBinNumber        *int     `db:"new_bin_number"`
-			MoveRequestID       *string  `db:"move_request_id"`
-			PickupLatitude      *float64 `db:"pickup_latitude"`
-			PickupLongitude     *float64 `db:"pickup_longitude"`
-			PickupAddress       *string  `db:"pickup_address"`
-			DropoffLatitude     *float64 `db:"dropoff_latitude"`
-			DropoffLongitude    *float64 `db:"dropoff_longitude"`
-			DropoffAddress      *string  `db:"dropoff_address"`
-			PotentialLocationID *string  `db:"potential_location_id"`
-			WarehouseAction     *string  `db:"warehouse_action"`
-			BinsToLoad          *int     `db:"bins_to_load"`
-		}
-
+		// 2. Fetch all tasks for this shift from route_tasks table
 		var tasks []TaskRow
 		err = db.Select(&tasks, `
 			SELECT
-				id, shift_id, task_type, sequence_order,
+				id, task_type, sequence_order,
 				bin_id, bin_number, latitude, longitude, address, fill_percentage,
 				new_bin_number, move_request_id,
-				pickup_latitude, pickup_longitude, pickup_address,
-				dropoff_latitude, dropoff_longitude, dropoff_address,
+				destination_latitude, destination_longitude, destination_address,
 				potential_location_id, warehouse_action, bins_to_load
-			FROM shift_bins
+			FROM route_tasks
 			WHERE shift_id = $1
 			ORDER BY sequence_order ASC
 		`, shiftID)
@@ -138,120 +136,193 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 							Longitude: *task.Longitude,
 							Address:   getStringValue(task.Address),
 						},
-						Duration:       300, // 5 minutes default
+						Duration:       300,
 						FillPercentage: getIntValue(task.FillPercentage),
 					}
 					req.Collections = append(req.Collections, collection)
-					log.Printf("   ➕ Collection: Bin #%d at (%.6f, %.6f)", collection.BinNumber, collection.Location.Latitude, collection.Location.Longitude)
 				}
 
 			case "placement":
-				if task.PotentialLocationID != nil && task.DropoffLatitude != nil && task.DropoffLongitude != nil {
+				if task.PotentialLocationID != nil && task.DestinationLatitude != nil && task.DestinationLongitude != nil {
 					placement := optimization.Placement{
 						ID:                *task.PotentialLocationID,
 						NewBinNumber:      getIntValue(task.NewBinNumber),
 						WarehouseLocation: warehouseLocation,
 						PlacementLocation: optimization.Location{
 							ID:        *task.PotentialLocationID,
-							Name:      fmt.Sprintf("Placement Site #%d", getIntValue(task.NewBinNumber)),
-							Latitude:  *task.DropoffLatitude,
-							Longitude: *task.DropoffLongitude,
-							Address:   getStringValue(task.DropoffAddress),
+							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
+							Latitude:  *task.DestinationLatitude,
+							Longitude: *task.DestinationLongitude,
+							Address:   getStringValue(task.DestinationAddress),
 						},
-						PickupDuration:  60,  // 1 minute to load bin
-						DropoffDuration: 120, // 2 minutes to place bin
+						PickupDuration:  60,
+						DropoffDuration: 120,
 					}
 					req.Placements = append(req.Placements, placement)
-					log.Printf("   ➕ Placement: Bin #%d at (%.6f, %.6f)", placement.NewBinNumber, placement.PlacementLocation.Latitude, placement.PlacementLocation.Longitude)
 				}
 
-			case "pickup", "dropoff":
-				// For move requests, we need to ensure we only add once (not for both pickup and dropoff)
-				if task.MoveRequestID != nil && task.TaskType == "pickup" {
-					if task.PickupLatitude != nil && task.PickupLongitude != nil &&
-						task.DropoffLatitude != nil && task.DropoffLongitude != nil {
-						moveRequest := optimization.MoveRequest{
-							ID:        *task.MoveRequestID,
-							BinID:     getStringValue(task.BinID),
-							BinNumber: getIntValue(task.BinNumber),
-							PickupLocation: optimization.Location{
-								ID:        fmt.Sprintf("%s-pickup", *task.MoveRequestID),
-								Name:      fmt.Sprintf("Pickup Bin #%d", getIntValue(task.BinNumber)),
-								Latitude:  *task.PickupLatitude,
-								Longitude: *task.PickupLongitude,
-								Address:   getStringValue(task.PickupAddress),
-							},
-							DropoffLocation: optimization.Location{
-								ID:        fmt.Sprintf("%s-dropoff", *task.MoveRequestID),
-								Name:      fmt.Sprintf("Dropoff Bin #%d", getIntValue(task.BinNumber)),
-								Latitude:  *task.DropoffLatitude,
-								Longitude: *task.DropoffLongitude,
-								Address:   getStringValue(task.DropoffAddress),
-							},
-							PickupDuration:  120, // 2 minutes to pick up
-							DropoffDuration: 120, // 2 minutes to drop off
-						}
-						req.MoveRequests = append(req.MoveRequests, moveRequest)
-						log.Printf("   ➕ Move Request: Bin #%d from (%.6f, %.6f) to (%.6f, %.6f)",
-							moveRequest.BinNumber,
-							moveRequest.PickupLocation.Latitude, moveRequest.PickupLocation.Longitude,
-							moveRequest.DropoffLocation.Latitude, moveRequest.DropoffLocation.Longitude)
+			case "pickup":
+				if task.MoveRequestID != nil && task.Latitude != nil && task.Longitude != nil &&
+					task.DestinationLatitude != nil && task.DestinationLongitude != nil {
+					moveRequest := optimization.MoveRequest{
+						ID:        *task.MoveRequestID,
+						BinID:     getStringValue(task.BinID),
+						BinNumber: getIntValue(task.BinNumber),
+						PickupLocation: optimization.Location{
+							ID:        fmt.Sprintf("%s-pickup", *task.MoveRequestID),
+							Name:      fmt.Sprintf("Pickup #%d", getIntValue(task.BinNumber)),
+							Latitude:  *task.Latitude,
+							Longitude: *task.Longitude,
+							Address:   getStringValue(task.Address),
+						},
+						DropoffLocation: optimization.Location{
+							ID:        fmt.Sprintf("%s-dropoff", *task.MoveRequestID),
+							Name:      fmt.Sprintf("Dropoff #%d", getIntValue(task.BinNumber)),
+							Latitude:  *task.DestinationLatitude,
+							Longitude: *task.DestinationLongitude,
+							Address:   getStringValue(task.DestinationAddress),
+						},
+						PickupDuration:  120,
+						DropoffDuration: 120,
 					}
+					req.MoveRequests = append(req.MoveRequests, moveRequest)
 				}
 
 			case "warehouse_stop":
 				warehouseStop := optimization.WarehouseStop{
-					ID:       task.ID,
-					Location: warehouseLocation,
-					Duration: 300, // 5 minutes default
-					Action:   getStringValue(task.WarehouseAction),
+					ID:         task.ID,
+					Location:   warehouseLocation,
+					Duration:   300,
+					Action:     getStringValue(task.WarehouseAction),
 					BinsToLoad: getIntValue(task.BinsToLoad),
 				}
 				req.WarehouseStops = append(req.WarehouseStops, warehouseStop)
-				log.Printf("   ➕ Warehouse Stop: %s (%d bins)", warehouseStop.Action, warehouseStop.BinsToLoad)
 			}
 		}
 
-		log.Printf("📊 Route Request Summary:")
-		log.Printf("   - Collections: %d", len(req.Collections))
-		log.Printf("   - Placements: %d", len(req.Placements))
-		log.Printf("   - Move Requests: %d", len(req.MoveRequests))
-		log.Printf("   - Warehouse Stops: %d", len(req.WarehouseStops))
+		log.Printf("📊 Route Request: %d collections, %d placements, %d moves, %d warehouse",
+			len(req.Collections), len(req.Placements), len(req.MoveRequests), len(req.WarehouseStops))
 
-		// 4. Run through Mapbox v2 optimizer
-		log.Printf("🚀 Running Mapbox v2 optimization...")
-		optimizer := optimization.NewMapboxOptimizer()
+		// 4. Run Mapbox v2 optimization
+		log.Printf("🚀 Running Mapbox v2...")
+		mapboxOptimizer := optimization.NewMapboxOptimizer()
+		mapboxResp, mapboxErr := mapboxOptimizer.OptimizeRoute(req)
 
-		response, err := optimizer.OptimizeRoute(req)
-		if err != nil {
-			log.Printf("❌ Optimization failed: %v", err)
-			http.Error(w, fmt.Sprintf("Optimization failed: %v", err), http.StatusInternalServerError)
-			return
-		}
+		// 5. Run HERE Maps optimization
+		log.Printf("🚀 Running HERE Maps...")
+		hereResp, hereErr := callHereOptimization(shift.WarehouseLatitude, shift.WarehouseLongitude, tasks)
 
-		log.Printf("✅ Optimization complete!")
-		log.Printf("   - Total Routes: %d", len(response.Routes))
-		log.Printf("   - Total Distance: %.0fm", response.TotalDistance)
-		log.Printf("   - Total Duration: %ds", response.TotalDuration)
-		log.Printf("   - Dropped Tasks: %d", len(response.DroppedTasks))
-
-		// 5. Return the result
+		// 6. Build comparison result
 		result := map[string]interface{}{
 			"shift_id": shiftID,
-			"original_tasks": map[string]interface{}{
-				"total":           len(tasks),
+			"summary": map[string]interface{}{
+				"total_tasks":     len(tasks),
 				"collections":     len(req.Collections),
 				"placements":      len(req.Placements),
 				"move_requests":   len(req.MoveRequests),
 				"warehouse_stops": len(req.WarehouseStops),
 			},
-			"mapbox_v2_result": response,
-			"optimizer_used":   optimizer.Name(),
+		}
+
+		if mapboxErr == nil {
+			result["mapbox"] = map[string]interface{}{
+				"success":                true,
+				"total_distance_meters":  mapboxResp.TotalDistance,
+				"total_duration_seconds": mapboxResp.TotalDuration,
+				"total_duration_minutes": mapboxResp.TotalDuration / 60,
+				"number_of_stops":        len(mapboxResp.Routes[0].Stops),
+				"dropped_tasks":          mapboxResp.DroppedTasks,
+			}
+		} else {
+			result["mapbox"] = map[string]interface{}{
+				"success": false,
+				"error":   mapboxErr.Error(),
+			}
+		}
+
+		if hereErr == nil {
+			result["heremaps"] = hereResp
+		} else {
+			result["heremaps"] = map[string]interface{}{
+				"success": false,
+				"error":   hereErr.Error(),
+			}
+		}
+
+		// Add comparison if both succeeded
+		if mapboxErr == nil && hereErr == nil {
+			mapboxDuration := mapboxResp.TotalDuration
+			hereDuration := int(hereResp["total_duration_seconds"].(float64))
+
+			result["comparison"] = map[string]interface{}{
+				"faster_optimizer":        getFasterOptimizer(mapboxDuration, hereDuration),
+				"time_difference_seconds": abs(mapboxDuration - hereDuration),
+				"time_difference_minutes": abs(mapboxDuration-hereDuration) / 60,
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	}
+}
+
+// callHereOptimization calls HERE Maps Waypoints Sequence API
+func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (map[string]interface{}, error) {
+	apiURL := "https://wps.hereapi.com/v8/findsequence2"
+	params := url.Values{}
+	params.Add("apiKey", HereAPIKey)
+	params.Add("mode", "fastest;car;traffic:disabled")
+	params.Add("improveFor", "time")
+	params.Add("start", fmt.Sprintf("warehouse;%.6f,%.6f", warehouseLat, warehouseLon))
+	params.Add("end", fmt.Sprintf("warehouse;%.6f,%.6f", warehouseLat, warehouseLon))
+
+	destNum := 1
+	for _, task := range tasks {
+		if task.Latitude != nil && task.Longitude != nil && task.TaskType != "warehouse_stop" {
+			params.Add(fmt.Sprintf("destination%d", destNum),
+				fmt.Sprintf("stop%d;%.6f,%.6f", destNum, *task.Latitude, *task.Longitude))
+			destNum++
+		}
+	}
+
+	fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
+	resp, err := http.Get(fullURL)
+	if err != nil {
+		return nil, fmt.Errorf("HERE API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HERE API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var hereResp struct {
+		Results []struct {
+			Distance string `json:"distance"`
+			Time     string `json:"time"`
+		} `json:"results"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&hereResp); err != nil {
+		return nil, fmt.Errorf("failed to parse HERE response: %w", err)
+	}
+
+	if len(hereResp.Results) == 0 {
+		return nil, fmt.Errorf("HERE returned no results")
+	}
+
+	// Parse distance and time from strings
+	var distance, duration float64
+	fmt.Sscanf(hereResp.Results[0].Distance, "%f", &distance)
+	fmt.Sscanf(hereResp.Results[0].Time, "%f", &duration)
+
+	return map[string]interface{}{
+		"success":                true,
+		"total_distance_meters":  distance,
+		"total_duration_seconds": duration,
+		"total_duration_minutes": duration / 60,
+	}, nil
 }
 
 // Helper functions
@@ -267,4 +338,11 @@ func getIntValue(i *int) int {
 		return 0
 	}
 	return *i
+}
+
+func getFasterOptimizer(mapboxDuration, hereDuration int) string {
+	if mapboxDuration < hereDuration {
+		return "mapbox"
+	}
+	return "heremaps"
 }
