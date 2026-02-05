@@ -258,6 +258,49 @@ func CreateShiftWithTasks(
 		}
 	}
 
+	// Smart warehouse task insertion: Ensure shift always ends at warehouse
+	// Check if last task is a warehouse_stop, if not, append one
+	var lastTaskType string
+	if len(tasks) > 0 {
+		lastTaskType, _ = tasks[len(tasks)-1]["task_type"].(string)
+	}
+
+	if lastTaskType != "warehouse_stop" {
+		log.Printf("🏭 Last task is '%s', appending final warehouse stop", lastTaskType)
+
+		// Create final warehouse task
+		warehouseTaskID := uuid.New().String()
+		warehouseSequence := len(tasks) + 1
+
+		_, err = tx.Exec(
+			taskQuery,
+			warehouseTaskID, shiftID, warehouseSequence, "warehouse_stop",
+			warehouseLat, warehouseLon, warehouseAddr,
+			nil, nil, nil, // bin_id, bin_number, fill_percentage
+			nil, nil,      // potential_location_id, new_bin_number
+			nil, nil, nil, nil, nil, // move_request fields
+			nil, nil,      // warehouse_action, bins_to_load (nil = just return)
+			nil, []byte("{}"), now, // route_id, task_data, created_at
+		)
+		if err != nil {
+			return "", 0, fmt.Errorf("failed to create final warehouse task: %w", err)
+		}
+
+		// Update shift total_bins to include the warehouse task
+		_, err = tx.Exec(
+			`UPDATE shifts SET total_bins = $1, updated_at = $2 WHERE id = $3`,
+			warehouseSequence, now, shiftID,
+		)
+		if err != nil {
+			return "", 0, fmt.Errorf("failed to update shift total_bins: %w", err)
+		}
+
+		log.Printf("✅ Added final warehouse stop (sequence %d) - shift now ends at warehouse", warehouseSequence)
+		totalBins = warehouseSequence // Update for return value
+	} else {
+		log.Printf("✅ Last task is already warehouse_stop - no need to append")
+	}
+
 	// Populate shift_bins table for backward compatibility with StartShift handler
 	// Extract all collection tasks (bins to collect) and create shift_bins entries
 	shiftBinsQuery := `
