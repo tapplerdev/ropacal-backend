@@ -308,9 +308,9 @@ func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (
 				serviceDuration = 300 // Default 5 minutes
 			}
 
-			// HERE Maps format: name;lat,lon;duration_in_seconds
+			// HERE Maps format: name;lat,lon;st:duration_in_seconds
 			params.Add(fmt.Sprintf("destination%d", destNum),
-				fmt.Sprintf("stop%d;%.6f,%.6f;%d", destNum, *task.Latitude, *task.Longitude, serviceDuration))
+				fmt.Sprintf("stop%d;%.6f,%.6f;st:%d", destNum, *task.Latitude, *task.Longitude, serviceDuration))
 			destNum++
 		}
 	}
