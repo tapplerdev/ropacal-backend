@@ -291,6 +291,7 @@ func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (
 	params.Add("apiKey", HereAPIKey)
 	params.Add("mode", "fastest;car;traffic:disabled")
 	params.Add("improveFor", "time")
+	params.Add("departure", "now") // Required when using service time constraints
 	params.Add("start", fmt.Sprintf("warehouse-start;%.6f,%.6f", warehouseLat, warehouseLon))
 	params.Add("end", fmt.Sprintf("warehouse-end;%.6f,%.6f", warehouseLat, warehouseLon))
 
