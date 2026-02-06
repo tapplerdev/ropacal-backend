@@ -30,10 +30,37 @@ func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 // GetShiftTasksDetailed retrieves tasks with JOINed data from related tables
 func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{}, error) {
 	// Query route_tasks directly and LEFT JOIN with bins table to get bin_number for collection tasks
+	// Explicitly cast float columns to text to avoid base64 encoding in JSON
 	query := `
 		SELECT
-			rt.*,
-			COALESCE(rt.bin_number, b.bin_number::int) as bin_number
+			rt.id,
+			rt.shift_id,
+			rt.sequence_order,
+			rt.task_type,
+			rt.latitude::text as latitude,
+			rt.longitude::text as longitude,
+			rt.address,
+			rt.bin_id,
+			COALESCE(rt.bin_number, b.bin_number::int) as bin_number,
+			rt.fill_percentage,
+			rt.potential_location_id,
+			rt.new_bin_number,
+			rt.move_request_id,
+			rt.destination_latitude::text as destination_latitude,
+			rt.destination_longitude::text as destination_longitude,
+			rt.destination_address,
+			rt.move_type,
+			rt.warehouse_action,
+			rt.bins_to_load,
+			rt.route_id,
+			rt.task_data,
+			rt.is_completed,
+			rt.completed_at,
+			rt.updated_fill_percentage,
+			rt.skipped,
+			rt.skip_reason,
+			rt.created_at,
+			rt.updated_at
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
 		WHERE rt.shift_id = $1
