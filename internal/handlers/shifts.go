@@ -1632,6 +1632,13 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			bins = []models.ShiftBinWithDetails{}
 		}
 
+		// Get updated tasks list (new task-based system)
+		tasks, err := database.GetShiftTasks(db, shift.ID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
+			tasks = []models.RouteTask{}
+		}
+
 		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
 		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
 		log.Printf("[DIAGNOSTIC] 🔢 Logical counts: %d completed / %d total (Physical: %d/%d)",
@@ -1646,6 +1653,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				"completed_bins": logicalCompleted,
 				"total_bins":     logicalTotal,
 				"bins":           bins,
+				"tasks":          tasks,
 			},
 		})
 
@@ -1857,6 +1865,13 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			bins = []models.ShiftBinWithDetails{}
 		}
 
+		// Get updated tasks list (new task-based system)
+		tasks, err := database.GetShiftTasks(db, shift.ID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
+			tasks = []models.RouteTask{}
+		}
+
 		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
 		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
 
@@ -1869,6 +1884,7 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				"completed_bins": logicalCompleted,
 				"total_bins":     logicalTotal,
 				"bins":           bins,
+				"tasks":          tasks,
 			},
 		})
 
