@@ -1061,6 +1061,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		log.Printf("✅ Shift history saved: %s (reason: %s, completion: %.1f%%)", shift.ID, endReason, completionRate)
 
 		// Update shift
+		log.Printf("🔄 Ending shift: %s (status: ended)", shift.ID)
 		updateQuery := `UPDATE shifts
 						SET status = 'ended',
 							end_time = $1,
@@ -1075,6 +1076,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to end shift")
 			return
 		}
+		log.Printf("✅ Shift ended successfully")
 
 		// Update incomplete move requests back to pending and clear assignment
 		updateMovesQuery := `UPDATE bin_move_requests
@@ -1610,6 +1612,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Update shift completed_bins count
+		log.Printf("🔄 Updating shift completed_bins count (shift_id=%s)", shift.ID)
 		shiftQuery := `UPDATE shifts
 					   SET completed_bins = completed_bins + 1,
 						   updated_at = $1
@@ -1621,16 +1624,19 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
 			return
 		}
+		log.Printf("✅ Shift completed_bins incremented")
 
 		// Get updated shift
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
 		// Get updated bins list
+		log.Printf("🔄 Fetching shift tasks via getShiftTasksWithDetails...")
 		bins, err := getShiftTasksWithDetails(db, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
 			bins = []models.ShiftBinWithDetails{}
 		}
+		log.Printf("✅ Fetched %d tasks", len(bins))
 
 		// Get updated tasks list (new task-based system)
 		tasks, err := database.GetShiftTasks(db, shift.ID)
@@ -1831,6 +1837,7 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Increment shift completed_bins counter
+		log.Printf("🔄 Updating shift completed_bins (skipping %d tasks)", tasksSkipped)
 		_, err = tx.Exec(`
 			UPDATE shifts
 			SET completed_bins = completed_bins + $1,
@@ -1842,6 +1849,7 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
 			return
 		}
+		log.Printf("✅ Shift updated for skip")
 
 		// Commit transaction
 		if err = tx.Commit(); err != nil {
