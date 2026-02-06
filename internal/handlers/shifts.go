@@ -1611,20 +1611,24 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Update shift completed_bins count
-		log.Printf("🔄 Updating shift completed_bins count (shift_id=%s)", shift.ID)
-		shiftQuery := `UPDATE shifts
-					   SET completed_bins = completed_bins + 1,
-						   updated_at = $1
-					   WHERE id = $2`
+		// Update shift completed_bins count (only for bin tasks, not warehouse stops)
+		if taskType != "warehouse_stop" {
+			log.Printf("🔄 Updating shift completed_bins count (shift_id=%s, task_type=%s)", shift.ID, taskType)
+			shiftQuery := `UPDATE shifts
+						   SET completed_bins = completed_bins + 1,
+							   updated_at = $1
+						   WHERE id = $2`
 
-		_, err = db.Exec(shiftQuery, now, shift.ID)
-		if err != nil {
-			log.Printf("❌ Error updating shift: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
-			return
+			_, err = db.Exec(shiftQuery, now, shift.ID)
+			if err != nil {
+				log.Printf("❌ Error updating shift: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
+				return
+			}
+			log.Printf("✅ Shift completed_bins incremented")
+		} else {
+			log.Printf("⏭️  Skipping completed_bins increment for warehouse_stop task")
 		}
-		log.Printf("✅ Shift completed_bins incremented")
 
 		// Get updated shift
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
@@ -1836,14 +1840,20 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Increment shift completed_bins counter
-		log.Printf("🔄 Updating shift completed_bins (skipping %d tasks)", tasksSkipped)
+		// Increment shift completed_bins counter (only for bin tasks, not warehouse stops)
+		binTasksSkipped := tasksSkipped
+		if task.TaskType == "warehouse_stop" {
+			binTasksSkipped = 0 // Warehouse stops don't count toward completed_bins
+			log.Printf("⏭️  Main task is warehouse_stop - not counting toward completed_bins")
+		}
+
+		log.Printf("🔄 Updating shift completed_bins (skipping %d tasks, %d count toward completed_bins)", tasksSkipped, binTasksSkipped)
 		_, err = tx.Exec(`
 			UPDATE shifts
 			SET completed_bins = completed_bins + $1,
 				updated_at = $2
 			WHERE id = $3
-		`, tasksSkipped, now, shift.ID)
+		`, binTasksSkipped, now, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error updating shift: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")

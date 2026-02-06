@@ -113,7 +113,16 @@ func CreateShiftWithTasks(
 		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10)
 	`
 
-	totalBins := len(tasks)
+	// Count only bin-related tasks (exclude warehouse_stop) for total_bins
+	totalBins := 0
+	for _, taskData := range tasks {
+		taskType, _ := taskData["task_type"].(string)
+		if taskType != "warehouse_stop" {
+			totalBins++
+		}
+	}
+	log.Printf("   📊 Shift total_bins: %d (excluding warehouse stops from %d total tasks)", totalBins, len(tasks))
+
 	_, err = tx.Exec(
 		shiftQuery,
 		shiftID, driverID, totalBins, truckBinCapacity,
