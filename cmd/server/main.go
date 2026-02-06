@@ -273,6 +273,7 @@ func main() {
 
 			// Shift management
 			r.Get("/driver/shift/current", handlers.GetCurrentShift(db))
+			r.Post("/driver/shift/preflight", handlers.PreflightCheck(db, redisClient))
 			r.Post("/driver/shift/start", handlers.StartShift(db, wsHub, redisClient))
 			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub))
 			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub))

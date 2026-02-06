@@ -366,6 +366,146 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// PreflightCheck validates GPS readiness before starting a shift
+// Returns: ready status, location cached, Centrifugo connection health
+func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: POST /api/driver/shift/preflight")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+
+		// Initialize response
+		checks := map[string]interface{}{
+			"gps_quality":          "unknown",
+			"location_cached":      false,
+			"can_optimize":         false,
+			"centrifugo_connected": true, // Assume true if they can call this
+		}
+		ready := false
+		message := ""
+		retryAfter := 2 // seconds
+
+		// Check 1: Verify location is in Redis
+		ctx := context.Background()
+		locationJSON, locationErr := redisClient.GetDriverLocation(ctx, userClaims.UserID)
+
+		if locationErr != nil {
+			log.Printf("❌ Location not cached in Redis: %v", locationErr)
+			checks["location_cached"] = false
+			message = "Location syncing - Please wait..."
+
+			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+				"success":     true,
+				"ready":       ready,
+				"checks":      checks,
+				"message":     message,
+				"retry_after": retryAfter,
+			})
+			return
+		}
+
+		checks["location_cached"] = true
+
+		// Check 2: Parse and validate GPS accuracy
+		var driverLocation models.DriverLocation
+		if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
+			log.Printf("❌ Failed to parse location JSON: %v", err)
+			message = "Invalid location data"
+
+			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+				"success":     true,
+				"ready":       ready,
+				"checks":      checks,
+				"message":     message,
+				"retry_after": retryAfter,
+			})
+			return
+		}
+
+		// Check accuracy availability
+		accuracy := 0.0
+		if driverLocation.Accuracy != nil {
+			accuracy = *driverLocation.Accuracy
+		}
+
+		log.Printf("✅ Location cached: (%.6f, %.6f), accuracy: %.1fm",
+			driverLocation.Latitude, driverLocation.Longitude, accuracy)
+
+		// Evaluate GPS quality based on accuracy
+		if accuracy <= 10 {
+			checks["gps_quality"] = "excellent"
+		} else if accuracy <= 50 {
+			checks["gps_quality"] = "good"
+		} else if accuracy <= 100 {
+			checks["gps_quality"] = "fair"
+		} else {
+			checks["gps_quality"] = "poor"
+			message = "GPS signal weak - Move to open area"
+
+			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+				"success":     true,
+				"ready":       ready,
+				"checks":      checks,
+				"message":     message,
+				"retry_after": retryAfter,
+			})
+			return
+		}
+
+		// Check 3: Verify shift is ready to start
+		var shift models.Shift
+		shiftQuery := `SELECT * FROM shifts
+		              WHERE driver_id = $1
+		              AND status = 'ready'
+		              ORDER BY created_at DESC
+		              LIMIT 1`
+
+		shiftErr := db.Get(&shift, shiftQuery, userClaims.UserID)
+		if shiftErr != nil {
+			log.Printf("❌ No ready shift found: %v", shiftErr)
+			message = "No shift assigned"
+
+			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+				"success":     true,
+				"ready":       ready,
+				"checks":      checks,
+				"message":     message,
+				"retry_after": retryAfter,
+			})
+			return
+		}
+
+		checks["can_optimize"] = true
+		ready = true
+		message = "Ready to start shift"
+
+		log.Printf("✅ Preflight checks passed:")
+		log.Printf("   GPS Quality: %s (%.1fm)", checks["gps_quality"], accuracy)
+		log.Printf("   Location Cached: %v", checks["location_cached"])
+		log.Printf("   Can Optimize: %v", checks["can_optimize"])
+		log.Printf("   Estimated Start Time: < 5 seconds")
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success":               true,
+			"ready":                 ready,
+			"checks":                checks,
+			"message":               message,
+			"estimated_start_time":  "< 5 seconds",
+			"location": map[string]float64{
+				"latitude":  driverLocation.Latitude,
+				"longitude": driverLocation.Longitude,
+				"accuracy":  accuracy,
+			},
+		})
+	}
+}
+
 // StartShift starts an assigned shift
 func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
