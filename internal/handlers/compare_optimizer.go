@@ -205,14 +205,9 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 				}
 
 			case "warehouse_stop":
-				warehouseStop := optimization.WarehouseStop{
-					ID:         task.ID,
-					Location:   warehouseLocation,
-					Duration:   300,
-					Action:     getStringValue(task.WarehouseAction),
-					BinsToLoad: getIntValue(task.BinsToLoad),
-				}
-				req.WarehouseStops = append(req.WarehouseStops, warehouseStop)
+				// Skip warehouse stops for Mapbox - they're implicit in placement/move request pickups
+				// Adding them as separate services causes duplicate warehouse visits
+				log.Printf("⏭️  Skipping warehouse_stop task %s (warehouse visits handled implicitly by shipments)", task.ID)
 			}
 		}
 
