@@ -18,6 +18,7 @@ import (
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/services/optimization"
 	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
@@ -521,24 +522,33 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 			return
 		}
 
-		// Run segmented route optimization (optimizes between warehouse stops)
-		err = optimizeRouteInSegments(
+		// Run Mapbox v2 route optimization (capacity-aware, automatic warehouse trips)
+		capacity := 4 // Default capacity
+		if shift.TruckBinCapacity != nil {
+			capacity = *shift.TruckBinCapacity
+		}
+
+		warehouseAddr := ""
+		if shift.WarehouseAddress != nil {
+			warehouseAddr = *shift.WarehouseAddress
+		}
+
+		err = optimizeRouteWithMapbox(
 			db,
 			shift.ID,
-			driverLocation.Latitude,
-			driverLocation.Longitude,
+			capacity,
 			*shift.WarehouseLatitude,
 			*shift.WarehouseLongitude,
-			HereAPIKey,
+			warehouseAddr,
 		)
 
 		if err != nil {
-			log.Printf("❌ Segmented route optimization failed: %v", err)
+			log.Printf("❌ Mapbox v2 route optimization failed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Route optimization failed")
 			return
 		}
 
-		log.Printf("✅ Segmented route optimization complete")
+		log.Printf("✅ Mapbox v2 route optimization complete")
 	}
 
 	// Old shift_bins optimization code (DEPRECATED - remove after migration)
@@ -3777,6 +3787,324 @@ func min(a, b int) int {
 	}
 	return b
 }
+// optimizeRouteWithMapbox optimizes a shift's route using Mapbox Optimization v2 API
+// This replaces the old segmented HERE Maps optimization with intelligent capacity-aware routing
+func optimizeRouteWithMapbox(
+	db *sqlx.DB,
+	shiftID string,
+	capacity int,
+	warehouseLat, warehouseLon float64,
+	warehouseAddr string,
+) error {
+	log.Printf("🚀 [MAPBOX OPTIMIZER] Starting Mapbox v2 route optimization")
+
+	// Step 1: Fetch shift details
+	var shift struct {
+		ID            string  `db:"id"`
+		DriverID      string  `db:"driver_id"`
+		WarehouseAddr *string `db:"warehouse_address"`
+	}
+	err := db.Get(&shift, `SELECT id, driver_id, warehouse_address FROM shifts WHERE id = $1`, shiftID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch shift: %w", err)
+	}
+
+	// Step 2: Fetch all tasks for the shift
+	var tasks []models.RouteTask
+	query := `SELECT * FROM route_tasks WHERE shift_id = $1 ORDER BY sequence_order ASC`
+	err = db.Select(&tasks, query, shiftID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch tasks: %w", err)
+	}
+
+	log.Printf("📋 [MAPBOX OPTIMIZER] Fetched %d tasks", len(tasks))
+
+	if len(tasks) == 0 {
+		log.Printf("✅ [MAPBOX OPTIMIZER] No tasks to optimize")
+		return nil
+	}
+
+	// Step 3: Convert to optimization.RouteRequest
+	req := &optimization.RouteRequest{
+		Vehicles:       make([]optimization.Vehicle, 1),
+		Collections:    make([]optimization.Collection, 0),
+		Placements:     make([]optimization.Placement, 0),
+		MoveRequests:   make([]optimization.MoveRequest, 0),
+		WarehouseStops: make([]optimization.WarehouseStop, 0),
+	}
+
+	// Define warehouse location
+	warehouseLocation := optimization.Location{
+		ID:        "warehouse",
+		Name:      "Warehouse",
+		Latitude:  warehouseLat,
+		Longitude: warehouseLon,
+		Address:   warehouseAddr,
+	}
+
+	// Define vehicle with capacity
+	req.Vehicles[0] = optimization.Vehicle{
+		ID:            shift.DriverID,
+		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
+		StartLocation: warehouseLocation,
+		EndLocation:   warehouseLocation,
+		Capacities: map[string]int{
+			"bins": capacity,
+		},
+	}
+
+	// Helper functions for nil-safe value extraction
+	getIntValue := func(ptr *int) int {
+		if ptr != nil {
+			return *ptr
+		}
+		return 0
+	}
+
+	getStringValue := func(ptr *string) string {
+		if ptr != nil {
+			return *ptr
+		}
+		return ""
+	}
+
+	// Convert tasks to optimization format
+	for _, task := range tasks {
+		switch task.TaskType {
+		case "collection":
+			if task.BinID != nil && task.Latitude != 0 && task.Longitude != 0 {
+				collection := optimization.Collection{
+					ID:             task.ID,
+					BinID:          *task.BinID,
+					BinNumber:      getIntValue(task.BinNumber),
+					Location: optimization.Location{
+						ID:        *task.BinID,
+						Name:      fmt.Sprintf("Bin #%d", getIntValue(task.BinNumber)),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					Duration:       300, // 5 minutes
+					FillPercentage: getIntValue(task.FillPercentage),
+				}
+				req.Collections = append(req.Collections, collection)
+			} else {
+				log.Printf("⚠️  Skipping collection task %s: missing required fields", task.ID)
+			}
+
+		case "placement":
+			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
+				placement := optimization.Placement{
+					ID:                *task.PotentialLocationID,
+					NewBinNumber:      getIntValue(task.NewBinNumber),
+					WarehouseLocation: warehouseLocation,
+					PlacementLocation: optimization.Location{
+						ID:        *task.PotentialLocationID,
+						Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					PickupDuration:  60,  // 1 minute pickup
+					DropoffDuration: 120, // 2 minutes dropoff
+				}
+				req.Placements = append(req.Placements, placement)
+			} else {
+				log.Printf("⚠️  Skipping placement task %s: missing required fields", task.ID)
+			}
+
+		case "pickup":
+			if task.MoveRequestID != nil && task.Latitude != 0 && task.Longitude != 0 &&
+				task.DestinationLatitude != nil && task.DestinationLongitude != nil {
+				moveRequest := optimization.MoveRequest{
+					ID:        *task.MoveRequestID,
+					BinID:     getStringValue(task.BinID),
+					BinNumber: getIntValue(task.BinNumber),
+					PickupLocation: optimization.Location{
+						ID:        fmt.Sprintf("%s-pickup", *task.MoveRequestID),
+						Name:      fmt.Sprintf("Pickup #%d", getIntValue(task.BinNumber)),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					DropoffLocation: optimization.Location{
+						ID:        fmt.Sprintf("%s-dropoff", *task.MoveRequestID),
+						Name:      fmt.Sprintf("Dropoff #%d", getIntValue(task.BinNumber)),
+						Latitude:  *task.DestinationLatitude,
+						Longitude: *task.DestinationLongitude,
+						Address:   getStringValue(task.DestinationAddress),
+					},
+					PickupDuration:  120, // 2 minutes pickup
+					DropoffDuration: 120, // 2 minutes dropoff
+				}
+				req.MoveRequests = append(req.MoveRequests, moveRequest)
+			} else {
+				log.Printf("⚠️  Skipping move request task %s: missing required fields", task.ID)
+			}
+
+		case "warehouse_stop":
+			// Skip warehouse stops - Mapbox handles them automatically
+			log.Printf("⏭️  Skipping warehouse_stop task %s (handled implicitly by Mapbox)", task.ID)
+		}
+	}
+
+	log.Printf("📊 [MAPBOX OPTIMIZER] Request: %d collections, %d placements, %d moves",
+		len(req.Collections), len(req.Placements), len(req.MoveRequests))
+
+	// Step 4: Call Mapbox optimizer
+	log.Printf("🚀 [MAPBOX OPTIMIZER] Calling Mapbox Optimization v2 API...")
+	mapboxOptimizer := optimization.NewMapboxOptimizer()
+	response, err := mapboxOptimizer.OptimizeRoute(req)
+	if err != nil {
+		return fmt.Errorf("Mapbox optimization failed: %w", err)
+	}
+
+	if len(response.Routes) == 0 {
+		return fmt.Errorf("Mapbox returned no routes")
+	}
+
+	route := response.Routes[0]
+	log.Printf("✅ [MAPBOX OPTIMIZER] Optimization complete: %d stops, %.2f meters, %d seconds",
+		len(route.Stops), route.TotalDistance, route.TotalDuration)
+
+	// Step 5: Delete old route_tasks and create new ones from Mapbox response
+	_, err = db.Exec(`DELETE FROM route_tasks WHERE shift_id = $1`, shiftID)
+	if err != nil {
+		return fmt.Errorf("failed to delete old tasks: %w", err)
+	}
+
+	log.Printf("🗑️  [MAPBOX OPTIMIZER] Deleted old route tasks")
+
+	// Step 6: Create new route_tasks from optimized stops
+	for i, stop := range route.Stops {
+		var task models.RouteTask
+		task.ID = uuid.New().String()
+		task.ShiftID = shiftID
+		task.SequenceOrder = i + 1
+		task.Latitude = stop.Latitude
+		task.Longitude = stop.Longitude
+		task.Address = &stop.Address
+
+		// Determine task type and map to original task
+		switch stop.Type {
+		case optimization.StopTypeStart, optimization.StopTypeEnd:
+			// Skip start/end stops - they're implicit
+			continue
+
+		case optimization.StopTypePickup:
+			// This could be a placement pickup OR move request pickup
+			// Check if this is a placement or move request
+			for _, placement := range req.Placements {
+				if stop.LocationID == placement.WarehouseLocation.ID {
+					// This is a warehouse pickup for a placement - create warehouse_stop task
+					task.TaskType = "warehouse_stop"
+					log.Printf("   Stop #%d: Warehouse pickup for placement", i+1)
+					break
+				}
+			}
+			for _, moveReq := range req.MoveRequests {
+				if stop.LocationID == moveReq.PickupLocation.ID {
+					// This is a pickup location for a move request
+					task.TaskType = "pickup"
+					task.MoveRequestID = &moveReq.ID
+					task.BinID = &moveReq.BinID
+					task.BinNumber = &moveReq.BinNumber
+					task.DestinationLatitude = &moveReq.DropoffLocation.Latitude
+					task.DestinationLongitude = &moveReq.DropoffLocation.Longitude
+					task.DestinationAddress = &moveReq.DropoffLocation.Address
+					log.Printf("   Stop #%d: Pickup for move request %s", i+1, moveReq.ID)
+					break
+				}
+			}
+
+		case optimization.StopTypeDropoff:
+			// This could be a placement dropoff OR move request dropoff
+			for _, placement := range req.Placements {
+				if stop.LocationID == placement.PlacementLocation.ID {
+					// This is a placement dropoff
+					task.TaskType = "placement"
+					task.PotentialLocationID = &placement.ID
+					task.NewBinNumber = &placement.NewBinNumber
+					log.Printf("   Stop #%d: Placement dropoff at %s", i+1, placement.PlacementLocation.Name)
+					break
+				}
+			}
+			for _, moveReq := range req.MoveRequests {
+				if stop.LocationID == moveReq.DropoffLocation.ID {
+					// This is a dropoff location for a move request
+					task.TaskType = "dropoff"
+					task.MoveRequestID = &moveReq.ID
+					task.BinID = &moveReq.BinID
+					task.BinNumber = &moveReq.BinNumber
+					log.Printf("   Stop #%d: Dropoff for move request %s", i+1, moveReq.ID)
+					break
+				}
+			}
+
+		case optimization.StopTypeCollection:
+			// This is a collection
+			for _, collection := range req.Collections {
+				if stop.LocationID == collection.BinID || stop.CollectionID == fmt.Sprintf("collection-%s", collection.ID) {
+					task.TaskType = "collection"
+					task.BinID = &collection.BinID
+					task.BinNumber = &collection.BinNumber
+					task.FillPercentage = &collection.FillPercentage
+					log.Printf("   Stop #%d: Collection at Bin #%d", i+1, collection.BinNumber)
+					break
+				}
+			}
+		}
+
+		// Insert task
+		insertQuery := `
+			INSERT INTO route_tasks (
+				id, shift_id, task_type, sequence_order,
+				bin_id, bin_number, fill_percentage,
+				potential_location_id, new_bin_number,
+				move_request_id, destination_latitude, destination_longitude, destination_address,
+				latitude, longitude, address
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		`
+		_, err = db.Exec(insertQuery,
+			task.ID, task.ShiftID, task.TaskType, task.SequenceOrder,
+			task.BinID, task.BinNumber, task.FillPercentage,
+			task.PotentialLocationID, task.NewBinNumber,
+			task.MoveRequestID, task.DestinationLatitude, task.DestinationLongitude, task.DestinationAddress,
+			task.Latitude, task.Longitude, task.Address,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert optimized task: %w", err)
+		}
+	}
+
+	log.Printf("✅ [MAPBOX OPTIMIZER] Created %d optimized route tasks", len(route.Stops)-2) // -2 for start/end
+
+	// Step 7: Save optimization metadata to shifts table
+	optimizationMetadata := map[string]interface{}{
+		"optimizer":       "mapbox-v2",
+		"distance_meters": route.TotalDistance,
+		"duration_seconds": route.TotalDuration,
+		"optimized_at":    time.Now().Format(time.RFC3339),
+	}
+
+	metadataJSON, err := json.Marshal(optimizationMetadata)
+	if err != nil {
+		log.Printf("⚠️  Failed to marshal optimization metadata: %v", err)
+	} else {
+		_, err = db.Exec(`
+			UPDATE shifts
+			SET optimization_metadata = $1
+			WHERE id = $2
+		`, metadataJSON, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Failed to save optimization metadata: %v", err)
+		}
+	}
+
+	log.Printf("✅ [MAPBOX OPTIMIZER] Route optimization complete!")
+	return nil
+}
+
 func abs(n int) int {
 	if n < 0 {
 		return -n
