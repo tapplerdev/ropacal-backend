@@ -210,9 +210,10 @@ func (m *MapboxOptimizer) buildMapboxProblem(req *RouteRequest) map[string]inter
 		problem["shipments"] = shipments
 	}
 
-	// Add optimization objective: minimize total travel duration
+	// Add optimization objective: minimize total travel duration for the fleet
+	// For single-vehicle routes, this minimizes the total route time
 	problem["options"] = map[string]interface{}{
-		"objectives": []string{"min-schedule-completion-time"},
+		"objectives": []string{"min-total-travel-duration"},
 	}
 
 	return problem
