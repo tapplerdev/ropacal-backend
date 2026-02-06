@@ -202,8 +202,8 @@ func canViewDriverLocation(db *sqlx.DB, userID string, driverID string) (bool, e
 // canViewShift checks if user can view shift updates
 func canViewShift(db *sqlx.DB, userID string, shiftID string) (bool, error) {
 	// Check if user is assigned to this shift
-	var assignedDriverID sql.NullString
-	err := db.Get(&assignedDriverID, `SELECT assigned_driver_id FROM shifts WHERE id = $1`, shiftID)
+	var driverID sql.NullString
+	err := db.Get(&driverID, `SELECT driver_id FROM shifts WHERE id = $1`, shiftID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -212,7 +212,7 @@ func canViewShift(db *sqlx.DB, userID string, shiftID string) (bool, error) {
 	}
 
 	// Allow if user is assigned to this shift
-	if assignedDriverID.Valid && assignedDriverID.String == userID {
+	if driverID.Valid && driverID.String == userID {
 		return true, nil
 	}
 
