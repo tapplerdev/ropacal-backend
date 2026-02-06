@@ -348,6 +348,10 @@ func (c *Client) markAsDisconnected() {
 // handleDriverLog processes driver log messages and outputs them to Railway logs
 // This allows seeing driver-side logs in the backend logs for debugging
 func (c *Client) handleDriverLog(data map[string]interface{}) {
+	// DISABLED: Verbose driver logs make debugging difficult
+	// Uncomment below to enable driver log streaming for mobile app debugging
+
+	/*
 	category, _ := data["category"].(string)
 	message, _ := data["message"].(string)
 	level, _ := data["level"].(float64)
@@ -374,4 +378,5 @@ func (c *Client) handleDriverLog(data map[string]interface{}) {
 		message,
 		int64(timestamp),
 	)
+	*/
 }

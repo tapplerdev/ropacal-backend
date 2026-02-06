@@ -37,8 +37,9 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("CENTRIFUGO_TOKEN_HMAC_SECRET_KEY environment variable is required")
 	}
 
-	log.Printf("🔧 [Centrifugo] Initializing client - API URL: %s, API Key length: %d chars",
-		apiURL, len(apiKey))
+	// DISABLED: Verbose initialization logs
+	// log.Printf("🔧 [Centrifugo] Initializing client - API URL: %s, API Key length: %d chars",
+	// 	apiURL, len(apiKey))
 
 	// Create gocent client
 	client := gocent.New(gocent.Config{
@@ -46,7 +47,8 @@ func NewClient() (*Client, error) {
 		Key:  apiKey,
 	})
 
-	log.Printf("✅ [Centrifugo] Client initialized successfully")
+	// DISABLED: Verbose initialization logs
+	// log.Printf("✅ [Centrifugo] Client initialized successfully")
 
 	return &Client{
 		client:          client,
@@ -65,7 +67,8 @@ func (c *Client) PublishDriverLocation(ctx context.Context, driverID string, loc
 		return fmt.Errorf("failed to marshal location data: %w", err)
 	}
 
-	log.Printf("🔄 [Centrifugo] Attempting to publish to channel: %s", channel)
+	// DISABLED: Verbose publish logs (too frequent)
+	// log.Printf("🔄 [Centrifugo] Attempting to publish to channel: %s", channel)
 
 	result, err := c.client.Publish(ctx, channel, data)
 	if err != nil {
@@ -73,8 +76,12 @@ func (c *Client) PublishDriverLocation(ctx context.Context, driverID string, loc
 		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
 	}
 
-	log.Printf("✅ [Centrifugo] Successfully published to %s (offset: %d, epoch: %s)",
-		channel, result.Offset, result.Epoch)
+	// DISABLED: Verbose publish logs (too frequent)
+	// log.Printf("✅ [Centrifugo] Successfully published to %s (offset: %d, epoch: %s)",
+	// 	channel, result.Offset, result.Epoch)
+
+	// Keep track of result to avoid unused variable warning
+	_ = result
 
 	return nil
 }
@@ -94,7 +101,11 @@ func (c *Client) PublishShiftUpdate(ctx context.Context, shiftID string, update 
 		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
 	}
 
-	log.Printf("📡 [Centrifugo] Published shift update to %s (offset: %d)", channel, result.Offset)
+	// DISABLED: Verbose publish logs
+	// log.Printf("📡 [Centrifugo] Published shift update to %s (offset: %d)", channel, result.Offset)
+
+	// Keep track of result to avoid unused variable warning
+	_ = result
 
 	return nil
 }
@@ -114,7 +125,11 @@ func (c *Client) PublishManagerNotification(ctx context.Context, managerID strin
 		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
 	}
 
-	log.Printf("📡 [Centrifugo] Published manager notification to %s (offset: %d)", channel, result.Offset)
+	// DISABLED: Verbose publish logs
+	// log.Printf("📡 [Centrifugo] Published manager notification to %s (offset: %d)", channel, result.Offset)
+
+	// Keep track of result to avoid unused variable warning
+	_ = result
 
 	return nil
 }
