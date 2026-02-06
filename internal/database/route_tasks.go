@@ -58,7 +58,6 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 			rt.completed_at,
 			rt.updated_fill_percentage,
 			rt.skipped,
-			rt.skip_reason,
 			rt.created_at,
 			rt.updated_at
 		FROM route_tasks rt
