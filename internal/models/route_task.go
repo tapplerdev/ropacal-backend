@@ -75,7 +75,8 @@ type CreateShiftWithTasksRequest struct {
 type CompleteTaskRequest struct {
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
 	PhotoURL              *string `json:"photo_url,omitempty"`
-	NewBinID              *string `json:"new_bin_id,omitempty"` // For placement tasks
+	NewBinID              *string `json:"new_bin_id,omitempty"`          // DEPRECATED: For backward compatibility
+	NewBinNumber          int     `json:"new_bin_number"`                // REQUIRED: Driver-provided bin number for placements
 	HasIncident           bool    `json:"has_incident"`
 	IncidentType          *string `json:"incident_type,omitempty"`
 	IncidentPhotoURL      *string `json:"incident_photo_url,omitempty"`

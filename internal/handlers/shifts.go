@@ -1029,6 +1029,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
 			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
+			NewBinNumber          int     `json:"new_bin_number"`                // REQUIRED: Driver-provided bin number for placements
 
 			// Incident reporting fields (all optional)
 			HasIncident         bool    `json:"has_incident"`
@@ -1242,7 +1243,9 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 						) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 					`
 
-					actualBinNumber := *newBinNumber
+					// Use driver-provided bin number (required)
+					actualBinNumber := req.NewBinNumber
+					log.Printf("[DIAGNOSTIC] Using driver-provided bin number: %d", actualBinNumber)
 					_, err = db.Exec(
 						binInsertQuery,
 						newBinID,
@@ -1259,41 +1262,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 						now,
 						now,
 					)
-
-					if err != nil {
-						// Check if error is duplicate bin_number
-						if strings.Contains(err.Error(), "bins_bin_number_key") {
-							log.Printf("[DIAGNOSTIC] ⚠️  Bin #%d already exists, generating next available number...", actualBinNumber)
-
-							// Get next available bin number
-							var maxBinNumber int
-							err = db.QueryRow("SELECT COALESCE(MAX(bin_number), 0) FROM bins").Scan(&maxBinNumber)
-							if err != nil {
-								log.Printf("[DIAGNOSTIC] ❌ Error querying max bin number: %v", err)
-							} else {
-								actualBinNumber = maxBinNumber + 1
-								log.Printf("[DIAGNOSTIC] 🔢 Using next available bin number: %d", actualBinNumber)
-
-								// Retry insert with new bin number
-								_, err = db.Exec(
-									binInsertQuery,
-									newBinID,
-									actualBinNumber,
-									potentialLocation.Street,
-									potentialLocation.City,
-									potentialLocation.Zip,
-									potentialLocation.Latitude,
-									potentialLocation.Longitude,
-									"active",
-									0,
-									now,
-									userClaims.UserID,
-									now,
-									now,
-								)
-							}
-						}
-					}
 
 					if err != nil {
 						log.Printf("[DIAGNOSTIC] ❌ Error creating bin: %v", err)
@@ -1323,7 +1291,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 									Data: map[string]interface{}{
 										"type": "bin_created",
 										"bin_id":     newBinID,
-										"bin_number": *newBinNumber,
+										"bin_number": actualBinNumber,
 										"street":     potentialLocation.Street,
 										"city":       potentialLocation.City,
 										"zip":        potentialLocation.Zip,
@@ -2752,6 +2720,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
 	PhotoUrl              *string `json:"photo_url,omitempty"`
 	MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
+	NewBinNumber          int     `json:"new_bin_number"`            // Required for placements (not used for moves)
 	HasIncident           bool    `json:"has_incident"`
 	IncidentType          *string `json:"incident_type,omitempty"`
 	IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
