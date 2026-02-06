@@ -485,13 +485,7 @@ func (m *MapboxOptimizer) buildSequentialRoute(req *RouteRequest) *RouteResponse
 	currentOdometer := 0.0
 	baseTime := time.Now()
 
-	// Add warehouse start
-	route.Stops = append(route.Stops, OptimizedStop{
-		Type:       "warehouse_start",
-		LocationID: vehicle.StartLocation.ID,
-		ETA:        baseTime,
-		Odometer:   currentOdometer,
-	})
+	// Note: Warehouse start/end are implicit (not added as tasks, same as Mapbox behavior)
 
 	// Add collections in order
 	for _, collection := range req.Collections {
@@ -559,16 +553,6 @@ func (m *MapboxOptimizer) buildSequentialRoute(req *RouteRequest) *RouteResponse
 			Odometer:      currentOdometer,
 		})
 	}
-
-	// Add warehouse end
-	currentOdometer += 1000
-	baseTime = baseTime.Add(5 * time.Minute)
-	route.Stops = append(route.Stops, OptimizedStop{
-		Type:       "warehouse_end",
-		LocationID: vehicle.EndLocation.ID,
-		ETA:        baseTime,
-		Odometer:   currentOdometer,
-	})
 
 	// Calculate route totals
 	if len(route.Stops) > 0 {
