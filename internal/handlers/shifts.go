@@ -1094,8 +1094,8 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Remove incomplete move requests from shift_bins
-		deleteShiftBinsQuery := `DELETE FROM shift_bins
+		// Remove incomplete move request tasks from route_tasks
+		deleteTasksQuery := `DELETE FROM route_tasks
 								 WHERE shift_id = $1
 								 AND is_completed = 0
 								 AND bin_id IN (
@@ -1103,7 +1103,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 									WHERE assigned_shift_id IS NULL
 									AND status = 'pending'
 								 )`
-		_, err = db.Exec(deleteShiftBinsQuery, shift.ID)
+		_, err = db.Exec(deleteTasksQuery, shift.ID)
 		if err != nil {
 			log.Printf("⚠️ Error removing incomplete move bins from shift: %v", err)
 			// Don't fail the request - continue
@@ -2298,35 +2298,11 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 			}
 		}
 
-		// If we found pre-defined route bins, use their sequence
-		if len(routeBins) > 0 {
-			log.Printf("✅ Using pre-defined route sequence with %d bins", len(routeBins))
-			for _, rb := range routeBins {
-				routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
-								  VALUES ($1, $2, $3, $4)`
-
-				_, err = tx.Exec(routeBinQuery, shiftID, rb.BinID, rb.SequenceOrder, now)
-				if err != nil {
-					log.Printf("❌ Error inserting shift_bin: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
-					return
-				}
-			}
-		} else {
-			// Custom selection or route without pre-defined bins - insert with sequence_order = 0
-			log.Printf("ℹ️  Custom bin selection - will optimize from driver's start location")
-			for _, binID := range req.BinIDs {
-				routeBinQuery := `INSERT INTO shift_bins (shift_id, bin_id, sequence_order, created_at)
-								  VALUES ($1, $2, 0, $3)`
-
-				_, err = tx.Exec(routeBinQuery, shiftID, binID, now)
-				if err != nil {
-					log.Printf("❌ Error inserting shift_bin: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to assign bins to shift")
-					return
-				}
-			}
-		}
+		// DEPRECATED: This endpoint no longer creates tasks.
+		// Use POST /api/manager/shifts/with-tasks (CreateShiftWithTasks) instead.
+		// shift_bins table has been removed in favor of route_tasks.
+		log.Printf("⚠️  DEPRECATED: AssignRoute endpoint called. This endpoint is legacy and does not create tasks.")
+		log.Printf("⚠️  Please update clients to use POST /api/manager/shifts/with-tasks instead.")
 
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
@@ -3320,10 +3296,10 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			}
 		}
 
-		// 3. Delete shift_bins entries (cleanup)
-		_, err = tx.Exec(`DELETE FROM shift_bins WHERE shift_id = $1`, shiftID)
+		// 3. Delete route_tasks entries (cleanup)
+		_, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1`, shiftID)
 		if err != nil {
-			log.Printf("⚠️  Error deleting shift_bins: %v", err)
+			log.Printf("⚠️  Error deleting route_tasks: %v", err)
 			// Don't fail - continue
 		}
 
@@ -3503,15 +3479,15 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			}
 		}
 
-		// 3. Delete shift_bins entries
-		deleteQuery, deleteArgs, err := sqlx.In(`DELETE FROM shift_bins WHERE shift_id IN (?)`, shiftIDs)
+		// 3. Delete route_tasks entries
+		deleteQuery, deleteArgs, err := sqlx.In(`DELETE FROM route_tasks WHERE shift_id IN (?)`, shiftIDs)
 		if err != nil {
 			log.Printf("⚠️  Error building delete query: %v", err)
 		} else {
 			deleteQuery = tx.Rebind(deleteQuery)
 			_, err = tx.Exec(deleteQuery, deleteArgs...)
 			if err != nil {
-				log.Printf("⚠️  Error deleting shift_bins: %v", err)
+				log.Printf("⚠️  Error deleting route_tasks: %v", err)
 			}
 		}
 
