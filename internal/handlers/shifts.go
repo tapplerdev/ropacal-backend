@@ -537,6 +537,8 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 			db,
 			shift.ID,
 			capacity,
+			driverLocation.Latitude,
+			driverLocation.Longitude,
 			*shift.WarehouseLatitude,
 			*shift.WarehouseLongitude,
 			warehouseAddr,
@@ -3713,6 +3715,7 @@ func optimizeRouteWithMapbox(
 	db *sqlx.DB,
 	shiftID string,
 	capacity int,
+	driverLat, driverLon float64,
 	warehouseLat, warehouseLon float64,
 	warehouseAddr string,
 ) error {
@@ -3753,7 +3756,16 @@ func optimizeRouteWithMapbox(
 		WarehouseStops: make([]optimization.WarehouseStop, 0),
 	}
 
-	// Define warehouse location
+	// Define driver's current location (where route starts)
+	driverStartLocation := optimization.Location{
+		ID:        "driver-current",
+		Name:      "Driver Current Location",
+		Latitude:  driverLat,
+		Longitude: driverLon,
+		Address:   "Current GPS Position",
+	}
+
+	// Define warehouse location (where route ends)
 	warehouseLocation := optimization.Location{
 		ID:        "warehouse",
 		Name:      "Warehouse",
@@ -3762,11 +3774,14 @@ func optimizeRouteWithMapbox(
 		Address:   warehouseAddr,
 	}
 
+	log.Printf("📍 [MAPBOX OPTIMIZER] Start: Driver location (%.6f, %.6f)", driverLat, driverLon)
+	log.Printf("🏭 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
+
 	// Define vehicle with capacity
 	req.Vehicles[0] = optimization.Vehicle{
 		ID:            shift.DriverID,
 		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
-		StartLocation: warehouseLocation,
+		StartLocation: driverStartLocation,
 		EndLocation:   warehouseLocation,
 		Capacities: map[string]int{
 			"bins": capacity,
