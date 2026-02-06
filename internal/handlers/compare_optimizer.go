@@ -585,9 +585,10 @@ func callSegmentedOptimization(warehouseLat, warehouseLon float64, tasks []TaskR
 		// Single task - no optimization needed
 		if len(seg.tasks) == 1 {
 			task := seg.tasks[0]
-			// Rough distance estimate (Haversine)
-			dist := haversineDistance(startLat, startLon, *task.Latitude, *task.Longitude)
-			travelTime := (dist / 50.0) * 3600 // Assume 50 km/h average
+			// Rough distance estimate (Haversine returns km, convert to meters)
+			distKm := haversineDistance(startLat, startLon, *task.Latitude, *task.Longitude)
+			dist := distKm * 1000 // Convert to meters
+			travelTime := (distKm / 50.0) * 3600 // Assume 50 km/h average
 
 			cumulativeTime += travelTime
 			allStops = append(allStops, map[string]interface{}{
@@ -802,22 +803,3 @@ func getTaskInfoByWaypoint(waypoint string, tasks []TaskRow) map[string]interfac
 	return map[string]interface{}{}
 }
 
-// haversineDistance calculates distance between two points in meters
-func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
-	const R = 6371000 // Earth radius in meters
-
-	dLat := (lat2 - lat1) * (3.14159265359 / 180)
-	dLon := (lon2 - lon1) * (3.14159265359 / 180)
-
-	lat1Rad := lat1 * (3.14159265359 / 180)
-	lat2Rad := lat2 * (3.14159265359 / 180)
-
-	a := (dLat/2)*(dLat/2) +
-		(dLon/2)*(dLon/2)*
-		(1-lat1Rad*lat1Rad/2)* // cos approximation
-		(1-lat2Rad*lat2Rad/2)
-
-	c := 2 * a // simplified
-
-	return R * c
-}
