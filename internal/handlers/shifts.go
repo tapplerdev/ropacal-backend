@@ -501,7 +501,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 		if locationErr != nil {
 			log.Printf("❌ Driver location not available in Redis: %v", locationErr)
 			log.Printf("   This means the driver hasn't published their GPS location via the mobile app yet.")
-			log.Printf("   The mobile app publishes location to Centrifugo every 10 seconds when GPS is enabled.")
+			log.Printf("   The mobile app publishes location to Centrifugo approximately every 1 second when GPS is enabled.")
 			utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
 			return
 		}
