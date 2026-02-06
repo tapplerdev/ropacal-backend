@@ -278,6 +278,7 @@ func main() {
 			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub))
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
 			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub))
+			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, wsHub))
 
 			// Shift history
 			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))

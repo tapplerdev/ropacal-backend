@@ -1540,6 +1540,207 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	}
 }
 
+// SkipTask marks a task as skipped with a required reason
+// If skipping a pickup task, automatically skips the paired dropoff
+func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: POST /api/driver/shift/skip-task")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		var req struct {
+			TaskID string `json:"task_id"`
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ Error decoding request body: %v", err)
+			utils.RespondError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+		log.Printf("   Task ID: %s", req.TaskID)
+		log.Printf("   Reason: %s", req.Reason)
+
+		// Validate reason is not empty
+		if strings.TrimSpace(req.Reason) == "" {
+			utils.RespondError(w, http.StatusBadRequest, "Skip reason is required")
+			return
+		}
+
+		// Get current active shift
+		var shift models.Shift
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1`, userClaims.UserID)
+		if err != nil {
+			utils.RespondError(w, http.StatusBadRequest, "No active shift")
+			return
+		}
+
+		// Get task details to check type and move_request_id
+		var task models.RouteTask
+		err = db.Get(&task, `SELECT * FROM route_tasks WHERE id = $1 AND shift_id = $2`, req.TaskID, shift.ID)
+		if err == sql.ErrNoRows {
+			utils.RespondError(w, http.StatusBadRequest, "Task not found in route or already completed")
+			return
+		}
+		if err != nil {
+			log.Printf("❌ Error querying route_tasks: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to find task")
+			return
+		}
+
+		log.Printf("✅ Found task: ID=%s, Type=%s", task.ID, task.TaskType)
+
+		// Check if already completed or skipped
+		if task.IsCompleted == 1 {
+			utils.RespondError(w, http.StatusBadRequest, "Task already completed or skipped")
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Create task_data JSON with skip reason
+		skipData := map[string]interface{}{
+			"skip_reason": req.Reason,
+		}
+		skipDataJSON, err := json.Marshal(skipData)
+		if err != nil {
+			log.Printf("❌ Error marshaling skip data: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to process skip")
+			return
+		}
+
+		// Start transaction for atomic updates
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ Error starting transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to skip task")
+			return
+		}
+		defer tx.Rollback()
+
+		tasksSkipped := 1 // At minimum, we skip the current task
+
+		// Mark the task as skipped
+		_, err = tx.Exec(`
+			UPDATE route_tasks
+			SET skipped = true,
+				is_completed = 1,
+				completed_at = $1,
+				task_data = $2,
+				updated_at = $3
+			WHERE id = $4
+		`, now, skipDataJSON, now, task.ID)
+		if err != nil {
+			log.Printf("❌ Error marking task as skipped: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to skip task")
+			return
+		}
+
+		log.Printf("✅ Task marked as skipped: %s", task.ID)
+
+		// If skipping a pickup, also skip the paired dropoff
+		if task.TaskType == models.TaskTypePickup && task.MoveRequestID != nil {
+			log.Printf("🔗 Pickup task has move_request_id: %s, also skipping dropoff...", *task.MoveRequestID)
+
+			var dropoffID string
+			err = tx.QueryRow(`
+				SELECT id FROM route_tasks
+				WHERE shift_id = $1
+				  AND move_request_id = $2
+				  AND task_type = 'dropoff'
+				  AND is_completed = 0
+			`, shift.ID, *task.MoveRequestID).Scan(&dropoffID)
+
+			if err == nil {
+				// Found paired dropoff, skip it too
+				_, err = tx.Exec(`
+					UPDATE route_tasks
+					SET skipped = true,
+						is_completed = 1,
+						completed_at = $1,
+						task_data = $2,
+						updated_at = $3
+					WHERE id = $4
+				`, now, skipDataJSON, now, dropoffID)
+				if err != nil {
+					log.Printf("❌ Error marking dropoff as skipped: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to skip paired dropoff")
+					return
+				}
+				tasksSkipped++
+				log.Printf("✅ Paired dropoff also marked as skipped: %s", dropoffID)
+			} else if err != sql.ErrNoRows {
+				log.Printf("❌ Error querying dropoff: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to find paired dropoff")
+				return
+			}
+		}
+
+		// Increment shift completed_bins counter
+		_, err = tx.Exec(`
+			UPDATE shifts
+			SET completed_bins = completed_bins + $1,
+				updated_at = $2
+			WHERE id = $3
+		`, tasksSkipped, now, shift.ID)
+		if err != nil {
+			log.Printf("❌ Error updating shift: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
+			return
+		}
+
+		// Commit transaction
+		if err = tx.Commit(); err != nil {
+			log.Printf("❌ Error committing transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to commit skip")
+			return
+		}
+
+		log.Printf("✅ Transaction committed - %d task(s) skipped", tasksSkipped)
+
+		// Refresh shift data
+		err = db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
+		if err != nil {
+			log.Printf("⚠️  Error refreshing shift: %v", err)
+		}
+
+		// Get updated bin/task list
+		bins, err := getShiftTasksWithDetails(db, shift.ID)
+		if err != nil {
+			log.Printf("⚠️  Error fetching route bins: %v", err)
+			bins = []models.ShiftBinWithDetails{}
+		}
+
+		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
+		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
+
+		// Broadcast WebSocket update with bins
+		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
+			"type": "shift_update",
+			"data": map[string]interface{}{
+				"id":             shift.ID,
+				"status":         shift.Status,
+				"completed_bins": logicalCompleted,
+				"total_bins":     logicalTotal,
+				"bins":           bins,
+			},
+		})
+
+		log.Printf("📡 WebSocket: Broadcasted shift update to driver %s", userClaims.UserID)
+
+		// Return success
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success":       true,
+			"tasks_skipped": tasksSkipped,
+			"message":       fmt.Sprintf("%d task(s) skipped successfully", tasksSkipped),
+		})
+	}
+}
+
 // GetDriverShiftHistory returns all completed shifts for the authenticated driver
 func GetDriverShiftHistory(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1819,7 +2020,9 @@ func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWit
 			rt.potential_location_id,
 			rt.new_bin_number,
 			rt.warehouse_action,
-			rt.bins_to_load
+			rt.bins_to_load,
+			rt.skipped,
+			rt.task_data
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
 		WHERE rt.shift_id = $1

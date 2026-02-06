@@ -1,5 +1,7 @@
 package models
 
+import "encoding/json"
+
 // ShiftBin represents a bin assigned to an active shift (from shift_bins table)
 // Note: This was formerly called RouteBin, but renamed for clarity
 type ShiftBin struct {
@@ -44,4 +46,8 @@ type ShiftBinWithDetails struct {
 	// Warehouse stop fields
 	WarehouseAction *string `db:"warehouse_action" json:"warehouse_action"`
 	BinsToLoad      *int    `db:"bins_to_load" json:"bins_to_load"`
+
+	// Skip tracking fields
+	Skipped  bool             `db:"skipped" json:"skipped"`
+	TaskData *json.RawMessage `db:"task_data" json:"task_data,omitempty"`
 }
