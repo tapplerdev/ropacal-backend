@@ -223,7 +223,11 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("🚀 Running HERE Maps...")
 		hereResp, hereErr := callHereOptimization(shift.WarehouseLatitude, shift.WarehouseLongitude, tasks)
 
-		// 6. Build comparison result
+		// 6. Run Segmented HERE Maps optimization (Smart Engine + HERE)
+		log.Printf("🚀 Running Segmented HERE Maps (Smart Engine)...")
+		segmentedResp, segmentedErr := callSegmentedOptimization(shift.WarehouseLatitude, shift.WarehouseLongitude, tasks)
+
+		// 7. Build comparison result
 		result := map[string]interface{}{
 			"shift_id": shiftID,
 			"summary": map[string]interface{}{
@@ -278,15 +282,40 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		// Add comparison if both succeeded
-		if mapboxErr == nil && hereErr == nil {
+		if segmentedErr == nil {
+			result["segmented"] = segmentedResp
+		} else {
+			result["segmented"] = map[string]interface{}{
+				"success": false,
+				"error":   segmentedErr.Error(),
+			}
+		}
+
+		// Add comparison if all succeeded
+		if mapboxErr == nil && hereErr == nil && segmentedErr == nil {
 			mapboxDuration := mapboxResp.TotalDuration
 			hereDuration := int(hereResp["total_duration_seconds"].(float64))
+			segmentedDuration := int(segmentedResp["total_duration_seconds"].(float64))
+
+			// Find fastest
+			fastest := "mapbox"
+			fastestTime := mapboxDuration
+			if hereDuration < fastestTime {
+				fastest = "heremaps"
+				fastestTime = hereDuration
+			}
+			if segmentedDuration < fastestTime {
+				fastest = "segmented"
+				fastestTime = segmentedDuration
+			}
 
 			result["comparison"] = map[string]interface{}{
-				"faster_optimizer":        getFasterOptimizer(mapboxDuration, hereDuration),
-				"time_difference_seconds": abs(mapboxDuration - hereDuration),
-				"time_difference_minutes": abs(mapboxDuration-hereDuration) / 60,
+				"fastest_optimizer": fastest,
+				"times": map[string]interface{}{
+					"mapbox_minutes":    mapboxDuration / 60,
+					"heremaps_minutes":  hereDuration / 60,
+					"segmented_minutes": segmentedDuration / 60,
+				},
 			}
 		}
 
@@ -476,4 +505,319 @@ func formatSeconds(seconds float64) string {
 	minutes := int(seconds) / 60
 	secs := int(seconds) % 60
 	return fmt.Sprintf("%02d:%02d", minutes, secs)
+}
+
+// callSegmentedOptimization performs segmented optimization with HERE Maps
+// Splits tasks by warehouse stops and optimizes each segment independently
+func callSegmentedOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (map[string]interface{}, error) {
+	log.Printf("📦 [SEGMENTED] Starting segmented optimization with %d tasks", len(tasks))
+
+	// Step 1: Split tasks into segments by warehouse stops
+	type segment struct {
+		tasks    []TaskRow
+		isWarehouse bool
+	}
+
+	segments := []segment{}
+	currentSegment := segment{tasks: []TaskRow{}}
+
+	for _, task := range tasks {
+		if task.TaskType == "warehouse_stop" {
+			// End current segment if it has tasks
+			if len(currentSegment.tasks) > 0 {
+				segments = append(segments, currentSegment)
+				currentSegment = segment{tasks: []TaskRow{}}
+			}
+			// Warehouse stop is its own segment
+			segments = append(segments, segment{
+				tasks:       []TaskRow{task},
+				isWarehouse: true,
+			})
+		} else {
+			currentSegment.tasks = append(currentSegment.tasks, task)
+		}
+	}
+
+	// Add final segment if exists
+	if len(currentSegment.tasks) > 0 {
+		segments = append(segments, currentSegment)
+	}
+
+	log.Printf("📦 [SEGMENTED] Split into %d segments", len(segments))
+
+	// Step 2: Optimize each segment
+	var totalDistance float64
+	var totalDuration float64
+	var allStops []map[string]interface{}
+	sequenceNum := 1
+	cumulativeTime := 0.0
+
+	// Add start location
+	allStops = append(allStops, map[string]interface{}{
+		"sequence":     sequenceNum,
+		"waypoint":     "warehouse-start",
+		"type":         "start",
+		"task_info":    map[string]interface{}{"task_type": "warehouse"},
+		"arrival_time": formatSeconds(cumulativeTime),
+	})
+	sequenceNum++
+
+	startLat, startLon := warehouseLat, warehouseLon
+
+	for segIdx, seg := range segments {
+		log.Printf("   Segment #%d: %d tasks (warehouse: %v)", segIdx+1, len(seg.tasks), seg.isWarehouse)
+
+		// Warehouse stops are kept as-is
+		if seg.isWarehouse {
+			task := seg.tasks[0]
+			allStops = append(allStops, map[string]interface{}{
+				"sequence":     sequenceNum,
+				"waypoint":     fmt.Sprintf("warehouse-seg%d", segIdx),
+				"type":         "warehouse_stop",
+				"task_info":    getTaskInfo("", tasks),
+				"arrival_time": formatSeconds(cumulativeTime),
+			})
+			sequenceNum++
+			startLat, startLon = *task.Latitude, *task.Longitude
+			continue
+		}
+
+		// Single task - no optimization needed
+		if len(seg.tasks) == 1 {
+			task := seg.tasks[0]
+			// Rough distance estimate (Haversine)
+			dist := haversineDistance(startLat, startLon, *task.Latitude, *task.Longitude)
+			travelTime := (dist / 50.0) * 3600 // Assume 50 km/h average
+
+			cumulativeTime += travelTime
+			allStops = append(allStops, map[string]interface{}{
+				"sequence":     sequenceNum,
+				"waypoint":     fmt.Sprintf("stop%d", sequenceNum-1),
+				"type":         "stop",
+				"task_info":    getTaskInfoFromTask(task),
+				"arrival_time": formatSeconds(cumulativeTime),
+			})
+			sequenceNum++
+			totalDistance += dist
+			totalDuration += travelTime
+			startLat, startLon = *task.Latitude, *task.Longitude
+			continue
+		}
+
+		// Multiple tasks - optimize with HERE Maps
+		log.Printf("   🚀 Optimizing segment #%d with HERE Maps (%d tasks)", segIdx+1, len(seg.tasks))
+
+		// Determine segment end (next warehouse or final warehouse)
+		endLat, endLon := warehouseLat, warehouseLon
+		if segIdx < len(segments)-1 && segments[segIdx+1].isWarehouse {
+			endLat = *segments[segIdx+1].tasks[0].Latitude
+			endLon = *segments[segIdx+1].tasks[0].Longitude
+		}
+
+		// Call HERE Maps for this segment
+		segResult, err := callHereSegmentOptimization(startLat, startLon, endLat, endLon, seg.tasks)
+		if err != nil {
+			log.Printf("   ❌ Segment optimization failed: %v", err)
+			return nil, err
+		}
+
+		// Add segment results
+		segDist := segResult["distance"].(float64)
+		segDur := segResult["duration"].(float64)
+		totalDistance += segDist
+		totalDuration += segDur
+
+		// Add segment stops (skip start since we already have it)
+		segStops := segResult["stops"].([]map[string]interface{})
+		for i, stop := range segStops {
+			if i == 0 && segIdx > 0 {
+				// Skip first stop if not first segment (it's the previous segment's end)
+				continue
+			}
+			stop["sequence"] = sequenceNum
+			stop["arrival_time"] = formatSeconds(cumulativeTime + stop["arrival_time"].(float64))
+			allStops = append(allStops, stop)
+			sequenceNum++
+		}
+
+		cumulativeTime += segDur
+
+		// Update start position for next segment
+		if len(segStops) > 0 {
+			lastStop := segStops[len(segStops)-1]
+			taskInfo := lastStop["task_info"].(map[string]interface{})
+			if lat, ok := taskInfo["latitude"].(float64); ok {
+				startLat = lat
+			}
+			if lon, ok := taskInfo["longitude"].(float64); ok {
+				startLon = lon
+			}
+		}
+	}
+
+	// Add end location
+	allStops = append(allStops, map[string]interface{}{
+		"sequence":     sequenceNum,
+		"waypoint":     "warehouse-end",
+		"type":         "end",
+		"task_info":    map[string]interface{}{"task_type": "warehouse"},
+		"arrival_time": formatSeconds(cumulativeTime),
+	})
+
+	log.Printf("✅ [SEGMENTED] Total: %.2f km, %.0f seconds (%d minutes)",
+		totalDistance/1000, totalDuration, int(totalDuration/60))
+
+	return map[string]interface{}{
+		"success":                true,
+		"total_distance_meters":  totalDistance,
+		"total_duration_seconds": totalDuration,
+		"total_duration_minutes": totalDuration / 60,
+		"route_sequence":         allStops,
+		"segments_count":         len(segments),
+		"description":            "Smart Engine + HERE Maps (Segmented)",
+	}, nil
+}
+
+// callHereSegmentOptimization calls HERE Maps for a single segment
+func callHereSegmentOptimization(startLat, startLon, endLat, endLon float64, tasks []TaskRow) (map[string]interface{}, error) {
+	HereAPIKey := "paBPqXdCxmq01bP5eA0_i2jA53PnqMH7YCc6q21wwrw"
+
+	apiURL := "https://wps.hereapi.com/v8/findsequence2"
+	params := url.Values{}
+	params.Add("apiKey", HereAPIKey)
+	params.Add("mode", "fastest;car;traffic:disabled")
+	params.Add("improveFor", "time")
+	params.Add("departure", "now")
+	params.Add("start", fmt.Sprintf("seg-start;%.6f,%.6f", startLat, startLon))
+	params.Add("end", fmt.Sprintf("seg-end;%.6f,%.6f", endLat, endLon))
+
+	destNum := 1
+	for _, task := range tasks {
+		if task.Latitude != nil && task.Longitude != nil {
+			var serviceDuration int
+			switch task.TaskType {
+			case "collection":
+				serviceDuration = 300
+			case "placement":
+				serviceDuration = 180
+			case "pickup", "dropoff":
+				serviceDuration = 120
+			default:
+				serviceDuration = 300
+			}
+
+			params.Add(fmt.Sprintf("destination%d", destNum),
+				fmt.Sprintf("stop%d;%.6f,%.6f;st:%d", destNum, *task.Latitude, *task.Longitude, serviceDuration))
+			destNum++
+		}
+	}
+
+	fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
+	resp, err := http.Get(fullURL)
+	if err != nil {
+		return nil, fmt.Errorf("HERE API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HERE API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var hereResp struct {
+		Results []struct {
+			Distance        string `json:"distance"`
+			Time            string `json:"time"`
+			Interconnections []struct {
+				FromWaypoint string  `json:"fromWaypoint"`
+				ToWaypoint   string  `json:"toWaypoint"`
+				Distance     float64 `json:"distance"`
+				Time         float64 `json:"time"`
+			} `json:"interconnections"`
+		} `json:"results"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&hereResp); err != nil {
+		return nil, fmt.Errorf("failed to parse HERE response: %w", err)
+	}
+
+	if len(hereResp.Results) == 0 {
+		return nil, fmt.Errorf("HERE returned no results")
+	}
+
+	var distance, duration float64
+	fmt.Sscanf(hereResp.Results[0].Distance, "%f", &distance)
+	fmt.Sscanf(hereResp.Results[0].Time, "%f", &duration)
+
+	// Build stops list
+	stops := []map[string]interface{}{}
+	cumTime := 0.0
+
+	// Add start
+	stops = append(stops, map[string]interface{}{
+		"waypoint":     "seg-start",
+		"type":         "segment_start",
+		"task_info":    map[string]interface{}{},
+		"arrival_time": cumTime,
+	})
+
+	// Add intermediate stops
+	for _, conn := range hereResp.Results[0].Interconnections {
+		cumTime += conn.Time
+		stops = append(stops, map[string]interface{}{
+			"waypoint":     conn.ToWaypoint,
+			"type":         "stop",
+			"task_info":    getTaskInfoByWaypoint(conn.ToWaypoint, tasks),
+			"arrival_time": cumTime,
+		})
+	}
+
+	return map[string]interface{}{
+		"distance": distance,
+		"duration": duration,
+		"stops":    stops,
+	}, nil
+}
+
+// Helper to extract task info from TaskRow
+func getTaskInfoFromTask(task TaskRow) map[string]interface{}{
+	return map[string]interface{}{
+		"task_type":  task.TaskType,
+		"bin_number": getIntValue(task.BinNumber),
+		"latitude":   *task.Latitude,
+		"longitude":  *task.Longitude,
+		"address":    getStringValue(task.Address),
+	}
+}
+
+// Helper to get task info by waypoint from segment tasks
+func getTaskInfoByWaypoint(waypoint string, tasks []TaskRow) map[string]interface{} {
+	var stopNum int
+	fmt.Sscanf(waypoint, "stop%d", &stopNum)
+
+	if stopNum > 0 && stopNum <= len(tasks) {
+		return getTaskInfoFromTask(tasks[stopNum-1])
+	}
+
+	return map[string]interface{}{}
+}
+
+// haversineDistance calculates distance between two points in meters
+func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6371000 // Earth radius in meters
+
+	dLat := (lat2 - lat1) * (3.14159265359 / 180)
+	dLon := (lon2 - lon1) * (3.14159265359 / 180)
+
+	lat1Rad := lat1 * (3.14159265359 / 180)
+	lat2Rad := lat2 * (3.14159265359 / 180)
+
+	a := (dLat/2)*(dLat/2) +
+		(dLon/2)*(dLon/2)*
+		(1-lat1Rad*lat1Rad/2)* // cos approximation
+		(1-lat2Rad*lat2Rad/2)
+
+	c := 2 * a // simplified
+
+	return R * c
 }
