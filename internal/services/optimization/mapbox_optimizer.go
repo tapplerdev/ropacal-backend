@@ -38,6 +38,13 @@ func (m *MapboxOptimizer) OptimizeRoute(req *RouteRequest) (*RouteResponse, erro
 	log.Printf("📦 Converting request to Mapbox format...")
 	problem := m.buildMapboxProblem(req)
 
+	// Debug: Log the full problem being sent to Mapbox
+	problemJSON, _ := json.MarshalIndent(problem, "", "  ")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📤 MAPBOX REQUEST (Problem JSON):")
+	log.Printf("%s", string(problemJSON))
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	log.Printf("📤 Submitting routing problem to Mapbox...")
 	jobID, err := m.submitProblem(problem)
 	if err != nil {
@@ -53,6 +60,14 @@ func (m *MapboxOptimizer) OptimizeRoute(req *RouteRequest) (*RouteResponse, erro
 	}
 
 	log.Printf("✅ Solution received, parsing...")
+
+	// Debug: Log the full solution from Mapbox
+	solutionJSON, _ := json.MarshalIndent(solution, "", "  ")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📥 MAPBOX RESPONSE (Solution JSON):")
+	log.Printf("%s", string(solutionJSON))
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	response := m.parseMapboxSolution(solution, req)
 	response.OptimizerUsed = "mapbox"
 

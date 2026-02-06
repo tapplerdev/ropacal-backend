@@ -3896,7 +3896,20 @@ func optimizeRouteWithMapbox(
 	log.Printf("🗑️  [MAPBOX OPTIMIZER] Deleted old route tasks")
 
 	// Step 6: Create new route_tasks from optimized stops
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📍 Creating route tasks from %d optimized stops", len(route.Stops))
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	for i, stop := range route.Stops {
+		log.Printf("")
+		log.Printf("🔍 Processing Stop #%d/%d:", i+1, len(route.Stops))
+		log.Printf("   Type: %s", stop.Type)
+		log.Printf("   LocationID: %s", stop.LocationID)
+		log.Printf("   CollectionID: '%s'", stop.CollectionID)
+		log.Printf("   PlacementID: '%s'", stop.PlacementID)
+		log.Printf("   MoveRequestID: '%s'", stop.MoveRequestID)
+		log.Printf("   Coordinates: (%.6f, %.6f)", stop.Latitude, stop.Longitude)
+
 		var task models.RouteTask
 		task.ID = uuid.New().String()
 		task.ShiftID = shiftID
@@ -3909,6 +3922,7 @@ func optimizeRouteWithMapbox(
 		switch stop.Type {
 		case optimization.StopTypeStart, optimization.StopTypeEnd:
 			// Skip start/end stops - they're implicit
+			log.Printf("   ⏭️  SKIPPED: Start/End stop (implicit warehouse)")
 			continue
 
 		case optimization.StopTypePickup:
@@ -3975,7 +3989,16 @@ func optimizeRouteWithMapbox(
 			}
 		}
 
+		// Validate task has a type before inserting
+		if task.TaskType == "" {
+			log.Printf("   ⚠️  WARNING: No task_type determined! Stop will cause database error.")
+			log.Printf("   ⚠️  This stop did not match any case in the switch statement.")
+		} else {
+			log.Printf("   ✅ Mapped to task_type: '%s'", task.TaskType)
+		}
+
 		// Insert task
+		log.Printf("   💾 Inserting into database...")
 		insertQuery := `
 			INSERT INTO route_tasks (
 				id, shift_id, task_type, sequence_order,
