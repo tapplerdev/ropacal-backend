@@ -3919,72 +3919,84 @@ func optimizeRouteWithMapbox(
 		task.Address = &stop.Address
 
 		// Determine task type and map to original task
+		// Note: Mapbox returns "service" for collections, "pickup"/"dropoff" for shipments
 		switch stop.Type {
 		case optimization.StopTypeStart, optimization.StopTypeEnd:
 			// Skip start/end stops - they're implicit
 			log.Printf("   ⏭️  SKIPPED: Start/End stop (implicit warehouse)")
 			continue
 
-		case optimization.StopTypePickup:
-			// This could be a placement pickup OR move request pickup
-			// Check if this is a placement or move request
-			for _, placement := range req.Placements {
-				if stop.LocationID == placement.WarehouseLocation.ID {
-					// This is a warehouse pickup for a placement - create warehouse_stop task
-					task.TaskType = "warehouse_stop"
-					log.Printf("   Stop #%d: Warehouse pickup for placement", i+1)
-					break
+		case "service":
+			// Mapbox returns "service" type for collections (not "collection")
+			// Match by CollectionID which we extracted from the services array
+			if stop.CollectionID != "" {
+				for _, collection := range req.Collections {
+					if stop.CollectionID == fmt.Sprintf("collection-%s", collection.ID) {
+						task.TaskType = "collection"
+						task.BinID = &collection.BinID
+						task.BinNumber = &collection.BinNumber
+						task.FillPercentage = &collection.FillPercentage
+						log.Printf("   ✅ Matched service to collection (Bin #%d)", collection.BinNumber)
+						break
+					}
 				}
 			}
-			for _, moveReq := range req.MoveRequests {
-				if stop.LocationID == moveReq.PickupLocation.ID {
-					// This is a pickup location for a move request
-					task.TaskType = "pickup"
-					task.MoveRequestID = &moveReq.ID
-					task.BinID = &moveReq.BinID
-					task.BinNumber = &moveReq.BinNumber
-					task.DestinationLatitude = &moveReq.DropoffLocation.Latitude
-					task.DestinationLongitude = &moveReq.DropoffLocation.Longitude
-					task.DestinationAddress = &moveReq.DropoffLocation.Address
-					log.Printf("   Stop #%d: Pickup for move request %s", i+1, moveReq.ID)
-					break
+
+		case optimization.StopTypePickup:
+			// Pickup for placement or move request
+			// Match by PlacementID or MoveRequestID (extracted from pickups array)
+			if stop.PlacementID != "" {
+				// This is a placement pickup at warehouse
+				for _, placement := range req.Placements {
+					if stop.PlacementID == fmt.Sprintf("placement-%s", placement.ID) {
+						task.TaskType = "warehouse_stop"
+						task.PotentialLocationID = &placement.ID
+						log.Printf("   ✅ Matched pickup to placement warehouse stop")
+						break
+					}
+				}
+			} else if stop.MoveRequestID != "" {
+				// This is a move request pickup
+				for _, moveReq := range req.MoveRequests {
+					if stop.MoveRequestID == fmt.Sprintf("move-%s", moveReq.ID) {
+						task.TaskType = "pickup"
+						task.MoveRequestID = &moveReq.ID
+						task.BinID = &moveReq.BinID
+						task.BinNumber = &moveReq.BinNumber
+						task.DestinationLatitude = &moveReq.DropoffLocation.Latitude
+						task.DestinationLongitude = &moveReq.DropoffLocation.Longitude
+						task.DestinationAddress = &moveReq.DropoffLocation.Address
+						log.Printf("   ✅ Matched pickup to move request (Bin #%d)", moveReq.BinNumber)
+						break
+					}
 				}
 			}
 
 		case optimization.StopTypeDropoff:
-			// This could be a placement dropoff OR move request dropoff
-			for _, placement := range req.Placements {
-				if stop.LocationID == placement.PlacementLocation.ID {
-					// This is a placement dropoff
-					task.TaskType = "placement"
-					task.PotentialLocationID = &placement.ID
-					task.NewBinNumber = &placement.NewBinNumber
-					log.Printf("   Stop #%d: Placement dropoff at %s", i+1, placement.PlacementLocation.Name)
-					break
+			// Dropoff for placement or move request
+			// Match by PlacementID or MoveRequestID (extracted from dropoffs array)
+			if stop.PlacementID != "" {
+				// This is a placement dropoff
+				for _, placement := range req.Placements {
+					if stop.PlacementID == fmt.Sprintf("placement-%s", placement.ID) {
+						task.TaskType = "placement"
+						task.PotentialLocationID = &placement.ID
+						task.NewBinNumber = &placement.NewBinNumber
+						log.Printf("   ✅ Matched dropoff to placement (new bin #%d)", placement.NewBinNumber)
+						break
+					}
 				}
-			}
-			for _, moveReq := range req.MoveRequests {
-				if stop.LocationID == moveReq.DropoffLocation.ID {
-					// This is a dropoff location for a move request
-					task.TaskType = "dropoff"
-					task.MoveRequestID = &moveReq.ID
-					task.BinID = &moveReq.BinID
-					task.BinNumber = &moveReq.BinNumber
-					log.Printf("   Stop #%d: Dropoff for move request %s", i+1, moveReq.ID)
-					break
-				}
-			}
-
-		case optimization.StopTypeCollection:
-			// This is a collection
-			for _, collection := range req.Collections {
-				if stop.LocationID == collection.BinID || stop.CollectionID == fmt.Sprintf("collection-%s", collection.ID) {
-					task.TaskType = "collection"
-					task.BinID = &collection.BinID
-					task.BinNumber = &collection.BinNumber
-					task.FillPercentage = &collection.FillPercentage
-					log.Printf("   Stop #%d: Collection at Bin #%d", i+1, collection.BinNumber)
-					break
+			} else if stop.MoveRequestID != "" {
+				// This is a move request dropoff
+				for _, moveReq := range req.MoveRequests {
+					if stop.MoveRequestID == fmt.Sprintf("move-%s", moveReq.ID) {
+						task.TaskType = "dropoff"
+						task.MoveRequestID = &moveReq.ID
+						task.BinID = &moveReq.BinID
+						task.BinNumber = &moveReq.BinNumber
+						log.Printf("   ✅ Matched dropoff to move request (Bin #%d)", moveReq.BinNumber)
+						break
+					}
 				}
 			}
 		}

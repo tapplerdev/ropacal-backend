@@ -402,6 +402,30 @@ func (m *MapboxOptimizer) parseMapboxSolution(solution map[string]interface{}, o
 					}
 				}
 
+				// Extract pickup references (for shipments)
+				if pickups, ok := stop["pickups"].([]interface{}); ok && len(pickups) > 0 {
+					if pickup, ok := pickups[0].(string); ok {
+						// Pickup ID could be "placement-XXX" or "move-XXX"
+						if len(pickup) > 10 && pickup[:10] == "placement-" {
+							optimizedStop.PlacementID = pickup
+						} else if len(pickup) > 5 && pickup[:5] == "move-" {
+							optimizedStop.MoveRequestID = pickup
+						}
+					}
+				}
+
+				// Extract dropoff references (for shipments)
+				if dropoffs, ok := stop["dropoffs"].([]interface{}); ok && len(dropoffs) > 0 {
+					if dropoff, ok := dropoffs[0].(string); ok {
+						// Dropoff ID could be "placement-XXX" or "move-XXX"
+						if len(dropoff) > 10 && dropoff[:10] == "placement-" {
+							optimizedStop.PlacementID = dropoff
+						} else if len(dropoff) > 5 && dropoff[:5] == "move-" {
+							optimizedStop.MoveRequestID = dropoff
+						}
+					}
+				}
+
 				optimizedRoute.Stops = append(optimizedRoute.Stops, optimizedStop)
 			}
 
