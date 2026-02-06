@@ -35,6 +35,16 @@ func (m *MapboxOptimizer) OptimizeRoute(req *RouteRequest) (*RouteResponse, erro
 		return nil, fmt.Errorf("MAPBOX_ACCESS_TOKEN not configured")
 	}
 
+	// Count total tasks (excluding warehouse starts/ends)
+	totalTasks := len(req.Collections) + len(req.Placements) + (len(req.MoveRequests) * 2)
+
+	// Skip optimization for shifts with 0-1 tasks - not enough waypoints for Mapbox
+	if totalTasks <= 1 {
+		log.Printf("⏭️  Skipping optimization: only %d task(s) found (minimum 2 required for route optimization)", totalTasks)
+		log.Printf("✅ Using sequential order for single-task shift")
+		return m.buildSequentialRoute(req), nil
+	}
+
 	log.Printf("📦 Converting request to Mapbox format...")
 	problem := m.buildMapboxProblem(req)
 
@@ -448,4 +458,128 @@ func findLocationInRequest(locationID string, req *RouteRequest) *Location {
 	}
 
 	return nil
+}
+
+// buildSequentialRoute creates a simple sequential route for shifts with 0-1 tasks
+// This avoids calling Mapbox API which requires at least 2 waypoints
+func (m *MapboxOptimizer) buildSequentialRoute(req *RouteRequest) *RouteResponse {
+	response := &RouteResponse{
+		OptimizerUsed: "sequential",
+		Routes:        []OptimizedRoute{},
+		TotalDistance: 0,
+		TotalDuration: 0,
+	}
+
+	if len(req.Vehicles) == 0 {
+		return response
+	}
+
+	vehicle := req.Vehicles[0]
+	route := OptimizedRoute{
+		VehicleID:     vehicle.ID,
+		Stops:         []OptimizedStop{},
+		TotalDistance: 0,
+		TotalDuration: 0,
+	}
+
+	currentOdometer := 0.0
+	baseTime := time.Now()
+
+	// Add warehouse start
+	route.Stops = append(route.Stops, OptimizedStop{
+		Type:       "warehouse_start",
+		LocationID: vehicle.StartLocation.ID,
+		ETA:        baseTime,
+		Odometer:   currentOdometer,
+	})
+
+	// Add collections in order
+	for _, collection := range req.Collections {
+		currentOdometer += 1000 // 1km estimate per stop
+		baseTime = baseTime.Add(5 * time.Minute)
+		route.Stops = append(route.Stops, OptimizedStop{
+			Type:         "collection",
+			LocationID:   collection.Location.ID,
+			CollectionID: collection.ID,
+			BinNumber:    collection.BinNumber,
+			ETA:          baseTime,
+			Odometer:     currentOdometer,
+		})
+	}
+
+	// Add placements in order
+	for _, placement := range req.Placements {
+		// Warehouse pickup
+		currentOdometer += 1000
+		baseTime = baseTime.Add(5 * time.Minute)
+		route.Stops = append(route.Stops, OptimizedStop{
+			Type:        "placement_warehouse",
+			LocationID:  placement.WarehouseLocation.ID,
+			PlacementID: placement.ID,
+			ETA:         baseTime,
+			Odometer:    currentOdometer,
+		})
+
+		// Placement location
+		currentOdometer += 1000
+		baseTime = baseTime.Add(5 * time.Minute)
+		route.Stops = append(route.Stops, OptimizedStop{
+			Type:        "placement",
+			LocationID:  placement.PlacementLocation.ID,
+			PlacementID: placement.ID,
+			BinNumber:   placement.NewBinNumber,
+			ETA:         baseTime,
+			Odometer:    currentOdometer,
+		})
+	}
+
+	// Add move requests in order
+	for _, moveReq := range req.MoveRequests {
+		// Pickup
+		currentOdometer += 1000
+		baseTime = baseTime.Add(5 * time.Minute)
+		route.Stops = append(route.Stops, OptimizedStop{
+			Type:          "pickup",
+			LocationID:    moveReq.PickupLocation.ID,
+			MoveRequestID: moveReq.ID,
+			BinNumber:     moveReq.BinNumber,
+			ETA:           baseTime,
+			Odometer:      currentOdometer,
+		})
+
+		// Dropoff
+		currentOdometer += 1000
+		baseTime = baseTime.Add(5 * time.Minute)
+		route.Stops = append(route.Stops, OptimizedStop{
+			Type:          "dropoff",
+			LocationID:    moveReq.DropoffLocation.ID,
+			MoveRequestID: moveReq.ID,
+			BinNumber:     moveReq.BinNumber,
+			ETA:           baseTime,
+			Odometer:      currentOdometer,
+		})
+	}
+
+	// Add warehouse end
+	currentOdometer += 1000
+	baseTime = baseTime.Add(5 * time.Minute)
+	route.Stops = append(route.Stops, OptimizedStop{
+		Type:       "warehouse_end",
+		LocationID: vehicle.EndLocation.ID,
+		ETA:        baseTime,
+		Odometer:   currentOdometer,
+	})
+
+	// Calculate route totals
+	if len(route.Stops) > 0 {
+		lastStop := route.Stops[len(route.Stops)-1]
+		route.TotalDistance = lastStop.Odometer
+		route.TotalDuration = int(lastStop.ETA.Sub(route.Stops[0].ETA).Seconds())
+	}
+
+	response.Routes = append(response.Routes, route)
+	response.TotalDistance = route.TotalDistance
+	response.TotalDuration = route.TotalDuration
+
+	return response
 }
