@@ -681,8 +681,6 @@ func callSegmentedOptimization(warehouseLat, warehouseLon float64, tasks []TaskR
 
 // callHereSegmentOptimization calls HERE Maps for a single segment
 func callHereSegmentOptimization(startLat, startLon, endLat, endLon float64, tasks []TaskRow) (map[string]interface{}, error) {
-	HereAPIKey := "paBPqXdCxmq01bP5eA0_i2jA53PnqMH7YCc6q21wwrw"
-
 	apiURL := "https://wps.hereapi.com/v8/findsequence2"
 	params := url.Values{}
 	params.Add("apiKey", HereAPIKey)
