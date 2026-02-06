@@ -3921,10 +3921,15 @@ func optimizeRouteWithMapbox(
 		// Determine task type and map to original task
 		// Note: Mapbox returns "service" for collections, "pickup"/"dropoff" for shipments
 		switch stop.Type {
-		case optimization.StopTypeStart, optimization.StopTypeEnd:
-			// Skip start/end stops - they're implicit
-			log.Printf("   ⏭️  SKIPPED: Start/End stop (implicit warehouse)")
+		case optimization.StopTypeStart:
+			// Skip start - driver is already at warehouse
+			log.Printf("   ⏭️  SKIPPED: Start stop (driver already at warehouse)")
 			continue
+
+		case optimization.StopTypeEnd:
+			// Map end to warehouse_stop so mobile knows to return to warehouse
+			task.TaskType = "warehouse_stop"
+			log.Printf("   ✅ Mapped end stop to warehouse_stop (return to warehouse)")
 
 		case "service":
 			// Mapbox returns "service" type for collections (not "collection")
