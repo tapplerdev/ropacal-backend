@@ -487,9 +487,14 @@ func (m *MapboxOptimizer) parseMapboxSolution(solution map[string]interface{}, o
 
 // findLocationInRequest finds location details from the original request
 func findLocationInRequest(locationID string, req *RouteRequest) *Location {
-	// Check warehouse
+	// Check start location
 	if locationID == req.Vehicles[0].StartLocation.ID {
 		return &req.Vehicles[0].StartLocation
+	}
+
+	// Check end location (warehouse)
+	if locationID == req.Vehicles[0].EndLocation.ID {
+		return &req.Vehicles[0].EndLocation
 	}
 
 	// Check collections
