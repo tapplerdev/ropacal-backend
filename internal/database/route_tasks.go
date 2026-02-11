@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -228,12 +229,17 @@ func CreateShiftWithTasks(
 
 		getInt := func(key string) interface{} {
 			if val, ok := taskData[key]; ok {
-				// Handle both int and float64 from JSON
+				// Handle int, float64, and string from JSON
 				switch v := val.(type) {
 				case float64:
 					return int(v)
 				case int:
 					return v
+				case string:
+					// Handle string numbers (e.g., "33" from dashboard)
+					if intVal, err := strconv.Atoi(v); err == nil {
+						return intVal
+					}
 				}
 			}
 			return nil
