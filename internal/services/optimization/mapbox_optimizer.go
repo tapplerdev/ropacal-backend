@@ -238,30 +238,45 @@ func (m *MapboxOptimizer) buildMapboxProblem(req *RouteRequest) map[string]inter
 func (m *MapboxOptimizer) submitProblem(problem map[string]interface{}) (string, error) {
 	url := fmt.Sprintf("https://api.mapbox.com/optimized-trips/v2?access_token=%s", m.accessToken)
 
+	log.Printf("🌐 [MAPBOX] Submitting to URL: %s", "https://api.mapbox.com/optimized-trips/v2?access_token=***")
+
 	problemJSON, err := json.Marshal(problem)
 	if err != nil {
+		log.Printf("❌ [MAPBOX] Failed to marshal problem JSON: %v", err)
 		return "", fmt.Errorf("failed to marshal problem: %w", err)
 	}
 
+	log.Printf("📏 [MAPBOX] Request size: %d bytes", len(problemJSON))
+
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(problemJSON))
 	if err != nil {
+		log.Printf("❌ [MAPBOX] Failed to create HTTP request: %v", err)
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
+	log.Printf("📤 [MAPBOX] Sending POST request to Mapbox Optimization API...")
 	resp, err := m.client.Do(req)
 	if err != nil {
+		log.Printf("❌ [MAPBOX] HTTP request failed: %v", err)
 		return "", fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	log.Printf("📡 [MAPBOX] Received response with status code: %d", resp.StatusCode)
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("❌ [MAPBOX] Failed to read response body: %v", err)
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
 
+	log.Printf("📥 [MAPBOX] Response body: %s", string(body))
+
 	if resp.StatusCode != 202 {
+		log.Printf("❌ [MAPBOX] Unexpected status code %d (expected 202)", resp.StatusCode)
+		log.Printf("❌ [MAPBOX] Error response: %s", string(body))
 		return "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -271,8 +286,12 @@ func (m *MapboxOptimizer) submitProblem(problem map[string]interface{}) (string,
 	}
 
 	if err := json.Unmarshal(body, &response); err != nil {
+		log.Printf("❌ [MAPBOX] Failed to parse response JSON: %v", err)
+		log.Printf("❌ [MAPBOX] Raw response was: %s", string(body))
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
+
+	log.Printf("✅ [MAPBOX] Job submitted successfully - ID: %s, Status: %s", response.ID, response.Status)
 
 	return response.ID, nil
 }
@@ -282,39 +301,60 @@ func (m *MapboxOptimizer) pollForSolution(jobID string, timeout time.Duration) (
 	url := fmt.Sprintf("https://api.mapbox.com/optimized-trips/v2/%s?access_token=%s", jobID, m.accessToken)
 	deadline := time.Now().Add(timeout)
 	pollInterval := 2 * time.Second
+	pollCount := 0
+
+	log.Printf("⏳ [MAPBOX] Starting to poll for job %s (timeout: %v)", jobID, timeout)
 
 	for time.Now().Before(deadline) {
+		pollCount++
+		log.Printf("🔄 [MAPBOX] Poll attempt #%d for job %s", pollCount, jobID)
+
 		resp, err := m.client.Get(url)
 		if err != nil {
+			log.Printf("❌ [MAPBOX] Poll request failed: %v", err)
 			return nil, fmt.Errorf("failed to check status: %w", err)
 		}
 
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
+			log.Printf("❌ [MAPBOX] Failed to read poll response body: %v", err)
 			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
 
+		log.Printf("📡 [MAPBOX] Poll response status: %d", resp.StatusCode)
+
 		// 200 OK = solution ready
 		if resp.StatusCode == 200 {
+			log.Printf("✅ [MAPBOX] Solution ready! (after %d polls)", pollCount)
+			log.Printf("📥 [MAPBOX] Solution body size: %d bytes", len(body))
+
 			var solution map[string]interface{}
 			if err := json.Unmarshal(body, &solution); err != nil {
+				log.Printf("❌ [MAPBOX] Failed to parse solution JSON: %v", err)
+				log.Printf("❌ [MAPBOX] Raw solution: %s", string(body))
 				return nil, fmt.Errorf("failed to parse solution: %w", err)
 			}
+
+			log.Printf("✅ [MAPBOX] Solution parsed successfully")
 			return solution, nil
 		}
 
 		// 202 Accepted = still processing
 		if resp.StatusCode == 202 {
-			log.Printf("⏳ Solution not ready yet, waiting %v...", pollInterval)
+			log.Printf("⏳ [MAPBOX] Solution not ready yet (status: 202 Accepted), waiting %v...", pollInterval)
+			log.Printf("📄 [MAPBOX] Status response: %s", string(body))
 			time.Sleep(pollInterval)
 			continue
 		}
 
 		// Other status = error
+		log.Printf("❌ [MAPBOX] Unexpected status %d", resp.StatusCode)
+		log.Printf("❌ [MAPBOX] Error response: %s", string(body))
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
+	log.Printf("❌ [MAPBOX] Timeout! Waited %v (%d polls total)", timeout, pollCount)
 	return nil, fmt.Errorf("timeout waiting for solution (waited %v)", timeout)
 }
 

@@ -4041,10 +4041,15 @@ func optimizeRouteWithMapbox(
 	mapboxOptimizer := optimization.NewMapboxOptimizer()
 	response, err := mapboxOptimizer.OptimizeRoute(req)
 	if err != nil {
+		log.Printf("❌ [MAPBOX OPTIMIZER] Optimization FAILED: %v", err)
 		return fmt.Errorf("Mapbox optimization failed: %w", err)
 	}
 
+	log.Printf("✅ [MAPBOX OPTIMIZER] Received response from Mapbox")
+	log.Printf("📊 [MAPBOX OPTIMIZER] Response contains %d routes", len(response.Routes))
+
 	if len(response.Routes) == 0 {
+		log.Printf("❌ [MAPBOX OPTIMIZER] No routes in response! Dropped tasks: %v", response.DroppedTasks)
 		return fmt.Errorf("Mapbox returned no routes")
 	}
 
