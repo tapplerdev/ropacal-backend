@@ -646,6 +646,9 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 			return
 		}
 
+		// DEBUG: Log raw Redis data to diagnose unexpected coordinates
+		log.Printf("🔍 [DEBUG] Raw Redis data for driver %s: %s", userClaims.UserID, locationJSON)
+
 		// Parse location JSON from Redis
 		if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
 			log.Printf("❌ Failed to parse location JSON from Redis: %v", err)
