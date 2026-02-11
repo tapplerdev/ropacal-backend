@@ -257,6 +257,25 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("🔄 [UPDATE-BIN] Transaction started")
 
+		// Convert booleans to integers (database uses INTEGER for boolean fields)
+		checkedInt := 0
+		if req.Checked {
+			checkedInt = 1
+		}
+		moveRequestedInt := 0
+		if req.MoveRequested {
+			moveRequestedInt = 1
+		}
+
+		// Dereference fill_percentage pointer to get actual value
+		fillPct := 0
+		if req.FillPercentage != nil {
+			fillPct = *req.FillPercentage
+		}
+
+		log.Printf("🔧 [UPDATE-BIN] Converted values: checked=%d, fill_percentage=%d, move_requested=%d",
+			checkedInt, fillPct, moveRequestedInt)
+
 		// Build update query
 		query := `
 			UPDATE bins
@@ -265,7 +284,7 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 
 		args := []interface{}{
 			req.CurrentStreet, req.City, req.Zip, req.Status,
-			req.Checked, req.FillPercentage, req.MoveRequested,
+			checkedInt, fillPct, moveRequestedInt,
 		}
 
 		paramCount := 7
