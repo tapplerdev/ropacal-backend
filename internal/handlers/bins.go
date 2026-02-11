@@ -171,7 +171,10 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
+		log.Printf("🔧 [UPDATE-BIN] Request received for bin ID: %s", id)
+
 		if id == "" {
+			log.Printf("❌ [UPDATE-BIN] Missing bin ID")
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
@@ -181,26 +184,35 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		if claims, ok := r.Context().Value("userClaims").(map[string]interface{}); ok {
 			if uid, ok := claims["user_id"].(string); ok {
 				userID = &uid
+				log.Printf("🔐 [UPDATE-BIN] User ID from JWT: %s", uid)
 			}
 		}
 
 		var req models.UpdateBinRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ [UPDATE-BIN] Invalid request body: %v", err)
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+
+		log.Printf("📦 [UPDATE-BIN] Request data: street=%s, city=%s, zip=%s, status=%s, checked=%v, fill=% v, lat=%v, lng=%v",
+			req.CurrentStreet, req.City, req.Zip, req.Status, req.Checked, req.FillPercentage, req.Latitude, req.Longitude)
 
 		// Get existing bin
 		var existing models.Bin
 		err := db.Get(&existing, "SELECT * FROM bins WHERE id = $1", id)
 		if err == sql.ErrNoRows {
+			log.Printf("❌ [UPDATE-BIN] Bin not found: %s", id)
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
 		if err != nil {
+			log.Printf("❌ [UPDATE-BIN] Database error fetching bin: %v", err)
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
+
+		log.Printf("✅ [UPDATE-BIN] Found existing bin #%d: %s, %s %s", existing.BinNumber, existing.CurrentStreet, existing.City, existing.Zip)
 
 		wasChecked := existing.Checked
 		becomingChecked := req.Checked && !wasChecked
@@ -230,13 +242,20 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			strings.TrimSpace(req.City) != existing.City ||
 			strings.TrimSpace(req.Zip) != existing.Zip
 
+		log.Printf("📍 [UPDATE-BIN] Address changed: %v (was: %s, %s %s → now: %s, %s %s)",
+			addrChanged, existing.CurrentStreet, existing.City, existing.Zip,
+			req.CurrentStreet, req.City, req.Zip)
+
 		// Start transaction
 		tx, err := db.Beginx()
 		if err != nil {
+			log.Printf("❌ [UPDATE-BIN] Failed to begin transaction: %v", err)
 			http.Error(w, "Failed to begin transaction", http.StatusInternalServerError)
 			return
 		}
 		defer tx.Rollback()
+
+		log.Printf("🔄 [UPDATE-BIN] Transaction started")
 
 		// Build update query
 		query := `
@@ -279,14 +298,25 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		query += `, updated_at = $` + fmt.Sprintf("%d", paramCount) + ` WHERE id = $` + fmt.Sprintf("%d", paramCount+1)
 		args = append(args, time.Now().Unix(), id)
 
+		log.Printf("📝 [UPDATE-BIN] Executing query with %d parameters", len(args))
+		log.Printf("📝 [UPDATE-BIN] Query: %s", query)
+		log.Printf("📝 [UPDATE-BIN] Args: %v", args)
+
 		_, err = tx.Exec(query, args...)
 		if err != nil {
+			log.Printf("❌ [UPDATE-BIN] Failed to execute update query: %v", err)
+			log.Printf("❌ [UPDATE-BIN] Query was: %s", query)
+			log.Printf("❌ [UPDATE-BIN] Args were: %v", args)
 			http.Error(w, "Failed to update bin", http.StatusInternalServerError)
 			return
 		}
 
+		log.Printf("✅ [UPDATE-BIN] Bin updated successfully")
+
 		// If becoming checked, insert check record
 		if becomingChecked {
+			log.Printf("✓ [UPDATE-BIN] Bin is becoming checked, creating check record")
+
 			checkedFrom := ""
 			if req.CheckedFrom != nil && strings.TrimSpace(*req.CheckedFrom) != "" {
 				checkedFrom = *req.CheckedFrom
@@ -299,30 +329,46 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				fillForCheck = *req.FillPercentage
 			}
 
+			log.Printf("📝 [UPDATE-BIN] Creating check: from=%s, fill=%d%%, time=%d, user=%v",
+				checkedFrom, fillForCheck, now.Unix(), userID)
+
 			// Include checked_by (authenticated user) and photo_url if provided
 			_, err = tx.Exec(`
 				INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
 				VALUES ($1, $2, $3, $4, $5, $6)
 			`, id, checkedFrom, fillForCheck, now.Unix(), userID, req.PhotoUrl)
 			if err != nil {
+				log.Printf("❌ [UPDATE-BIN] Failed to create check record: %v", err)
 				http.Error(w, "Failed to create check record", http.StatusInternalServerError)
 				return
 			}
+
+			log.Printf("✅ [UPDATE-BIN] Check record created")
 		}
 
 		// Commit transaction
+		log.Printf("💾 [UPDATE-BIN] Committing transaction")
 		if err := tx.Commit(); err != nil {
+			log.Printf("❌ [UPDATE-BIN] Failed to commit transaction: %v", err)
 			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
 			return
 		}
 
+		log.Printf("✅ [UPDATE-BIN] Transaction committed successfully")
+
 		// Fetch updated bin
+		log.Printf("🔍 [UPDATE-BIN] Fetching updated bin data")
 		var updated models.Bin
 		err = db.Get(&updated, "SELECT * FROM bins WHERE id = $1", id)
 		if err != nil {
+			log.Printf("❌ [UPDATE-BIN] Failed to fetch updated bin: %v", err)
 			http.Error(w, "Failed to fetch updated bin", http.StatusInternalServerError)
 			return
 		}
+
+		log.Printf("✅ [UPDATE-BIN] Updated bin #%d fetched: %s, %s %s (lat=%v, lng=%v)",
+			updated.BinNumber, updated.CurrentStreet, updated.City, updated.Zip,
+			updated.Latitude, updated.Longitude)
 
 		// Broadcast to all managers
 		wsHub.BroadcastToRole("admin", map[string]interface{}{
@@ -333,6 +379,8 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(updated.ToBinResponse())
+
+		log.Printf("✅ [UPDATE-BIN] Successfully completed update for bin #%d", updated.BinNumber)
 	}
 }
 
