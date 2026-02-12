@@ -300,7 +300,11 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc
 func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] ========== START ==========")
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Request received for location ID: %s", id)
+
 		if id == "" {
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Missing location ID")
 			http.Error(w, "Missing location ID", http.StatusBadRequest)
 			return
 		}
@@ -310,17 +314,39 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		if r.Body != nil {
 			json.NewDecoder(r.Body).Decode(&req)
 		}
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Request body parsed: bin_number=%v, fill_percentage=%v", req.BinNumber, req.FillPercentage)
 
 		// Get user from context (manager who is converting)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Unauthorized: user not found in context")
 			http.Error(w, "Unauthorized: user not found in context", http.StatusUnauthorized)
 			return
 		}
 
 		userID := userClaims.UserID
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] User ID: %s", userID)
+
+		// First, check if location exists at all (without transaction)
+		var existsCheck bool
+		err := db.Get(&existsCheck, "SELECT EXISTS(SELECT 1 FROM potential_locations WHERE id = $1)", id)
+		if err != nil {
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Error checking if location exists: %v", err)
+		} else {
+			log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Location exists in DB: %v", existsCheck)
+		}
+
+		// Check if already converted (without transaction)
+		var convertedAt *int64
+		err = db.Get(&convertedAt, "SELECT converted_at FROM potential_locations WHERE id = $1", id)
+		if err != nil {
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Error checking converted_at: %v", err)
+		} else {
+			log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at value: %v (nil means not converted)", convertedAt)
+		}
 
 		// Begin transaction
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Starting transaction...")
 		tx, err := db.Beginx()
 		if err != nil {
 			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Transaction begin failed: %v", err)
@@ -328,8 +354,10 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 			return
 		}
 		defer tx.Rollback()
+		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Transaction started successfully")
 
 		// Fetch potential location
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Executing query: SELECT id, street, city, zip, latitude, longitude, requested_by_user_id FROM potential_locations WHERE id = '%s' AND converted_at IS NULL", id)
 		var location models.PotentialLocation
 		err = tx.QueryRow(`
 			SELECT id, street, city, zip, latitude, longitude, requested_by_user_id
@@ -346,14 +374,16 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		)
 
 		if err == sql.ErrNoRows {
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Query returned NO ROWS - location not found or already converted")
 			http.Error(w, "Potential location not found or already converted", http.StatusNotFound)
 			return
 		}
 		if err != nil {
-			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Failed to fetch location: %v", err)
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Query failed with error: %v (error type: %T)", err, err)
 			http.Error(w, "Failed to fetch potential location", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Location fetched: %s, %s %s", location.Street, location.City, location.Zip)
 
 		// Validate bin_number is required
 		if req.BinNumber == nil || *req.BinNumber <= 0 {
@@ -368,6 +398,7 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		// Create bin
 		binID := uuid.New().String()
 		now := time.Now().Unix()
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Generated bin ID: %s, timestamp: %d", binID, now)
 
 		// Default fill_percentage to 0 if not provided
 		fillPercentage := 0
@@ -375,6 +406,7 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 			fillPercentage = *req.FillPercentage
 		}
 
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Creating bin with: bin_number=%d, street=%s, city=%s, zip=%s, fill_percentage=%d", binNumber, location.Street, location.City, location.Zip, fillPercentage)
 		_, err = tx.Exec(`
 			INSERT INTO bins (
 				id, bin_number, current_street, city, zip, status,
@@ -393,8 +425,10 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 			http.Error(w, "Failed to create bin", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Bin created successfully")
 
 		// Update potential location to mark as converted (soft delete)
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Updating potential location to mark as converted...")
 		_, err = tx.Exec(`
 			UPDATE potential_locations
 			SET converted_to_bin_id = $1,
@@ -409,15 +443,20 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 			http.Error(w, "Failed to update potential location", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Potential location marked as converted")
 
 		// Commit transaction
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Committing transaction...")
 		if err = tx.Commit(); err != nil {
 			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Transaction commit failed: %v", err)
 			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
 			return
 		}
 
+		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Transaction committed successfully")
+
 		// Fetch created bin
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Fetching created bin from database...")
 		var createdBin models.Bin
 		err = db.Get(&createdBin, "SELECT * FROM bins WHERE id = $1", binID)
 		if err != nil {
@@ -425,10 +464,12 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 			http.Error(w, "Failed to fetch created bin", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Fetched created bin successfully")
 
 		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Converted location (ID: %s) to Bin #%d (ID: %s)", id, binNumber, binID)
 
 		// Broadcast to all managers (both location removed and bin created)
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Broadcasting WebSocket event...")
 		wsHub.BroadcastToRole("admin", map[string]interface{}{
 			"type": "potential_location_converted",
 			"data": map[string]interface{}{
@@ -441,5 +482,7 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(createdBin.ToBinResponse())
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] ========== SUCCESS ==========")
+		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Response sent: HTTP 201 with bin data")
 	}
 }
