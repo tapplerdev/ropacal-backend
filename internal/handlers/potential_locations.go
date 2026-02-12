@@ -355,18 +355,41 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 			return
 		}
 
-		// Auto-assign bin number
-		var maxBinNumber sql.NullInt64
-		err = tx.QueryRow("SELECT MAX(bin_number) FROM bins").Scan(&maxBinNumber)
-		if err != nil {
-			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Failed to get max bin_number: %v", err)
-			http.Error(w, "Failed to generate bin number", http.StatusInternalServerError)
-			return
-		}
+		// Use provided bin_number or auto-assign
+		var binNumber int
+		if req.BinNumber != nil && *req.BinNumber > 0 {
+			// Use manually provided bin number
+			binNumber = *req.BinNumber
+			log.Printf("📝 [CONVERT-POTENTIAL-LOCATION] Using provided bin number: %d", binNumber)
 
-		binNumber := 1
-		if maxBinNumber.Valid {
-			binNumber = int(maxBinNumber.Int64) + 1
+			// Check if bin number already exists
+			var existingBinID string
+			err = tx.QueryRow("SELECT id FROM bins WHERE bin_number = $1", binNumber).Scan(&existingBinID)
+			if err != sql.ErrNoRows {
+				if err != nil {
+					log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Failed to check bin number: %v", err)
+					http.Error(w, "Failed to validate bin number", http.StatusInternalServerError)
+					return
+				}
+				// Bin number already exists
+				http.Error(w, fmt.Sprintf("Bin number %d already exists", binNumber), http.StatusConflict)
+				return
+			}
+		} else {
+			// Auto-assign bin number
+			var maxBinNumber sql.NullInt64
+			err = tx.QueryRow("SELECT MAX(bin_number) FROM bins").Scan(&maxBinNumber)
+			if err != nil {
+				log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Failed to get max bin_number: %v", err)
+				http.Error(w, "Failed to generate bin number", http.StatusInternalServerError)
+				return
+			}
+
+			binNumber = 1
+			if maxBinNumber.Valid {
+				binNumber = int(maxBinNumber.Int64) + 1
+			}
+			log.Printf("🔢 [CONVERT-POTENTIAL-LOCATION] Auto-assigned bin number: %d", binNumber)
 		}
 
 		// Create bin

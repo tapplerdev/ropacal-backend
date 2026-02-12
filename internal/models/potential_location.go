@@ -56,6 +56,7 @@ type CreatePotentialLocationRequest struct {
 
 // ConvertToBinRequest is the request body for POST /api/potential-locations/:id/convert
 type ConvertToBinRequest struct {
+	BinNumber      *int `json:"bin_number,omitempty"`
 	FillPercentage *int `json:"fill_percentage,omitempty"`
 }
 
