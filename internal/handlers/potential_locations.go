@@ -22,6 +22,7 @@ import (
 func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		status := r.URL.Query().Get("status")
+		log.Printf("🔍 [GET-POTENTIAL-LOCATIONS] Request for status: '%s'", status)
 
 		var whereClause string
 		if status == "converted" {
@@ -30,6 +31,7 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 			// Default: show only active (non-converted) locations
 			whereClause = "WHERE pl.converted_at IS NULL"
 		}
+		log.Printf("🔍 [GET-POTENTIAL-LOCATIONS] Using WHERE clause: %s", whereClause)
 
 		query := fmt.Sprintf(`
 			SELECT
@@ -85,6 +87,11 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 			if err != nil {
 				log.Printf("❌ [GET-POTENTIAL-LOCATIONS] Row scan failed: %v", err)
 				continue
+			}
+
+			// Debug: log if this is supposed to be "active" but has converted_at
+			if status != "converted" && loc.ConvertedAt != nil {
+				log.Printf("⚠️ [GET-POTENTIAL-LOCATIONS] WARNING: Location %s has converted_at=%d but is being returned as ACTIVE!", loc.ID, *loc.ConvertedAt)
 			}
 
 			resp := loc.ToPotentialLocationResponse()
@@ -342,7 +349,11 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		if err != nil {
 			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Error checking converted_at: %v", err)
 		} else {
-			log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at value: %v (nil means not converted)", convertedAt)
+			if convertedAt == nil {
+				log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at is NULL - location NOT converted yet")
+			} else {
+				log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at = %d - location ALREADY CONVERTED!", *convertedAt)
+			}
 		}
 
 		// Begin transaction
