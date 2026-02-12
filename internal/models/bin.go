@@ -48,6 +48,7 @@ type BinResponse struct {
 
 // UpdateBinRequest is the request body for PATCH /api/bins/:id
 type UpdateBinRequest struct {
+	BinNumber      int      `json:"bin_number"`
 	CurrentStreet  string   `json:"current_street"`
 	City           string   `json:"city"`
 	Zip            string   `json:"zip"`

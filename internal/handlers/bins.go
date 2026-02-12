@@ -279,15 +279,15 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		// Build update query
 		query := `
 			UPDATE bins
-			SET current_street = $1, city = $2, zip = $3, status = $4,
-			    checked = $5, fill_percentage = $6, move_requested = $7`
+			SET bin_number = $1, current_street = $2, city = $3, zip = $4, status = $5,
+			    checked = $6, fill_percentage = $7, move_requested = $8`
 
 		args := []interface{}{
-			req.CurrentStreet, req.City, req.Zip, req.Status,
+			req.BinNumber, req.CurrentStreet, req.City, req.Zip, req.Status,
 			checkedInt, fillPct, moveRequestedInt,
 		}
 
-		paramCount := 7
+		paramCount := 8
 		if becomingChecked {
 			paramCount++
 			query += `, last_checked = $` + fmt.Sprintf("%d", paramCount)
