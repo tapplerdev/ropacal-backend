@@ -168,7 +168,7 @@ func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc
 		}
 
 		// Begin transaction
-		tx, err := db.Begin()
+		tx, err := db.Beginx()
 		if err != nil {
 			log.Printf("❌ [CREATE-POTENTIAL-LOCATION] Transaction begin failed: %v", err)
 			http.Error(w, "Failed to start transaction", http.StatusInternalServerError)
@@ -321,7 +321,7 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		userID := userClaims.UserID
 
 		// Begin transaction
-		tx, err := db.Begin()
+		tx, err := db.Beginx()
 		if err != nil {
 			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Transaction begin failed: %v", err)
 			http.Error(w, "Failed to start transaction", http.StatusInternalServerError)
