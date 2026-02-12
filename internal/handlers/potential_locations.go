@@ -345,14 +345,19 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 
 		// Check if already converted (without transaction)
 		var convertedAt *int64
-		err = db.Get(&convertedAt, "SELECT converted_at FROM potential_locations WHERE id = $1", id)
+		var convertedToBinID *string
+		err = db.QueryRow("SELECT converted_at, converted_to_bin_id FROM potential_locations WHERE id = $1", id).Scan(&convertedAt, &convertedToBinID)
 		if err != nil {
-			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Error checking converted_at: %v", err)
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Error checking conversion status: %v", err)
 		} else {
 			if convertedAt == nil {
 				log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at is NULL - location NOT converted yet")
 			} else {
-				log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at = %d - location ALREADY CONVERTED!", *convertedAt)
+				if convertedToBinID == nil {
+					log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at = %d, but converted_to_bin_id is NULL - BIN WAS DELETED! Re-conversion should be allowed.", *convertedAt)
+				} else {
+					log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] converted_at = %d, converted_to_bin_id = %s - location already converted to existing bin", *convertedAt, *convertedToBinID)
+				}
 			}
 		}
 
@@ -368,12 +373,13 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Transaction started successfully")
 
 		// Fetch potential location
-		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Executing query: SELECT id, street, city, zip, latitude, longitude, requested_by_user_id FROM potential_locations WHERE id = '%s' AND converted_at IS NULL", id)
+		// Allow re-conversion if bin was deleted (converted_to_bin_id IS NULL)
+		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Executing query: SELECT id, street, city, zip, latitude, longitude, requested_by_user_id FROM potential_locations WHERE id = '%s' AND (converted_at IS NULL OR converted_to_bin_id IS NULL)", id)
 		var location models.PotentialLocation
 		err = tx.QueryRow(`
 			SELECT id, street, city, zip, latitude, longitude, requested_by_user_id
 			FROM potential_locations
-			WHERE id = $1 AND converted_at IS NULL
+			WHERE id = $1 AND (converted_at IS NULL OR converted_to_bin_id IS NULL)
 		`, id).Scan(
 			&location.ID,
 			&location.Street,
@@ -385,8 +391,8 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 		)
 
 		if err == sql.ErrNoRows {
-			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Query returned NO ROWS - location not found or already converted")
-			http.Error(w, "Potential location not found or already converted", http.StatusNotFound)
+			log.Printf("❌ [CONVERT-POTENTIAL-LOCATION] Query returned NO ROWS - location not found or already converted to an existing bin")
+			http.Error(w, "Potential location not found or already converted to an existing bin", http.StatusNotFound)
 			return
 		}
 		if err != nil {
