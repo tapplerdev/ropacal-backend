@@ -72,12 +72,56 @@ func Auth(next http.Handler) http.Handler {
 		})
 
 		if err != nil || !token.Valid {
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			log.Printf("❌ Invalid token: %v", err)
 			if err != nil {
 				log.Printf("   Error type: %T", err)
 				log.Printf("   Error details: %+v", err)
 			}
 			log.Printf("   Token valid: %v", token.Valid)
+
+			// DETAILED EXPIRATION DEBUGGING
+			if claims, ok := token.Claims.(jwt.MapClaims); ok {
+				log.Printf("🔍 TOKEN DETAILS:")
+
+				// Get user info
+				if email, ok := claims["email"].(string); ok {
+					log.Printf("   User: %s", email)
+				}
+				if userID, ok := claims["user_id"].(string); ok {
+					log.Printf("   User ID: %s", userID)
+				}
+				if role, ok := claims["role"].(string); ok {
+					log.Printf("   Role: %s", role)
+				}
+
+				// Get token timing info
+				now := jwt.NewNumericDate(time.Now())
+				log.Printf("   Current server time: %s (unix: %d)", now.Time.Format(time.RFC3339), now.Unix())
+
+				if iat, ok := claims["iat"].(float64); ok {
+					iatTime := time.Unix(int64(iat), 0)
+					log.Printf("   Token issued at (iat): %s (unix: %d)", iatTime.Format(time.RFC3339), int64(iat))
+					log.Printf("   Token age: %s", time.Since(iatTime).Round(time.Second))
+				}
+
+				if exp, ok := claims["exp"].(float64); ok {
+					expTime := time.Unix(int64(exp), 0)
+					log.Printf("   Token expires at (exp): %s (unix: %d)", expTime.Format(time.RFC3339), int64(exp))
+
+					if expTime.Before(time.Now()) {
+						expiredDuration := time.Since(expTime).Round(time.Second)
+						log.Printf("   ⏰ Token EXPIRED %s ago", expiredDuration)
+					} else {
+						validDuration := time.Until(expTime).Round(time.Second)
+						log.Printf("   ⏰ Token still valid for %s", validDuration)
+					}
+				} else {
+					log.Printf("   ⚠️  No expiration claim (exp) in token!")
+				}
+			}
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
