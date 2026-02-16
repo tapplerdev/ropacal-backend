@@ -236,9 +236,36 @@ func (m *MapboxOptimizer) buildMapboxProblem(req *RouteRequest) map[string]inter
 
 // submitProblem submits the routing problem to Mapbox
 func (m *MapboxOptimizer) submitProblem(problem map[string]interface{}) (string, error) {
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Println("🚀 [MAPBOX] STARTING ROUTE OPTIMIZATION REQUEST")
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Validate access token
+	if m.accessToken == "" {
+		log.Println("❌ [MAPBOX] CRITICAL: Access token is empty!")
+		log.Println("   Check MAPBOX_ACCESS_TOKEN environment variable")
+		return "", fmt.Errorf("MAPBOX_ACCESS_TOKEN not configured")
+	}
+	log.Printf("✅ [MAPBOX] Access token present (length: %d)", len(m.accessToken))
+	log.Printf("   Token preview: %s...%s", m.accessToken[:8], m.accessToken[len(m.accessToken)-8:])
+
 	url := fmt.Sprintf("https://api.mapbox.com/optimized-trips/v2?access_token=%s", m.accessToken)
 
-	log.Printf("🌐 [MAPBOX] Submitting to URL: %s", "https://api.mapbox.com/optimized-trips/v2?access_token=***")
+	log.Printf("🌐 [MAPBOX] Target URL: https://api.mapbox.com/optimized-trips/v2?access_token=***")
+
+	// Log problem details
+	if locations, ok := problem["locations"].([]map[string]interface{}); ok {
+		log.Printf("📍 [MAPBOX] Problem contains %d locations", len(locations))
+	}
+	if vehicles, ok := problem["vehicles"].([]map[string]interface{}); ok {
+		log.Printf("🚚 [MAPBOX] Problem contains %d vehicles", len(vehicles))
+	}
+	if services, ok := problem["services"].([]map[string]interface{}); ok {
+		log.Printf("📦 [MAPBOX] Problem contains %d services (collections)", len(services))
+	}
+	if shipments, ok := problem["shipments"].([]map[string]interface{}); ok {
+		log.Printf("📦 [MAPBOX] Problem contains %d shipments (placements/moves)", len(shipments))
+	}
 
 	problemJSON, err := json.Marshal(problem)
 	if err != nil {
@@ -246,7 +273,7 @@ func (m *MapboxOptimizer) submitProblem(problem map[string]interface{}) (string,
 		return "", fmt.Errorf("failed to marshal problem: %w", err)
 	}
 
-	log.Printf("📏 [MAPBOX] Request size: %d bytes", len(problemJSON))
+	log.Printf("📏 [MAPBOX] Request size: %d bytes (%.2f KB)", len(problemJSON), float64(len(problemJSON))/1024.0)
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(problemJSON))
 	if err != nil {
@@ -257,14 +284,38 @@ func (m *MapboxOptimizer) submitProblem(problem map[string]interface{}) (string,
 	req.Header.Set("Content-Type", "application/json")
 
 	log.Printf("📤 [MAPBOX] Sending POST request to Mapbox Optimization API...")
+	requestStart := time.Now()
 	resp, err := m.client.Do(req)
+	requestDuration := time.Since(requestStart)
+
 	if err != nil {
-		log.Printf("❌ [MAPBOX] HTTP request failed: %v", err)
+		log.Printf("❌ [MAPBOX] HTTP request FAILED after %v", requestDuration)
+		log.Printf("   Error type: %T", err)
+		log.Printf("   Error details: %v", err)
+
+		// Categorize error
+		if os.IsTimeout(err) {
+			log.Println("   ⏱️  Error category: TIMEOUT")
+			log.Println("   Possible causes:")
+			log.Println("      - Mapbox API is slow/overloaded")
+			log.Println("      - Network connectivity issues")
+			log.Println("      - Request too large/complex")
+		} else {
+			log.Println("   🌐 Error category: NETWORK/CONNECTION")
+			log.Println("   Possible causes:")
+			log.Println("      - DNS resolution failed")
+			log.Println("      - Cannot reach Mapbox servers")
+			log.Println("      - Firewall blocking outbound HTTPS")
+		}
+
 		return "", fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	log.Printf("📡 [MAPBOX] Received response with status code: %d", resp.StatusCode)
+	log.Printf("📡 [MAPBOX] Received response in %v", requestDuration)
+	log.Printf("   Status code: %d", resp.StatusCode)
+	log.Printf("   Status text: %s", resp.Status)
+	log.Printf("   Response headers: %v", resp.Header)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -272,11 +323,59 @@ func (m *MapboxOptimizer) submitProblem(problem map[string]interface{}) (string,
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
 
+	log.Printf("📥 [MAPBOX] Response body size: %d bytes", len(body))
 	log.Printf("📥 [MAPBOX] Response body: %s", string(body))
 
 	if resp.StatusCode != 202 {
-		log.Printf("❌ [MAPBOX] Unexpected status code %d (expected 202)", resp.StatusCode)
-		log.Printf("❌ [MAPBOX] Error response: %s", string(body))
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("❌ [MAPBOX] REQUEST REJECTED - Status %d (expected 202 Accepted)", resp.StatusCode)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+		// Categorize error by status code
+		switch resp.StatusCode {
+		case 400:
+			log.Println("   ⚠️  Error: BAD REQUEST (400)")
+			log.Println("   This means the problem JSON is malformed or invalid")
+			log.Println("   Common causes:")
+			log.Println("      - Missing required fields (vehicles, locations)")
+			log.Println("      - Invalid coordinate format")
+			log.Println("      - Invalid time windows")
+			log.Println("      - Too many locations (>1000)")
+		case 401:
+			log.Println("   🔒 Error: UNAUTHORIZED (401)")
+			log.Println("   This means the Mapbox access token is invalid or expired")
+			log.Println("   Check:")
+			log.Printf("      - Token: %s...%s", m.accessToken[:8], m.accessToken[len(m.accessToken)-8:])
+			log.Println("      - MAPBOX_ACCESS_TOKEN environment variable")
+			log.Println("      - Token hasn't been revoked in Mapbox dashboard")
+		case 403:
+			log.Println("   🚫 Error: FORBIDDEN (403)")
+			log.Println("   This means the account doesn't have access to Optimization API")
+			log.Println("   Check:")
+			log.Println("      - Mapbox subscription includes Optimization API")
+			log.Println("      - Account hasn't exceeded usage limits")
+		case 422:
+			log.Println("   ⚠️  Error: UNPROCESSABLE ENTITY (422)")
+			log.Println("   This means Mapbox can't solve the problem")
+			log.Println("   Common causes:")
+			log.Println("      - Impossible constraints (time windows, capacities)")
+			log.Println("      - Unreachable locations")
+			log.Println("      - Problem too complex to solve")
+		case 429:
+			log.Println("   ⏱️  Error: RATE LIMIT EXCEEDED (429)")
+			log.Println("   Too many requests to Mapbox API")
+			log.Println("   Wait and retry with backoff")
+		case 500, 502, 503, 504:
+			log.Printf("   🔥 Error: SERVER ERROR (%d)", resp.StatusCode)
+			log.Println("   Mapbox API is experiencing issues")
+			log.Println("   Retry later")
+		default:
+			log.Printf("   ❓ Error: UNKNOWN (%d)", resp.StatusCode)
+		}
+
+		log.Printf("   Error response: %s", string(body))
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 		return "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -291,7 +390,14 @@ func (m *MapboxOptimizer) submitProblem(problem map[string]interface{}) (string,
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	log.Printf("✅ [MAPBOX] Job submitted successfully - ID: %s, Status: %s", response.ID, response.Status)
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("✅ [MAPBOX] REQUEST ACCEPTED - Job submitted successfully")
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("   Job ID: %s", response.ID)
+	log.Printf("   Status: %s", response.Status)
+	log.Printf("   Request duration: %v", requestDuration)
+	log.Println("   Next step: Polling for solution...")
+	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	return response.ID, nil
 }
