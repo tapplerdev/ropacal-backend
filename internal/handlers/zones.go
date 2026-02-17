@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/pkg/utils"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
@@ -528,6 +529,48 @@ func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
 			"verified_at": time.Unix(now, 0).Format(time.RFC3339),
 			"verified_by": userClaims.UserID,
 		})
+	}
+}
+
+// GetBinIncidents returns all zone incidents associated with a specific bin
+func GetBinIncidents(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "id")
+		if binID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "missing bin ID")
+			return
+		}
+
+		var incidents []models.ZoneIncidentResponse
+		err := db.Select(&incidents, `
+			SELECT
+				zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
+				zi.reported_by_user_id, zi.description, zi.photo_url,
+				zi.check_id, zi.shift_id, zi.move_id,
+				zi.reporter_latitude, zi.reporter_longitude,
+				zi.is_field_observation, zi.status,
+				zi.verified_by_user_id, zi.verified_at,
+				to_timestamp(zi.created_at) AS reported_at_iso,
+				u.name AS reported_by_name,
+				v.name AS verified_by_name,
+				b.bin_number
+			FROM zone_incidents zi
+			LEFT JOIN users u ON u.id = zi.reported_by_user_id
+			LEFT JOIN users v ON v.id = zi.verified_by_user_id
+			LEFT JOIN bins b ON b.id = zi.bin_id
+			WHERE zi.bin_id = $1
+			ORDER BY zi.created_at DESC
+		`, binID)
+		if err != nil {
+			log.Printf("❌ [GetBinIncidents] DB error: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "failed to fetch bin incidents")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(incidents); err != nil {
+			log.Printf("❌ [GetBinIncidents] encode error: %v", err)
+		}
 	}
 }
 

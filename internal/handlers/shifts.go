@@ -1586,6 +1586,26 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			} else {
 				log.Printf("[DIAGNOSTIC] ⚠️  Could not create incident: bin has no coordinates (lat: %v, lng: %v)", bin.Latitude, bin.Longitude)
 			}
+
+		// If the incident type is "missing", flip the bin status and broadcast in real-time
+		if *req.IncidentType == "missing" {
+			if _, updateErr := db.Exec(
+				`UPDATE bins SET status = 'missing', updated_at = $1 WHERE id = $2`,
+				now, req.BinID,
+			); updateErr != nil {
+				log.Printf("[DIAGNOSTIC] ⚠️  Failed to mark bin %s as missing: %v", req.BinID, updateErr)
+			} else {
+				log.Printf("[DIAGNOSTIC] 🔍 Bin %s marked as missing", req.BinID)
+				if centrifugoClient != nil {
+					var updatedBin models.Bin
+					if fetchErr := db.Get(&updatedBin, "SELECT * FROM bins WHERE id = $1", req.BinID); fetchErr == nil {
+						if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_updated", updatedBin); pubErr != nil {
+							log.Printf("[DIAGNOSTIC] ⚠️  Centrifugo bin_updated publish failed: %v", pubErr)
+						}
+					}
+				}
+			}
+		}
 		}
 
 		// Update shift completed_bins count (only for bin tasks, not warehouse stops)
