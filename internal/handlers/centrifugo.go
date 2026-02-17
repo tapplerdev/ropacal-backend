@@ -173,6 +173,21 @@ func authorizeSubscription(db *sqlx.DB, userID string, channel string) (bool, er
 			// Only the manager themselves can subscribe
 			return userID == managerID, nil
 		}
+
+	case "company":
+		// Channel format: company:events
+		// Only admins and managers can subscribe to company-wide broadcast events
+		if channelType == "events" {
+			var role string
+			err := db.Get(&role, `SELECT role FROM users WHERE id = $1`, userID)
+			if err == sql.ErrNoRows {
+				return false, nil
+			}
+			if err != nil {
+				return false, fmt.Errorf("failed to get user role: %w", err)
+			}
+			return role == "admin" || role == "manager", nil
+		}
 	}
 
 	return false, fmt.Errorf("unknown channel format: %s", channel)
