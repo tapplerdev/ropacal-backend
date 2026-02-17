@@ -301,7 +301,7 @@ func main() {
 			r.Put("/shifts/tasks/{taskId}/complete", handlers.CompleteRouteTask(db, wsHub))
 
 			// Potential Locations (drivers can create requests)
-			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub))
+			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub, centrifugoClient))
 
 			// Incident reporting (drivers can report both check-based and field observations)
 			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteShiftBin)
@@ -352,7 +352,7 @@ func main() {
 			r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
 
 			// Potential Locations management (managers can delete and convert)
-			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, wsHub))
+			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, wsHub, centrifugoClient))
 			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub, centrifugoClient))
 
 			// Fleet management

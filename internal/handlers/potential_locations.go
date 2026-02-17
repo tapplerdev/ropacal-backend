@@ -117,7 +117,7 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 // POST /api/potential-locations (requires authentication)
 // Accepts either a single object or an array of objects
 // Always returns an array of created locations
-func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Get user from context (set by auth middleware)
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -240,11 +240,15 @@ func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc
 			resp := created.ToPotentialLocationResponse()
 			createdLocations = append(createdLocations, resp)
 
-			// Broadcast each location to all managers
-			wsHub.BroadcastToRole("admin", map[string]interface{}{
-				"type": "potential_location_created",
-				"data": resp,
-			})
+			// Broadcast each location to all managers via Centrifugo
+			if centrifugoClient != nil {
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_created", resp); pubErr != nil {
+					log.Printf("\u26a0\ufe0f [CREATE-POTENTIAL-LOCATION] Centrifugo publish failed: %v", pubErr)
+					wsHub.BroadcastToRole("admin", map[string]interface{}{"type": "potential_location_created", "data": resp})
+				}
+			} else {
+				wsHub.BroadcastToRole("admin", map[string]interface{}{"type": "potential_location_created", "data": resp})
+			}
 		}
 
 		log.Printf("✅ [CREATE-POTENTIAL-LOCATION] Created %d location(s), broadcasted to managers", len(createdLocations))
@@ -258,7 +262,7 @@ func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc
 
 // DeletePotentialLocation removes a potential location (hard delete)
 // DELETE /api/potential-locations/:id (requires admin role)
-func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -290,14 +294,17 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc
 
 		log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Deleted location (ID: %s)", id)
 
-		// Broadcast to all managers
-		wsHub.BroadcastToRole("admin", map[string]interface{}{
-			"type": "potential_location_deleted",
-			"data": map[string]interface{}{
-				"location_id": id,
-			},
-		})
-		log.Printf("📤 [DELETE-POTENTIAL-LOCATION] WebSocket event broadcasted to managers")
+		// Broadcast to all managers via Centrifugo
+		deleteData := map[string]interface{}{"location_id": id}
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_deleted", deleteData); pubErr != nil {
+				log.Printf("\u26a0\ufe0f [DELETE-POTENTIAL-LOCATION] Centrifugo publish failed: %v", pubErr)
+				wsHub.BroadcastToRole("admin", map[string]interface{}{"type": "potential_location_deleted", "data": deleteData})
+			}
+		} else {
+			wsHub.BroadcastToRole("admin", map[string]interface{}{"type": "potential_location_deleted", "data": deleteData})
+		}
+		log.Printf("\U0001f4e4 [DELETE-POTENTIAL-LOCATION] Event broadcasted to managers")
 
 		w.WriteHeader(http.StatusNoContent)
 	}
