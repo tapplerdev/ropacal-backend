@@ -361,7 +361,7 @@ func main() {
 			r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
 
 			// Incident reporting (manager phone-call complaints → zone creation)
-			r.Post("/manager/incident-report", handlers.CreateManagerIncidentReport(db, centrifugoClient, wsHub))
+			r.Post("/manager/incident-report", handlers.CreateManagerIncidentReport(db, centrifugoClient))
 
 			// User management
 			r.Get("/users", handlers.GetAllUsers(db))
