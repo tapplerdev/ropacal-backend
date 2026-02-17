@@ -21,7 +21,7 @@ type NoGoZone struct {
 type ZoneIncident struct {
 	ID                 string   `json:"id" db:"id"`
 	ZoneID             string   `json:"zone_id" db:"zone_id"`
-	BinID              string   `json:"bin_id" db:"bin_id"`
+	BinID              *string  `json:"bin_id" db:"bin_id"` // nil for address-only manager reports
 	IncidentType       string   `json:"incident_type" db:"incident_type"` // vandalism, landlord_complaint, theft, relocation_request
 	ReportedByUserID   *string  `json:"reported_by_user_id" db:"reported_by_user_id"`
 	ReportedAt         int64    `json:"reported_at" db:"reported_at"`
@@ -71,7 +71,7 @@ type NoGoZoneResponse struct {
 type ZoneIncidentResponse struct {
 	ID                 string   `json:"id"`
 	ZoneID             string   `json:"zone_id"`
-	BinID              string   `json:"bin_id"`
+	BinID              *string  `json:"bin_id,omitempty"` // nil for address-only manager reports
 	BinNumber          *int     `json:"bin_number,omitempty"` // Joined from bins table
 	IncidentType       string   `json:"incident_type"`
 	ReportedByUserID   *string  `json:"reported_by_user_id,omitempty"`

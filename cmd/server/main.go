@@ -360,6 +360,9 @@ func main() {
 			r.Get("/manager/active-drivers", handlers.GetActiveDrivers(db, redisClient))
 			r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
 
+			// Incident reporting (manager phone-call complaints → zone creation)
+			r.Post("/manager/incident-report", handlers.CreateManagerIncidentReport(db))
+
 			// User management
 			r.Get("/users", handlers.GetAllUsers(db))
 			r.Post("/users", handlers.CreateUser(db))

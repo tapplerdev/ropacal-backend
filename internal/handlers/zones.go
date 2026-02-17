@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -8,8 +9,10 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/models"
 	"ropacal-backend/pkg/utils"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -38,7 +41,7 @@ type NoGoZoneResponse struct {
 type ZoneIncidentResponse struct {
 	ID                 string   `json:"id"`
 	ZoneID             string   `json:"zone_id"`
-	BinID              string   `json:"bin_id"`
+	BinID              *string  `json:"bin_id,omitempty"` // nil for address-only manager reports
 	BinNumber          *int     `json:"bin_number,omitempty"`
 	IncidentType       string   `json:"incident_type"`
 	ReportedByUserID   *string  `json:"reported_by_user_id,omitempty"`
@@ -225,7 +228,7 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 		var incidents []struct {
 			ID                 string   `db:"id"`
 			ZoneID             string   `db:"zone_id"`
-			BinID              string   `db:"bin_id"`
+			BinID              *string  `db:"bin_id"` // nil for address-only manager reports
 			BinNumber          *int     `db:"bin_number"`
 			IncidentType       string   `db:"incident_type"`
 			ReportedByUserID   *string  `db:"reported_by_user_id"`
@@ -315,7 +318,7 @@ func GetShiftIncidents(db *sqlx.DB) http.HandlerFunc {
 		var incidents []struct {
 			ID                 string   `db:"id"`
 			ZoneID             string   `db:"zone_id"`
-			BinID              string   `db:"bin_id"`
+			BinID              *string  `db:"bin_id"`
 			BinNumber          *int     `db:"bin_number"`
 			IncidentType       string   `db:"incident_type"`
 			ReportedByUserID   *string  `db:"reported_by_user_id"`
@@ -391,7 +394,7 @@ func GetFieldObservations(db *sqlx.DB) http.HandlerFunc {
 		var incidents []struct {
 			ID                 string   `db:"id"`
 			ZoneID             string   `db:"zone_id"`
-			BinID              string   `db:"bin_id"`
+			BinID              *string  `db:"bin_id"`
 			BinNumber          *int     `db:"bin_number"`
 			IncidentType       string   `db:"incident_type"`
 			ReportedByUserID   *string  `db:"reported_by_user_id"`
@@ -523,6 +526,228 @@ func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
 			"incident_id": incidentID,
 			"verified_at": time.Unix(now, 0).Format(time.RFC3339),
 			"verified_by": userClaims.UserID,
+		})
+	}
+}
+
+// createZoneAndIncident is a shared helper that finds or creates a no-go zone
+// at the given coordinates, inserts a zone_incident, and runs merge detection.
+//
+// Used by both the driver CompleteTask flow and the manager incident report flow.
+//
+// Parameters:
+//   - binID: nil for address-only manager reports (no bin involved)
+//   - shiftID / checkID: nil for manager reports
+//   - isFieldObservation: true for manager-logged reports
+//
+// Returns the created incidentID or an error.
+func createZoneAndIncident(
+	db *sqlx.DB,
+	lat, lng float64,
+	zoneName string,
+	incidentType string,
+	binID *string,
+	reportedByUserID string,
+	description *string,
+	photoURL *string,
+	shiftID *string,
+	checkID *int,
+	reporterLat *float64,
+	reporterLng *float64,
+	isFieldObservation bool,
+	now int64,
+) (string, error) {
+	// 1. Find existing active zone within 100m
+	var existingZone *models.NoGoZone
+	var zones []models.NoGoZone
+	if err := db.Select(&zones, "SELECT * FROM no_go_zones WHERE status = 'active'"); err != nil {
+		log.Printf("⚠️  [createZoneAndIncident] Error fetching zones: %v", err)
+		// Non-fatal — continue to create new zone
+	} else {
+		for _, z := range zones {
+			dist := calculateZoneDistance(lat, lng, z.CenterLatitude, z.CenterLongitude)
+			if dist < 100 {
+				zCopy := z
+				existingZone = &zCopy
+				log.Printf("📍 [createZoneAndIncident] Found existing zone within 100m (%.2fm)", dist)
+				break
+			}
+		}
+	}
+
+	// 2. Create or update zone
+	var zoneID string
+	if existingZone != nil {
+		zoneID = existingZone.ID
+		newScore := existingZone.ConflictScore + getIncidentScore(incidentType)
+		if _, err := db.Exec(
+			`UPDATE no_go_zones SET conflict_score = $1, updated_at = $2 WHERE id = $3`,
+			newScore, now, zoneID,
+		); err != nil {
+			return "", fmt.Errorf("failed to update zone score: %w", err)
+		}
+		log.Printf("✅ [createZoneAndIncident] Updated zone %s (new score: %d)", zoneID, newScore)
+	} else {
+		zoneID = uuid.New().String()
+		radius := getZoneRadius(incidentType)
+		score := getIncidentScore(incidentType)
+		if _, err := db.Exec(`
+			INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $8)
+		`, zoneID, zoneName, lat, lng, radius, score, reportedByUserID, now); err != nil {
+			return "", fmt.Errorf("failed to create zone: %w", err)
+		}
+		log.Printf("✅ [createZoneAndIncident] Created new zone %s (%s, radius %dm, score %d)", zoneID, zoneName, radius, score)
+	}
+
+	// 3. Run merge detection (non-fatal if it fails)
+	if mergeErr := detectAndMergeZones(db, zoneID, now); mergeErr != nil {
+		log.Printf("⚠️  [createZoneAndIncident] Zone merge check failed: %v", mergeErr)
+	}
+
+	// 4. Insert incident record
+	incidentID := uuid.New().String()
+	if _, err := db.Exec(`
+		INSERT INTO zone_incidents (
+			id, zone_id, bin_id, incident_type,
+			reported_by_user_id, reported_at,
+			description, photo_url,
+			check_id, shift_id,
+			reporter_latitude, reporter_longitude,
+			is_field_observation, status
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+	`,
+		incidentID, zoneID, binID, incidentType,
+		reportedByUserID, now,
+		description, photoURL,
+		checkID, shiftID,
+		reporterLat, reporterLng,
+		isFieldObservation, "open",
+	); err != nil {
+		return "", fmt.Errorf("failed to insert incident: %w", err)
+	}
+	log.Printf("✅ [createZoneAndIncident] Incident %s created (zone: %s, type: %s)", incidentID, zoneID, incidentType)
+
+	return incidentID, nil
+}
+
+// CreateManagerIncidentReport allows a manager/admin to file an incident report
+// for a specific bin OR for a geocoded address (when no bin exists yet).
+//
+// POST /api/manager/incident-report
+//
+// Request body:
+//
+//	{
+//	  "incident_type":  "landlord_complaint",   // required
+//	  "description":    "Caller reported...",   // required
+//	  "bin_id":         "uuid",                 // optional — provide bin OR address
+//	  "latitude":       40.7128,                // required if no bin_id
+//	  "longitude":      -74.0060,               // required if no bin_id
+//	  "address":        "123 Main St, NYC",     // required if no bin_id (used as zone name)
+//	  "photo_url":      "https://..."           // optional
+//	}
+func CreateManagerIncidentReport(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: POST /api/manager/incident-report")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		var req struct {
+			IncidentType string   `json:"incident_type"`
+			Description  *string  `json:"description"`
+			BinID        *string  `json:"bin_id"`
+			Latitude     *float64 `json:"latitude"`
+			Longitude    *float64 `json:"longitude"`
+			Address      *string  `json:"address"`
+			PhotoURL     *string  `json:"photo_url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			utils.RespondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		// Validate incident type
+		validTypes := map[string]bool{
+			"vandalism": true, "vandalized": true, "landlord_complaint": true,
+			"theft": true, "relocation_request": true, "missing": true,
+			"damaged": true, "inaccessible": true,
+		}
+		if !validTypes[req.IncidentType] {
+			utils.RespondError(w, http.StatusBadRequest, "invalid incident_type")
+			return
+		}
+		if req.Description == nil || *req.Description == "" {
+			utils.RespondError(w, http.StatusBadRequest, "description is required")
+			return
+		}
+
+		// Resolve coordinates and zone name
+		var lat, lng float64
+		var zoneName string
+
+		if req.BinID != nil && *req.BinID != "" {
+			// Mode 1: bin-linked report — look up the bin's coordinates
+			var bin models.Bin
+			if err := db.Get(&bin, "SELECT * FROM bins WHERE id = $1", *req.BinID); err != nil {
+				utils.RespondError(w, http.StatusNotFound, "bin not found")
+				return
+			}
+			if bin.Latitude == nil || bin.Longitude == nil {
+				utils.RespondError(w, http.StatusUnprocessableEntity, "bin has no coordinates")
+				return
+			}
+			lat = *bin.Latitude
+			lng = *bin.Longitude
+			zoneName = fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
+			log.Printf("   📦 Bin-linked report: bin=%s (%s)", *req.BinID, zoneName)
+		} else {
+			// Mode 2: address-only report — use provided lat/lng and address
+			if req.Latitude == nil || req.Longitude == nil || req.Address == nil {
+				utils.RespondError(w, http.StatusBadRequest,
+					"either bin_id or (latitude, longitude, address) must be provided")
+				return
+			}
+			lat = *req.Latitude
+			lng = *req.Longitude
+			zoneName = *req.Address
+			log.Printf("   🗺️  Address-only report: %s (%.6f, %.6f)", zoneName, lat, lng)
+		}
+
+		now := time.Now().Unix()
+
+		incidentID, err := createZoneAndIncident(
+			db,
+			lat, lng,
+			zoneName,
+			req.IncidentType,
+			req.BinID,               // nil for address-only
+			userClaims.UserID,
+			req.Description,
+			req.PhotoURL,
+			nil,                     // shiftID — managers don't have shifts
+			nil,                     // checkID — not from a bin check
+			nil, nil,                // reporter GPS (manager is in office)
+			true,                    // isFieldObservation — manager-logged
+			now,
+		)
+		if err != nil {
+			log.Printf("❌ [CreateManagerIncidentReport] %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "failed to create incident report")
+			return
+		}
+
+		log.Printf("✅ [CreateManagerIncidentReport] Incident %s created by manager %s", incidentID, userClaims.UserID)
+		utils.RespondJSON(w, http.StatusCreated, map[string]interface{}{
+			"success":       true,
+			"incident_id":   incidentID,
+			"reported_by":   userClaims.UserID,
+			"incident_type": req.IncidentType,
+			"created_at":    time.Unix(now, 0).Format(time.RFC3339),
 		})
 	}
 }

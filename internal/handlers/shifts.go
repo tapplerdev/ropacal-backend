@@ -1555,73 +1555,26 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			}
 
 			if err == nil && bin.Latitude != nil && bin.Longitude != nil {
-				// Call the zone incident creation logic
-				incidentID := uuid.New().String()
-				log.Printf("[DIAGNOSTIC]    Incident ID: %s", incidentID)
-
-				// Check for existing zone within 100m
-				var zoneID string
-				var existingZone *models.NoGoZone
-				var zones []models.NoGoZone
-				err = db.Select(&zones, "SELECT * FROM no_go_zones WHERE status = 'active'")
-				if err != nil {
-					log.Printf("[DIAGNOSTIC] ⚠️  Error fetching zones: %v", err)
-				} else {
-					log.Printf("[DIAGNOSTIC]    Checking %d active zones for proximity...", len(zones))
-					for _, zone := range zones {
-						distance := calculateZoneDistance(*bin.Latitude, *bin.Longitude, zone.CenterLatitude, zone.CenterLongitude)
-						if distance < 100 {
-							existingZone = &zone
-							log.Printf("[DIAGNOSTIC]    Found existing zone within 100m (distance: %.2fm)", distance)
-							break
-						}
-					}
-				}
-
-				// Create or update zone
-				if existingZone != nil {
-					zoneID = existingZone.ID
-					newScore := existingZone.ConflictScore + getIncidentScore(*req.IncidentType)
-					_, err = db.Exec(`UPDATE no_go_zones SET conflict_score = $1, updated_at = $2 WHERE id = $3`, newScore, now, zoneID)
-					if err != nil {
-						log.Printf("[DIAGNOSTIC] ❌ Error updating zone: %v", err)
-					} else {
-						log.Printf("[DIAGNOSTIC] ✅ Updated existing zone (new score: %d)", newScore)
-					}
-				} else {
-					zoneID = uuid.New().String()
-					zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
-					radiusMeters := getZoneRadius(*req.IncidentType)
-					log.Printf("[DIAGNOSTIC]    Creating new zone: %s (radius: %dm)", zoneName, radiusMeters)
-					_, err = db.Exec(`
-						INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
-						VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-					`, zoneID, zoneName, *bin.Latitude, *bin.Longitude, radiusMeters, getIncidentScore(*req.IncidentType), "active", nil, now, now)
-					if err != nil {
-						log.Printf("[DIAGNOSTIC] ❌ Error creating zone: %v", err)
-					} else {
-						log.Printf("[DIAGNOSTIC] ✅ Created new no-go zone (ID: %s)", zoneID)
-					}
-				}
-
-				// Check for zone merges after creating/updating zone
-				if err == nil {
-					log.Printf("[DIAGNOSTIC] 🔍 Checking for zone merges...")
-					if mergeErr := detectAndMergeZones(db, zoneID, now); mergeErr != nil {
-						log.Printf("[DIAGNOSTIC] ⚠️  Zone merge check failed: %v", mergeErr)
-						// Don't fail the request if merge fails - it's not critical
-					}
-				}
-
-				// Create incident record
-				log.Printf("[DIAGNOSTIC]    Inserting incident record...")
-				_, err = db.Exec(`
-					INSERT INTO zone_incidents (id, zone_id, bin_id, incident_type, reported_by_user_id, reported_at, description, photo_url, check_id, shift_id, is_field_observation, status)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-				`, incidentID, zoneID, req.BinID, *req.IncidentType, userClaims.UserID, now, req.IncidentDescription, req.IncidentPhotoUrl, checkID, shift.ID, false, "open")
-
-				if err != nil {
-					log.Printf("[DIAGNOSTIC] ❌ ERROR inserting incident: %v", err)
+				binIDCopy := req.BinID
+				shiftIDCopy := shift.ID
+				zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
+				incidentID, incidentErr := createZoneAndIncident(
+					db,
+					*bin.Latitude, *bin.Longitude,
+					zoneName,
+					*req.IncidentType,
+					&binIDCopy,
+					userClaims.UserID,
+					req.IncidentDescription,
+					req.IncidentPhotoUrl,
+					&shiftIDCopy,
+					checkID,
+					nil, nil,
+					false,
+					now,
+				)
+				if incidentErr != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error creating zone/incident: %v", incidentErr)
 				} else {
 					createdIncidentID = &incidentID
 					log.Printf("[DIAGNOSTIC] ✅ Incident created (ID: %s) and linked to check ID %d", incidentID, *checkID)
