@@ -10,6 +10,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -304,7 +305,7 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc
 
 // ConvertPotentialLocationToBin converts a potential location to an active bin
 // POST /api/potential-locations/:id/convert (requires admin role)
-func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] ========== START ==========")
@@ -485,16 +486,29 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub) http.Handl
 
 		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Converted location (ID: %s) to Bin #%d (ID: %s)", id, binNumber, binID)
 
-		// Broadcast to all managers (both location removed and bin created)
-		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Broadcasting WebSocket event...")
-		wsHub.BroadcastToRole("admin", map[string]interface{}{
+		// Broadcast to all managers via Centrifugo (company-wide channel)
+		eventData := map[string]interface{}{
 			"type": "potential_location_converted",
 			"data": map[string]interface{}{
 				"location_id": id,
 				"bin":         createdBin.ToBinResponse(),
 			},
-		})
-		log.Printf("📤 [CONVERT-POTENTIAL-LOCATION] WebSocket event broadcasted to managers")
+		}
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_converted", map[string]interface{}{
+				"location_id": id,
+				"bin":         createdBin.ToBinResponse(),
+			}); pubErr != nil {
+				log.Printf("⚠️ [CONVERT-POTENTIAL-LOCATION] Centrifugo publish failed: %v — falling back to WebSocket", pubErr)
+				wsHub.BroadcastToRole("admin", eventData)
+			} else {
+				log.Printf("📡 [CONVERT-POTENTIAL-LOCATION] Published potential_location_converted via Centrifugo")
+			}
+		} else {
+			// Centrifugo not available — fall back to legacy WebSocket hub
+			wsHub.BroadcastToRole("admin", eventData)
+			log.Printf("📤 [CONVERT-POTENTIAL-LOCATION] WebSocket event broadcasted to managers (fallback)")
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

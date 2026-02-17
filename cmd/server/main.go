@@ -278,7 +278,7 @@ func main() {
 			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub))
 			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub))
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
-			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub))
+			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub, centrifugoClient))
 			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, wsHub))
 
 			// Shift history
@@ -353,7 +353,7 @@ func main() {
 
 			// Potential Locations management (managers can delete and convert)
 			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, wsHub))
-			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub))
+			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub, centrifugoClient))
 
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db, redisClient))

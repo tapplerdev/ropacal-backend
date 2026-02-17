@@ -1156,7 +1156,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 }
 
 // CompleteShiftBin marks a task as completed within an active shift (collection, pickup, dropoff, warehouse, placement)
-func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Printf("[DIAGNOSTIC] 📥 REQUEST: POST /api/driver/shift/complete-task")
@@ -1450,6 +1450,25 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 								hub.BroadcastToRole("manager", binCreatedMsg)
 								log.Printf("[DIAGNOSTIC] 📡 Broadcast bin_created event to managers")
 							}
+
+						// Also publish potential_location_converted via Centrifugo so the
+						// manager dashboard removes this location from the selector in real-time
+						if centrifugoClient != nil {
+							plData := map[string]interface{}{
+								"location_id": *potentialLocationID,
+								"bin_id":      newBinID,
+								"bin_number":  actualBinNumber,
+								"street":      potentialLocation.Street,
+								"city":        potentialLocation.City,
+								"zip":         potentialLocation.Zip,
+								"shift_id":    shift.ID,
+							}
+							if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_converted", plData); pubErr != nil {
+								log.Printf("[DIAGNOSTIC] Failed to publish potential_location_converted via Centrifugo: %v", pubErr)
+							} else {
+								log.Printf("[DIAGNOSTIC] Published potential_location_converted via Centrifugo (location_id: %s)", *potentialLocationID)
+							}
+						}
 						}
 					}
 				}

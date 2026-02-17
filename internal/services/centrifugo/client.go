@@ -134,6 +134,37 @@ func (c *Client) PublishManagerNotification(ctx context.Context, managerID strin
 	return nil
 }
 
+// CompanyEvent represents a company-wide broadcast event payload
+type CompanyEvent struct {
+	Type string      `json:"type"`
+	Data interface{} `json:"data"`
+}
+
+// PublishCompanyEvent publishes a company-wide event to the company:events channel,
+// which all authenticated managers subscribe to for real-time updates.
+func (c *Client) PublishCompanyEvent(ctx context.Context, eventType string, data interface{}) error {
+	channel := "company:events"
+
+	payload := CompanyEvent{
+		Type: eventType,
+		Data: data,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal company event data: %w", err)
+	}
+
+	result, err := c.client.Publish(ctx, channel, jsonData)
+	if err != nil {
+		log.Printf("❌ [Centrifugo] Publish failed - Channel: %s, Type: %s, Error: %v", channel, eventType, err)
+		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
+	}
+
+	_ = result
+	return nil
+}
+
 // GenerateConnectionToken generates a JWT token for Centrifugo connection
 func (c *Client) GenerateConnectionToken(userID string, expiresAt time.Time) (string, error) {
 	claims := jwt.MapClaims{
