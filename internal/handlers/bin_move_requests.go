@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -57,7 +58,7 @@ func calculateUrgency(status string, scheduledDate int64) string {
 
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
-func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
+func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req models.CreateBinMoveRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -266,6 +267,17 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 					response.NewCity = &city
 					response.NewZip = &zip
 				}
+			}
+		}
+
+		// Publish move_request_created to company:events so all manager dashboards update
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_created", map[string]interface{}{
+				"move_request_id": id,
+				"bin_id":          req.BinID,
+				"status":          "pending",
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish move_request_created to Centrifugo: %v", pubErr)
 			}
 		}
 
@@ -1209,7 +1221,7 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 
 // UpdateBinMoveRequest updates move request details (date, notes, location, assignment, etc.)
 // PUT /api/manager/bins/move-requests/:id
-func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -2003,23 +2015,23 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 		log.Printf("   Should send notifications: %v", (assignmentChanged || len(affectedDriverIDs) > 0) && wsHub != nil)
 		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+		// Always publish move_request_updated to Centrifugo so all manager views refresh
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_updated", map[string]interface{}{
+				"move_request_id": id,
+				"status":          updatedMove.Status,
+				"bin_id":          updatedMove.BinID,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish move_request_updated to Centrifugo: %v", pubErr)
+			}
+		}
+
 		if (assignmentChanged || len(affectedDriverIDs) > 0) && wsHub != nil {
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			log.Printf("📡 [WEBSOCKET] Sending notifications...")
 
-			// Broadcast to all managers
-			managerPayload := &websocket.Message{
-				Data: map[string]interface{}{
-					"type":            "move_request_updated",
-					"move_request_id": id,
-					"status":          updatedMove.Status,
-					"bin_id":          updatedMove.BinID,
-				},
-			}
-			log.Printf("   Broadcasting to managers (admin role):")
-			log.Printf("   Payload: %+v", managerPayload)
-			wsHub.BroadcastToRole("admin", managerPayload)
-			log.Printf("   ✅ Manager notification sent")
+			// Broadcast to affected drivers only (manager notification now handled via Centrifugo)
+			log.Printf("   ✅ Manager notification sent via Centrifugo")
 
 			// Notify affected drivers
 			if len(affectedDriverIDs) > 0 {
@@ -2133,7 +2145,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 
 // CancelBinMoveRequest cancels a pending move request
 // PUT /api/manager/bins/move-requests/:id/cancel
-func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -2229,6 +2241,17 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 				"bin_id":  moveRequest.BinID,
 				"message": "Move request cancelled by manager",
 			})
+		}
+
+		// Publish move_request_cancelled to Centrifugo so all manager dashboards update
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_cancelled", map[string]interface{}{
+				"move_request_id": id,
+				"bin_id":          moveRequest.BinID,
+				"status":          "cancelled",
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish move_request_cancelled to Centrifugo: %v", pubErr)
+			}
 		}
 
 		w.WriteHeader(http.StatusOK)
