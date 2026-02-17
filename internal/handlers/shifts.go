@@ -1561,6 +1561,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
 				incidentID, incidentErr := createZoneAndIncident(
 					db,
+					centrifugoClient,
 					*bin.Latitude, *bin.Longitude,
 					zoneName,
 					*req.IncidentType,
@@ -2930,7 +2931,7 @@ func calculateZoneOverlap(lat1, lon1 float64, radius1 int, lat2, lon2 float64, r
 
 // detectAndMergeZones checks if the given zone should be merged with any existing zones
 // Merges zones if they overlap by more than 50%
-func detectAndMergeZones(db *sqlx.DB, zoneID string, now int64) error {
+func detectAndMergeZones(db *sqlx.DB, centrifugoClient *centrifugo.Client, zoneID string, now int64) error {
 	// Get the current zone details
 	var currentZone models.NoGoZone
 	err := db.Get(&currentZone, "SELECT * FROM no_go_zones WHERE id = $1", zoneID)
@@ -2987,6 +2988,30 @@ func detectAndMergeZones(db *sqlx.DB, zoneID string, now int64) error {
 			}
 
 			log.Printf("[ZONE MERGE] ✅ Successfully merged zone %s into %s", secondaryZone.ID[:8], primaryZone.ID[:8])
+
+			// Broadcast merge events via Centrifugo
+			if centrifugoClient != nil {
+				ctx := context.Background()
+
+				// zone_merged: tells frontend to move consumed zone to resolved and update surviving
+				mergedPayload := map[string]string{
+					"consumed_zone_id":  secondaryZone.ID,
+					"surviving_zone_id": primaryZone.ID,
+				}
+				if pubErr := centrifugoClient.PublishCompanyEvent(ctx, "zone_merged", mergedPayload); pubErr != nil {
+					log.Printf("[ZONE MERGE] ⚠️  Centrifugo zone_merged publish failed: %v", pubErr)
+				}
+
+				// zone_updated: fetch the updated primary zone and broadcast full response
+				var updatedPrimary models.NoGoZone
+				if fetchErr := db.Get(&updatedPrimary, "SELECT * FROM no_go_zones WHERE id = $1", primaryZone.ID); fetchErr == nil {
+					if pubErr := centrifugoClient.PublishCompanyEvent(ctx, "zone_updated", updatedPrimary.ToResponse()); pubErr != nil {
+						log.Printf("[ZONE MERGE] ⚠️  Centrifugo zone_updated publish failed: %v", pubErr)
+					}
+				} else {
+					log.Printf("[ZONE MERGE] ⚠️  Could not fetch updated primary zone for broadcast: %v", fetchErr)
+				}
+			}
 		}
 	}
 

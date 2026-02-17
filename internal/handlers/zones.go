@@ -544,6 +544,7 @@ func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
 // Returns the created incidentID or an error.
 func createZoneAndIncident(
 	db *sqlx.DB,
+	centrifugoClient *centrifugo.Client,
 	lat, lng float64,
 	zoneName string,
 	incidentType string,
@@ -565,14 +566,17 @@ func createZoneAndIncident(
 		log.Printf("⚠️  [createZoneAndIncident] Error fetching zones: %v", err)
 		// Non-fatal — continue to create new zone
 	} else {
+		var minDist float64 = -1
 		for _, z := range zones {
 			dist := calculateZoneDistance(lat, lng, z.CenterLatitude, z.CenterLongitude)
-			if dist < 100 {
+			if dist < 100 && (minDist < 0 || dist < minDist) {
 				zCopy := z
 				existingZone = &zCopy
-				log.Printf("📍 [createZoneAndIncident] Found existing zone within 100m (%.2fm)", dist)
-				break
+				minDist = dist
 			}
+		}
+		if existingZone != nil {
+			log.Printf("📍 [createZoneAndIncident] Found nearest existing zone within 100m (%.2fm)", minDist)
 		}
 	}
 
@@ -602,7 +606,7 @@ func createZoneAndIncident(
 	}
 
 	// 3. Run merge detection (non-fatal if it fails)
-	if mergeErr := detectAndMergeZones(db, zoneID, now); mergeErr != nil {
+	if mergeErr := detectAndMergeZones(db, centrifugoClient, zoneID, now); mergeErr != nil {
 		log.Printf("⚠️  [createZoneAndIncident] Zone merge check failed: %v", mergeErr)
 	}
 
@@ -723,6 +727,7 @@ func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Clien
 
 		incidentID, err := createZoneAndIncident(
 			db,
+			centrifugoClient,
 			lat, lng,
 			zoneName,
 			req.IncidentType,
