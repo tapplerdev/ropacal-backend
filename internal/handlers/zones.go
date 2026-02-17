@@ -10,6 +10,8 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/google/uuid"
@@ -647,7 +649,7 @@ func createZoneAndIncident(
 //	  "address":        "123 Main St, NYC",     // required if no bin_id (used as zone name)
 //	  "photo_url":      "https://..."           // optional
 //	}
-func CreateManagerIncidentReport(db *sqlx.DB) http.HandlerFunc {
+func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Client, wsHub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/manager/incident-report")
 
@@ -742,6 +744,28 @@ func CreateManagerIncidentReport(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		log.Printf("✅ [CreateManagerIncidentReport] Incident %s created by manager %s", incidentID, userClaims.UserID)
+
+		// Fetch the zone that was created/updated so we can broadcast it in real-time
+		var zone models.NoGoZone
+		if err := db.Get(&zone,
+			`SELECT z.* FROM no_go_zones z
+			 JOIN zone_incidents zi ON zi.zone_id = z.id
+			 WHERE zi.id = $1`, incidentID,
+		); err == nil {
+			zoneResp := zone.ToResponse()
+			eventData := map[string]interface{}{"type": "zone_created", "data": zoneResp}
+			if centrifugoClient != nil {
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "zone_created", zoneResp); pubErr != nil {
+					log.Printf("⚠️ [CreateManagerIncidentReport] Centrifugo publish failed: %v — falling back to WebSocket", pubErr)
+					wsHub.BroadcastToRole("admin", eventData)
+				}
+			} else {
+				wsHub.BroadcastToRole("admin", eventData)
+			}
+		} else {
+			log.Printf("⚠️ [CreateManagerIncidentReport] Could not fetch zone for broadcast: %v", err)
+		}
+
 		utils.RespondJSON(w, http.StatusCreated, map[string]interface{}{
 			"success":       true,
 			"incident_id":   incidentID,
