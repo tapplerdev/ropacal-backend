@@ -1554,7 +1554,8 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				log.Printf("[DIAGNOSTIC]    Latitude: %v, Longitude: %v", bin.Latitude, bin.Longitude)
 			}
 
-			if err == nil && bin.Latitude != nil && bin.Longitude != nil {
+		// relocation_request is an operational note, not a location safety signal — skip zone creation
+		if err == nil && bin.Latitude != nil && bin.Longitude != nil && *req.IncidentType != "relocation_request" {
 				binIDCopy := req.BinID
 				shiftIDCopy := shift.ID
 				zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
