@@ -1634,12 +1634,14 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				WHERE id = $1
 			`, taskID).Scan(&potentialLocationID, &newBinNumber)
 
-			if err != nil || potentialLocationID == nil || newBinNumber == nil {
-				log.Printf("[DIAGNOSTIC] ❌ Error fetching placement details: %v", err)
-				log.Printf("[DIAGNOSTIC] ⚠️  potential_location_id=%v, new_bin_number=%v", potentialLocationID, newBinNumber)
+			if err != nil || potentialLocationID == nil {
+				log.Printf("[DIAGNOSTIC] ❌ Error fetching placement details or missing potential_location_id: %v (potential_location_id=%v)", err, potentialLocationID)
+				// Undo is_completed since we can't complete the placement
+				db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement location")
+				return
 			} else {
 				log.Printf("[DIAGNOSTIC]    Potential Location ID: %s", *potentialLocationID)
-				log.Printf("[DIAGNOSTIC]    Pre-assigned Bin Number: %d", *newBinNumber)
 
 				// Fetch potential location details
 				var potentialLocation models.PotentialLocation
@@ -1662,7 +1664,24 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					// Use driver-provided bin number (required)
 					actualBinNumber := req.NewBinNumber
 					log.Printf("[DIAGNOSTIC] Using driver-provided bin number: %d", actualBinNumber)
-					_, err = db.Exec(
+					if actualBinNumber == 0 {
+					log.Printf("[DIAGNOSTIC] ❌ Driver did not provide a bin number")
+					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					utils.RespondError(w, http.StatusBadRequest, "Bin number is required for placement tasks")
+					return
+				}
+
+				// Check if this bin number is already taken
+				var binAlreadyExists bool
+				db.QueryRow(`SELECT EXISTS(SELECT 1 FROM bins WHERE bin_number = $1)`, actualBinNumber).Scan(&binAlreadyExists)
+				if binAlreadyExists {
+					log.Printf("[DIAGNOSTIC] ❌ Bin #%d already exists — rejecting duplicate", actualBinNumber)
+					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					utils.RespondError(w, http.StatusConflict, fmt.Sprintf("Bin #%d already exists, please use a different number", actualBinNumber))
+					return
+				}
+
+				_, err = db.Exec(
 						binInsertQuery,
 						newBinID,
 						actualBinNumber,
@@ -1681,6 +1700,9 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 					if err != nil {
 						log.Printf("[DIAGNOSTIC] ❌ Error creating bin: %v", err)
+					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to create bin, please try again")
+					return
 					} else {
 						log.Printf("[DIAGNOSTIC] ✅ Created new Bin #%d (ID: %s)", actualBinNumber, newBinID)
 
