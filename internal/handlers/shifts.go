@@ -523,6 +523,118 @@ func GetManagerShiftHistory(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// GetShiftHistoryTasks returns the granular per-task breakdown for a single completed shift.
+// GET /api/manager/shifts/history/{shiftId}/tasks
+func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shiftID := chi.URLParam(r, "shiftId")
+		if shiftID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "shiftId is required")
+			return
+		}
+
+		_, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		type TaskRow struct {
+			ID                  string   `db:"id"                    json:"id"`
+			SequenceOrder       int      `db:"sequence_order"        json:"sequence_order"`
+			TaskType            string   `db:"task_type"             json:"task_type"`
+			IsCompleted         int      `db:"is_completed"          json:"is_completed"`
+			Skipped             bool     `db:"skipped"               json:"skipped"`
+			CompletedAt         *int64   `db:"completed_at"          json:"completed_at"`
+			Address             *string  `db:"address"               json:"address"`
+			Latitude            *float64 `db:"latitude"              json:"latitude"`
+			Longitude           *float64 `db:"longitude"             json:"longitude"`
+			TaskData            *string  `db:"task_data"             json:"task_data"`
+			// Collection / bin fields
+			BinID               *string  `db:"bin_id"                json:"bin_id"`
+			BinNumber           *int     `db:"bin_number"            json:"bin_number"`
+			UpdatedFillPct      *int     `db:"updated_fill_percentage" json:"updated_fill_percentage"`
+			BinStreet           *string  `db:"bin_street"            json:"bin_street"`
+			BinCity             *string  `db:"bin_city"              json:"bin_city"`
+			// Placement fields
+			PotentialLocationID *string  `db:"potential_location_id" json:"potential_location_id"`
+			NewBinNumber        *int     `db:"new_bin_number"        json:"new_bin_number"`
+			PlacementAddress    *string  `db:"placement_address"     json:"placement_address"`
+			PlacementCreatedBinID *string `db:"placement_created_bin_id" json:"placement_created_bin_id"`
+			PlacementCreatedBinNumber *int `db:"placement_created_bin_number" json:"placement_created_bin_number"`
+			// Move request fields
+			MoveRequestID       *string  `db:"move_request_id"       json:"move_request_id"`
+			MoveType            *string  `db:"move_type"             json:"move_type"`
+			DestinationAddress  *string  `db:"destination_address"   json:"destination_address"`
+			// Warehouse fields
+			WarehouseAction     *string  `db:"warehouse_action"      json:"warehouse_action"`
+			BinsToLoad          *int     `db:"bins_to_load"          json:"bins_to_load"`
+		}
+
+		query := `
+			SELECT
+				rt.id,
+				rt.sequence_order,
+				rt.task_type,
+				rt.is_completed,
+				rt.skipped,
+				rt.completed_at,
+				rt.address,
+				rt.latitude,
+				rt.longitude,
+				rt.task_data::text AS task_data,
+				rt.bin_id,
+				rt.bin_number,
+				rt.updated_fill_percentage,
+				b.current_street    AS bin_street,
+				b.city              AS bin_city,
+				rt.potential_location_id,
+				rt.new_bin_number,
+				pl.address          AS placement_address,
+				pl.converted_to_bin_id AS placement_created_bin_id,
+				cb.bin_number       AS placement_created_bin_number,
+				rt.move_request_id,
+				bmr.move_type,
+				bmr.destination_address,
+				rt.warehouse_action,
+				rt.bins_to_load
+			FROM route_tasks rt
+			LEFT JOIN bins b   ON b.id  = rt.bin_id
+			LEFT JOIN potential_locations pl ON pl.id = rt.potential_location_id
+			LEFT JOIN bins cb  ON cb.id = pl.converted_to_bin_id
+			LEFT JOIN bin_move_requests bmr ON bmr.id = rt.move_request_id
+			WHERE rt.shift_id = $1
+			ORDER BY rt.sequence_order ASC
+		`
+
+		rows, err := db.Queryx(query, shiftID)
+		if err != nil {
+			log.Printf("❌ GetShiftHistoryTasks: query error: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch tasks")
+			return
+		}
+		defer rows.Close()
+
+		var tasks []TaskRow
+		for rows.Next() {
+			var t TaskRow
+			if err := rows.StructScan(&t); err != nil {
+				log.Printf("❌ GetShiftHistoryTasks: scan error: %v", err)
+				continue
+			}
+			tasks = append(tasks, t)
+		}
+		if tasks == nil {
+			tasks = []TaskRow{}
+		}
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    tasks,
+		})
+	}
+}
+
 // PreflightCheck validates GPS readiness before starting a shift
 // Returns: ready status, location cached, Centrifugo connection health
 func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {

@@ -325,8 +325,9 @@ func main() {
 			// Task-based shift creation (agnostic shift builder)
 			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub))
 			r.Get("/manager/shifts", handlers.GetAllShifts(db))                   // List all shifts with filtering (register first - exact match)
-			r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db)) // Completed shift history with task stats
-			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))         // Get single shift (register after)
+			r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db))                    // Completed shift history with task stats
+			r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))     // Per-task granular breakdown for a shift
+			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                           // Get single shift (register after)
 			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db)) // Compare Mapbox v2 optimization
 
 			// One-time data migration endpoints (can be removed after use)
