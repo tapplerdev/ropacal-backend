@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
+	"sort"
+	"strconv"
 	"time"
 
 	"ropacal-backend/internal/middleware"
@@ -523,4 +526,138 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugo
 		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] ========== SUCCESS ==========")
 		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Response sent: HTTP 201 with bin data")
 	}
+}
+
+// GetNearbyPotentialLocations finds active potential locations within a radius of a bin's coordinates.
+// GET /api/bins/{binId}/nearby-potential-locations?max_distance=500
+// Requires: admin auth
+func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "binId")
+		if binID == "" {
+			http.Error(w, "Missing bin ID", http.StatusBadRequest)
+			return
+		}
+
+		// Parse max_distance query param (default 500m, hard cap 500m)
+		maxDistance := 500.0
+		if raw := r.URL.Query().Get("max_distance"); raw != "" {
+			if parsed, err := strconv.ParseFloat(raw, 64); err == nil && parsed > 0 {
+				if parsed > 500 {
+					parsed = 500
+				}
+				maxDistance = parsed
+			}
+		}
+
+		log.Printf("🔍 [NEARBY-POTENTIAL-LOCATIONS] bin=%s max_distance=%.0fm", binID, maxDistance)
+
+		// Fetch bin coordinates
+		var binLat, binLng *float64
+		var binNumber int
+		var binStreet, binCity, binZip string
+		err := db.QueryRow(`
+			SELECT bin_number, current_street, city, zip, latitude, longitude
+			FROM bins WHERE id = $1
+		`, binID).Scan(&binNumber, &binStreet, &binCity, &binZip, &binLat, &binLng)
+		if err == sql.ErrNoRows {
+			http.Error(w, "Bin not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			log.Printf("❌ [NEARBY-POTENTIAL-LOCATIONS] DB error fetching bin: %v", err)
+			http.Error(w, "Failed to fetch bin", http.StatusInternalServerError)
+			return
+		}
+		if binLat == nil || binLng == nil {
+			http.Error(w, "Bin has no coordinates", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch all active potential locations that have coordinates
+		rows, err := db.Query(`
+			SELECT id, street, city, zip, latitude, longitude,
+			       requested_by_name, notes, created_at
+			FROM potential_locations
+			WHERE converted_at IS NULL
+			  AND latitude IS NOT NULL
+			  AND longitude IS NOT NULL
+		`)
+		if err != nil {
+			log.Printf("❌ [NEARBY-POTENTIAL-LOCATIONS] DB error fetching locations: %v", err)
+			http.Error(w, "Failed to fetch potential locations", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		type NearbyResult struct {
+			ID              string  `json:"id"`
+			Street          string  `json:"street"`
+			City            string  `json:"city"`
+			Zip             string  `json:"zip"`
+			Latitude        float64 `json:"latitude"`
+			Longitude       float64 `json:"longitude"`
+			RequestedByName string  `json:"requested_by_name"`
+			Notes           *string `json:"notes,omitempty"`
+			CreatedAt       int64   `json:"created_at"`
+			DistanceMeters  float64 `json:"distance_meters"`
+		}
+
+		var results []NearbyResult
+		for rows.Next() {
+			var loc NearbyResult
+			if err := rows.Scan(
+				&loc.ID, &loc.Street, &loc.City, &loc.Zip,
+				&loc.Latitude, &loc.Longitude,
+				&loc.RequestedByName, &loc.Notes, &loc.CreatedAt,
+			); err != nil {
+				log.Printf("⚠️ [NEARBY-POTENTIAL-LOCATIONS] Row scan error: %v", err)
+				continue
+			}
+			dist := haversineMeters(*binLat, *binLng, loc.Latitude, loc.Longitude)
+			if dist <= maxDistance {
+				loc.DistanceMeters = math.Round(dist*10) / 10
+				results = append(results, loc)
+			}
+		}
+
+		// Sort ascending by distance
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].DistanceMeters < results[j].DistanceMeters
+		})
+
+		if results == nil {
+			results = []NearbyResult{}
+		}
+
+		log.Printf("✅ [NEARBY-POTENTIAL-LOCATIONS] Found %d location(s) within %.0fm of bin #%d", len(results), maxDistance, binNumber)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"bin": map[string]interface{}{
+				"id":             binID,
+				"bin_number":     binNumber,
+				"current_street": binStreet,
+				"city":           binCity,
+				"zip":            binZip,
+				"latitude":       *binLat,
+				"longitude":      *binLng,
+			},
+			"search_radius_meters": maxDistance,
+			"count":                len(results),
+			"results":              results,
+		})
+	}
+}
+
+// haversineMeters returns the great-circle distance in metres between two lat/lng points.
+func haversineMeters(lat1, lng1, lat2, lng2 float64) float64 {
+	const earthRadius = 6371000.0
+	φ1 := lat1 * math.Pi / 180
+	φ2 := lat2 * math.Pi / 180
+	Δφ := (lat2 - lat1) * math.Pi / 180
+	Δλ := (lng2 - lng1) * math.Pi / 180
+	a := math.Sin(Δφ/2)*math.Sin(Δφ/2) +
+		math.Cos(φ1)*math.Cos(φ2)*math.Sin(Δλ/2)*math.Sin(Δλ/2)
+	return 2 * earthRadius * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }

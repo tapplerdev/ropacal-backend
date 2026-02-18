@@ -357,6 +357,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			// Potential Locations management (managers can delete and convert)
 			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, wsHub, centrifugoClient))
 			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub, centrifugoClient))
+			r.Get("/bins/{binId}/nearby-potential-locations", handlers.GetNearbyPotentialLocations(db))
 
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db, redisClient))
