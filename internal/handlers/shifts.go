@@ -595,7 +595,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				cb.bin_number       AS placement_created_bin_number,
 				rt.move_request_id,
 				bmr.move_type,
-				bmr.destination_address,
+				bmr.new_address       AS destination_address,
 				rt.warehouse_action,
 				rt.bins_to_load
 			FROM route_tasks rt

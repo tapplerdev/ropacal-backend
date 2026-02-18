@@ -629,6 +629,9 @@ func Migrate(db *sqlx.DB) error {
 		// Create index on move_request_id in shift_bins for faster lookups
 		`CREATE INDEX IF NOT EXISTS idx_shift_bins_move_request_id ON shift_bins(move_request_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_shift_bins_stop_type ON shift_bins(stop_type)`,
+
+		// Add converted_via_shift_id to potential_locations (tracks which shift triggered the conversion)
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS converted_via_shift_id TEXT`,
 	}
 
 	for _, migration := range migrations {
