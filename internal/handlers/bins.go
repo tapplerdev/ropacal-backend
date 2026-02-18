@@ -11,6 +11,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -168,7 +169,7 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 	}
 }
 
-func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		log.Printf("🔧 [UPDATE-BIN] Request received for bin ID: %s", id)
@@ -375,6 +376,131 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("✅ [UPDATE-BIN] Transaction committed successfully")
 
+		// ── Change log + optional no-go zone creation ───────────────────────────
+		nowUnix := time.Now().Unix()
+
+		// Detect what changed and build old/new JSONB snapshots
+		changeType := ""
+		oldValues := map[string]interface{}{}
+		newValues := map[string]interface{}{}
+
+		if addrChanged {
+			changeType = "address_change"
+			oldValues["street"] = existing.CurrentStreet
+			oldValues["city"] = existing.City
+			oldValues["zip"] = existing.Zip
+			newValues["street"] = req.CurrentStreet
+			newValues["city"] = req.City
+			newValues["zip"] = req.Zip
+		} else if req.Status != existing.Status {
+			changeType = "status_change"
+			oldValues["status"] = existing.Status
+			newValues["status"] = req.Status
+		} else if req.FillPercentage != nil && existing.FillPercentage != nil && *req.FillPercentage != *existing.FillPercentage {
+			changeType = "fill_override"
+			oldValues["fill_percentage"] = *existing.FillPercentage
+			newValues["fill_percentage"] = *req.FillPercentage
+		} else if req.BinNumber != existing.BinNumber {
+			changeType = "bin_number_change"
+			oldValues["bin_number"] = existing.BinNumber
+			newValues["bin_number"] = req.BinNumber
+		} else if req.Latitude != nil && req.Longitude != nil {
+			if existing.Latitude == nil || existing.Longitude == nil ||
+				*req.Latitude != *existing.Latitude || *req.Longitude != *existing.Longitude {
+				changeType = "coordinates_change"
+				oldValues["latitude"] = existing.Latitude
+				oldValues["longitude"] = existing.Longitude
+				newValues["latitude"] = *req.Latitude
+				newValues["longitude"] = *req.Longitude
+			}
+		}
+
+		if changeType != "" && userID != nil {
+			oldJSON, _ := json.Marshal(oldValues)
+			newJSON, _ := json.Marshal(newValues)
+			changeLogID := uuid.New().String()
+
+			noGoZoneCreated := false
+			var noGoZoneID *string
+
+			// Determine if we should create a no-go zone at the OLD location
+			noGoTriggers := map[string]bool{
+				"landlord_complaint": true,
+				"theft":              true,
+				"vandalism":          true,
+				"missing":            true,
+			}
+			shouldCreateZone := false
+			if req.ReasonCategory != nil {
+				if noGoTriggers[*req.ReasonCategory] {
+					shouldCreateZone = true
+				} else if *req.ReasonCategory == "relocation_request" &&
+					req.CreateNoGoZone != nil && *req.CreateNoGoZone {
+					shouldCreateZone = true
+				}
+			}
+
+			if shouldCreateZone && (changeType == "address_change" || changeType == "coordinates_change") &&
+				existing.Latitude != nil && existing.Longitude != nil {
+				zoneName := fmt.Sprintf("%s, %s", existing.CurrentStreet, existing.City)
+				adminBinChangeSource := "admin_bin_change"
+				incidentDesc := fmt.Sprintf("No-go zone created from admin bin relocation. Reason: %s", *req.ReasonCategory)
+				binIDCopy := id
+				_, zoneErr := createZoneAndIncident(
+					db,
+					centrifugoClient,
+					*existing.Latitude, *existing.Longitude,
+					zoneName,
+					*req.ReasonCategory,
+					&binIDCopy,
+					*userID,
+					&incidentDesc,
+					nil,  // photoURL
+					nil,  // shiftID
+					nil,  // checkID
+					nil, nil, // reporter GPS
+					true, // isFieldObservation
+					nowUnix,
+					&adminBinChangeSource,
+					nil, // moveRequestID
+				)
+				if zoneErr != nil {
+					log.Printf("⚠️  [UPDATE-BIN] Failed to create no-go zone: %v", zoneErr)
+				} else {
+					noGoZoneCreated = true
+					// Fetch the zone ID just created (nearest active zone at old coords)
+					var fetchedZoneID string
+					if fetchErr := db.QueryRow(
+						`SELECT id FROM no_go_zones WHERE status='active'
+						 ORDER BY (center_latitude - $1)^2 + (center_longitude - $2)^2 ASC LIMIT 1`,
+						*existing.Latitude, *existing.Longitude,
+					).Scan(&fetchedZoneID); fetchErr == nil {
+						noGoZoneID = &fetchedZoneID
+					}
+					log.Printf("✅ [UPDATE-BIN] No-go zone created at old location (%s)", zoneName)
+				}
+			}
+
+			_, logErr := db.Exec(`
+				INSERT INTO bin_change_log
+					(id, bin_id, changed_by_user_id, changed_at, change_type,
+					 old_values, new_values, reason_category, reason_notes,
+					 no_go_zone_created, no_go_zone_id)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			`,
+				changeLogID, id, *userID, nowUnix, changeType,
+				string(oldJSON), string(newJSON),
+				req.ReasonCategory, req.ReasonNotes,
+				noGoZoneCreated, noGoZoneID,
+			)
+			if logErr != nil {
+				log.Printf("⚠️  [UPDATE-BIN] Failed to write change log: %v", logErr)
+				// Non-fatal — bin was already updated successfully
+			} else {
+				log.Printf("✅ [UPDATE-BIN] Change log entry created (%s)", changeType)
+			}
+		}
+
 		// Fetch updated bin
 		log.Printf("🔍 [UPDATE-BIN] Fetching updated bin data")
 		var updated models.Bin
@@ -574,5 +700,76 @@ func FixBinStatus(db *sqlx.DB) http.HandlerFunc {
 			"message":       "Fixed bin status casing",
 			"rows_affected": rowsAffected,
 		})
+	}
+}
+
+// GetBinChangeLog returns the change log for a specific bin
+// GET /api/bins/:id/change-log
+func GetBinChangeLog(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "id")
+		if binID == "" {
+			http.Error(w, "Missing bin ID", http.StatusBadRequest)
+			return
+		}
+
+		type ChangeLogEntry struct {
+			ID              string  `db:"id" json:"id"`
+			BinID           string  `db:"bin_id" json:"bin_id"`
+			ChangedByUserID string  `db:"changed_by_user_id" json:"changed_by_user_id"`
+			ChangedByName   *string `db:"changed_by_name" json:"changed_by_name,omitempty"`
+			ChangeType      string  `db:"change_type" json:"change_type"`
+			OldValues       string  `db:"old_values" json:"old_values"`
+			NewValues       string  `db:"new_values" json:"new_values"`
+			ReasonCategory  *string `db:"reason_category" json:"reason_category,omitempty"`
+			ReasonNotes     *string `db:"reason_notes" json:"reason_notes,omitempty"`
+			NoGoZoneCreated bool    `db:"no_go_zone_created" json:"no_go_zone_created"`
+			NoGoZoneID      *string `db:"no_go_zone_id" json:"no_go_zone_id,omitempty"`
+			CreatedAt       int64   `db:"created_at" json:"created_at"`
+			CreatedAtIso    string  `json:"created_at_iso"`
+		}
+
+		rows, err := db.Queryx(`
+			SELECT
+				bcl.id,
+				bcl.bin_id,
+				bcl.changed_by_user_id,
+				u.name AS changed_by_name,
+				bcl.change_type,
+				bcl.old_values,
+				bcl.new_values,
+				bcl.reason_category,
+				bcl.reason_notes,
+				bcl.no_go_zone_created,
+				bcl.no_go_zone_id,
+				bcl.created_at
+			FROM bin_change_log bcl
+			LEFT JOIN users u ON u.id = bcl.changed_by_user_id
+			WHERE bcl.bin_id = $1
+			ORDER BY bcl.created_at DESC
+		`, binID)
+		if err != nil {
+			log.Printf("Error querying bin change log: %v", err)
+			http.Error(w, "Failed to fetch change log", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		entries := []ChangeLogEntry{}
+		for rows.Next() {
+			var entry ChangeLogEntry
+			if err := rows.StructScan(&entry); err != nil {
+				log.Printf("Error scanning change log row: %v", err)
+				continue
+			}
+			entry.CreatedAtIso = strings.Replace(
+				fmt.Sprintf("%s", time.Unix(entry.CreatedAt, 0).UTC().Format(time.RFC3339)),
+				" ", "T", 1,
+			)
+			entries = append(entries, entry)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(entries)
 	}
 }

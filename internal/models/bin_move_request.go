@@ -114,6 +114,10 @@ type CreateBinMoveRequest struct {
 	Reason         *string `json:"reason,omitempty"`
 	Notes          *string `json:"notes,omitempty"`
 
+	// Change tracking
+	ReasonCategory *string `json:"reason_category,omitempty"` // 'landlord_complaint', 'theft', 'vandalism', 'missing', 'relocation_request', 'other'
+	CreateNoGoZone *bool   `json:"create_no_go_zone,omitempty"` // Opt-in for relocation_request
+
 	// Assignment (optional - if provided, assigns to shift immediately)
 	ShiftID *string `json:"shift_id,omitempty"`
 }

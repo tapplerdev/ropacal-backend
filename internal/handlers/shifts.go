@@ -1847,26 +1847,29 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 		// relocation_request is an operational note, not a location safety signal — skip zone creation
 		if err == nil && bin.Latitude != nil && bin.Longitude != nil && *req.IncidentType != "relocation_request" {
-				binIDCopy := req.BinID
-				shiftIDCopy := shift.ID
-				zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
-				incidentID, incidentErr := createZoneAndIncident(
-					db,
-					centrifugoClient,
-					*bin.Latitude, *bin.Longitude,
-					zoneName,
-					*req.IncidentType,
-					&binIDCopy,
-					userClaims.UserID,
-					req.IncidentDescription,
-					req.IncidentPhotoUrl,
-					&shiftIDCopy,
-					checkID,
-					nil, nil,
-					false,
-					now,
-				)
-				if incidentErr != nil {
+			binIDCopy := req.BinID
+			shiftIDCopy := shift.ID
+			zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
+			driverShiftSource := "driver_shift"
+			incidentID, incidentErr := createZoneAndIncident(
+				db,
+				centrifugoClient,
+				*bin.Latitude, *bin.Longitude,
+				zoneName,
+				*req.IncidentType,
+				&binIDCopy,
+				userClaims.UserID,
+				req.IncidentDescription,
+				req.IncidentPhotoUrl,
+				&shiftIDCopy,
+				checkID,
+				nil, nil,
+				false,
+				now,
+				&driverShiftSource, // source
+				nil,                // moveRequestID
+			)
+			if incidentErr != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error creating zone/incident: %v", incidentErr)
 				} else {
 					createdIncidentID = &incidentID

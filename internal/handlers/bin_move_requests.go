@@ -189,9 +189,10 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 				new_latitude, new_longitude, new_address,
 				move_type, disposal_action, reason, notes,
 				assignment_type, assigned_shift_id,
-				created_at, updated_at
+				created_at, updated_at,
+				reason_category, no_go_zone_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		`,
 			moveRequest.ID, moveRequest.BinID, moveRequest.ScheduledDate,
 			moveRequest.Urgency, moveRequest.RequestedBy, moveRequest.Status,
@@ -200,12 +201,86 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			moveRequest.MoveType, moveRequest.DisposalAction, moveRequest.Reason, moveRequest.Notes,
 			moveRequest.AssignmentType, moveRequest.AssignedShiftID,
 			moveRequest.CreatedAt, moveRequest.UpdatedAt,
+			req.ReasonCategory, nil, // reason_category, no_go_zone_id (zone created after insert)
 		)
 		if err != nil {
 			log.Printf("Error creating bin move request: %v", err)
 			http.Error(w, "Failed to create move request", http.StatusInternalServerError)
 			return
 		}
+
+		// --- No-go zone creation logic ---
+		// Determine if we should auto-create a no-go zone based on reason_category
+		shouldCreateZone := false
+		if req.ReasonCategory != nil {
+			switch *req.ReasonCategory {
+			case "landlord_complaint", "theft", "vandalism", "missing":
+				shouldCreateZone = true
+			case "relocation_request":
+				// Only create if explicitly opted in
+				if req.CreateNoGoZone != nil && *req.CreateNoGoZone {
+					shouldCreateZone = true
+				}
+			}
+		}
+
+		if shouldCreateZone {
+			moveRequestSource := "move_request"
+			idCopy := id
+			// Map reason category to incident type
+			incidentType := "relocation_request"
+			if req.ReasonCategory != nil {
+				switch *req.ReasonCategory {
+				case "landlord_complaint":
+					incidentType = "landlord_complaint"
+				case "theft":
+					incidentType = "theft"
+				case "vandalism":
+					incidentType = "vandalism"
+				case "missing":
+					incidentType = "missing"
+				}
+			}
+			zoneName := fmt.Sprintf("No-go zone (move request - %s)", incidentType)
+			binIDCopy := req.BinID
+			_, zoneErr := createZoneAndIncident(
+				db, centrifugoClient,
+				*bin.Latitude, *bin.Longitude,
+				zoneName, incidentType,
+				&binIDCopy, userID,
+				req.Notes, nil,
+				nil, nil,
+				nil, nil,
+				false, now,
+				&moveRequestSource,
+				&idCopy,
+			)
+			if zoneErr != nil {
+				log.Printf("⚠️  Warning: Failed to create no-go zone for move request %s: %v", id, zoneErr)
+			} else {
+				// Retrieve the zone ID from the nearest zone at those coordinates
+				var zoneID string
+				nearErr := db.Get(&zoneID, `
+					SELECT id FROM no_go_zones
+					ORDER BY (
+						(center_latitude - $1) * (center_latitude - $1) +
+						(center_longitude - $2) * (center_longitude - $2)
+					) ASC
+					LIMIT 1
+				`, *bin.Latitude, *bin.Longitude)
+				if nearErr != nil {
+					log.Printf("⚠️  Warning: Could not retrieve zone ID for move request %s: %v", id, nearErr)
+				} else {
+					_, updErr := db.Exec(`
+						UPDATE bin_move_requests SET no_go_zone_id = $1 WHERE id = $2
+					`, zoneID, id)
+					if updErr != nil {
+						log.Printf("⚠️  Warning: Failed to link no_go_zone_id to move request %s: %v", id, updErr)
+					}
+				}
+			}
+		}
+		// --- End no-go zone creation logic ---
 
 		// Log history: move request created
 		var userName string

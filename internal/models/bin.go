@@ -61,6 +61,11 @@ type UpdateBinRequest struct {
 	CheckedFrom    *string  `json:"checkedFrom,omitempty"`
 	CheckedOnIso   *string  `json:"checkedOnIso,omitempty"`
 	PhotoUrl       *string  `json:"photoUrl,omitempty"` // Optional photo URL from Cloudinary
+
+	// Admin change tracking
+	ReasonCategory *string `json:"reason_category,omitempty"` // Required when meaningful change is made
+	ReasonNotes    *string `json:"reason_notes,omitempty"`
+	CreateNoGoZone *bool   `json:"create_no_go_zone,omitempty"` // Opt-in for relocation_request
 }
 
 // CreateBinRequest is the request body for POST /api/bins

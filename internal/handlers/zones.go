@@ -601,6 +601,11 @@ func createZoneAndIncident(
 	reporterLng *float64,
 	isFieldObservation bool,
 	now int64,
+	// source identifies how this zone/incident was created:
+	// 'driver_shift' | 'manager_report' | 'admin_bin_change' | 'move_request'
+	source *string,
+	// moveRequestID links the incident back to the move request that triggered it (nullable)
+	moveRequestID *string,
 ) (string, error) {
 	// 1. Find existing active zone within 100m
 	var existingZone *models.NoGoZone
@@ -662,8 +667,9 @@ func createZoneAndIncident(
 			description, photo_url,
 			check_id, shift_id,
 			reporter_latitude, reporter_longitude,
-			is_field_observation, status
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			is_field_observation, status,
+			source, move_request_id
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 	`,
 		incidentID, zoneID, binID, incidentType,
 		reportedByUserID, now,
@@ -671,6 +677,7 @@ func createZoneAndIncident(
 		checkID, shiftID,
 		reporterLat, reporterLng,
 		isFieldObservation, "open",
+		source, moveRequestID,
 	); err != nil {
 		return "", fmt.Errorf("failed to insert incident: %w", err)
 	}
@@ -768,6 +775,7 @@ func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Clien
 
 		now := time.Now().Unix()
 
+		managerReportSource := "manager_report"
 		incidentID, err := createZoneAndIncident(
 			db,
 			centrifugoClient,
@@ -783,6 +791,8 @@ func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Clien
 			nil, nil,                // reporter GPS (manager is in office)
 			true,                    // isFieldObservation — manager-logged
 			now,
+			&managerReportSource,    // source
+			nil,                     // moveRequestID — not from a move request
 		)
 		if err != nil {
 			log.Printf("❌ [CreateManagerIncidentReport] %v", err)

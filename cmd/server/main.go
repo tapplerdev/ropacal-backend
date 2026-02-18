@@ -219,7 +219,7 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
 			r.Post("/bins", handlers.CreateBin(db, wsHub))
-			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub))
+			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
 			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
 			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
 		})
@@ -233,6 +233,7 @@ func main() {
 		r.Post("/bins/{id}/moves", handlers.CreateMove(db))
 		r.Get("/bins/{id}/move-requests", handlers.GetBinMoveRequestsByBinID(db))
 		r.Get("/bins/{id}/incidents", handlers.GetBinIncidents(db))
+		r.Get("/bins/{id}/change-log", handlers.GetBinChangeLog(db))
 
 		// Route management endpoints (route blueprints/templates)
 		r.Get("/routes", handlers.GetRoutes(db))
