@@ -3565,6 +3565,12 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			return
 		}
 
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
 		now := time.Now().Unix()
 
 		// Get shift details for websocket/FCM notifications
@@ -3595,10 +3601,10 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		}
 		defer tx.Rollback()
 
-		// 1. Update shift status to cancelled
+		// 1. Update shift status to cancelled, record end_time
 		_, err = tx.Exec(`
 			UPDATE shifts
-			SET status = 'cancelled', updated_at = $1
+			SET status = 'cancelled', end_time = $1, updated_at = $1
 			WHERE id = $2
 		`, now, shiftID)
 		if err != nil {
@@ -3627,6 +3633,33 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		}
 
 		// 3. route_tasks are preserved for shift history audit trail
+
+		// 4. Insert into shift_history so this cancellation appears in history tab
+		var completionRate float64
+		if shift.TotalBins > 0 {
+			completionRate = float64(shift.CompletedBins) / float64(shift.TotalBins) * 100
+		}
+		_, err = tx.Exec(`
+			INSERT INTO shift_history (
+				id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+				total_pause_seconds, total_bins, completed_bins, completion_rate,
+				incidents_reported, field_observations,
+				end_reason, ended_by_user_id, end_reason_metadata
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			ON CONFLICT (id) DO NOTHING
+		`,
+			shift.ID, shift.DriverID, shift.RouteID,
+			shift.StartTime, now, shift.CreatedAt, now,
+			shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
+			0, 0,
+			"manager_cancelled", userClaims.UserID, nil,
+		)
+		if err != nil {
+			log.Printf("⚠️  Error inserting shift history on cancel: %v", err)
+			// Don't fail the cancellation — history is best-effort
+		} else {
+			log.Printf("✅ Shift %s recorded in history (manager_cancelled by %s)", shiftID, userClaims.UserID)
+		}
 
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
@@ -3719,6 +3752,12 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("❌ REQUEST: POST /api/manager/shifts/cancel-all-active")
 
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
 		now := time.Now().Unix()
 
 		// Get all active/paused shifts
@@ -3761,12 +3800,12 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			shiftIDs[i] = shift.ID
 		}
 
-		// 1. Update all shifts to cancelled
+		// 1. Update all shifts to cancelled, record end_time
 		query, args, err := sqlx.In(`
 			UPDATE shifts
-			SET status = 'cancelled', updated_at = ?
+			SET status = 'cancelled', end_time = ?, updated_at = ?
 			WHERE id IN (?)
-		`, now, shiftIDs)
+		`, now, now, shiftIDs)
 		if err != nil {
 			log.Printf("❌ Error building update query: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to build query")
@@ -3805,6 +3844,32 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 		}
 
 		// 3. route_tasks are preserved for shift history audit trail
+
+		// 4. Insert each shift into shift_history
+		for _, s := range shifts {
+			var cr float64
+			if s.TotalBins > 0 {
+				cr = float64(s.CompletedBins) / float64(s.TotalBins) * 100
+			}
+			_, histErr := tx.Exec(`
+				INSERT INTO shift_history (
+					id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+					total_pause_seconds, total_bins, completed_bins, completion_rate,
+					incidents_reported, field_observations,
+					end_reason, ended_by_user_id, end_reason_metadata
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+				ON CONFLICT (id) DO NOTHING
+			`,
+				s.ID, s.DriverID, s.RouteID,
+				s.StartTime, now, s.CreatedAt, now,
+				s.TotalPauseSeconds, s.TotalBins, s.CompletedBins, cr,
+				0, 0,
+				"manager_cancelled", userClaims.UserID, nil,
+			)
+			if histErr != nil {
+				log.Printf("⚠️  Error inserting history for shift %s: %v", s.ID, histErr)
+			}
+		}
 
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
