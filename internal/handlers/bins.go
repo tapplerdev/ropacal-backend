@@ -483,7 +483,7 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 			_, logErr := db.Exec(`
 				INSERT INTO bin_change_log
-					(id, bin_id, changed_by_user_id, changed_at, change_type,
+					(id, bin_id, changed_by_user_id, created_at, change_type,
 					 old_values, new_values, reason_category, reason_notes,
 					 no_go_zone_created, no_go_zone_id)
 				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)

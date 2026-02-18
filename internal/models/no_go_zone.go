@@ -69,25 +69,26 @@ type NoGoZoneResponse struct {
 }
 
 type ZoneIncidentResponse struct {
-	ID                 string   `json:"id"`
-	ZoneID             string   `json:"zone_id"`
-	BinID              *string  `json:"bin_id,omitempty"` // nil for address-only manager reports
-	BinNumber          *int     `json:"bin_number,omitempty"` // Joined from bins table
-	IncidentType       string   `json:"incident_type"`
-	ReportedByUserID   *string  `json:"reported_by_user_id,omitempty"`
-	ReportedByName     *string  `json:"reported_by_name,omitempty"` // Joined from users table
-	ReportedAtIso      string   `json:"reported_at_iso"`
-	Description        *string  `json:"description,omitempty"`
-	PhotoURL           *string  `json:"photo_url,omitempty"`
-	CheckID            *int     `json:"check_id,omitempty"`
-	MoveID             *int     `json:"move_id,omitempty"`
-	ReporterLatitude   *float64 `json:"reporter_latitude,omitempty"`
-	ReporterLongitude  *float64 `json:"reporter_longitude,omitempty"`
-	IsFieldObservation bool     `json:"is_field_observation"`
-	VerifiedByUserID   *string  `json:"verified_by_user_id,omitempty"`
-	VerifiedByName     *string  `json:"verified_by_name,omitempty"` // Joined from users table
-	VerifiedAtIso      *string  `json:"verified_at_iso,omitempty"`
-	Status             string   `json:"status"`
+	ID                 string   `json:"id" db:"id"`
+	ZoneID             string   `json:"zone_id" db:"zone_id"`
+	BinID              *string  `json:"bin_id,omitempty" db:"bin_id"`
+	BinNumber          *int     `json:"bin_number,omitempty" db:"bin_number"`
+	IncidentType       string   `json:"incident_type" db:"incident_type"`
+	ReportedByUserID   *string  `json:"reported_by_user_id,omitempty" db:"reported_by_user_id"`
+	ReportedByName     *string  `json:"reported_by_name,omitempty" db:"reported_by_name"`
+	ReportedAtIso      string   `json:"reported_at_iso" db:"reported_at_iso"`
+	Description        *string  `json:"description,omitempty" db:"description"`
+	PhotoURL           *string  `json:"photo_url,omitempty" db:"photo_url"`
+	CheckID            *int     `json:"check_id,omitempty" db:"check_id"`
+	ShiftID            *string  `json:"shift_id,omitempty" db:"shift_id"`
+	MoveID             *int     `json:"move_id,omitempty" db:"move_id"`
+	ReporterLatitude   *float64 `json:"reporter_latitude,omitempty" db:"reporter_latitude"`
+	ReporterLongitude  *float64 `json:"reporter_longitude,omitempty" db:"reporter_longitude"`
+	IsFieldObservation bool     `json:"is_field_observation" db:"is_field_observation"`
+	VerifiedByUserID   *string  `json:"verified_by_user_id,omitempty" db:"verified_by_user_id"`
+	VerifiedByName     *string  `json:"verified_by_name,omitempty" db:"verified_by_name"`
+	VerifiedAtIso      *string  `json:"verified_at_iso,omitempty" db:"verified_at"`
+	Status             string   `json:"status" db:"status"`
 }
 
 type ZoneRiskOverrideResponse struct {
