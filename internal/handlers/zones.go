@@ -550,7 +550,7 @@ func GetBinIncidents(db *sqlx.DB) http.HandlerFunc {
 				zi.reporter_latitude, zi.reporter_longitude,
 				zi.is_field_observation, zi.status,
 				zi.verified_by_user_id, zi.verified_at,
-				to_timestamp(zi.created_at) AS reported_at_iso,
+				to_timestamp(zi.reported_at) AS reported_at_iso,
 				u.name AS reported_by_name,
 				v.name AS verified_by_name,
 				b.bin_number
@@ -559,7 +559,7 @@ func GetBinIncidents(db *sqlx.DB) http.HandlerFunc {
 			LEFT JOIN users v ON v.id = zi.verified_by_user_id
 			LEFT JOIN bins b ON b.id = zi.bin_id
 			WHERE zi.bin_id = $1
-			ORDER BY zi.created_at DESC
+			ORDER BY zi.reported_at DESC
 		`, binID)
 		if err != nil {
 			log.Printf("❌ [GetBinIncidents] DB error: %v", err)
