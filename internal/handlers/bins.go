@@ -396,9 +396,13 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			changeType = "status_change"
 			oldValues["status"] = existing.Status
 			newValues["status"] = req.Status
-		} else if req.FillPercentage != nil && existing.FillPercentage != nil && *req.FillPercentage != *existing.FillPercentage {
+		} else if req.FillPercentage != nil && (existing.FillPercentage == nil || *req.FillPercentage != *existing.FillPercentage) {
 			changeType = "fill_override"
-			oldValues["fill_percentage"] = *existing.FillPercentage
+			if existing.FillPercentage != nil {
+				oldValues["fill_percentage"] = *existing.FillPercentage
+			} else {
+				oldValues["fill_percentage"] = nil
+			}
 			newValues["fill_percentage"] = *req.FillPercentage
 		} else if req.BinNumber != existing.BinNumber {
 			changeType = "bin_number_change"
