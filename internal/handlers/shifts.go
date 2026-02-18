@@ -366,6 +366,163 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// GetManagerShiftHistory returns paginated completed-shift history with per-shift task stats.
+// GET /api/manager/shifts/history
+// Query params: driver_id, start_date (unix), end_date (unix), limit, offset
+func GetManagerShiftHistory(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/manager/shifts/history")
+
+		_, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		// Pagination
+		limit := 50
+		offset := 0
+		if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 500 {
+			limit = l
+		}
+		if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+			offset = o
+		}
+
+		driverID := r.URL.Query().Get("driver_id")
+		startDate := r.URL.Query().Get("start_date")
+		endDate := r.URL.Query().Get("end_date")
+
+		// Build WHERE clause
+		where := "WHERE 1=1"
+		args := []interface{}{}
+		argIndex := 1
+
+		if driverID != "" {
+			where += fmt.Sprintf(" AND sh.driver_id = $%d", argIndex)
+			args = append(args, driverID)
+			argIndex++
+		}
+		if startDate != "" {
+			if ts, err := strconv.ParseInt(startDate, 10, 64); err == nil {
+				where += fmt.Sprintf(" AND sh.ended_at >= $%d", argIndex)
+				args = append(args, ts)
+				argIndex++
+			}
+		}
+		if endDate != "" {
+			if ts, err := strconv.ParseInt(endDate, 10, 64); err == nil {
+				where += fmt.Sprintf(" AND sh.ended_at <= $%d", argIndex)
+				args = append(args, ts)
+				argIndex++
+			}
+		}
+
+		// Main query — join route_tasks for per-type counts
+		query := fmt.Sprintf(`
+			SELECT
+				sh.id,
+				sh.driver_id,
+				COALESCE(u.name, '') AS driver_name,
+				COALESCE(u.email, '') AS driver_email,
+				sh.route_id,
+				sh.start_time,
+				sh.end_time,
+				sh.created_at,
+				sh.ended_at,
+				sh.total_pause_seconds,
+				sh.total_bins,
+				sh.completed_bins,
+				sh.completion_rate,
+				sh.incidents_reported,
+				sh.field_observations,
+				sh.end_reason,
+				COALESCE(COUNT(CASE WHEN rt.task_type = 'collection' AND rt.is_completed = 1 THEN 1 END), 0) AS collections_completed,
+				COALESCE(COUNT(CASE WHEN rt.task_type = 'collection' AND rt.skipped = TRUE THEN 1 END), 0) AS collections_skipped,
+				COALESCE(COUNT(CASE WHEN rt.task_type = 'placement' AND rt.is_completed = 1 THEN 1 END), 0) AS placements_completed,
+				COALESCE(COUNT(CASE WHEN rt.task_type = 'placement' AND rt.skipped = TRUE THEN 1 END), 0) AS placements_skipped,
+				COALESCE(COUNT(DISTINCT CASE WHEN rt.task_type = 'pickup' AND rt.is_completed = 1 AND rt.move_request_id IS NOT NULL THEN rt.move_request_id END), 0) AS move_requests_completed,
+				COALESCE(COUNT(CASE WHEN rt.skipped = TRUE THEN 1 END), 0) AS total_skipped,
+				COALESCE(COUNT(CASE WHEN rt.task_type = 'warehouse_stop' AND rt.is_completed = 1 THEN 1 END), 0) AS warehouse_stops
+			FROM shift_history sh
+			LEFT JOIN users u ON sh.driver_id = u.id
+			LEFT JOIN route_tasks rt ON sh.id = rt.shift_id
+			%s
+			GROUP BY sh.id, u.name, u.email
+			ORDER BY sh.ended_at DESC
+			LIMIT $%d OFFSET $%d
+		`, where, argIndex, argIndex+1)
+		args = append(args, limit, offset)
+
+		type ShiftHistoryRow struct {
+			ID                    string   `db:"id" json:"id"`
+			DriverID              string   `db:"driver_id" json:"driver_id"`
+			DriverName            string   `db:"driver_name" json:"driver_name"`
+			DriverEmail           string   `db:"driver_email" json:"driver_email"`
+			RouteID               *string  `db:"route_id" json:"route_id"`
+			StartTime             *int64   `db:"start_time" json:"start_time"`
+			EndTime               *int64   `db:"end_time" json:"end_time"`
+			CreatedAt             int64    `db:"created_at" json:"created_at"`
+			EndedAt               int64    `db:"ended_at" json:"ended_at"`
+			TotalPauseSeconds     int      `db:"total_pause_seconds" json:"total_pause_seconds"`
+			TotalBins             int      `db:"total_bins" json:"total_bins"`
+			CompletedBins         int      `db:"completed_bins" json:"completed_bins"`
+			CompletionRate        float64  `db:"completion_rate" json:"completion_rate"`
+			IncidentsReported     int      `db:"incidents_reported" json:"incidents_reported"`
+			FieldObservations     int      `db:"field_observations" json:"field_observations"`
+			EndReason             string   `db:"end_reason" json:"end_reason"`
+			CollectionsCompleted  int64    `db:"collections_completed" json:"collections_completed"`
+			CollectionsSkipped    int64    `db:"collections_skipped" json:"collections_skipped"`
+			PlacementsCompleted   int64    `db:"placements_completed" json:"placements_completed"`
+			PlacementsSkipped     int64    `db:"placements_skipped" json:"placements_skipped"`
+			MoveRequestsCompleted int64    `db:"move_requests_completed" json:"move_requests_completed"`
+			TotalSkipped          int64    `db:"total_skipped" json:"total_skipped"`
+			WarehouseStops        int64    `db:"warehouse_stops" json:"warehouse_stops"`
+		}
+
+		rows, err := db.Queryx(query, args...)
+		if err != nil {
+			log.Printf("❌ Error fetching shift history: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift history")
+			return
+		}
+		defer rows.Close()
+
+		var history []ShiftHistoryRow
+		for rows.Next() {
+			var row ShiftHistoryRow
+			if err := rows.StructScan(&row); err != nil {
+				log.Printf("❌ Error scanning shift history row: %v", err)
+				continue
+			}
+			history = append(history, row)
+		}
+		if history == nil {
+			history = []ShiftHistoryRow{}
+		}
+
+		// Total count (without GROUP BY)
+		countWhere := where
+		countArgs := args[:len(args)-2] // strip limit/offset
+		var totalCount int
+		countQuery := fmt.Sprintf(`SELECT COUNT(DISTINCT sh.id) FROM shift_history sh LEFT JOIN users u ON sh.driver_id = u.id %s`, countWhere)
+		if err := db.Get(&totalCount, countQuery, countArgs...); err != nil {
+			log.Printf("⚠️  Could not count shift history: %v", err)
+		}
+
+		log.Printf("📤 RESPONSE: 200 OK — %d shift history records (total: %d)", len(history), totalCount)
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"shifts":      history,
+				"total_count": totalCount,
+				"limit":       limit,
+				"offset":      offset,
+			},
+		})
+	}
+}
+
 // PreflightCheck validates GPS readiness before starting a shift
 // Returns: ready status, location cached, Centrifugo connection health
 func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
