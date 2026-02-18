@@ -3626,12 +3626,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			}
 		}
 
-		// 3. Delete route_tasks entries (cleanup)
-		_, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1`, shiftID)
-		if err != nil {
-			log.Printf("⚠️  Error deleting route_tasks: %v", err)
-			// Don't fail - continue
-		}
+		// 3. route_tasks are preserved for shift history audit trail
 
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
@@ -3809,17 +3804,7 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			}
 		}
 
-		// 3. Delete route_tasks entries
-		deleteQuery, deleteArgs, err := sqlx.In(`DELETE FROM route_tasks WHERE shift_id IN (?)`, shiftIDs)
-		if err != nil {
-			log.Printf("⚠️  Error building delete query: %v", err)
-		} else {
-			deleteQuery = tx.Rebind(deleteQuery)
-			_, err = tx.Exec(deleteQuery, deleteArgs...)
-			if err != nil {
-				log.Printf("⚠️  Error deleting route_tasks: %v", err)
-			}
-		}
+		// 3. route_tasks are preserved for shift history audit trail
 
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
