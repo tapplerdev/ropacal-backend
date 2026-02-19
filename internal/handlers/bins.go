@@ -384,6 +384,9 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		oldValues := map[string]interface{}{}
 		newValues := map[string]interface{}{}
 
+		log.Printf("🔍 [CHANGELOG] addrChanged=%v statusChanged=%v reqFill=%v existingFill=%v userID=%v",
+			addrChanged, req.Status != existing.Status, req.FillPercentage, existing.FillPercentage, userID)
+
 		if addrChanged {
 			changeType = "address_change"
 			oldValues["street"] = existing.CurrentStreet
