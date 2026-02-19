@@ -252,7 +252,15 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 		if includeMerged {
 			// Include incidents from zones that were merged into this zone
 			query = `
-				SELECT zi.*, b.bin_number
+				SELECT zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
+				       zi.reported_by_user_id, zi.reported_at,
+				       zi.description, zi.photo_url,
+				       zi.check_id, zi.move_id, zi.shift_id,
+				       zi.reporter_latitude, zi.reporter_longitude,
+				       zi.is_field_observation,
+				       zi.verified_by_user_id, zi.verified_at,
+				       zi.status,
+				       b.bin_number
 				FROM zone_incidents zi
 				LEFT JOIN bins b ON zi.bin_id = b.id
 				WHERE zi.zone_id = $1 OR zi.zone_id IN (
@@ -263,7 +271,15 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 		} else {
 			// Only incidents directly associated with this zone
 			query = `
-				SELECT zi.*, b.bin_number
+				SELECT zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
+				       zi.reported_by_user_id, zi.reported_at,
+				       zi.description, zi.photo_url,
+				       zi.check_id, zi.move_id, zi.shift_id,
+				       zi.reporter_latitude, zi.reporter_longitude,
+				       zi.is_field_observation,
+				       zi.verified_by_user_id, zi.verified_at,
+				       zi.status,
+				       b.bin_number
 				FROM zone_incidents zi
 				LEFT JOIN bins b ON zi.bin_id = b.id
 				WHERE zi.zone_id = $1
@@ -339,7 +355,15 @@ func GetShiftIncidents(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		query := `
-			SELECT zi.*, b.bin_number
+			SELECT zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
+			       zi.reported_by_user_id, zi.reported_at,
+			       zi.description, zi.photo_url,
+			       zi.check_id, zi.move_id, zi.shift_id,
+			       zi.reporter_latitude, zi.reporter_longitude,
+			       zi.is_field_observation,
+			       zi.verified_by_user_id, zi.verified_at,
+			       zi.status,
+			       b.bin_number
 			FROM zone_incidents zi
 			LEFT JOIN bins b ON zi.bin_id = b.id
 			WHERE zi.shift_id = $1
@@ -417,10 +441,17 @@ func GetFieldObservations(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		query := `
-			SELECT zi.*, 
+			SELECT zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
+			       zi.reported_by_user_id, zi.reported_at,
+			       zi.description, zi.photo_url,
+			       zi.check_id, zi.move_id, zi.shift_id,
+			       zi.reporter_latitude, zi.reporter_longitude,
+			       zi.is_field_observation,
+			       zi.verified_by_user_id, zi.verified_at,
+			       zi.status,
 			       b.bin_number,
-			       u1.full_name as reported_by_name,
-			       u2.full_name as verified_by_name
+			       u1.name as reported_by_name,
+			       u2.name as verified_by_name
 			FROM zone_incidents zi
 			LEFT JOIN bins b ON zi.bin_id = b.id
 			LEFT JOIN users u1 ON zi.reported_by_user_id = u1.id
