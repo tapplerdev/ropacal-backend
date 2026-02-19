@@ -182,11 +182,9 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 		// Extract user from JWT context (for checked_by tracking)
 		var userID *string
-		if claims, ok := r.Context().Value("userClaims").(map[string]interface{}); ok {
-			if uid, ok := claims["user_id"].(string); ok {
-				userID = &uid
-				log.Printf("🔐 [UPDATE-BIN] User ID from JWT: %s", uid)
-			}
+		if claims, ok := middleware.GetUserFromContext(r); ok {
+			userID = &claims.UserID
+			log.Printf("🔐 [UPDATE-BIN] User ID from JWT: %s", claims.UserID)
 		}
 
 		var req models.UpdateBinRequest
