@@ -1622,25 +1622,94 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				log.Printf("[DIAGNOSTIC] This is the PICKUP - move request remains in_progress")
 			}
 		} else if taskType == "placement" {
-			// PLACEMENT task - create new bin from potential location
-			log.Printf("[DIAGNOSTIC] 📍 Detected PLACEMENT task - creating new bin...")
+			// PLACEMENT task - either create new bin (potential_location) or redeploy warehouse bin
+			log.Printf("[DIAGNOSTIC] 📍 Detected PLACEMENT task - determining source...")
 
 			// Get placement details from route_tasks table
 			var potentialLocationID *string
-			var newBinNumber *int
+			var placementSource *string
+			var taskBinID *string
 			err = db.QueryRow(`
-				SELECT potential_location_id, new_bin_number
+				SELECT potential_location_id, placement_source, bin_id
 				FROM route_tasks
 				WHERE id = $1
-			`, taskID).Scan(&potentialLocationID, &newBinNumber)
-
-			if err != nil || potentialLocationID == nil {
-				log.Printf("[DIAGNOSTIC] ❌ Error fetching placement details or missing potential_location_id: %v (potential_location_id=%v)", err, potentialLocationID)
-				// Undo is_completed since we can't complete the placement
+			`, taskID).Scan(&potentialLocationID, &placementSource, &taskBinID)
+			if err != nil {
+				log.Printf("[DIAGNOSTIC] ❌ Error fetching placement details: %v", err)
 				db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement location")
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement details")
 				return
+			}
+
+			src := "potential_location"
+			if placementSource != nil {
+				src = *placementSource
+			}
+			log.Printf("[DIAGNOSTIC]    placement_source: %s", src)
+
+			if src == "warehouse" {
+				// ── WAREHOUSE REDEPLOYMENT ─────────────────────────────────────────────
+				// The bin already exists (in_storage). Update its location + status → active.
+				log.Printf("[DIAGNOSTIC] 🏭 Warehouse redeployment path")
+
+				if taskBinID == nil || *taskBinID == "" {
+					log.Printf("[DIAGNOSTIC] ❌ No bin_id on warehouse placement task")
+					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					utils.RespondError(w, http.StatusBadRequest, "bin_id is required for warehouse deployment tasks")
+					return
+				}
+
+				// Use task coordinates + address as the deployment destination
+				var destLat, destLon float64
+				var destAddr *string
+				db.QueryRow(`SELECT latitude, longitude, address FROM route_tasks WHERE id = $1`, taskID).Scan(&destLat, &destLon, &destAddr)
+				addrVal := ""
+				if destAddr != nil {
+					addrVal = *destAddr
+				}
+
+				_, err = db.Exec(`
+					UPDATE bins
+					SET status = 'active',
+					    current_street = $1,
+					    latitude = $2,
+					    longitude = $3,
+					    last_checked_at = $4,
+					    updated_at = $4
+					WHERE id = $5
+				`, addrVal, destLat, destLon, now, *taskBinID)
+				if err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error redeploying warehouse bin: %v", err)
+					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to redeploy bin")
+					return
+				}
+				log.Printf("[DIAGNOSTIC] ✅ Bin %s redeployed to active at (%f, %f)", *taskBinID, destLat, destLon)
+
+				// Broadcast bin_redeployed event to managers
+				if hub != nil {
+					hub.BroadcastToRole("manager", websocket.Message{
+						UserID: "",
+						Data: map[string]interface{}{
+							"type":     "bin_redeployed",
+							"bin_id":   *taskBinID,
+							"address":  addrVal,
+							"status":   "active",
+							"shift_id": shift.ID,
+						},
+					})
+					log.Printf("[DIAGNOSTIC] 📡 Broadcast bin_redeployed event to managers")
+				}
 			} else {
+				// ── POTENTIAL LOCATION PLACEMENT ──────────────────────────────────────
+				// Create a brand new bin from a potential location
+				if potentialLocationID == nil {
+					log.Printf("[DIAGNOSTIC] ❌ Missing potential_location_id for potential_location placement")
+					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement location")
+					return
+				}
+
 				log.Printf("[DIAGNOSTIC]    Potential Location ID: %s", *potentialLocationID)
 
 				// Fetch potential location details
@@ -1665,23 +1734,23 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					actualBinNumber := req.NewBinNumber
 					log.Printf("[DIAGNOSTIC] Using driver-provided bin number: %d", actualBinNumber)
 					if actualBinNumber == 0 {
-					log.Printf("[DIAGNOSTIC] ❌ Driver did not provide a bin number")
-					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
-					utils.RespondError(w, http.StatusBadRequest, "Bin number is required for placement tasks")
-					return
-				}
+						log.Printf("[DIAGNOSTIC] ❌ Driver did not provide a bin number")
+						db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+						utils.RespondError(w, http.StatusBadRequest, "Bin number is required for placement tasks")
+						return
+					}
 
-				// Check if this bin number is already taken
-				var binAlreadyExists bool
-				db.QueryRow(`SELECT EXISTS(SELECT 1 FROM bins WHERE bin_number = $1)`, actualBinNumber).Scan(&binAlreadyExists)
-				if binAlreadyExists {
-					log.Printf("[DIAGNOSTIC] ❌ Bin #%d already exists — rejecting duplicate", actualBinNumber)
-					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
-					utils.RespondError(w, http.StatusConflict, fmt.Sprintf("Bin #%d already exists, please use a different number", actualBinNumber))
-					return
-				}
+					// Check if this bin number is already taken
+					var binAlreadyExists bool
+					db.QueryRow(`SELECT EXISTS(SELECT 1 FROM bins WHERE bin_number = $1)`, actualBinNumber).Scan(&binAlreadyExists)
+					if binAlreadyExists {
+						log.Printf("[DIAGNOSTIC] ❌ Bin #%d already exists — rejecting duplicate", actualBinNumber)
+						db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+						utils.RespondError(w, http.StatusConflict, fmt.Sprintf("Bin #%d already exists, please use a different number", actualBinNumber))
+						return
+					}
 
-				_, err = db.Exec(
+					_, err = db.Exec(
 						binInsertQuery,
 						newBinID,
 						actualBinNumber,
@@ -1700,9 +1769,9 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 					if err != nil {
 						log.Printf("[DIAGNOSTIC] ❌ Error creating bin: %v", err)
-					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to create bin, please try again")
-					return
+						db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to create bin, please try again")
+						return
 					} else {
 						log.Printf("[DIAGNOSTIC] ✅ Created new Bin #%d (ID: %s)", actualBinNumber, newBinID)
 
@@ -1727,7 +1796,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 								binCreatedMsg := websocket.Message{
 									UserID: "",
 									Data: map[string]interface{}{
-										"type": "bin_created",
+										"type":       "bin_created",
 										"bin_id":     newBinID,
 										"bin_number": actualBinNumber,
 										"street":     potentialLocation.Street,
@@ -1742,24 +1811,24 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 								log.Printf("[DIAGNOSTIC] 📡 Broadcast bin_created event to managers")
 							}
 
-						// Also publish potential_location_converted via Centrifugo so the
-						// manager dashboard removes this location from the selector in real-time
-						if centrifugoClient != nil {
-							plData := map[string]interface{}{
-								"location_id": *potentialLocationID,
-								"bin_id":      newBinID,
-								"bin_number":  actualBinNumber,
-								"street":      potentialLocation.Street,
-								"city":        potentialLocation.City,
-								"zip":         potentialLocation.Zip,
-								"shift_id":    shift.ID,
+							// Also publish potential_location_converted via Centrifugo so the
+							// manager dashboard removes this location from the selector in real-time
+							if centrifugoClient != nil {
+								plData := map[string]interface{}{
+									"location_id": *potentialLocationID,
+									"bin_id":      newBinID,
+									"bin_number":  actualBinNumber,
+									"street":      potentialLocation.Street,
+									"city":        potentialLocation.City,
+									"zip":         potentialLocation.Zip,
+									"shift_id":    shift.ID,
+								}
+								if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_converted", plData); pubErr != nil {
+									log.Printf("[DIAGNOSTIC] Failed to publish potential_location_converted via Centrifugo: %v", pubErr)
+								} else {
+									log.Printf("[DIAGNOSTIC] Published potential_location_converted via Centrifugo (location_id: %s)", *potentialLocationID)
+								}
 							}
-							if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_converted", plData); pubErr != nil {
-								log.Printf("[DIAGNOSTIC] Failed to publish potential_location_converted via Centrifugo: %v", pubErr)
-							} else {
-								log.Printf("[DIAGNOSTIC] Published potential_location_converted via Centrifugo (location_id: %s)", *potentialLocationID)
-							}
-						}
 						}
 					}
 				}
@@ -4555,15 +4624,15 @@ func optimizeRouteWithMapbox(
 			INSERT INTO route_tasks (
 				id, shift_id, task_type, sequence_order,
 				bin_id, bin_number, fill_percentage,
-				potential_location_id, new_bin_number,
+				potential_location_id, new_bin_number, placement_source,
 				move_request_id, destination_latitude, destination_longitude, destination_address,
 				latitude, longitude, address
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		`
 		_, err = db.Exec(insertQuery,
 			task.ID, task.ShiftID, task.TaskType, task.SequenceOrder,
 			task.BinID, task.BinNumber, task.FillPercentage,
-			task.PotentialLocationID, task.NewBinNumber,
+			task.PotentialLocationID, task.NewBinNumber, task.PlacementSource,
 			task.MoveRequestID, task.DestinationLatitude, task.DestinationLongitude, task.DestinationAddress,
 			task.Latitude, task.Longitude, task.Address,
 		)

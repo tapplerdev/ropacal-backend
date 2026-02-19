@@ -33,6 +33,7 @@ type RouteTask struct {
 	// Placement task fields
 	PotentialLocationID *string `json:"potential_location_id,omitempty" db:"potential_location_id"`
 	NewBinNumber        *int    `json:"new_bin_number,omitempty" db:"new_bin_number"`
+	PlacementSource     *string `json:"placement_source,omitempty" db:"placement_source"` // "potential_location" | "warehouse"
 
 	// Move request task fields
 	MoveRequestID        *string  `json:"move_request_id,omitempty" db:"move_request_id"`
@@ -60,15 +61,25 @@ type RouteTask struct {
 	UpdatedAt *int64           `json:"updated_at,omitempty" db:"updated_at"`
 }
 
+// WarehouseDeploymentTask represents a request to deploy an in_storage bin to a new field address
+type WarehouseDeploymentTask struct {
+	BinID                string  `json:"bin_id"`                // ID of the existing in_storage bin
+	BinNumber            int     `json:"bin_number"`            // Bin number (for display/logging)
+	DestinationAddress   string  `json:"destination_address"`
+	DestinationLatitude  float64 `json:"destination_latitude"`
+	DestinationLongitude float64 `json:"destination_longitude"`
+}
+
 // CreateShiftWithTasksRequest represents the request to create a shift with tasks
 type CreateShiftWithTasksRequest struct {
-	DriverID           string                   `json:"driver_id"`
-	TruckBinCapacity   int                      `json:"truck_bin_capacity"`
-	WarehouseLatitude  float64                  `json:"warehouse_latitude"`
-	WarehouseLongitude float64                  `json:"warehouse_longitude"`
-	WarehouseAddress   string                   `json:"warehouse_address"`
-	LockRouteOrder     bool                     `json:"lock_route_order"` // If true, skip optimization on shift start
-	Tasks              []map[string]interface{} `json:"tasks"`            // Raw task data
+	DriverID               string                    `json:"driver_id"`
+	TruckBinCapacity       int                       `json:"truck_bin_capacity"`
+	WarehouseLatitude      float64                   `json:"warehouse_latitude"`
+	WarehouseLongitude     float64                   `json:"warehouse_longitude"`
+	WarehouseAddress       string                    `json:"warehouse_address"`
+	LockRouteOrder         bool                      `json:"lock_route_order"` // If true, skip optimization on shift start
+	Tasks                  []map[string]interface{}  `json:"tasks"`            // Raw task data
+	WarehouseDeployments   []WarehouseDeploymentTask `json:"warehouse_deployments,omitempty"` // Bins to deploy from warehouse
 }
 
 // CompleteTaskRequest represents the request to complete a task

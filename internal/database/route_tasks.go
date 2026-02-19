@@ -95,6 +95,7 @@ func CreateShiftWithTasks(
 	warehouseAddr string,
 	tasks []map[string]interface{},
 	lockRouteOrder bool,
+	warehouseDeployments []models.WarehouseDeploymentTask,
 ) (string, int, error) {
 	tx, err := db.Beginx()
 	if err != nil {
@@ -139,17 +140,17 @@ func CreateShiftWithTasks(
 		INSERT INTO route_tasks (
 			id, shift_id, sequence_order, task_type, latitude, longitude, address,
 			bin_id, bin_number, fill_percentage,
-			potential_location_id, new_bin_number,
+			potential_location_id, new_bin_number, placement_source,
 			move_request_id, destination_latitude, destination_longitude, destination_address, move_type,
 			warehouse_action, bins_to_load,
 			route_id, task_data, created_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10,
-			$11, $12,
-			$13, $14, $15, $16, $17,
-			$18, $19,
-			$20, $21, $22
+			$11, $12, $13,
+			$14, $15, $16, $17, $18,
+			$19, $20,
+			$21, $22, $23
 		)
 	`
 
@@ -283,12 +284,19 @@ func CreateShiftWithTasks(
 			}
 		}
 
+		// Determine placement_source: default to "potential_location" for placement tasks
+		placementSource := getString("placement_source")
+		if taskType == "placement" && placementSource == nil {
+			s := "potential_location"
+			placementSource = s
+		}
+
 		_, err = tx.Exec(
 			taskQuery,
 			taskID, shiftID, i+1, taskType, lat, lon,
 			getString("address"),
 			getString("bin_id"), getInt("bin_number"), getInt("fill_percentage"),
-			getString("potential_location_id"), getString("new_bin_number"),
+			getString("potential_location_id"), getString("new_bin_number"), placementSource,
 			getString("move_request_id"), getFloat("destination_latitude"),
 			getFloat("destination_longitude"), getString("destination_address"), getString("move_type"),
 			getString("warehouse_action"), getInt("bins_to_load"),
@@ -299,28 +307,93 @@ func CreateShiftWithTasks(
 		}
 	}
 
+	// Insert warehouse deployment task pairs (warehouse_stop load + placement with source="warehouse")
+	// Each deployment: driver goes to warehouse to load the bin, then drives to destination to place it
+	nextSeq := len(tasks) + 1
+	if len(warehouseDeployments) > 0 {
+		log.Printf("🏭 Inserting %d warehouse deployment task pair(s)...", len(warehouseDeployments))
+
+		// Group all deployments into a single warehouse_stop "load" task (efficient: one trip to warehouse)
+		// then individual placement tasks for each bin
+		binIDs := make([]string, 0, len(warehouseDeployments))
+		for _, d := range warehouseDeployments {
+			binIDs = append(binIDs, d.BinID)
+		}
+		loadTaskDataRaw, _ := json.Marshal(map[string]interface{}{
+			"warehouse_action": "load",
+			"bin_ids":          binIDs,
+		})
+
+		// warehouse_stop task: go to warehouse and load all deployment bins
+		loadStopID := uuid.New().String()
+		loadAction := "load"
+		_, err = tx.Exec(
+			taskQuery,
+			loadStopID, shiftID, nextSeq, "warehouse_stop",
+			warehouseLat, warehouseLon, warehouseAddr,
+			nil, nil, nil,          // bin_id, bin_number, fill_percentage
+			nil, nil, nil,          // potential_location_id, new_bin_number, placement_source
+			nil, nil, nil, nil, nil, // move_request fields
+			loadAction, len(warehouseDeployments), // warehouse_action, bins_to_load
+			nil, loadTaskDataRaw, now,
+		)
+		if err != nil {
+			return "", 0, fmt.Errorf("failed to create warehouse load stop: %w", err)
+		}
+		log.Printf("   ✅ Warehouse load stop inserted (seq %d, loading %d bins)", nextSeq, len(warehouseDeployments))
+		nextSeq++
+
+		// placement tasks: one per deployment bin, with placement_source="warehouse"
+		for _, d := range warehouseDeployments {
+			placeSrc := "warehouse"
+			addr := d.DestinationAddress
+			depTaskID := uuid.New().String()
+			_, err = tx.Exec(
+				taskQuery,
+				depTaskID, shiftID, nextSeq, "placement",
+				d.DestinationLatitude, d.DestinationLongitude, addr,
+				d.BinID, d.BinNumber, nil, // bin_id (existing bin), bin_number, fill_percentage
+				nil, nil, placeSrc,        // potential_location_id, new_bin_number, placement_source
+				nil, nil, nil, nil, nil,   // move_request fields
+				nil, nil,                  // warehouse_action, bins_to_load
+				nil, []byte("{}"), now,
+			)
+			if err != nil {
+				return "", 0, fmt.Errorf("failed to create warehouse deployment placement task: %w", err)
+			}
+			log.Printf("   ✅ Deployment placement inserted (seq %d, bin #%d → %s)", nextSeq, d.BinNumber, d.DestinationAddress)
+			nextSeq++
+		}
+
+		totalBins += 1 + len(warehouseDeployments) // warehouse_stop load + placements
+	}
+
 	// Smart warehouse task insertion: Ensure shift always ends at warehouse
 	// Check if last task is a warehouse_stop, if not, append one
 	var lastTaskType string
 	if len(tasks) > 0 {
 		lastTaskType, _ = tasks[len(tasks)-1]["task_type"].(string)
 	}
+	// If we appended warehouse deployment tasks, the last task is now a placement (not warehouse_stop)
+	if len(warehouseDeployments) > 0 {
+		lastTaskType = "placement"
+	}
 
 	if lastTaskType != "warehouse_stop" {
 		log.Printf("🏭 Last task is '%s', appending final warehouse stop", lastTaskType)
 
-		// Create final warehouse task
+		// Create final warehouse task (nextSeq accounts for any deployment tasks already inserted)
 		warehouseTaskID := uuid.New().String()
-		warehouseSequence := len(tasks) + 1
+		warehouseSequence := nextSeq
 
 		_, err = tx.Exec(
 			taskQuery,
 			warehouseTaskID, shiftID, warehouseSequence, "warehouse_stop",
 			warehouseLat, warehouseLon, warehouseAddr,
-			nil, nil, nil, // bin_id, bin_number, fill_percentage
-			nil, nil,      // potential_location_id, new_bin_number
+			nil, nil, nil,          // bin_id, bin_number, fill_percentage
+			nil, nil, nil,          // potential_location_id, new_bin_number, placement_source
 			nil, nil, nil, nil, nil, // move_request fields
-			nil, nil,      // warehouse_action, bins_to_load (nil = just return)
+			nil, nil,               // warehouse_action, bins_to_load (nil = just return)
 			nil, []byte("{}"), now, // route_id, task_data, created_at
 		)
 		if err != nil {
