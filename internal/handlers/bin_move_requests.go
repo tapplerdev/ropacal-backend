@@ -159,26 +159,27 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 
 		// Create bin move request
 		moveRequest := models.BinMoveRequest{
-			ID:                id,
-			BinID:             req.BinID,
-			ScheduledDate:     req.ScheduledDate,
-			Urgency:           urgency, // Auto-calculated urgency
-			RequestedBy:       userID,
-			Status:            status,
-			OriginalLatitude:  *bin.Latitude,
-			OriginalLongitude: *bin.Longitude,
-			OriginalAddress:   originalAddress,
-			NewLatitude:       req.NewLatitude,
-			NewLongitude:      req.NewLongitude,
-			NewAddress:        newAddress, // Built from separate fields or provided address
-			MoveType:          req.MoveType,
-			DisposalAction:    req.DisposalAction,
-			Reason:            req.Reason,
-			Notes:             req.Notes,
-			AssignmentType:    assignmentType, // Set based on whether shift is assigned
-			AssignedShiftID:   req.ShiftID,    // Assign to shift if provided
-			CreatedAt:         now,
-			UpdatedAt:         now,
+			ID:                        id,
+			BinID:                     req.BinID,
+			ScheduledDate:             req.ScheduledDate,
+			Urgency:                   urgency, // Auto-calculated urgency
+			RequestedBy:               userID,
+			Status:                    status,
+			OriginalLatitude:          *bin.Latitude,
+			OriginalLongitude:         *bin.Longitude,
+			OriginalAddress:           originalAddress,
+			NewLatitude:               req.NewLatitude,
+			NewLongitude:              req.NewLongitude,
+			NewAddress:                newAddress, // Built from separate fields or provided address
+			MoveType:                  req.MoveType,
+			DisposalAction:            req.DisposalAction,
+			Reason:                    req.Reason,
+			Notes:                     req.Notes,
+			SourcePotentialLocationID: req.SourcePotentialLocationID, // For warehouse redeployments to potential locations
+			AssignmentType:            assignmentType,                // Set based on whether shift is assigned
+			AssignedShiftID:           req.ShiftID,                   // Assign to shift if provided
+			CreatedAt:                 now,
+			UpdatedAt:                 now,
 		}
 
 		// Insert into database
@@ -188,17 +189,19 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 				original_latitude, original_longitude, original_address,
 				new_latitude, new_longitude, new_address,
 				move_type, disposal_action, reason, notes,
+				source_potential_location_id,
 				assignment_type, assigned_shift_id,
 				created_at, updated_at,
 				reason_category, no_go_zone_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		`,
 			moveRequest.ID, moveRequest.BinID, moveRequest.ScheduledDate,
 			moveRequest.Urgency, moveRequest.RequestedBy, moveRequest.Status,
 			moveRequest.OriginalLatitude, moveRequest.OriginalLongitude, moveRequest.OriginalAddress,
 			moveRequest.NewLatitude, moveRequest.NewLongitude, moveRequest.NewAddress,
 			moveRequest.MoveType, moveRequest.DisposalAction, moveRequest.Reason, moveRequest.Notes,
+			moveRequest.SourcePotentialLocationID,
 			moveRequest.AssignmentType, moveRequest.AssignedShiftID,
 			moveRequest.CreatedAt, moveRequest.UpdatedAt,
 			req.ReasonCategory, nil, // reason_category, no_go_zone_id (zone created after insert)

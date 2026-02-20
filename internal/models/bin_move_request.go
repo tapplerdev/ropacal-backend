@@ -21,10 +21,11 @@ type BinMoveRequest struct {
 	NewAddress   *string  `json:"new_address,omitempty" db:"new_address"`
 
 	// Move metadata
-	MoveType       string  `json:"move_type" db:"move_type"`                       // 'store' or 'relocation'
-	DisposalAction *string `json:"disposal_action,omitempty" db:"disposal_action"` // DEPRECATED: kept for backward compatibility
-	Reason         *string `json:"reason,omitempty" db:"reason"`
-	Notes          *string `json:"notes,omitempty" db:"notes"`
+	MoveType                  string  `json:"move_type" db:"move_type"`                                             // 'store', 'relocation', or 'redeployment'
+	DisposalAction            *string `json:"disposal_action,omitempty" db:"disposal_action"`                       // DEPRECATED: kept for backward compatibility
+	Reason                    *string `json:"reason,omitempty" db:"reason"`
+	Notes                     *string `json:"notes,omitempty" db:"notes"`
+	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty" db:"source_potential_location_id"` // For warehouse redeployments to potential locations
 
 	// Assignment (shift-based or manual)
 	AssignmentType  *string `json:"assignment_type,omitempty" db:"assignment_type"` // 'shift' or 'manual', NULL for unassigned
@@ -71,10 +72,11 @@ type BinMoveRequestResponse struct {
 	NewAddress   *string  `json:"new_address,omitempty"`
 
 	// Move metadata
-	MoveType       string  `json:"move_type"`
-	DisposalAction *string `json:"disposal_action,omitempty"`
-	Reason         *string `json:"reason,omitempty"`
-	Notes          *string `json:"notes,omitempty"`
+	MoveType                  string  `json:"move_type"`
+	DisposalAction            *string `json:"disposal_action,omitempty"`
+	Reason                    *string `json:"reason,omitempty"`
+	Notes                     *string `json:"notes,omitempty"`
+	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty"`
 
 	// Assignment (shift-based or manual)
 	AssignmentType     *string `json:"assignment_type,omitempty"`     // 'shift' or 'manual', NULL for unassigned
@@ -109,13 +111,14 @@ type CreateBinMoveRequest struct {
 	NewZip       *string  `json:"new_zip,omitempty"`
 
 	// Move metadata
-	MoveType       string  `json:"move_type" binding:"required"` // 'store' or 'relocation'
-	DisposalAction *string `json:"disposal_action,omitempty"`    // DEPRECATED: kept for backward compatibility
-	Reason         *string `json:"reason,omitempty"`
-	Notes          *string `json:"notes,omitempty"`
+	MoveType                  string  `json:"move_type" binding:"required"` // 'store', 'relocation', or 'redeployment'
+	DisposalAction            *string `json:"disposal_action,omitempty"`    // DEPRECATED: kept for backward compatibility
+	Reason                    *string `json:"reason,omitempty"`
+	Notes                     *string `json:"notes,omitempty"`
+	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty"` // For warehouse redeployments to potential locations
 
 	// Change tracking
-	ReasonCategory *string `json:"reason_category,omitempty"` // 'landlord_complaint', 'theft', 'vandalism', 'missing', 'relocation_request', 'other'
+	ReasonCategory *string `json:"reason_category,omitempty"`   // 'landlord_complaint', 'theft', 'vandalism', 'missing', 'relocation_request', 'other'
 	CreateNoGoZone *bool   `json:"create_no_go_zone,omitempty"` // Opt-in for relocation_request
 
 	// Assignment (optional - if provided, assigns to shift immediately)
@@ -137,12 +140,13 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 		OriginalAddress:   bmr.OriginalAddress,
 		NewLatitude:       bmr.NewLatitude,
 		NewLongitude:      bmr.NewLongitude,
-		NewAddress:        bmr.NewAddress,
-		MoveType:          bmr.MoveType,
-		DisposalAction:    bmr.DisposalAction,
-		Reason:            bmr.Reason,
-		Notes:             bmr.Notes,
-		AssignmentType:    bmr.AssignmentType,
+		NewAddress:                bmr.NewAddress,
+		MoveType:                  bmr.MoveType,
+		DisposalAction:            bmr.DisposalAction,
+		Reason:                    bmr.Reason,
+		Notes:                     bmr.Notes,
+		SourcePotentialLocationID: bmr.SourcePotentialLocationID,
+		AssignmentType:            bmr.AssignmentType,
 		AssignedShiftID:   bmr.AssignedShiftID,
 		AssignedUserID:    bmr.AssignedUserID,
 		CreatedAtIso:      time.Unix(bmr.CreatedAt, 0).Format(time.RFC3339),

@@ -3539,9 +3539,9 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 		}
 		log.Printf("[MOVE] ✅ Bin status updated to %s", newStatus)
 
-	} else if moveRequest.MoveType == "relocation" {
+	} else if moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment" {
 		// Update bin location to new coordinates
-		log.Printf("[MOVE]    → Relocating bin to new address")
+		log.Printf("[MOVE]    → Relocating bin to new address (type: %s)", moveRequest.MoveType)
 		_, err = db.Exec(`
 			UPDATE bins
 			SET latitude = $1,
@@ -3557,6 +3557,44 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 			moveRequest.BinID)
 		if err != nil {
 			return fmt.Errorf("failed to relocate bin: %w", err)
+		}
+
+		// If this was a warehouse redeployment to a potential location, mark location as converted
+		if moveRequest.MoveType == "redeployment" && moveRequest.SourcePotentialLocationID != nil {
+			log.Printf("[MOVE]    → Warehouse redeployment to potential location - marking as converted")
+
+			// Get shift ID from assigned_shift_id
+			var shiftID *string
+			if moveRequest.AssignedShiftID != nil {
+				shiftID = moveRequest.AssignedShiftID
+			}
+
+			_, err = db.Exec(`
+				UPDATE potential_locations
+				SET converted_to_bin_id = $1,
+				    converted_at = $2,
+				    converted_via_shift_id = $3,
+				    updated_at = $2
+				WHERE id = $4
+			`, moveRequest.BinID, now, shiftID, *moveRequest.SourcePotentialLocationID)
+
+			if err != nil {
+				log.Printf("[MOVE] ⚠️  Error updating potential location: %v", err)
+			} else {
+				log.Printf("[MOVE] ✅ Potential location marked as converted")
+
+				// Broadcast potential_location_converted event to dashboard
+				hub.BroadcastToRole("manager", map[string]interface{}{
+					"type": "potential_location_converted",
+					"data": map[string]interface{}{
+						"potential_location_id": *moveRequest.SourcePotentialLocationID,
+						"bin_id":                moveRequest.BinID,
+						"shift_id":              shiftID,
+						"converted_at":          now,
+					},
+				})
+				log.Printf("📡 Broadcast potential_location_converted to managers")
+			}
 		}
 
 		// Record the move in moves table
