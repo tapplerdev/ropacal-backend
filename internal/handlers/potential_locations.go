@@ -539,18 +539,20 @@ func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Parse max_distance query param (default 500m, hard cap 500m)
-		maxDistance := 500.0
+		// Parse max_distance query param (default: return all locations sorted by distance)
+		// If max_distance is provided, filter to only locations within that radius
+		var maxDistance *float64
 		if raw := r.URL.Query().Get("max_distance"); raw != "" {
 			if parsed, err := strconv.ParseFloat(raw, 64); err == nil && parsed > 0 {
-				if parsed > 500 {
-					parsed = 500
-				}
-				maxDistance = parsed
+				maxDistance = &parsed
 			}
 		}
 
-		log.Printf("🔍 [NEARBY-POTENTIAL-LOCATIONS] bin=%s max_distance=%.0fm", binID, maxDistance)
+		if maxDistance != nil {
+			log.Printf("🔍 [NEARBY-POTENTIAL-LOCATIONS] bin=%s max_distance=%.0fm", binID, *maxDistance)
+		} else {
+			log.Printf("🔍 [NEARBY-POTENTIAL-LOCATIONS] bin=%s returning ALL locations sorted by distance", binID)
+		}
 
 		// Fetch bin coordinates
 		var binLat, binLng *float64
@@ -615,8 +617,10 @@ func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 				continue
 			}
 			dist := haversineMeters(*binLat, *binLng, loc.Latitude, loc.Longitude)
-			if dist <= maxDistance {
-				loc.DistanceMeters = math.Round(dist*10) / 10
+			loc.DistanceMeters = math.Round(dist*10) / 10
+
+			// Only filter by distance if max_distance is provided
+			if maxDistance == nil || dist <= *maxDistance {
 				results = append(results, loc)
 			}
 		}
@@ -630,10 +634,13 @@ func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 			results = []NearbyResult{}
 		}
 
-		log.Printf("✅ [NEARBY-POTENTIAL-LOCATIONS] Found %d location(s) within %.0fm of bin #%d", len(results), maxDistance, binNumber)
+		if maxDistance != nil {
+			log.Printf("✅ [NEARBY-POTENTIAL-LOCATIONS] Found %d location(s) within %.0fm of bin #%d", len(results), *maxDistance, binNumber)
+		} else {
+			log.Printf("✅ [NEARBY-POTENTIAL-LOCATIONS] Found %d location(s) sorted by distance from bin #%d", len(results), binNumber)
+		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			"bin": map[string]interface{}{
 				"id":             binID,
 				"bin_number":     binNumber,
@@ -643,10 +650,17 @@ func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 				"latitude":       *binLat,
 				"longitude":      *binLng,
 			},
-			"search_radius_meters": maxDistance,
-			"count":                len(results),
-			"results":              results,
-		})
+			"count":   len(results),
+			"results": results,
+		}
+
+		// Only include search_radius_meters if a max_distance was specified
+		if maxDistance != nil {
+			response["search_radius_meters"] = *maxDistance
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
