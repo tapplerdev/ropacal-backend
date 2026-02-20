@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type BinMoveRequest struct {
 	ID            string `json:"id" db:"id"`
@@ -158,5 +161,68 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 		resp.CompletedAtIso = &iso
 	}
 
+	// Parse new_address into separate fields for frontend compatibility
+	// Format: "Street, City Zip" (e.g., "1030 E El Camino Real, Sunnyvale, Sunnyvale 94087")
+	if bmr.NewAddress != nil && *bmr.NewAddress != "" {
+		parts := parseAddress(*bmr.NewAddress)
+		if parts["street"] != "" {
+			resp.NewStreet = &parts["street"]
+		}
+		if parts["city"] != "" {
+			resp.NewCity = &parts["city"]
+		}
+		if parts["zip"] != "" {
+			resp.NewZip = &parts["zip"]
+		}
+	}
+
 	return resp
+}
+
+// parseAddress splits a combined address string into street, city, zip
+// Expects format: "Street, City Zip" or "Street, City, City Zip"
+func parseAddress(address string) map[string]string {
+	result := map[string]string{
+		"street": "",
+		"city":   "",
+		"zip":    "",
+	}
+
+	// Split by comma
+	parts := []string{}
+	for _, part := range []rune(address) {
+		if part == ',' {
+			parts = append(parts, "")
+		} else if len(parts) == 0 {
+			parts = append(parts, string(part))
+		} else {
+			parts[len(parts)-1] += string(part)
+		}
+	}
+
+	// Trim whitespace from all parts
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+
+	if len(parts) >= 2 {
+		// Street is first part
+		result["street"] = parts[0]
+
+		// Last part should contain "City Zip"
+		lastPart := parts[len(parts)-1]
+		lastPartTokens := strings.Fields(lastPart)
+
+		if len(lastPartTokens) >= 2 {
+			// Last token is likely the ZIP
+			result["zip"] = lastPartTokens[len(lastPartTokens)-1]
+			// Everything else is the city
+			result["city"] = strings.Join(lastPartTokens[:len(lastPartTokens)-1], " ")
+		} else {
+			// Just city, no zip
+			result["city"] = lastPart
+		}
+	}
+
+	return result
 }
