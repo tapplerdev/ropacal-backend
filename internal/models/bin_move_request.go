@@ -166,13 +166,16 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 	if bmr.NewAddress != nil && *bmr.NewAddress != "" {
 		parts := parseAddress(*bmr.NewAddress)
 		if parts["street"] != "" {
-			resp.NewStreet = &parts["street"]
+			street := parts["street"]
+			resp.NewStreet = &street
 		}
 		if parts["city"] != "" {
-			resp.NewCity = &parts["city"]
+			city := parts["city"]
+			resp.NewCity = &city
 		}
 		if parts["zip"] != "" {
-			resp.NewZip = &parts["zip"]
+			zip := parts["zip"]
+			resp.NewZip = &zip
 		}
 	}
 
