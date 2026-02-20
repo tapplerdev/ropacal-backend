@@ -4603,6 +4603,10 @@ func optimizeRouteWithMapbox(
 						task.MoveRequestID = &moveReq.ID
 						task.BinID = &moveReq.BinID
 						task.BinNumber = &moveReq.BinNumber
+						// Populate destination fields with dropoff location for consistent data structure
+						task.DestinationLatitude = &stop.Latitude
+						task.DestinationLongitude = &stop.Longitude
+						task.DestinationAddress = &stop.Address
 						log.Printf("   ✅ Matched dropoff to move request (Bin #%d)", moveReq.BinNumber)
 						break
 					}
