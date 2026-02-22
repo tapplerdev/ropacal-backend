@@ -222,6 +222,7 @@ func main() {
 			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
 			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
 			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
+			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db)) // Check if bin is in active shifts
 		})
 
 		// Checks endpoints
@@ -339,6 +340,7 @@ func main() {
 			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(db, wsHub, fcmService, centrifugoClient))
 r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))            // List all move requests (register first - exact match)
 			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))        // Get single move request (register after)
+			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db)) // Check if move request is in active shifts
 			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db, wsHub, centrifugoClient)) // Update move request
 			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService))
 			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, wsHub, centrifugoClient))
@@ -356,6 +358,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
 
 			// Potential Locations management (managers can delete and convert)
+			r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
 			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, wsHub, centrifugoClient))
 			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub, centrifugoClient))
 			r.Get("/bins/{binId}/nearby-potential-locations", handlers.GetNearbyPotentialLocations(db))
