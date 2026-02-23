@@ -506,6 +506,83 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			}
 		}
 
+		// ── Cascading Update: Update active shift tasks if address changed ───────
+		if addrChanged && centrifugoClient != nil {
+			log.Printf("🔄 [UPDATE-BIN] Address changed - checking for active shift dependencies")
+
+			// Find active shifts with tasks for this bin
+			var affectedShifts []struct {
+				ShiftID string `db:"shift_id"`
+				TaskID  string `db:"task_id"`
+				OldAddress string `db:"old_address"`
+			}
+
+			err = db.Select(&affectedShifts, `
+				SELECT
+					rt.shift_id,
+					rt.id as task_id,
+					rt.address as old_address
+				FROM route_tasks rt
+				JOIN shifts s ON rt.shift_id = s.id
+				WHERE rt.bin_id = $1
+				  AND rt.is_completed = 0
+				  AND s.status IN ('active', 'scheduled')
+			`, id)
+
+			if err != nil && err != sql.ErrNoRows {
+				log.Printf("⚠️  [UPDATE-BIN] Failed to check active shift dependencies: %v", err)
+			} else if len(affectedShifts) > 0 {
+				log.Printf("🎯 [UPDATE-BIN] Found %d active shift task(s) affected by address change", len(affectedShifts))
+
+				// Group tasks by shift for notification
+				shiftTasksMap := make(map[string][]string)
+				for _, affected := range affectedShifts {
+					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
+
+					// Update the task's address and coordinates
+					_, updateErr := db.Exec(`
+						UPDATE route_tasks
+						SET address = $1,
+							latitude = $2,
+							longitude = $3,
+							updated_at = $4
+						WHERE id = $5
+					`, req.CurrentStreet, req.Latitude, req.Longitude, time.Now().Unix(), affected.TaskID)
+
+					if updateErr != nil {
+						log.Printf("⚠️  [UPDATE-BIN] Failed to update route task %s: %v", affected.TaskID, updateErr)
+					} else {
+						log.Printf("✅ [UPDATE-BIN] Updated route task %s: %s → %s", affected.TaskID, affected.OldAddress, req.CurrentStreet)
+					}
+				}
+
+				// Notify each affected shift
+				for shiftID, taskIDs := range shiftTasksMap {
+					notifyErr := NotifyDriverOfRouteUpdate(
+						db,
+						centrifugoClient,
+						shiftID,
+						"address_changed",
+						map[string]interface{}{
+							"bin_id":         id,
+							"bin_number":     req.BinNumber,
+							"old_address":    existing.CurrentStreet,
+							"new_address":    req.CurrentStreet,
+							"affected_tasks": taskIDs,
+						},
+					)
+
+					if notifyErr != nil {
+						log.Printf("⚠️  [UPDATE-BIN] Failed to notify driver for shift %s: %v", shiftID, notifyErr)
+					} else {
+						log.Printf("✅ [UPDATE-BIN] Notified driver for shift %s about address change", shiftID)
+					}
+				}
+			} else {
+				log.Printf("ℹ️  [UPDATE-BIN] No active shift dependencies found for this bin")
+			}
+		}
+
 		// Fetch updated bin
 		log.Printf("🔍 [UPDATE-BIN] Fetching updated bin data")
 		var updated models.Bin

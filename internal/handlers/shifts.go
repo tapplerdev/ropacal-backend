@@ -4728,3 +4728,54 @@ func truncateAddress(addr *string) string {
 	}
 	return (*addr)[:47] + "..."
 }
+
+// NotifyDriverOfRouteUpdate sends a Centrifugo notification to a driver when their shift tasks change
+// This is used when managers edit bins, move requests, or potential locations that affect active shifts
+func NotifyDriverOfRouteUpdate(
+	db *sqlx.DB,
+	centrifugoClient *centrifugo.Client,
+	shiftID string,
+	changeType string,
+	changeDetails map[string]interface{},
+) error {
+	if centrifugoClient == nil {
+		log.Printf("⚠️  [NOTIFY-DRIVER] Centrifugo client is nil, skipping notification for shift %s", shiftID)
+		return nil
+	}
+
+	log.Printf("📢 [NOTIFY-DRIVER] Notifying driver about route update for shift %s (change: %s)", shiftID, changeType)
+
+	// Get updated tasks for the shift (only incomplete tasks)
+	var tasks []models.RouteTask
+	err := db.Select(&tasks, `
+		SELECT * FROM route_tasks
+		WHERE shift_id = $1 AND is_completed = 0
+		ORDER BY sequence_order ASC
+	`, shiftID)
+	if err != nil {
+		log.Printf("❌ [NOTIFY-DRIVER] Failed to fetch route tasks for shift %s: %v", shiftID, err)
+		return fmt.Errorf("failed to fetch route tasks: %w", err)
+	}
+
+	log.Printf("📋 [NOTIFY-DRIVER] Found %d incomplete tasks for shift %s", len(tasks), shiftID)
+
+	// Build notification payload
+	payload := map[string]interface{}{
+		"type":         "route_updated",
+		"change_type":  changeType,
+		"details":      changeDetails,
+		"updated_tasks": tasks,
+		"timestamp":    time.Now().Unix(),
+	}
+
+	// Publish to shift-specific channel
+	channel := fmt.Sprintf("shift:%s", shiftID)
+	err = centrifugoClient.Publish(channel, payload)
+	if err != nil {
+		log.Printf("❌ [NOTIFY-DRIVER] Failed to publish to Centrifugo channel %s: %v", channel, err)
+		return fmt.Errorf("failed to publish notification: %w", err)
+	}
+
+	log.Printf("✅ [NOTIFY-DRIVER] Successfully published route update notification to channel %s", channel)
+	return nil
+}
