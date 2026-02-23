@@ -4770,7 +4770,8 @@ func NotifyDriverOfRouteUpdate(
 
 	// Publish to shift-specific channel
 	channel := fmt.Sprintf("shift:%s", shiftID)
-	err = centrifugoClient.Publish(channel, payload)
+	ctx := context.Background()
+	err = centrifugoClient.PublishToChannel(ctx, channel, payload)
 	if err != nil {
 		log.Printf("❌ [NOTIFY-DRIVER] Failed to publish to Centrifugo channel %s: %v", channel, err)
 		return fmt.Errorf("failed to publish notification: %w", err)

@@ -110,6 +110,25 @@ func (c *Client) PublishShiftUpdate(ctx context.Context, shiftID string, update 
 	return nil
 }
 
+// PublishToChannel publishes arbitrary data to a specific channel
+func (c *Client) PublishToChannel(ctx context.Context, channel string, data interface{}) error {
+	// Marshal data to JSON
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal data: %w", err)
+	}
+
+	result, err := c.client.Publish(ctx, channel, jsonData)
+	if err != nil {
+		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
+	}
+
+	// Keep track of result to avoid unused variable warning
+	_ = result
+
+	return nil
+}
+
 // PublishManagerNotification publishes notification to manager
 func (c *Client) PublishManagerNotification(ctx context.Context, managerID string, notification interface{}) error {
 	channel := fmt.Sprintf("manager:notifications:%s", managerID)

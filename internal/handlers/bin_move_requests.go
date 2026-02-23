@@ -1358,15 +1358,18 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 			ShiftStatus     *string `db:"shift_status"`
 			ShiftDriverName *string `db:"shift_driver_name"`
 			TotalWaypoints  *int    `db:"total_waypoints"`
+			BinNumber       int     `db:"bin_number"`
 		}
 
 		err = db.Get(&moveRequest, `
 			SELECT
 				mr.*,
+				b.bin_number,
 				s.status as shift_status,
 				u.name as shift_driver_name,
 				(SELECT COUNT(*) FROM shift_bins WHERE shift_id = mr.assigned_shift_id) as total_waypoints
 			FROM bin_move_requests mr
+			LEFT JOIN bins b ON mr.bin_id = b.id
 			LEFT JOIN shifts s ON mr.assigned_shift_id = s.id
 			LEFT JOIN users u ON s.driver_id = u.id
 			WHERE mr.id = $1
