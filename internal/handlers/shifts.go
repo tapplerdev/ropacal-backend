@@ -2713,15 +2713,10 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 
 			log.Printf("🗑️  Removing task: ID=%s, Type=%s, Seq=%d", task.ID, task.TaskType, task.SequenceOrder)
 
-			// Mark task as deleted
-			_, err = tx.Exec(`
-				UPDATE route_tasks
-				SET is_deleted = true,
-					updated_at = $1
-				WHERE id = $2
-			`, now, actualTaskID)
+			// Delete task from route_tasks table
+			_, err = tx.Exec(`DELETE FROM route_tasks WHERE id = $1`, actualTaskID)
 			if err != nil {
-				log.Printf("❌ Error marking task as deleted: %v", err)
+				log.Printf("❌ Error deleting task: %v", err)
 				utils.RespondError(w, http.StatusInternalServerError, "Failed to remove task")
 				return
 			}
