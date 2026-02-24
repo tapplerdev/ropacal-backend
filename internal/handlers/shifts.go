@@ -2607,6 +2607,230 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	}
 }
 
+// RemoveTasksFromShift removes one or more tasks from an active shift (manager-initiated)
+// This unassigns tasks without deleting the underlying resources
+func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: POST /api/manager/shifts/:shift_id/tasks/remove")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		shiftID := chi.URLParam(r, "shift_id")
+		if shiftID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "Shift ID is required")
+			return
+		}
+
+		var req struct {
+			TaskIDs []string `json:"task_ids"`
+			Reason  string   `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ Error decoding request body: %v", err)
+			utils.RespondError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+		if len(req.TaskIDs) == 0 {
+			utils.RespondError(w, http.StatusBadRequest, "At least one task ID is required")
+			return
+		}
+
+		log.Printf("   Shift ID: %s", shiftID)
+		log.Printf("   Task IDs: %v", req.TaskIDs)
+		log.Printf("   Reason: %s", req.Reason)
+		log.Printf("   Manager: %s (%s)", userClaims.Email, userClaims.UserID)
+
+		// Get shift details
+		var shift models.Shift
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
+		if err == sql.ErrNoRows {
+			utils.RespondError(w, http.StatusNotFound, "Shift not found")
+			return
+		}
+		if err != nil {
+			log.Printf("❌ Error fetching shift: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift")
+			return
+		}
+
+		// Only allow removing tasks from active shifts
+		if shift.Status != "active" {
+			utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Can only remove tasks from active shifts (current status: %s)", shift.Status))
+			return
+		}
+
+		log.Printf("✅ Found active shift for driver %s", shift.DriverID)
+
+		// Start transaction
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ Error starting transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to start transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		now := time.Now().Unix()
+		removedCount := 0
+		var removedTasks []models.RouteTask
+
+		// Process each task
+		for _, taskID := range req.TaskIDs {
+			// Get task details
+			var task models.RouteTask
+			err = tx.Get(&task, `SELECT * FROM route_tasks WHERE id = $1 AND shift_id = $2`, taskID, shiftID)
+			if err == sql.ErrNoRows {
+				log.Printf("⚠️  Task %s not found in shift %s, skipping", taskID, shiftID)
+				continue
+			}
+			if err != nil {
+				log.Printf("❌ Error fetching task %s: %v", taskID, err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch task")
+				return
+			}
+
+			// Don't remove already completed tasks
+			if task.IsCompleted == 1 {
+				log.Printf("⚠️  Task %s already completed, skipping", taskID)
+				continue
+			}
+
+			log.Printf("🗑️  Removing task: ID=%s, Type=%s, Seq=%d", task.ID, task.TaskType, task.SequenceOrder)
+
+			// Mark task as deleted
+			_, err = tx.Exec(`
+				UPDATE route_tasks
+				SET is_deleted = true,
+					updated_at = $1
+				WHERE id = $2
+			`, now, taskID)
+			if err != nil {
+				log.Printf("❌ Error marking task as deleted: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to remove task")
+				return
+			}
+
+			// Unassign underlying resources
+			switch task.TaskType {
+			case models.TaskTypePickup, models.TaskTypeDropoff:
+				// Unassign move request
+				if task.MoveRequestID != nil {
+					log.Printf("   Unassigning move request %s", *task.MoveRequestID)
+					_, err = tx.Exec(`
+						UPDATE bin_move_requests
+						SET assigned_shift_id = NULL,
+							assigned_user_id = NULL,
+							updated_at = $1
+						WHERE id = $2
+					`, now, *task.MoveRequestID)
+					if err != nil {
+						log.Printf("❌ Error unassigning move request: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to unassign move request")
+						return
+					}
+				}
+
+			case models.TaskTypePlacement:
+				// Unassign potential location
+				if task.PotentialLocationID != nil {
+					log.Printf("   Unassigning potential location %s", *task.PotentialLocationID)
+					_, err = tx.Exec(`
+						UPDATE potential_locations
+						SET assigned_shift_id = NULL,
+							updated_at = $1
+						WHERE id = $2
+					`, now, *task.PotentialLocationID)
+					if err != nil {
+						log.Printf("❌ Error unassigning potential location: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to unassign potential location")
+						return
+					}
+				}
+
+			case models.TaskTypeCollection:
+				// For collection tasks, just mark as removed
+				// The bin itself stays in the system
+				log.Printf("   Collection task removed (bin %s remains in system)", task.BinID)
+			}
+
+			removedTasks = append(removedTasks, task)
+			removedCount++
+		}
+
+		if removedCount == 0 {
+			utils.RespondError(w, http.StatusBadRequest, "No valid tasks to remove")
+			return
+		}
+
+		log.Printf("✅ Marked %d tasks as removed", removedCount)
+
+		// Commit transaction
+		if err = tx.Commit(); err != nil {
+			log.Printf("❌ Error committing transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to commit changes")
+			return
+		}
+
+		log.Printf("✅ Transaction committed")
+
+		// Refresh shift data
+		err = db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Error refreshing shift: %v", err)
+		}
+
+		// Get updated task list
+		tasks, err := database.GetShiftTasks(db, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Could not fetch tasks: %v", err)
+			tasks = []models.RouteTask{}
+		}
+
+		// Publish Centrifugo event to driver's shift channel
+		if centrifugoClient != nil {
+			eventData := map[string]interface{}{
+				"type":          "task_removed",
+				"shift_id":      shiftID,
+				"removed_count": removedCount,
+				"reason":        req.Reason,
+				"manager_name":  userClaims.Email,
+			}
+
+			channel := fmt.Sprintf("shift:updates:%s", shiftID)
+			if pubErr := centrifugoClient.PublishToChannel(r.Context(), channel, eventData); pubErr != nil {
+				log.Printf("⚠️  Failed to publish task removal to Centrifugo: %v", pubErr)
+			} else {
+				log.Printf("📡 Published task_removed event to %s", channel)
+			}
+		}
+
+		// Re-optimize the shift after removing tasks (skip gates since manager-initiated)
+		if err := ReoptimizeActiveShift(db, shiftID, centrifugoClient, true); err != nil {
+			log.Printf("⚠️  Failed to re-optimize shift after task removal: %v", err)
+			// Don't fail the request if re-optimization fails
+		} else {
+			log.Printf("✅ Successfully re-optimized shift %s after removing %d tasks", shiftID, removedCount)
+		}
+
+		// Return success response
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success":       true,
+			"removed_count": removedCount,
+			"message":       fmt.Sprintf("%d task(s) removed from shift successfully", removedCount),
+			"shift": map[string]interface{}{
+				"id":     shift.ID,
+				"status": shift.Status,
+				"tasks":  tasks,
+			},
+		})
+	}
+}
+
 // GetDriverShiftHistory returns all completed shifts for the authenticated driver
 func GetDriverShiftHistory(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
