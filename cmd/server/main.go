@@ -331,6 +331,7 @@ func main() {
 			r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db))                    // Completed shift history with task stats
 			r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))     // Per-task granular breakdown for a shift
 			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                           // Get single shift (register after)
+			r.Get("/manager/shifts/{shiftId}/tasks/history", handlers.GetShiftTasksWithHistory(db)) // Get ALL tasks including deleted ones for audit trail
 			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db)) // Compare Mapbox v2 optimization
 
 			// One-time data migration endpoints (can be removed after use)

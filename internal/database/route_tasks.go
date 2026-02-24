@@ -13,16 +13,31 @@ import (
 	"ropacal-backend/internal/models"
 )
 
-// GetShiftTasks retrieves all tasks for a shift ordered by sequence
+// GetShiftTasks retrieves all active (non-deleted) tasks for a shift ordered by sequence
 func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 	var tasks []models.RouteTask
 	query := `SELECT * FROM route_tasks
-	          WHERE shift_id = $1
+	          WHERE shift_id = $1 AND is_deleted = FALSE
 	          ORDER BY sequence_order ASC`
 
 	err := db.Select(&tasks, query, shiftID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shift tasks: %w", err)
+	}
+
+	return tasks, nil
+}
+
+// GetShiftTasksWithDeleted retrieves ALL tasks for a shift including deleted ones (for audit/history)
+func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
+	var tasks []models.RouteTask
+	query := `SELECT * FROM route_tasks
+	          WHERE shift_id = $1
+	          ORDER BY is_deleted ASC, sequence_order ASC`
+
+	err := db.Select(&tasks, query, shiftID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get shift tasks with deleted: %w", err)
 	}
 
 	return tasks, nil
@@ -466,7 +481,7 @@ func GetNextIncompleteTask(db *sqlx.DB, shiftID string) (*models.RouteTask, erro
 	var task models.RouteTask
 	query := `
 		SELECT * FROM route_tasks
-		WHERE shift_id = $1 AND is_completed = 0
+		WHERE shift_id = $1 AND is_completed = 0 AND is_deleted = FALSE
 		ORDER BY sequence_order ASC
 		LIMIT 1
 	`

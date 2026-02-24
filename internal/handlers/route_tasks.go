@@ -74,6 +74,35 @@ func GetShiftTasksDetailed(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// GetShiftTasksWithHistory retrieves ALL tasks including deleted ones for audit/history view
+func GetShiftTasksWithHistory(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: GET /api/manager/shifts/:shiftId/tasks/history")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		shiftID := chi.URLParam(r, "shiftId")
+		log.Printf("   Manager: %s, Shift ID: %s", userClaims.Email, shiftID)
+
+		tasks, err := database.GetShiftTasksWithDeleted(db, shiftID)
+		if err != nil {
+			log.Printf("❌ Error: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch task history")
+			return
+		}
+
+		log.Printf("📤 RESPONSE: 200 - Found %d tasks (including deleted)", len(tasks))
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    tasks,
+		})
+	}
+}
+
 // CreateShiftWithTasks creates a new shift with tasks (Manager only)
 func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
