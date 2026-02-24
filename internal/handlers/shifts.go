@@ -2659,13 +2659,13 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 			return
 		}
 
-		// Only allow removing tasks from active shifts
-		if shift.Status != "active" {
-			utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Can only remove tasks from active shifts (current status: %s)", shift.Status))
+		// Only allow removing tasks from ready or active shifts
+		if shift.Status != "active" && shift.Status != "ready" {
+			utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Can only remove tasks from ready or active shifts (current status: %s)", shift.Status))
 			return
 		}
 
-		log.Printf("✅ Found active shift for driver %s", shift.DriverID)
+		log.Printf("✅ Found shift (status: %s) for driver %s", shift.Status, shift.DriverID)
 
 		// Start transaction
 		tx, err := db.Beginx()
