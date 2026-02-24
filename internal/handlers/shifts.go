@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -2681,9 +2682,19 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 
 		// Process each task
 		for _, taskID := range req.TaskIDs {
+			// Decode base64 task ID to UUID
+			decodedBytes, decodeErr := base64.StdEncoding.DecodeString(taskID)
+			actualTaskID := taskID // Default to original if decode fails
+			if decodeErr == nil {
+				actualTaskID = string(decodedBytes)
+				log.Printf("🔓 Decoded task ID: %s -> %s", taskID, actualTaskID)
+			} else {
+				log.Printf("⚠️  Task ID %s is not base64, using as-is", taskID)
+			}
+
 			// Get task details
 			var task models.RouteTask
-			err = tx.Get(&task, `SELECT * FROM route_tasks WHERE id = $1 AND shift_id = $2`, taskID, shiftID)
+			err = tx.Get(&task, `SELECT * FROM route_tasks WHERE id = $1 AND shift_id = $2`, actualTaskID, shiftID)
 			if err == sql.ErrNoRows {
 				log.Printf("⚠️  Task %s not found in shift %s, skipping", taskID, shiftID)
 				continue
@@ -2708,7 +2719,7 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 				SET is_deleted = true,
 					updated_at = $1
 				WHERE id = $2
-			`, now, taskID)
+			`, now, actualTaskID)
 			if err != nil {
 				log.Printf("❌ Error marking task as deleted: %v", err)
 				utils.RespondError(w, http.StatusInternalServerError, "Failed to remove task")
