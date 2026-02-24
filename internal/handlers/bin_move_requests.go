@@ -1854,6 +1854,81 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 							}
 						}
 
+					// If move_type changed from store → relocation, add dropoff task
+					} else if moveTypeChanged && req.MoveType != nil && *req.MoveType == "relocation" && moveRequest.MoveType == "store" {
+						// Find the pickup task to get shift_id and sequence info
+						var pickupTask *struct {
+							TaskID        string
+							ShiftID       string
+							SequenceOrder int
+						}
+
+						for _, task := range affectedTasks {
+							if task.TaskType == "pickup" {
+								pickupTask = &struct {
+									TaskID        string
+									ShiftID       string
+									SequenceOrder int
+								}{
+									TaskID:        task.TaskID,
+									ShiftID:       task.ShiftID,
+									SequenceOrder: 0, // Will query for actual sequence
+								}
+								break
+							}
+						}
+
+						if pickupTask != nil && req.NewStreet != nil && req.NewLatitude != nil && req.NewLongitude != nil {
+							// Get actual sequence order of pickup task
+							err := tx.QueryRow(`SELECT sequence_order FROM route_tasks WHERE id = $1`, pickupTask.TaskID).Scan(&pickupTask.SequenceOrder)
+							if err != nil {
+								log.Printf("⚠️  [UPDATE-MOVE] Failed to get pickup task sequence: %v", err)
+							} else {
+								// Create new dropoff task right after pickup
+								newDropoffID := uuid.New().String()
+								_, insertErr := tx.Exec(`
+									INSERT INTO route_tasks (
+										id, shift_id, move_request_id, task_type,
+										sequence_order, address, destination_address,
+										destination_latitude, destination_longitude,
+										is_completed, created_at, updated_at
+									) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $10)
+								`, newDropoffID, pickupTask.ShiftID, id, "dropoff",
+									pickupTask.SequenceOrder+1, *req.NewStreet, *req.NewStreet,
+									*req.NewLatitude, *req.NewLongitude, time.Now().Unix())
+
+								if insertErr != nil {
+									log.Printf("⚠️  [UPDATE-MOVE] Failed to create dropoff task: %v", insertErr)
+								} else {
+									log.Printf("✅ [UPDATE-MOVE] Created dropoff task %s (move_type → relocation)", newDropoffID)
+
+									// Notify driver that dropoff task was added
+									if moveRequest.AssignedShiftID != nil {
+										notifyErr := NotifyDriverOfRouteUpdate(
+											db,
+											centrifugoClient,
+											*moveRequest.AssignedShiftID,
+											"move_type_changed",
+											map[string]interface{}{
+												"move_request_id": id,
+												"bin_number":      moveRequest.BinNumber,
+												"old_move_type":   moveRequest.MoveType,
+												"new_move_type":   *req.MoveType,
+												"dropoff_added":   true,
+												"new_address":     *req.NewStreet,
+											},
+										)
+
+										if notifyErr != nil {
+											log.Printf("⚠️  [UPDATE-MOVE] Failed to notify driver: %v", notifyErr)
+										} else {
+											log.Printf("✅ [UPDATE-MOVE] Notified driver about move type change")
+										}
+									}
+								}
+							}
+						}
+
 					} else if addressChanged {
 						// Update address/coordinates for affected tasks
 						for _, task := range affectedTasks {
