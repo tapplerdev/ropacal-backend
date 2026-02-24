@@ -4769,7 +4769,7 @@ func NotifyDriverOfRouteUpdate(
 	}
 
 	// Publish to shift-specific channel
-	channel := fmt.Sprintf("shift:%s", shiftID)
+	channel := fmt.Sprintf("shift:updates:%s", shiftID)
 	ctx := context.Background()
 	err = centrifugoClient.PublishToChannel(ctx, channel, payload)
 	if err != nil {

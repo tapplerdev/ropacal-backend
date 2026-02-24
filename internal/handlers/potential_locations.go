@@ -297,6 +297,76 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 
 		log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Deleted location (ID: %s)", id)
 
+		// ── Cascading Update: Notify drivers if location was in active shifts ───────
+		if centrifugoClient != nil {
+			log.Printf("🔄 [DELETE-POTENTIAL-LOCATION] Checking for active shift dependencies")
+
+			// Find active shifts with placement tasks for this potential location
+			var affectedShifts []struct {
+				ShiftID string `db:"shift_id"`
+				TaskID  string `db:"task_id"`
+			}
+
+			err = db.Select(&affectedShifts, `
+				SELECT
+					rt.shift_id,
+					rt.id as task_id
+				FROM route_tasks rt
+				JOIN shifts s ON rt.shift_id = s.id
+				WHERE rt.potential_location_id = $1
+				  AND rt.task_type = 'placement'
+				  AND rt.is_completed = 0
+				  AND s.status IN ('active', 'scheduled')
+			`, id)
+
+			if err != nil && err != sql.ErrNoRows {
+				log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to check active shift dependencies: %v", err)
+			} else if len(affectedShifts) > 0 {
+				log.Printf("🎯 [DELETE-POTENTIAL-LOCATION] Found %d active shift task(s) affected by deletion", len(affectedShifts))
+
+				// Group tasks by shift for notification
+				shiftTasksMap := make(map[string][]string)
+				for _, affected := range affectedShifts {
+					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
+
+					// Delete the placement task (potential location no longer exists)
+					_, deleteErr := db.Exec(`
+						DELETE FROM route_tasks
+						WHERE id = $1
+					`, affected.TaskID)
+
+					if deleteErr != nil {
+						log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to delete placement task %s: %v", affected.TaskID, deleteErr)
+					} else {
+						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Deleted placement task %s", affected.TaskID)
+					}
+				}
+
+				// Notify each affected shift
+				for shiftID, taskIDs := range shiftTasksMap {
+					notifyErr := NotifyDriverOfRouteUpdate(
+						db,
+						centrifugoClient,
+						shiftID,
+						"potential_location_deleted",
+						map[string]interface{}{
+							"potential_location_id": id,
+							"removed_tasks":         taskIDs,
+							"reason":                "Potential location was deleted by manager",
+						},
+					)
+
+					if notifyErr != nil {
+						log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to notify driver for shift %s: %v", shiftID, notifyErr)
+					} else {
+						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Notified driver for shift %s about placement task removal", shiftID)
+					}
+				}
+			} else {
+				log.Printf("ℹ️  [DELETE-POTENTIAL-LOCATION] No active shift dependencies found for this potential location")
+			}
+		}
+
 		// Broadcast to all managers via Centrifugo
 		deleteData := map[string]interface{}{"location_id": id}
 		if centrifugoClient != nil {
@@ -495,6 +565,78 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugo
 		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Fetched created bin successfully")
 
 		log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Converted location (ID: %s) to Bin #%d (ID: %s)", id, binNumber, binID)
+
+		// ── Cascading Update: Notify drivers if location was in active shifts ───────
+		if centrifugoClient != nil {
+			log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Checking for active shift dependencies")
+
+			// Find active shifts with placement tasks for this potential location
+			var affectedShifts []struct {
+				ShiftID string `db:"shift_id"`
+				TaskID  string `db:"task_id"`
+			}
+
+			err = db.Select(&affectedShifts, `
+				SELECT
+					rt.shift_id,
+					rt.id as task_id
+				FROM route_tasks rt
+				JOIN shifts s ON rt.shift_id = s.id
+				WHERE rt.potential_location_id = $1
+				  AND rt.task_type = 'placement'
+				  AND rt.is_completed = 0
+				  AND s.status IN ('active', 'scheduled')
+			`, id)
+
+			if err != nil && err != sql.ErrNoRows {
+				log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to check active shift dependencies: %v", err)
+			} else if len(affectedShifts) > 0 {
+				log.Printf("🎯 [CONVERT-POTENTIAL-LOCATION] Found %d active shift task(s) affected by conversion", len(affectedShifts))
+
+				// Group tasks by shift for notification
+				shiftTasksMap := make(map[string][]string)
+				for _, affected := range affectedShifts {
+					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
+
+					// Delete the placement task (potential location converted to bin)
+					_, deleteErr := db.Exec(`
+						DELETE FROM route_tasks
+						WHERE id = $1
+					`, affected.TaskID)
+
+					if deleteErr != nil {
+						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to delete placement task %s: %v", affected.TaskID, deleteErr)
+					} else {
+						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Deleted placement task %s", affected.TaskID)
+					}
+				}
+
+				// Notify each affected shift
+				for shiftID, taskIDs := range shiftTasksMap {
+					notifyErr := NotifyDriverOfRouteUpdate(
+						db,
+						centrifugoClient,
+						shiftID,
+						"potential_location_converted",
+						map[string]interface{}{
+							"potential_location_id": id,
+							"new_bin_id":            binID,
+							"new_bin_number":        binNumber,
+							"removed_tasks":         taskIDs,
+							"reason":                "Potential location was converted to a bin by manager",
+						},
+					)
+
+					if notifyErr != nil {
+						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to notify driver for shift %s: %v", shiftID, notifyErr)
+					} else {
+						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Notified driver for shift %s about placement task removal", shiftID)
+					}
+				}
+			} else {
+				log.Printf("ℹ️  [CONVERT-POTENTIAL-LOCATION] No active shift dependencies found for this potential location")
+			}
+		}
 
 		// Broadcast to all managers via Centrifugo (company-wide channel)
 		eventData := map[string]interface{}{
