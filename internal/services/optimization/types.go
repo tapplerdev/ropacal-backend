@@ -32,6 +32,7 @@ type Vehicle struct {
 	EndLocation     Location
 	Capacities      map[string]int // e.g., {"bins": 4, "weight_kg": 1000}
 	Capabilities    []string       // e.g., ["refrigeration", "ladder"]
+	RoutingProfile  string         // e.g., "mapbox/driving-traffic" (default if empty)
 	EarliestStart   *time.Time
 	LatestEnd       *time.Time
 }

@@ -2060,6 +2060,328 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 	}
 }
 
+// ReoptimizeActiveShift re-optimizes an active shift's remaining tasks using current traffic
+// skipGates: if true, skips time-based gates (for manager-initiated changes)
+func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centrifugo.Client, skipGates bool) error {
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("🔄 [REOPTIMIZE] Starting re-optimization for shift %s", shiftID)
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Step 1: Get shift details
+	var shift models.Shift
+	err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
+	if err != nil {
+		return fmt.Errorf("failed to get shift: %w", err)
+	}
+
+	if shift.Status != "active" {
+		return fmt.Errorf("shift is not active (status: %s)", shift.Status)
+	}
+
+	// Step 2: Get remaining (uncompleted) route_tasks
+	var tasks []models.RouteTask
+	err = db.Select(&tasks, `
+		SELECT * FROM route_tasks
+		WHERE shift_id = $1 AND is_completed = 0
+		ORDER BY sequence_order ASC
+	`, shiftID)
+	if err != nil {
+		return fmt.Errorf("failed to get route tasks: %w", err)
+	}
+
+	remainingTasks := len(tasks)
+	log.Printf("📊 [REOPTIMIZE] Found %d remaining tasks", remainingTasks)
+
+	// Gate 1: Minimum tasks check
+	minTasks := 5
+	if skipGates {
+		minTasks = 3 // More lenient for manager edits
+	}
+
+	if remainingTasks < minTasks {
+		return fmt.Errorf("insufficient remaining tasks (%d < %d)", remainingTasks, minTasks)
+	}
+
+	// Gate 2: Time-based checks (only if skipGates is false)
+	if !skipGates {
+		shiftDuration := time.Since(time.Unix(shift.CreatedAt, 0)).Minutes()
+		if shiftDuration < 30 {
+			return fmt.Errorf("shift too new (%.0f min < 30 min)", shiftDuration)
+		}
+		log.Printf("✅ [REOPTIMIZE] Shift active for %.0f minutes", shiftDuration)
+	} else {
+		log.Printf("⏭️  [REOPTIMIZE] Skipping time gates (manager-initiated)")
+	}
+
+	// Step 3: Get warehouse location
+	warehouseLocation := optimization.Location{
+		ID:        "warehouse",
+		Name:      "Warehouse",
+		Latitude:  *shift.WarehouseLatitude,
+		Longitude: *shift.WarehouseLongitude,
+		Address:   *shift.WarehouseAddress,
+	}
+
+	// Step 4: Get driver's current location (use warehouse as fallback)
+	driverStartLocation := warehouseLocation
+
+	// Try to get driver's last GPS location
+	var lastLocation struct {
+		Latitude  *float64 `db:"latitude"`
+		Longitude *float64 `db:"longitude"`
+	}
+	err = db.Get(&lastLocation, `
+		SELECT latitude, longitude
+		FROM driver_locations
+		WHERE driver_id = $1
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`, shift.DriverID)
+
+	if err == nil && lastLocation.Latitude != nil && lastLocation.Longitude != nil {
+		driverStartLocation = optimization.Location{
+			ID:        "driver-current",
+			Name:      "Driver Current Location",
+			Latitude:  *lastLocation.Latitude,
+			Longitude: *lastLocation.Longitude,
+			Address:   "Current GPS Position",
+		}
+		log.Printf("📍 [REOPTIMIZE] Using driver's current location: (%.6f, %.6f)",
+			*lastLocation.Latitude, *lastLocation.Longitude)
+	} else {
+		log.Printf("⚠️  [REOPTIMIZE] No driver location found, using warehouse")
+	}
+
+	// Step 5: Build optimization request
+	req := &optimization.RouteRequest{
+		Vehicles:       make([]optimization.Vehicle, 1),
+		Collections:    make([]optimization.Collection, 0),
+		Placements:     make([]optimization.Placement, 0),
+		MoveRequests:   make([]optimization.MoveRequest, 0),
+		WarehouseStops: make([]optimization.WarehouseStop, 0),
+	}
+
+	capacity := 4
+	if shift.TruckBinCapacity != nil {
+		capacity = *shift.TruckBinCapacity
+	}
+
+	req.Vehicles[0] = optimization.Vehicle{
+		ID:             fmt.Sprintf("truck-%s", shift.DriverID[:8]),
+		Name:           fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
+		StartLocation:  driverStartLocation,
+		EndLocation:    warehouseLocation,
+		RoutingProfile: "mapbox/driving-traffic",
+		Capacities: map[string]int{
+			"bins": capacity,
+		},
+	}
+
+	// Helper functions for nil-safe value extraction
+	getIntValue := func(ptr *int) int {
+		if ptr != nil {
+			return *ptr
+		}
+		return 0
+	}
+
+	getStringValue := func(ptr *string) string {
+		if ptr != nil {
+			return *ptr
+		}
+		return ""
+	}
+
+	// Convert tasks to optimization format
+	for _, task := range tasks {
+		switch task.TaskType {
+		case "collection":
+			if task.BinID != nil && task.Latitude != 0 && task.Longitude != 0 {
+				collection := optimization.Collection{
+					ID:        task.ID,
+					BinID:     *task.BinID,
+					BinNumber: getIntValue(task.BinNumber),
+					Location: optimization.Location{
+						ID:        *task.BinID,
+						Name:      fmt.Sprintf("Bin #%d", getIntValue(task.BinNumber)),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					Duration:       300,
+					FillPercentage: getIntValue(task.FillPercentage),
+				}
+				req.Collections = append(req.Collections, collection)
+			}
+
+		case "placement":
+			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
+				placement := optimization.Placement{
+					ID:                *task.PotentialLocationID,
+					NewBinNumber:      getIntValue(task.NewBinNumber),
+					WarehouseLocation: warehouseLocation,
+					PlacementLocation: optimization.Location{
+						ID:        *task.PotentialLocationID,
+						Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					PickupDuration:  60,
+					DropoffDuration: 120,
+				}
+				req.Placements = append(req.Placements, placement)
+			}
+
+		case "pickup":
+			if task.MoveRequestID != nil && task.Latitude != 0 && task.Longitude != 0 &&
+				task.DestinationLatitude != nil && task.DestinationLongitude != nil {
+				moveRequest := optimization.MoveRequest{
+					ID:        *task.MoveRequestID,
+					BinID:     getStringValue(task.BinID),
+					BinNumber: getIntValue(task.BinNumber),
+					PickupLocation: optimization.Location{
+						ID:        fmt.Sprintf("%s-pickup", *task.MoveRequestID),
+						Name:      fmt.Sprintf("Pickup #%d", getIntValue(task.BinNumber)),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					DropoffLocation: optimization.Location{
+						ID:        fmt.Sprintf("%s-dropoff", *task.MoveRequestID),
+						Name:      fmt.Sprintf("Dropoff #%d", getIntValue(task.BinNumber)),
+						Latitude:  *task.DestinationLatitude,
+						Longitude: *task.DestinationLongitude,
+						Address:   getStringValue(task.DestinationAddress),
+					},
+					PickupDuration:  120,
+					DropoffDuration: 120,
+				}
+				req.MoveRequests = append(req.MoveRequests, moveRequest)
+			}
+		}
+	}
+
+	log.Printf("📊 [REOPTIMIZE] Request: %d collections, %d placements, %d moves",
+		len(req.Collections), len(req.Placements), len(req.MoveRequests))
+
+	// Step 6: Call MapBox optimizer
+	log.Printf("🚀 [REOPTIMIZE] Calling MapBox Optimization v2 API...")
+	mapboxOptimizer := optimization.NewMapboxOptimizer()
+	response, err := mapboxOptimizer.OptimizeRoute(req)
+	if err != nil {
+		return fmt.Errorf("MapBox optimization failed: %w", err)
+	}
+
+	if len(response.Routes) == 0 {
+		return fmt.Errorf("MapBox returned no routes (dropped tasks: %v)", response.DroppedTasks)
+	}
+
+	route := response.Routes[0]
+	log.Printf("✅ [REOPTIMIZE] Optimization complete: %d stops", len(route.Stops))
+
+	// Step 7: Calculate old vs new completion time (time savings check)
+	if !skipGates && len(tasks) > 0 {
+		// This is a simplified check - in production you'd want more sophisticated comparison
+		log.Printf("ℹ️  [REOPTIMIZE] Time savings check skipped (would need historical ETA data)")
+	}
+
+	// Step 8: Update route_tasks with new sequence_order
+	tx, err := db.Beginx()
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	taskIDToOriginal := make(map[string]models.RouteTask)
+	for _, task := range tasks {
+		taskIDToOriginal[task.ID] = task
+	}
+
+	sequenceOrder := 1
+	for _, stop := range route.Stops {
+		if stop.Type == optimization.StopTypeStart || stop.Type == optimization.StopTypeEnd {
+			continue
+		}
+
+		// Find the corresponding task
+		var taskID string
+		if stop.CollectionID != "" {
+			// It's a collection
+			for _, origTask := range tasks {
+				if origTask.TaskType == "collection" && origTask.ID == stop.CollectionID {
+					taskID = origTask.ID
+					break
+				}
+			}
+		} else if stop.PlacementID != "" {
+			// It's a placement
+			for _, origTask := range tasks {
+				if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil {
+					if stop.PlacementID == "placement-"+*origTask.PotentialLocationID {
+						taskID = origTask.ID
+						break
+					}
+				}
+			}
+		} else if stop.MoveRequestID != "" {
+			// It's a pickup or dropoff
+			for _, origTask := range tasks {
+				if origTask.MoveRequestID != nil && stop.MoveRequestID == "move-"+*origTask.MoveRequestID {
+					if (stop.Type == optimization.StopTypePickup && origTask.TaskType == "pickup") ||
+						(stop.Type == optimization.StopTypeDropoff && origTask.TaskType == "dropoff") {
+						taskID = origTask.ID
+						break
+					}
+				}
+			}
+		}
+
+		if taskID != "" {
+			_, err = tx.Exec(`
+				UPDATE route_tasks
+				SET sequence_order = $1, updated_at = $2
+				WHERE id = $3
+			`, sequenceOrder, time.Now().Unix(), taskID)
+			if err != nil {
+				return fmt.Errorf("failed to update sequence_order: %w", err)
+			}
+			log.Printf("   Updated task %s → sequence_order = %d", taskID[:8], sequenceOrder)
+			sequenceOrder++
+		}
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Step 9: Notify driver via Centrifugo
+	if centrifugoClient != nil {
+		err = NotifyDriverOfRouteUpdate(
+			db,
+			centrifugoClient,
+			shiftID,
+			"route_reoptimized",
+			map[string]interface{}{
+				"tasks_reordered": remainingTasks,
+				"reason":          "Automatic re-optimization with current traffic",
+			},
+		)
+		if err != nil {
+			log.Printf("⚠️  [REOPTIMIZE] Failed to notify driver: %v", err)
+		} else {
+			log.Printf("✅ [REOPTIMIZE] Notified driver of route changes")
+		}
+	}
+
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("✅ [REOPTIMIZE] Re-optimization complete")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	return nil
+}
+
 // SkipTask marks a task as skipped with a required reason
 // If skipping a pickup task, automatically skips the paired dropoff
 func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
@@ -2267,6 +2589,14 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		})
 
 		log.Printf("📡 WebSocket: Broadcasted shift update to driver %s", userClaims.UserID)
+
+		// Re-optimize the shift after skipping task (skipGates=false for driver-initiated)
+		if err := ReoptimizeActiveShift(db, shift.ID, nil, false); err != nil {
+			log.Printf("⚠️  Failed to re-optimize shift after task skip: %v", err)
+			// Don't fail the request if re-optimization fails
+		} else {
+			log.Printf("✅ Successfully re-optimized shift %s after task skip", shift.ID)
+		}
 
 		// Return success
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{

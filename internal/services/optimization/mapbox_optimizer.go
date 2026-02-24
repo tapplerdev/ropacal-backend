@@ -123,6 +123,13 @@ func (m *MapboxOptimizer) buildMapboxProblem(req *RouteRequest) map[string]inter
 			"end_location":   v.EndLocation.ID,
 		}
 
+		// Add routing profile (always use traffic-aware routing)
+		routingProfile := v.RoutingProfile
+		if routingProfile == "" {
+			routingProfile = "mapbox/driving-traffic" // Default to traffic-aware
+		}
+		vehicle["routing_profile"] = routingProfile
+
 		// Add capacities if defined
 		if len(v.Capacities) > 0 {
 			vehicle["capacities"] = v.Capacities

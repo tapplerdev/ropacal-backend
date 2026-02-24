@@ -361,6 +361,13 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 					} else {
 						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Notified driver for shift %s about placement task removal", shiftID)
 					}
+
+					// Re-optimize the shift (skip gates since this is manager-initiated)
+					if reoptErr := ReoptimizeActiveShift(db, shiftID, centrifugoClient, true); reoptErr != nil {
+						log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to re-optimize shift %s: %v", shiftID, reoptErr)
+					} else {
+						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Successfully re-optimized shift %s", shiftID)
+					}
 				}
 			} else {
 				log.Printf("ℹ️  [DELETE-POTENTIAL-LOCATION] No active shift dependencies found for this potential location")
@@ -631,6 +638,13 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugo
 						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to notify driver for shift %s: %v", shiftID, notifyErr)
 					} else {
 						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Notified driver for shift %s about placement task removal", shiftID)
+					}
+
+					// Re-optimize the shift (skip gates since this is manager-initiated)
+					if reoptErr := ReoptimizeActiveShift(db, shiftID, centrifugoClient, true); reoptErr != nil {
+						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to re-optimize shift %s: %v", shiftID, reoptErr)
+					} else {
+						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Successfully re-optimized shift %s", shiftID)
 					}
 				}
 			} else {

@@ -1995,6 +1995,28 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 
 		log.Printf("[UPDATE MOVE] ✅ Successfully updated move request: %s", id)
 
+	// Re-optimize shift if move request was on an active shift and address/move_type changed
+	if moveRequest.AssignedShiftID != nil {
+		addressChanged := req.NewStreet != nil || req.NewCity != nil || req.NewZip != nil ||
+			req.NewLatitude != nil || req.NewLongitude != nil
+		moveTypeChanged := req.MoveType != nil && *req.MoveType != moveRequest.MoveType
+
+		if addressChanged || moveTypeChanged {
+			// Check if shift is active
+			var shiftStatus string
+			err := db.Get(&shiftStatus, `SELECT status FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID)
+			if err == nil && shiftStatus == "active" {
+				log.Printf("🔄 [UPDATE-MOVE] Triggering re-optimization for shift %s (manager-initiated change)", *moveRequest.AssignedShiftID)
+				if reoptErr := ReoptimizeActiveShift(db, *moveRequest.AssignedShiftID, centrifugoClient, true); reoptErr != nil {
+					log.Printf("⚠️  [UPDATE-MOVE] Failed to re-optimize shift: %v", reoptErr)
+					// Don't fail the entire request if re-optimization fails
+				} else {
+					log.Printf("✅ [UPDATE-MOVE] Successfully re-optimized shift %s", *moveRequest.AssignedShiftID)
+				}
+			}
+		}
+	}
+
 // Fetch updated move request to get new state for history logging
 		var updatedMove struct {
 			models.BinMoveRequest
@@ -2535,6 +2557,33 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 				"bin_id":  moveRequest.BinID,
 				"message": "Move request cancelled by manager",
 			})
+
+		// Delete route_tasks associated with this move request
+		_, err = db.Exec(`
+			DELETE FROM route_tasks
+			WHERE move_request_id = $1 AND shift_id = $2 AND is_completed = 0
+		`, id, *moveRequest.AssignedShiftID)
+		if err != nil {
+			log.Printf("⚠️  Failed to delete route_tasks for cancelled move request: %v", err)
+		} else {
+			log.Printf("✅ Deleted route_tasks for cancelled move request %s from shift %s", id, *moveRequest.AssignedShiftID)
+		}
+
+		// Notify driver that route has been updated
+		if err := NotifyDriverOfRouteUpdate(db, centrifugoClient, *moveRequest.AssignedShiftID, "move_request_cancelled", map[string]interface{}{
+			"move_request_id": id,
+			"reason":          "Move request was cancelled by manager",
+		}); err != nil {
+			log.Printf("⚠️  Failed to notify driver of route update: %v", err)
+		}
+
+		// Re-optimize the shift (skip gates since this is manager-initiated)
+		if err := ReoptimizeActiveShift(db, *moveRequest.AssignedShiftID, centrifugoClient, true); err != nil {
+			log.Printf("⚠️  Failed to re-optimize shift after move request cancellation: %v", err)
+			// Don't fail the entire request if re-optimization fails
+		} else {
+			log.Printf("✅ Successfully re-optimized shift %s after move request cancellation", *moveRequest.AssignedShiftID)
+		}
 		}
 
 		// Publish move_request_cancelled to Centrifugo so all manager dashboards update
