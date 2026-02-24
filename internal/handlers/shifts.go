@@ -198,6 +198,7 @@ func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
 				"pause_start_time":    shift.PauseStartTime,
 				"total_bins":          shift.TotalBins,
 				"completed_bins":      shift.CompletedBins,
+				"truck_bin_capacity":  shift.TruckBinCapacity,
 				"bins":                bins,
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
