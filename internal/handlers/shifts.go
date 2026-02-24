@@ -2769,7 +2769,11 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 			case models.TaskTypeCollection:
 				// For collection tasks, just mark as removed
 				// The bin itself stays in the system
-				log.Printf("   Collection task removed (bin %s remains in system)", task.BinID)
+				binID := "unknown"
+				if task.BinID != nil {
+					binID = *task.BinID
+				}
+				log.Printf("   Collection task removed (bin %s remains in system)", binID)
 			}
 
 			removedTasks = append(removedTasks, task)
@@ -2843,6 +2847,556 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 			},
 		})
 	}
+}
+
+// UpdateShift comprehensively updates a shift (time, driver, add/remove tasks)
+// PATCH /api/manager/shifts/:id
+func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📥 REQUEST: PATCH /api/manager/shifts/:id")
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		shiftID := chi.URLParam(r, "id")
+		if shiftID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "Shift ID is required")
+			return
+		}
+
+		// Request structure
+		var req struct {
+			// Shift details (optional - only update if provided)
+			StartTime *int64  `json:"start_time,omitempty"`
+			EndTime   *int64  `json:"end_time,omitempty"`
+			DriverID  *string `json:"driver_id,omitempty"`
+			RouteID   *string `json:"route_id,omitempty"`
+
+			// Task modifications
+			AddTasks      []AddTaskRequest `json:"add_tasks,omitempty"`
+			RemoveTaskIDs []string         `json:"remove_task_ids,omitempty"`
+
+			// Flags
+			Reoptimize bool   `json:"reoptimize"` // Default: false (will be set to true if tasks change)
+			Reason     string `json:"reason"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ Error decoding request body: %v", err)
+			utils.RespondError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+		log.Printf("   Shift ID: %s", shiftID)
+		log.Printf("   Manager: %s (%s)", userClaims.Email, userClaims.UserID)
+		log.Printf("   Changes requested:")
+		if req.StartTime != nil {
+			log.Printf("      - Start time: %d", *req.StartTime)
+		}
+		if req.EndTime != nil {
+			log.Printf("      - End time: %d", *req.EndTime)
+		}
+		if req.DriverID != nil {
+			log.Printf("      - Driver ID: %s", *req.DriverID)
+		}
+		if req.RouteID != nil {
+			log.Printf("      - Route ID: %s", *req.RouteID)
+		}
+		log.Printf("      - Tasks to add: %d", len(req.AddTasks))
+		log.Printf("      - Tasks to remove: %d", len(req.RemoveTaskIDs))
+		log.Printf("      - Reason: %s", req.Reason)
+
+		// Get current shift
+		var shift models.Shift
+		err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
+		if err == sql.ErrNoRows {
+			utils.RespondError(w, http.StatusNotFound, "Shift not found")
+			return
+		}
+		if err != nil {
+			log.Printf("❌ Error fetching shift: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift")
+			return
+		}
+
+		// Only allow editing ready or active shifts
+		if shift.Status != "ready" && shift.Status != "active" {
+			utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Can only edit ready or active shifts (current status: %s)", shift.Status))
+			return
+		}
+
+		log.Printf("✅ Found shift (status: %s) for driver %s", shift.Status, shift.DriverID)
+
+		// Track changes for event payload
+		changes := make(map[string]interface{})
+		changes["tasks_added"] = 0
+		changes["tasks_removed"] = 0
+		changes["driver_changed"] = false
+		changes["time_changed"] = false
+		changes["route_reoptimized"] = false
+
+		oldDriverID := shift.DriverID
+
+		// Start transaction
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ Error starting transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to start transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		now := time.Now().Unix()
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// STEP 1: Update shift details (time, driver, route)
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		updateFields := []string{"updated_at = $1"}
+		updateArgs := []interface{}{now}
+		argIndex := 2
+
+		if req.StartTime != nil {
+			updateFields = append(updateFields, fmt.Sprintf("start_time = $%d", argIndex))
+			updateArgs = append(updateArgs, *req.StartTime)
+			argIndex++
+			changes["time_changed"] = true
+		}
+
+		if req.EndTime != nil {
+			updateFields = append(updateFields, fmt.Sprintf("end_time = $%d", argIndex))
+			updateArgs = append(updateArgs, *req.EndTime)
+			argIndex++
+			changes["time_changed"] = true
+		}
+
+		if req.DriverID != nil && *req.DriverID != shift.DriverID {
+			updateFields = append(updateFields, fmt.Sprintf("driver_id = $%d", argIndex))
+			updateArgs = append(updateArgs, *req.DriverID)
+			argIndex++
+			changes["driver_changed"] = true
+			log.Printf("🔄 Driver reassignment: %s → %s", oldDriverID, *req.DriverID)
+		}
+
+		if req.RouteID != nil {
+			updateFields = append(updateFields, fmt.Sprintf("route_id = $%d", argIndex))
+			updateArgs = append(updateArgs, *req.RouteID)
+			argIndex++
+		}
+
+		if len(updateFields) > 1 { // More than just updated_at
+			updateArgs = append(updateArgs, shiftID)
+			query := fmt.Sprintf("UPDATE shifts SET %s WHERE id = $%d", strings.Join(updateFields, ", "), argIndex)
+			_, err = tx.Exec(query, updateArgs...)
+			if err != nil {
+				log.Printf("❌ Error updating shift: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
+				return
+			}
+			log.Printf("✅ Updated shift details")
+		}
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// STEP 2: Remove tasks (if any)
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		removedCount := 0
+		if len(req.RemoveTaskIDs) > 0 {
+			log.Printf("🗑️  Removing %d tasks...", len(req.RemoveTaskIDs))
+
+			for _, taskID := range req.RemoveTaskIDs {
+				// Decode base64 task ID to UUID
+				decodedBytes, decodeErr := base64.StdEncoding.DecodeString(taskID)
+				actualTaskID := taskID
+				if decodeErr == nil {
+					actualTaskID = string(decodedBytes)
+				}
+
+				// Get task details
+				var task models.RouteTask
+				err = tx.Get(&task, `SELECT * FROM route_tasks WHERE id = $1 AND shift_id = $2`, actualTaskID, shiftID)
+				if err == sql.ErrNoRows {
+					log.Printf("⚠️  Task %s not found, skipping", taskID)
+					continue
+				}
+				if err != nil {
+					log.Printf("❌ Error fetching task: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch task")
+					return
+				}
+
+				// Don't remove completed tasks
+				if task.IsCompleted == 1 {
+					log.Printf("⚠️  Task %s already completed, skipping", taskID)
+					continue
+				}
+
+				log.Printf("   Removing task: %s (type=%s)", task.ID, task.TaskType)
+
+				// Mark as deleted
+				_, err = tx.Exec(`
+					UPDATE route_tasks
+					SET is_deleted = true,
+						deleted_at = $1,
+						deleted_by = $2,
+						deletion_reason = $3,
+						updated_at = $1
+					WHERE id = $4
+				`, now, userClaims.UserID, req.Reason, actualTaskID)
+				if err != nil {
+					log.Printf("❌ Error marking task as deleted: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to remove task")
+					return
+				}
+
+				// Unassign resources based on task type
+				switch task.TaskType {
+				case models.TaskTypePickup, models.TaskTypeDropoff:
+					if task.MoveRequestID != nil {
+						_, err = tx.Exec(`
+							UPDATE bin_move_requests
+							SET assigned_shift_id = NULL,
+								assigned_user_id = NULL,
+								updated_at = $1
+							WHERE id = $2
+						`, now, *task.MoveRequestID)
+						if err != nil {
+							log.Printf("❌ Error unassigning move request: %v", err)
+							utils.RespondError(w, http.StatusInternalServerError, "Failed to unassign move request")
+							return
+						}
+					}
+				case models.TaskTypePlacement:
+					if task.PotentialLocationID != nil {
+						_, err = tx.Exec(`
+							UPDATE potential_locations
+							SET assigned_shift_id = NULL,
+								updated_at = $1
+							WHERE id = $2
+						`, now, *task.PotentialLocationID)
+						if err != nil {
+							log.Printf("❌ Error unassigning potential location: %v", err)
+							utils.RespondError(w, http.StatusInternalServerError, "Failed to unassign potential location")
+							return
+						}
+					}
+				}
+
+				removedCount++
+			}
+
+			changes["tasks_removed"] = removedCount
+			log.Printf("✅ Removed %d tasks", removedCount)
+		}
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// STEP 3: Add new tasks (if any)
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		addedCount := 0
+		if len(req.AddTasks) > 0 {
+			log.Printf("➕ Adding %d tasks...", len(req.AddTasks))
+
+			for _, addReq := range req.AddTasks {
+				newTaskID := uuid.New().String()
+				log.Printf("   Creating task: type=%s, id=%s", addReq.TaskType, newTaskID)
+
+				// Get next sequence order
+				var maxSeq sql.NullInt64
+				err = tx.Get(&maxSeq, `
+					SELECT MAX(sequence_order)
+					FROM route_tasks
+					WHERE shift_id = $1 AND is_deleted = false
+				`, shiftID)
+				if err != nil && err != sql.ErrNoRows {
+					log.Printf("❌ Error getting max sequence: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to get sequence order")
+					return
+				}
+
+				nextSeq := 1
+				if maxSeq.Valid {
+					nextSeq = int(maxSeq.Int64) + 1
+				}
+
+				// Build task based on type
+				var task models.RouteTask
+				task.ID = newTaskID
+				task.ShiftID = shiftID
+				task.TaskType = models.TaskType(addReq.TaskType)
+				task.SequenceOrder = nextSeq
+				task.IsCompleted = 0
+				task.CreatedAt = now
+				task.UpdatedAt = &now
+
+				switch addReq.TaskType {
+				case "collection":
+					if addReq.BinID == nil {
+						utils.RespondError(w, http.StatusBadRequest, "bin_id required for collection task")
+						return
+					}
+					// Fetch bin details
+					var bin struct {
+						ID            string   `db:"id"`
+						BinNumber     int      `db:"bin_number"`
+						Latitude      float64  `db:"latitude"`
+						Longitude     float64  `db:"longitude"`
+						CurrentStreet string   `db:"current_street"`
+						City          string   `db:"city"`
+						ZipCode       string   `db:"zip_code"`
+						FillPercentage int     `db:"fill_percentage"`
+					}
+					err = tx.Get(&bin, `SELECT id, bin_number, latitude, longitude, current_street, city, zip_code, fill_percentage FROM bins WHERE id = $1`, *addReq.BinID)
+					if err != nil {
+						log.Printf("❌ Error fetching bin: %v", err)
+						utils.RespondError(w, http.StatusBadRequest, "Bin not found")
+						return
+					}
+
+					task.BinID = addReq.BinID
+					task.BinNumber = &bin.BinNumber
+					task.Latitude = bin.Latitude
+					task.Longitude = bin.Longitude
+					address := fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.ZipCode)
+					task.Address = &address
+					task.FillPercentage = &bin.FillPercentage
+
+				case "placement":
+					if addReq.PotentialLocationID == nil {
+						utils.RespondError(w, http.StatusBadRequest, "potential_location_id required for placement task")
+						return
+					}
+					// Fetch potential location details
+					var potLoc struct {
+						ID        string  `db:"id"`
+						Latitude  float64 `db:"latitude"`
+						Longitude float64 `db:"longitude"`
+						Address   string  `db:"address"`
+					}
+					err = tx.Get(&potLoc, `SELECT id, latitude, longitude, address FROM potential_locations WHERE id = $1`, *addReq.PotentialLocationID)
+					if err != nil {
+						log.Printf("❌ Error fetching potential location: %v", err)
+						utils.RespondError(w, http.StatusBadRequest, "Potential location not found")
+						return
+					}
+
+					task.PotentialLocationID = addReq.PotentialLocationID
+					task.Latitude = potLoc.Latitude
+					task.Longitude = potLoc.Longitude
+					task.Address = &potLoc.Address
+
+					// Mark as assigned
+					_, err = tx.Exec(`UPDATE potential_locations SET assigned_shift_id = $1, updated_at = $2 WHERE id = $3`,
+						shiftID, now, *addReq.PotentialLocationID)
+					if err != nil {
+						log.Printf("❌ Error assigning potential location: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to assign potential location")
+						return
+					}
+
+				case "pickup", "dropoff":
+					if addReq.MoveRequestID == nil {
+						utils.RespondError(w, http.StatusBadRequest, "move_request_id required for pickup/dropoff task")
+						return
+					}
+					// Fetch move request details
+					var moveReq struct {
+						ID         string  `db:"id"`
+						BinID      string  `db:"bin_id"`
+						Latitude   *float64 `db:"latitude"`
+						Longitude  *float64 `db:"longitude"`
+						Address    *string  `db:"address"`
+						DestLatitude  *float64 `db:"destination_latitude"`
+						DestLongitude *float64 `db:"destination_longitude"`
+						DestAddress   *string  `db:"destination_address"`
+					}
+					err = tx.Get(&moveReq, `SELECT id, bin_id, latitude, longitude, address, destination_latitude, destination_longitude, destination_address FROM bin_move_requests WHERE id = $1`, *addReq.MoveRequestID)
+					if err != nil {
+						log.Printf("❌ Error fetching move request: %v", err)
+						utils.RespondError(w, http.StatusBadRequest, "Move request not found")
+						return
+					}
+
+					task.MoveRequestID = addReq.MoveRequestID
+					task.BinID = &moveReq.BinID
+
+					if addReq.TaskType == "pickup" {
+						if moveReq.Latitude != nil && moveReq.Longitude != nil {
+							task.Latitude = *moveReq.Latitude
+							task.Longitude = *moveReq.Longitude
+						}
+						if moveReq.Address != nil {
+							task.Address = moveReq.Address
+						}
+					} else { // dropoff
+						if moveReq.DestLatitude != nil && moveReq.DestLongitude != nil {
+							task.Latitude = *moveReq.DestLatitude
+							task.Longitude = *moveReq.DestLongitude
+						}
+						if moveReq.DestAddress != nil {
+							task.DestinationAddress = moveReq.DestAddress
+						}
+					}
+
+					// Mark as assigned
+					_, err = tx.Exec(`UPDATE bin_move_requests SET assigned_shift_id = $1, assigned_user_id = $2, updated_at = $3 WHERE id = $4`,
+						shiftID, shift.DriverID, now, *addReq.MoveRequestID)
+					if err != nil {
+						log.Printf("❌ Error assigning move request: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to assign move request")
+						return
+					}
+
+				default:
+					utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid task type: %s", addReq.TaskType))
+					return
+				}
+
+				// Insert task
+				_, err = tx.Exec(`
+					INSERT INTO route_tasks (
+						id, shift_id, task_type, bin_id, potential_location_id, move_request_id,
+						bin_number, latitude, longitude, address, destination_address,
+						fill_percentage, sequence_order, is_completed, created_at, updated_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+				`, task.ID, task.ShiftID, task.TaskType, task.BinID, task.PotentialLocationID, task.MoveRequestID,
+					task.BinNumber, task.Latitude, task.Longitude, task.Address, task.DestinationAddress,
+					task.FillPercentage, task.SequenceOrder, task.IsCompleted, task.CreatedAt, task.UpdatedAt)
+				if err != nil {
+					log.Printf("❌ Error inserting task: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to add task")
+					return
+				}
+
+				addedCount++
+			}
+
+			changes["tasks_added"] = addedCount
+			log.Printf("✅ Added %d tasks", addedCount)
+		}
+
+		// Commit transaction
+		if err = tx.Commit(); err != nil {
+			log.Printf("❌ Error committing transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to commit changes")
+			return
+		}
+
+		log.Printf("✅ Transaction committed")
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// STEP 4: Re-optimize if tasks changed or driver changed
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		shouldReoptimize := req.Reoptimize || addedCount > 0 || removedCount > 0 || changes["driver_changed"].(bool)
+
+		if shouldReoptimize && shift.Status == "active" {
+			log.Printf("🔄 Re-optimizing route (tasks changed or driver reassigned)...")
+
+			// Update shift reference if driver changed
+			if req.DriverID != nil {
+				shift.DriverID = *req.DriverID
+			}
+
+			err = ReoptimizeActiveShift(db, shiftID, centrifugoClient, true)
+			if err != nil {
+				log.Printf("⚠️  Failed to re-optimize: %v", err)
+				// Don't fail the request
+			} else {
+				changes["route_reoptimized"] = true
+				log.Printf("✅ Route re-optimized")
+			}
+		}
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// STEP 5: Publish Centrifugo events
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		if centrifugoClient != nil {
+			// If driver changed, notify old driver
+			if changes["driver_changed"].(bool) {
+				oldDriverChannel := fmt.Sprintf("shift:updates:%s", shiftID)
+				reassignedEvent := map[string]interface{}{
+					"type":   "shift_reassigned",
+					"reason": "Shift has been reassigned to another driver",
+				}
+				if pubErr := centrifugoClient.PublishToChannel(r.Context(), oldDriverChannel, reassignedEvent); pubErr != nil {
+					log.Printf("⚠️  Failed to notify old driver: %v", pubErr)
+				} else {
+					log.Printf("📡 Published shift_reassigned event to old driver")
+				}
+			}
+
+			// Publish shift_edited event to current/new driver
+			newDriverChannel := fmt.Sprintf("shift:updates:%s", shiftID)
+			editedEvent := map[string]interface{}{
+				"type":    "shift_edited",
+				"shift_id": shiftID,
+				"changes":  changes,
+				"reason":   req.Reason,
+				"manager_name": userClaims.Email,
+			}
+			if pubErr := centrifugoClient.PublishToChannel(r.Context(), newDriverChannel, editedEvent); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_edited event: %v", pubErr)
+			} else {
+				log.Printf("📡 Published shift_edited event")
+			}
+		}
+
+		// Send FCM notifications
+		if fcmService != nil && changes["driver_changed"].(bool) {
+			// Notify old driver
+			var oldDriverToken models.FCMToken
+			if tokenErr := db.Get(&oldDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, oldDriverID); tokenErr == nil {
+				go fcmService.SendShiftUpdateNotification(oldDriverToken.Token, shiftID, "reassigned")
+				log.Printf("📱 Sent FCM notification to old driver: %s", oldDriverID)
+			}
+
+			// Notify new driver
+			if req.DriverID != nil {
+				var newDriverToken models.FCMToken
+				if tokenErr := db.Get(&newDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, *req.DriverID); tokenErr == nil {
+					go fcmService.SendShiftUpdateNotification(newDriverToken.Token, shiftID, "assigned")
+					log.Printf("📱 Sent FCM notification to new driver: %s", *req.DriverID)
+				}
+			}
+		}
+
+		// Get updated shift
+		err = db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Error refreshing shift: %v", err)
+		}
+
+		// Get updated tasks
+		tasks, err := database.GetShiftTasks(db, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Could not fetch tasks: %v", err)
+			tasks = []models.RouteTask{}
+		}
+
+		// Return response
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "Shift updated successfully",
+			"changes": changes,
+			"shift": map[string]interface{}{
+				"id":     shift.ID,
+				"status": shift.Status,
+				"driver_id": shift.DriverID,
+				"tasks":  tasks,
+			},
+		})
+
+		log.Printf("✅ Shift updated successfully")
+		log.Printf("   Changes: %+v", changes)
+	}
+}
+
+// AddTaskRequest represents a request to add a task to a shift
+type AddTaskRequest struct {
+	TaskType            string  `json:"task_type"` // collection, placement, pickup, dropoff, warehouse_stop
+	BinID               *string `json:"bin_id,omitempty"`
+	PotentialLocationID *string `json:"potential_location_id,omitempty"`
+	MoveRequestID       *string `json:"move_request_id,omitempty"`
 }
 
 // GetDriverShiftHistory returns all completed shifts for the authenticated driver

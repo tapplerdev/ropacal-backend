@@ -322,6 +322,7 @@ func main() {
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService))
 			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
 			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService))
+			r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, centrifugoClient, fcmService)) // Comprehensive shift editing
 			r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, centrifugoClient))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
 
