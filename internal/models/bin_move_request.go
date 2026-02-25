@@ -29,6 +29,7 @@ type BinMoveRequest struct {
 	Reason                    *string `json:"reason,omitempty" db:"reason"`
 	Notes                     *string `json:"notes,omitempty" db:"notes"`
 	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty" db:"source_potential_location_id"` // For warehouse redeployments to potential locations
+	NoGoZoneID                *string `json:"no_go_zone_id,omitempty" db:"no_go_zone_id"`                               // Links to created no-go zone if applicable
 
 	// Assignment (shift-based or manual)
 	AssignmentType  *string `json:"assignment_type,omitempty" db:"assignment_type"` // 'shift' or 'manual', NULL for unassigned
@@ -80,6 +81,7 @@ type BinMoveRequestResponse struct {
 	Reason                    *string `json:"reason,omitempty"`
 	Notes                     *string `json:"notes,omitempty"`
 	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty"`
+	NoGoZoneID                *string `json:"no_go_zone_id,omitempty"`
 
 	// Assignment (shift-based or manual)
 	AssignmentType     *string `json:"assignment_type,omitempty"`     // 'shift' or 'manual', NULL for unassigned
@@ -149,6 +151,7 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 		Reason:                    bmr.Reason,
 		Notes:                     bmr.Notes,
 		SourcePotentialLocationID: bmr.SourcePotentialLocationID,
+		NoGoZoneID:                bmr.NoGoZoneID,
 		AssignmentType:            bmr.AssignmentType,
 		AssignedShiftID:   bmr.AssignedShiftID,
 		AssignedUserID:    bmr.AssignedUserID,
