@@ -799,8 +799,19 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 
 		existingErr := db.Get(&existingShift, existingQuery, userClaims.UserID)
 		if existingErr == nil {
-			// Found an existing active/paused shift - auto-end it
-			log.Printf("⚠️  Found existing %s shift (%s), auto-ending it before starting new shift", existingShift.Status, existingShift.ID)
+			// IDEMPOTENCY FIX: If shift is already active, just return it (don't end it)
+			if existingShift.Status == "active" {
+				log.Printf("✅ Shift already active (%s), returning existing shift (idempotent)", existingShift.ID)
+				log.Printf("📤 RESPONSE: 200 OK - Returning existing active shift")
+				utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+					"success": true,
+					"data":    existingShift,
+				})
+				return
+			}
+
+			// Found an existing PAUSED shift - auto-end it
+			log.Printf("⚠️  Found existing paused shift (%s), auto-ending it before starting new shift", existingShift.ID)
 
 			endNow := time.Now().Unix()
 			totalPause := int64(existingShift.TotalPauseSeconds)
