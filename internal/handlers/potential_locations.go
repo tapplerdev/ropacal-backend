@@ -39,7 +39,22 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 
 		query := fmt.Sprintf(`
 			SELECT
-				pl.*,
+				pl.id,
+				pl.address,
+				pl.street,
+				pl.city,
+				pl.zip,
+				pl.latitude,
+				pl.longitude,
+				pl.requested_by_user_id,
+				pl.requested_by_name,
+				pl.notes,
+				pl.created_at,
+				pl.updated_at,
+				pl.converted_to_bin_id,
+				pl.converted_at,
+				pl.converted_by_user_id,
+				pl.converted_via_shift_id,
 				b.bin_number,
 				driver.name AS driver_name,
 				manager.name AS manager_name
