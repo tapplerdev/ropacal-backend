@@ -46,6 +46,7 @@ func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, 
 // GetShiftTasksDetailed retrieves tasks with JOINed data from related tables
 func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{}, error) {
 	// Query route_tasks directly and LEFT JOIN with bins table to get bin_number for collection tasks
+	// Also LEFT JOIN with checks table to get photo_url for completed tasks
 	// Explicitly cast float columns to text to avoid base64 encoding in JSON
 	query := `
 		SELECT
@@ -75,9 +76,19 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 			rt.updated_fill_percentage,
 			rt.skipped,
 			rt.created_at,
-			rt.updated_at
+			rt.updated_at,
+			c.photo_url
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
+		LEFT JOIN LATERAL (
+			SELECT photo_url
+			FROM checks
+			WHERE bin_id = rt.bin_id
+				AND shift_id = rt.shift_id
+				AND checked_on = rt.completed_at
+			ORDER BY checked_on DESC
+			LIMIT 1
+		) c ON true
 		WHERE rt.shift_id = $1
 		ORDER BY rt.sequence_order ASC
 	`
