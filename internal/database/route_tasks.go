@@ -89,7 +89,7 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 			ORDER BY checked_on DESC
 			LIMIT 1
 		) c ON true
-		WHERE rt.shift_id = $1
+		WHERE rt.shift_id = $1 AND rt.is_deleted = FALSE
 		ORDER BY rt.sequence_order ASC
 	`
 
