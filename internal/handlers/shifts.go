@@ -3158,10 +3158,10 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 						Longitude     float64  `db:"longitude"`
 						CurrentStreet string   `db:"current_street"`
 						City          string   `db:"city"`
-						ZipCode       string   `db:"zip_code"`
+						ZipCode       string   `db:"zip"`
 						FillPercentage int     `db:"fill_percentage"`
 					}
-					err = tx.Get(&bin, `SELECT id, bin_number, latitude, longitude, current_street, city, zip_code, fill_percentage FROM bins WHERE id = $1`, *addReq.BinID)
+					err = tx.Get(&bin, `SELECT id, bin_number, latitude, longitude, current_street, city, zip, fill_percentage FROM bins WHERE id = $1`, *addReq.BinID)
 					if err != nil {
 						log.Printf("❌ [SHIFT UPDATE] Error fetching bin_id=%s: %v", *addReq.BinID, err)
 						if err == sql.ErrNoRows {
