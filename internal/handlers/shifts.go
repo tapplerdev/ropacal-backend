@@ -2910,6 +2910,17 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 		log.Printf("      - Tasks to remove: %d", len(req.RemoveTaskIDs))
 		log.Printf("      - Reason: %s", req.Reason)
 
+		// Debug: Log each task being added
+		for i, task := range req.AddTasks {
+			log.Printf("      [Task %d] Type: %s", i+1, task.TaskType)
+			if task.BinID != nil {
+				log.Printf("      [Task %d]   Bin ID: %s", i+1, *task.BinID)
+			}
+			if task.PotentialLocationID != nil {
+				log.Printf("      [Task %d]   Potential Location ID: %s", i+1, *task.PotentialLocationID)
+			}
+		}
+
 		// Get current shift
 		var shift models.Shift
 		err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
@@ -3136,6 +3147,9 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 						utils.RespondError(w, http.StatusBadRequest, "bin_id required for collection task")
 						return
 					}
+
+					log.Printf("🔍 [SHIFT UPDATE] Looking up bin_id: %s", *addReq.BinID)
+
 					// Fetch bin details
 					var bin struct {
 						ID            string   `db:"id"`
@@ -3149,10 +3163,15 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 					}
 					err = tx.Get(&bin, `SELECT id, bin_number, latitude, longitude, current_street, city, zip_code, fill_percentage FROM bins WHERE id = $1`, *addReq.BinID)
 					if err != nil {
-						log.Printf("❌ Error fetching bin: %v", err)
+						log.Printf("❌ [SHIFT UPDATE] Error fetching bin_id=%s: %v", *addReq.BinID, err)
+						if err == sql.ErrNoRows {
+							log.Printf("❌ [SHIFT UPDATE] Bin not found in database: %s", *addReq.BinID)
+						}
 						utils.RespondError(w, http.StatusBadRequest, "Bin not found")
 						return
 					}
+
+					log.Printf("✅ [SHIFT UPDATE] Found bin #%d at %s", bin.BinNumber, bin.CurrentStreet)
 
 					task.BinID = addReq.BinID
 					task.BinNumber = &bin.BinNumber

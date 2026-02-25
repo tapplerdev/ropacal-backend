@@ -312,7 +312,7 @@ func (c *Client) markAsConnected() {
 		return
 	}
 
-	// log.Printf("🟢 Driver %s marked as CONNECTED (ready to receive assignments)", c.UserID)
+	log.Printf("🟢 Driver %s marked as CONNECTED (ready to receive assignments)", c.UserID)
 }
 
 // markAsDisconnected marks the driver as disconnected in the database
@@ -342,7 +342,7 @@ func (c *Client) markAsDisconnected() {
 		return
 	}
 
-	// log.Printf("🔴 Driver %s marked as disconnected (last position preserved)", c.UserID)
+	log.Printf("🔴 Driver %s marked as disconnected (last position preserved)", c.UserID)
 }
 
 // handleDriverLog processes driver log messages and outputs them to Railway logs
