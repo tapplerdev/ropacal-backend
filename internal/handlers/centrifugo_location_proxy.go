@@ -75,8 +75,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 
 		// 2. Authorize: Only the driver can publish to their own location channel
 		if req.User != driverID {
-			log.Printf("🚫 [LocationProxy] Authorization failed: user=%s trying to publish to driver=%s",
-				req.User, driverID)
+			// Silently deny - this is expected behavior when non-drivers try to publish
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(CentrifugoPublishResponse{
 				Error: &CentrifugoError{
