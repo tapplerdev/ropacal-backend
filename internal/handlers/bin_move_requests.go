@@ -83,8 +83,8 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 
 		// Validate move_type (accept both 'store' and 'pickup_only' for backward compatibility)
-		if req.MoveType != "store" && req.MoveType != "pickup_only" && req.MoveType != "relocation" {
-			http.Error(w, "Invalid move_type: must be 'store', 'pickup_only' (deprecated), or 'relocation'", http.StatusBadRequest)
+		if req.MoveType != "store" && req.MoveType != "pickup_only" && req.MoveType != "relocation" && req.MoveType != "redeployment" {
+			http.Error(w, "Invalid move_type: must be 'store', 'relocation', or 'redeployment'", http.StatusBadRequest)
 			return
 		}
 
@@ -109,6 +109,14 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		if req.MoveType == "relocation" && (req.NewLatitude == nil || req.NewLongitude == nil || newAddress == nil) {
 			http.Error(w, "relocation moves require new_latitude, new_longitude, and address (either new_address or new_street+new_city+new_zip)", http.StatusBadRequest)
 			return
+		}
+
+		// Validate redeployment moves require new location and bin must be in_storage
+		if req.MoveType == "redeployment" {
+			if req.NewLatitude == nil || req.NewLongitude == nil || newAddress == nil {
+				http.Error(w, "redeployment moves require new_latitude, new_longitude, and address (either new_address or new_street+new_city+new_zip)", http.StatusBadRequest)
+				return
+			}
 		}
 
 		// Get requesting user ID from context (set by Auth middleware)
@@ -142,6 +150,12 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			return
 		}
 
+		// Validate redeployment moves require bin to be in_storage
+		if req.MoveType == "redeployment" && bin.Status != "in_storage" {
+			http.Error(w, "redeployment moves require bin status to be 'in_storage' (current status: "+bin.Status+")", http.StatusBadRequest)
+			return
+		}
+
 		// Build original address
 		originalAddress := fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.Zip)
 
@@ -158,6 +172,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 
 		// Create bin move request
+		// Note: For redeployment moves, original_latitude/longitude will be warehouse location (where in_storage bin currently is)
 		moveRequest := models.BinMoveRequest{
 			ID:                        id,
 			BinID:                     req.BinID,
@@ -165,8 +180,8 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			Urgency:                   urgency, // Auto-calculated urgency
 			RequestedBy:               userID,
 			Status:                    status,
-			OriginalLatitude:          *bin.Latitude,
-			OriginalLongitude:         *bin.Longitude,
+			OriginalLatitude:          *bin.Latitude,  // For redeployment: warehouse pickup location
+			OriginalLongitude:         *bin.Longitude, // For redeployment: warehouse pickup location
 			OriginalAddress:           originalAddress,
 			NewLatitude:               req.NewLatitude,
 			NewLongitude:              req.NewLongitude,
