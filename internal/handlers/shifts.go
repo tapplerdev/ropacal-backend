@@ -5631,9 +5631,9 @@ func optimizeRouteWithMapbox(
 		return fmt.Errorf("failed to fetch shift: %w", err)
 	}
 
-	// Step 2: Fetch all tasks for the shift
+	// Step 2: Fetch all tasks for the shift (only active, non-deleted tasks)
 	var tasks []models.RouteTask
-	query := `SELECT * FROM route_tasks WHERE shift_id = $1 ORDER BY sequence_order ASC`
+	query := `SELECT * FROM route_tasks WHERE shift_id = $1 AND is_deleted = FALSE ORDER BY sequence_order ASC`
 	err = db.Select(&tasks, query, shiftID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch tasks: %w", err)
