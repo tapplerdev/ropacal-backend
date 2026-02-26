@@ -3081,6 +3081,7 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 							UPDATE bin_move_requests
 							SET assigned_shift_id = NULL,
 								assigned_user_id = NULL,
+								status = 'pending',
 								updated_at = $1
 							WHERE id = $2
 						`, now, *task.MoveRequestID)
@@ -3089,6 +3090,7 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 							utils.RespondError(w, http.StatusInternalServerError, "Failed to unassign move request")
 							return
 						}
+						log.Printf("✅ Unassigned move request %s (status → pending)", *task.MoveRequestID)
 					}
 				case models.TaskTypePlacement:
 					if task.PotentialLocationID != nil {
