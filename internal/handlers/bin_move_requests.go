@@ -573,13 +573,14 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// 2. Determine current position in route (find first uncompleted bin)
 	var shiftBins []models.ShiftBinWithDetails
 	err = db.Select(&shiftBins, `
-		SELECT rb.id, rb.shift_id, rb.bin_id, rb.sequence_order, rb.is_completed,
-		       b.bin_number, b.current_street, b.city, b.zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
-		       b.latitude, b.longitude
-		FROM shift_bins rb
-		JOIN bins b ON rb.bin_id = b.id
-		WHERE rb.shift_id = $1
-		ORDER BY rb.sequence_order ASC
+		SELECT rt.id, rt.shift_id, rt.bin_id, rt.sequence_order, rt.is_completed,
+		       COALESCE(b.bin_number, 0) as bin_number, COALESCE(b.current_street, rt.address, '') as current_street,
+		       COALESCE(b.city, '') as city, COALESCE(b.zip, '') as zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
+		       COALESCE(b.latitude, rt.latitude) as latitude, COALESCE(b.longitude, rt.longitude) as longitude
+		FROM route_tasks rt
+		LEFT JOIN bins b ON rt.bin_id = b.id
+		WHERE rt.shift_id = $1
+		ORDER BY rt.sequence_order ASC
 	`, activeShift.ID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch shift bins: %w", err)
@@ -667,9 +668,9 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	}
 	defer tx.Rollback()
 
-	// Shift all bins after insert position up by binsAdded
+	// Shift all tasks after insert position up by binsAdded
 	_, err = tx.Exec(`
-		UPDATE shift_bins
+		UPDATE route_tasks
 		SET sequence_order = sequence_order + $1
 		WHERE shift_id = $2 AND sequence_order >= $3
 	`, binsAdded, activeShift.ID, insertSequenceOrder)
@@ -679,14 +680,24 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	// Insert pickup waypoint for move request
 	pickupSeq := insertSequenceOrder
+	pickupID := uuid.New().String()
 	log.Printf("   🔍 DEBUG: About to insert PICKUP - insertSequenceOrder=%d, pickupSeq=%d", insertSequenceOrder, pickupSeq)
-	log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, stop_type=pickup, move_request_id=%s",
+	log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, task_type=pickup, move_request_id=%s",
 		activeShift.ID, moveRequest.BinID, pickupSeq, moveRequest.ID)
 
+	// For pickup, use bin's current location
+	pickupAddress := bin.CurrentStreet
+	moveTypeStr := string(moveRequest.MoveType)
 	_, err = tx.Exec(`
-		INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at, stop_type, move_request_id)
-		VALUES ($1, $2, $3, 0, $4, 'pickup', $5)
-	`, activeShift.ID, moveRequest.BinID, pickupSeq, now, moveRequest.ID)
+		INSERT INTO route_tasks (
+			id, shift_id, bin_id, bin_number, sequence_order, task_type,
+			latitude, longitude, address, fill_percentage,
+			move_request_id, move_type,
+			is_completed, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, $13)
+	`, pickupID, activeShift.ID, moveRequest.BinID, bin.BinNumber, pickupSeq, "pickup",
+		bin.Latitude, bin.Longitude, pickupAddress, bin.FillPercentage,
+		moveRequest.ID, moveTypeStr, now)
 	if err != nil {
 		return fmt.Errorf("failed to insert pickup waypoint: %w", err)
 	}
@@ -695,14 +706,35 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// For relocation moves, also insert dropoff waypoint immediately after pickup
 	if moveRequest.MoveType == "relocation" {
 		dropoffSeq := insertSequenceOrder + 1
+		dropoffID := uuid.New().String()
 		log.Printf("   🔍 DEBUG: About to insert DROPOFF - insertSequenceOrder=%d, dropoffSeq=%d", insertSequenceOrder, dropoffSeq)
-		log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, stop_type=dropoff, move_request_id=%s",
+		log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, task_type=dropoff, move_request_id=%s",
 			activeShift.ID, moveRequest.BinID, dropoffSeq, moveRequest.ID)
 
+		// For dropoff, use destination location
+		// Destination coordinates should be in NewLatitude/NewLongitude fields
+		var dropoffLat, dropoffLng float64
+		var dropoffAddr string
+		if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+			dropoffLat = *moveRequest.NewLatitude
+			dropoffLng = *moveRequest.NewLongitude
+		}
+		if moveRequest.NewAddress != nil {
+			dropoffAddr = *moveRequest.NewAddress
+		}
+
 		_, err = tx.Exec(`
-			INSERT INTO shift_bins (shift_id, bin_id, sequence_order, is_completed, created_at, stop_type, move_request_id)
-			VALUES ($1, $2, $3, 0, $4, 'dropoff', $5)
-		`, activeShift.ID, moveRequest.BinID, dropoffSeq, now, moveRequest.ID)
+			INSERT INTO route_tasks (
+				id, shift_id, bin_id, bin_number, sequence_order, task_type,
+				latitude, longitude, address,
+				destination_latitude, destination_longitude, destination_address,
+				move_request_id, move_type,
+				is_completed, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0, $15)
+		`, dropoffID, activeShift.ID, moveRequest.BinID, bin.BinNumber, dropoffSeq, "dropoff",
+			dropoffLat, dropoffLng, dropoffAddr,
+			dropoffLat, dropoffLng, dropoffAddr,
+			moveRequest.ID, moveTypeStr, now)
 		if err != nil {
 			return fmt.Errorf("failed to insert dropoff waypoint: %w", err)
 		}
@@ -711,16 +743,16 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		// Verify both waypoints have different sequence_order values
 		var actualPickupSeq, actualDropoffSeq int
 		err = tx.Get(&actualPickupSeq, `
-			SELECT sequence_order FROM shift_bins
-			WHERE shift_id = $1 AND move_request_id = $2 AND stop_type = 'pickup'
+			SELECT sequence_order FROM route_tasks
+			WHERE shift_id = $1 AND move_request_id = $2 AND task_type = 'pickup'
 		`, activeShift.ID, moveRequest.ID)
 		if err != nil {
 			log.Printf("   ⚠️  Warning: Could not verify pickup sequence_order: %v", err)
 		}
 
 		err = tx.Get(&actualDropoffSeq, `
-			SELECT sequence_order FROM shift_bins
-			WHERE shift_id = $1 AND move_request_id = $2 AND stop_type = 'dropoff'
+			SELECT sequence_order FROM route_tasks
+			WHERE shift_id = $1 AND move_request_id = $2 AND task_type = 'dropoff'
 		`, activeShift.ID, moveRequest.ID)
 		if err != nil {
 			log.Printf("   ⚠️  Warning: Could not verify dropoff sequence_order: %v", err)
@@ -804,18 +836,19 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		return fmt.Errorf("failed to update shift: %w", err)
 	}
 
-	// 4. Re-optimize remaining route (bins after the inserted move) - only for active shifts
+	// 4. Re-optimize remaining route (tasks after the inserted move) - only for active shifts
 	if isActiveShift {
 		var remainingBins []models.ShiftBinWithDetails
 		err = tx.Select(&remainingBins, `
-			SELECT rb.id, rb.shift_id, rb.bin_id, rb.sequence_order,
-			       b.bin_number, b.current_street, b.city, b.zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
-			       b.latitude, b.longitude
-			FROM shift_bins rb
-			JOIN bins b ON rb.bin_id = b.id
-			WHERE rb.shift_id = $1 AND rb.sequence_order > $2 AND rb.is_completed = 0
-			  AND rb.move_request_id IS NULL
-			ORDER BY rb.sequence_order ASC
+			SELECT rt.id, rt.shift_id, rt.bin_id, rt.sequence_order,
+			       COALESCE(b.bin_number, 0) as bin_number, COALESCE(b.current_street, rt.address, '') as current_street,
+			       COALESCE(b.city, '') as city, COALESCE(b.zip, '') as zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
+			       COALESCE(b.latitude, rt.latitude) as latitude, COALESCE(b.longitude, rt.longitude) as longitude
+			FROM route_tasks rt
+			LEFT JOIN bins b ON rt.bin_id = b.id
+			WHERE rt.shift_id = $1 AND rt.sequence_order > $2 AND rt.is_completed = 0
+			  AND rt.move_request_id IS NULL
+			ORDER BY rt.sequence_order ASC
 		`, activeShift.ID, insertSequenceOrder + binsAdded - 1)
 		if err != nil {
 			return fmt.Errorf("failed to fetch remaining bins: %w", err)
@@ -861,7 +894,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			for i, optimizedBin := range optimizedBins {
 				newSequence := insertSequenceOrder + binsAdded + i // After both move waypoints
 				_, err = tx.Exec(`
-					UPDATE shift_bins
+					UPDATE route_tasks
 					SET sequence_order = $1
 					WHERE shift_id = $2 AND bin_id = $3
 				`, newSequence, activeShift.ID, optimizedBin.ID)
