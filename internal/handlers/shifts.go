@@ -617,7 +617,9 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				rt.bins_to_load
 			FROM route_tasks rt
 			LEFT JOIN bins b   ON b.id  = rt.bin_id
-			LEFT JOIN bin_checks bc ON bc.bin_id = rt.bin_id AND bc.shift_id = rt.shift_id
+			LEFT JOIN checks bc ON bc.bin_id = rt.bin_id AND bc.checked_by IN (
+				SELECT driver_id FROM shifts WHERE id = rt.shift_id
+			)
 			LEFT JOIN potential_locations pl ON pl.id = rt.potential_location_id
 			LEFT JOIN bins cb  ON cb.id = pl.converted_to_bin_id
 			LEFT JOIN bin_move_requests bmr ON bmr.id = rt.move_request_id
