@@ -306,6 +306,7 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 
 		type ShiftResponse struct {
 			ShiftWithDriver
+			ActiveTaskCount         int      `json:"active_task_count"` // Count of non-deleted tasks
 			EstimatedCompletionTime *int64   `json:"estimated_completion_time,omitempty"` // Unix timestamp
 			TotalDistanceMiles      *float64 `json:"total_distance_miles,omitempty"`
 		}
@@ -318,9 +319,21 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 				continue
 			}
 
+			// Calculate active (non-deleted) task count from route_tasks
+			var activeTaskCount int
+			taskCountErr := db.Get(&activeTaskCount, `
+				SELECT COUNT(*) FROM route_tasks
+				WHERE shift_id = $1 AND is_deleted = FALSE
+			`, shift.ID)
+			if taskCountErr != nil {
+				log.Printf("⚠️  Error counting active tasks for shift %s: %v", shift.ID, taskCountErr)
+				activeTaskCount = shift.TotalBins // Fallback to database value
+			}
+
 			// Create response with computed fields
 			shiftResp := ShiftResponse{
-				ShiftWithDriver: shift,
+				ShiftWithDriver:  shift,
+				ActiveTaskCount:  activeTaskCount,
 			}
 
 			// Add computed fields if optimization metadata exists
@@ -1364,6 +1377,28 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		log.Printf("✅ Shift ended successfully")
 
 		// Update incomplete move requests back to pending and clear assignment
+		// First, fetch the affected move requests so we can log history
+		type MoveRequestInfo struct {
+			ID                 string  `db:"id"`
+			AssignmentType     *string `db:"assignment_type"`
+			AssignedUserID     *string `db:"assigned_user_id"`
+			AssignedUserName   *string `db:"assigned_user_name"`
+			AssignedShiftID    *string `db:"assigned_shift_id"`
+		}
+		var affectedMoveRequests []MoveRequestInfo
+		err = db.Select(&affectedMoveRequests, `
+			SELECT mr.id, mr.assignment_type, mr.assigned_user_id, mr.assigned_shift_id,
+			       u.name as assigned_user_name
+			FROM bin_move_requests mr
+			LEFT JOIN users u ON mr.assigned_user_id = u.id
+			WHERE mr.assigned_shift_id = $1
+			AND mr.status = 'in_progress'
+		`, shift.ID)
+		if err != nil {
+			log.Printf("⚠️ Error fetching move requests for history logging: %v", err)
+		}
+
+		// Update move requests to pending
 		updateMovesQuery := `UPDATE bin_move_requests
 							 SET status = 'pending',
 							     assigned_shift_id = NULL,
@@ -1378,6 +1413,33 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			rowsAffected, _ := result.RowsAffected()
 			if rowsAffected > 0 {
 				log.Printf("✅ Updated %d incomplete move request(s) back to pending", rowsAffected)
+
+				// Log history for each unassigned move request
+				for _, mr := range affectedMoveRequests {
+					metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manual_end"}`, shift.ID)
+					logErr := helpers.LogMoveRequestUnassigned(
+						db,
+						mr.ID,
+						userClaims.UserID,
+						userClaims.Email,
+						mr.AssignmentType,
+						mr.AssignedUserID,
+						mr.AssignedUserName,
+						mr.AssignedShiftID,
+					)
+					if logErr != nil {
+						log.Printf("⚠️ Failed to log move request unassignment history for %s: %v", mr.ID, logErr)
+					} else {
+						log.Printf("📝 Logged unassignment history for move request %s (shift ended by driver)", mr.ID)
+					}
+
+					// Also log in notes field with more context
+					notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND created_at = (SELECT MAX(created_at) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
+					_, noteErr := db.Exec(notesQuery, "Shift ended before completing move request", metadata, mr.ID)
+					if noteErr != nil {
+						log.Printf("⚠️ Failed to update history notes for %s: %v", mr.ID, noteErr)
+					}
+				}
 			}
 		}
 
@@ -5001,6 +5063,28 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		}
 
 		// 2. Return all in_progress move requests to pending
+		// First, fetch the affected move requests so we can log history
+		type MoveRequestInfo struct {
+			ID                 string  `db:"id"`
+			AssignmentType     *string `db:"assignment_type"`
+			AssignedUserID     *string `db:"assigned_user_id"`
+			AssignedUserName   *string `db:"assigned_user_name"`
+			AssignedShiftID    *string `db:"assigned_shift_id"`
+		}
+		var affectedMoveRequests []MoveRequestInfo
+		err = tx.Select(&affectedMoveRequests, `
+			SELECT mr.id, mr.assignment_type, mr.assigned_user_id, mr.assigned_shift_id,
+			       u.name as assigned_user_name
+			FROM bin_move_requests mr
+			LEFT JOIN users u ON mr.assigned_user_id = u.id
+			WHERE mr.assigned_shift_id = $1
+			AND mr.status = 'in_progress'
+		`, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Error fetching move requests for history logging: %v", err)
+		}
+
+		// Update move requests to pending
 		result, err := tx.Exec(`
 			UPDATE bin_move_requests
 			SET status = 'pending',
@@ -5016,6 +5100,33 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			rowsAffected, _ := result.RowsAffected()
 			if rowsAffected > 0 {
 				log.Printf("✅ Returned %d move request(s) to pending status", rowsAffected)
+
+				// Log history for each unassigned move request
+				for _, mr := range affectedMoveRequests {
+					metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manager_cancelled","cancelled_by":"%s"}`, shiftID, userClaims.UserID)
+					logErr := helpers.LogMoveRequestUnassigned(
+						tx,
+						mr.ID,
+						userClaims.UserID,
+						userClaims.Email,
+						mr.AssignmentType,
+						mr.AssignedUserID,
+						mr.AssignedUserName,
+						mr.AssignedShiftID,
+					)
+					if logErr != nil {
+						log.Printf("⚠️  Failed to log move request unassignment history for %s: %v", mr.ID, logErr)
+					} else {
+						log.Printf("📝 Logged unassignment history for move request %s (shift cancelled by manager)", mr.ID)
+					}
+
+					// Also log in notes field with more context
+					notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND created_at = (SELECT MAX(created_at) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
+					_, noteErr := tx.Exec(notesQuery, "Shift cancelled by manager", metadata, mr.ID)
+					if noteErr != nil {
+						log.Printf("⚠️  Failed to update history notes for %s: %v", mr.ID, noteErr)
+					}
+				}
 			}
 		}
 
