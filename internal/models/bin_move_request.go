@@ -28,6 +28,7 @@ type BinMoveRequest struct {
 	DisposalAction            *string `json:"disposal_action,omitempty" db:"disposal_action"`                       // DEPRECATED: kept for backward compatibility
 	Reason                    *string `json:"reason,omitempty" db:"reason"`
 	ReasonCategory            *string `json:"reason_category,omitempty" db:"reason_category"`                       // 'landlord_complaint', 'theft', 'vandalism', 'missing', 'relocation_request', 'other'
+	CreateNoGoZone            *bool   `json:"create_no_go_zone,omitempty" db:"create_no_go_zone"`                   // Opt-in for creating no-go zone
 	Notes                     *string `json:"notes,omitempty" db:"notes"`
 	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty" db:"source_potential_location_id"` // For warehouse redeployments to potential locations
 	NoGoZoneID                *string `json:"no_go_zone_id,omitempty" db:"no_go_zone_id"`                               // Links to created no-go zone if applicable
@@ -81,6 +82,7 @@ type BinMoveRequestResponse struct {
 	DisposalAction            *string `json:"disposal_action,omitempty"`
 	Reason                    *string `json:"reason,omitempty"`
 	ReasonCategory            *string `json:"reason_category,omitempty"`
+	CreateNoGoZone            *bool   `json:"create_no_go_zone,omitempty"`
 	Notes                     *string `json:"notes,omitempty"`
 	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty"`
 	NoGoZoneID                *string `json:"no_go_zone_id,omitempty"`
@@ -152,6 +154,7 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 		DisposalAction:            bmr.DisposalAction,
 		Reason:                    bmr.Reason,
 		ReasonCategory:            bmr.ReasonCategory,
+		CreateNoGoZone:            bmr.CreateNoGoZone,
 		Notes:                     bmr.Notes,
 		SourcePotentialLocationID: bmr.SourcePotentialLocationID,
 		NoGoZoneID:                bmr.NoGoZoneID,
