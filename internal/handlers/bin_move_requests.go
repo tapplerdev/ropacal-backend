@@ -1580,12 +1580,12 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 
 			switch *req.InProgressAction {
 			case "remove_from_route":
-				// Remove from shift_bins, reset to pending
+				// Remove from route_tasks, reset to pending
 				if moveRequest.AssignedShiftID != nil {
 					_, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
 						*moveRequest.AssignedShiftID, moveRequest.BinID)
 					if err != nil {
-						log.Printf("Error removing from shift_bins: %v", err)
+						log.Printf("Error removing from route_tasks: %v", err)
 						http.Error(w, "Failed to remove from driver's route", http.StatusInternalServerError)
 						return
 					}
@@ -1610,7 +1610,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 				// Keep on route, adjust waypoint order
 				log.Printf("[IN-PROGRESS EDIT] Inserting after current waypoint")
 				// Implementation: Re-order waypoints (complex, may need route optimization logic)
-				// For now, just log - full implementation would update waypoint_order in shift_bins
+				// For now, just log - full implementation would update waypoint_order in route_tasks
 
 			case "reoptimize_route":
 				// Trigger route re-optimization
@@ -1704,7 +1704,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 			if isUnassigning {
-				// Remove from shift_bins if previously assigned to a shift
+				// Remove from route_tasks if previously assigned to a shift
 				if moveRequest.AssignedShiftID != nil {
 					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 					log.Printf("⭕ [UNASSIGNMENT] Starting shift removal")
@@ -1715,7 +1715,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 					_, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
 						*moveRequest.AssignedShiftID, moveRequest.BinID)
 					if err == nil {
-						log.Printf("   ✅ Removed bin from shift_bins")
+						log.Printf("   ✅ Removed bin from route_tasks")
 						_, err = tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
 							now, *moveRequest.AssignedShiftID)
 						if err == nil {
@@ -1724,10 +1724,10 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 							log.Printf("   ⚠️  Failed to update shift count: %v", err)
 						}
 					} else {
-						log.Printf("   ❌ Failed to remove from shift_bins: %v", err)
+						log.Printf("   ❌ Failed to remove from route_tasks: %v", err)
 					}
 
-					log.Printf("[UNASSIGNMENT] Removed from shift_bins for shift: %s", *moveRequest.AssignedShiftID)
+					log.Printf("[UNASSIGNMENT] Removed from route_tasks for shift: %s", *moveRequest.AssignedShiftID)
 					assignmentChanged = true
 
 					// Track affected driver for WebSocket notification
@@ -2628,7 +2628,7 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 			log.Printf("Warning: Failed to update bin status: %v", err)
 		}
 
-		// If move was assigned to a shift, remove it from shift_bins
+		// If move was assigned to a shift, remove it from route_tasks
 		if moveRequest.AssignedShiftID != nil {
 			_, err = db.Exec(`
 				DELETE FROM route_tasks
@@ -2774,7 +2774,7 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		// If previously assigned to a shift, remove from shift_bins
+		// If previously assigned to a shift, remove from route_tasks
 		if moveRequest.AssignedShiftID != nil {
 			log.Printf("👤 [ASSIGN TO USER] Removing bin from shift %s", *moveRequest.AssignedShiftID)
 			_, err = tx.Exec(`
@@ -2782,7 +2782,7 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 				WHERE shift_id = $1 AND bin_id = $2
 			`, *moveRequest.AssignedShiftID, moveRequest.BinID)
 			if err != nil {
-				log.Printf("❌ [ASSIGN TO USER] Failed to remove from shift_bins: %v", err)
+				log.Printf("❌ [ASSIGN TO USER] Failed to remove from route_tasks: %v", err)
 				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
 				return
 			}
@@ -3113,7 +3113,7 @@ func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		// If assigned to a shift, remove from shift_bins
+		// If assigned to a shift, remove from route_tasks
 		if moveRequest.AssignedShiftID != nil {
 			log.Printf("🔄 [CLEAR ASSIGNMENT] Removing bin from shift %s", *moveRequest.AssignedShiftID)
 			_, err = tx.Exec(`
@@ -3121,7 +3121,7 @@ func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
 				WHERE shift_id = $1 AND bin_id = $2
 			`, *moveRequest.AssignedShiftID, moveRequest.BinID)
 			if err != nil {
-				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to remove from shift_bins: %v", err)
+				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to remove from route_tasks: %v", err)
 				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
 				return
 			}

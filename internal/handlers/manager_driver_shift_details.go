@@ -104,73 +104,22 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Now get the bins for this shift
-		binsQuery := `
-		SELECT
-			rb.id,
-			rb.shift_id,
-			rb.bin_id,
-			rb.sequence_order,
-			rb.is_completed,
-			rb.completed_at,
-			rb.updated_fill_percentage,
-			rb.created_at,
-			b.bin_number,
-			b.current_street,
-			b.city,
-			b.zip,
-			COALESCE(b.fill_percentage, 0) as fill_percentage,
-			b.latitude,
-			b.longitude
-		FROM shift_bins rb
-		INNER JOIN bins b ON rb.bin_id = b.id
-		WHERE rb.shift_id = $1
-		ORDER BY rb.sequence_order ASC
-	`
-
-		rows, err := db.Query(binsQuery, detail.ShiftID)
+		// Get tasks using the shared function (migrated from route_tasks to route_tasks)
+		bins, err := getShiftTasksWithDetails(db, detail.ShiftID)
 		if err != nil {
-			log.Printf("❌ Error fetching bins: %v", err)
+			log.Printf("❌ Error fetching tasks: %v", err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
-				"error":   "Failed to fetch bins",
+				"error":   "Failed to fetch shift tasks",
 			})
 			return
-		}
-		defer rows.Close()
-
-		var bins []models.ShiftBinWithDetails
-		for rows.Next() {
-			var bin models.ShiftBinWithDetails
-			err := rows.Scan(
-				&bin.ID,
-				&bin.ShiftID,
-				&bin.BinID,
-				&bin.SequenceOrder,
-				&bin.IsCompleted,
-				&bin.CompletedAt,
-				&bin.UpdatedFillPercentage,
-				&bin.CreatedAt,
-				&bin.BinNumber,
-				&bin.CurrentStreet,
-				&bin.City,
-				&bin.Zip,
-				&bin.FillPercentage,
-				&bin.Latitude,
-				&bin.Longitude,
-			)
-			if err != nil {
-				log.Printf("❌ Error scanning bin: %v", err)
-				continue
-			}
-			bins = append(bins, bin)
 		}
 
 		detail.Bins = bins
 
-		log.Printf("✅ Found shift with %d bins for driver: %s", len(bins), detail.DriverName)
+		log.Printf("✅ Found shift with %d tasks for driver: %s", len(bins), detail.DriverName)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{

@@ -2,7 +2,7 @@ package models
 
 import "encoding/json"
 
-// ShiftBin represents a bin assigned to an active shift (from shift_bins table)
+// ShiftBin represents a bin assigned to an active shift (from route_tasks table)
 // Note: This was formerly called RouteBin, but renamed for clarity
 type ShiftBin struct {
 	ID            int     `db:"id" json:"id"`

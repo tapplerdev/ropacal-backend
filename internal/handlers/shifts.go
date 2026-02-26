@@ -1526,7 +1526,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 		// Parse request body
 		var req struct {
-			TaskID                string     `json:"task_id"`                      // ID of shift_bins record (identifies specific waypoint)
+			TaskID                string     `json:"task_id"`                      // ID of route_tasks record (identifies specific waypoint)
 			BinID                 string  `json:"bin_id"`                            // DEPRECATED: Use task_id instead
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
 			PhotoUrl              *string `json:"photo_url,omitempty"`
@@ -4031,7 +4031,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		// DEPRECATED: This endpoint no longer creates tasks.
 		// Use POST /api/manager/shifts/with-tasks (CreateShiftWithTasks) instead.
-		// shift_bins table has been removed in favor of route_tasks.
+		// route_tasks table has been removed in favor of route_tasks.
 		log.Printf("⚠️  DEPRECATED: AssignRoute endpoint called. This endpoint is legacy and does not create tasks.")
 		log.Printf("⚠️  Please update clients to use POST /api/manager/shifts/with-tasks instead.")
 
