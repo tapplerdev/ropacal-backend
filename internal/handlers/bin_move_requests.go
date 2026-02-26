@@ -2430,27 +2430,24 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 			}
 		}
 
-		if (assignmentChanged || len(affectedDriverIDs) > 0) && wsHub != nil {
+		// Notify affected drivers via Centrifugo
+		if (assignmentChanged || len(affectedDriverIDs) > 0) && centrifugoClient != nil {
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			log.Printf("📡 [WEBSOCKET] Sending notifications...")
-
-			// Broadcast to affected drivers only (manager notification now handled via Centrifugo)
-			log.Printf("   ✅ Manager notification sent via Centrifugo")
+			log.Printf("📡 [CENTRIFUGO] Sending route update notifications...")
 
 			// Notify affected drivers
 			if len(affectedDriverIDs) > 0 {
-				log.Printf("   Broadcasting to %d affected driver(s):", len(affectedDriverIDs))
+				log.Printf("   Notifying %d affected driver(s):", len(affectedDriverIDs))
 
 				// Fetch bin number for the notification
 				var binNumber int
 				err := db.Get(&binNumber, `SELECT bin_number FROM bins WHERE id = $1`, updatedMove.BinID)
 				if err != nil {
-					log.Printf("Warning: Could not fetch bin number: %v", err)
+					log.Printf("⚠️  Warning: Could not fetch bin number: %v", err)
 					binNumber = 0 // Fallback
 				}
 
-				// Determine action type (removed/added)
-				// Recalculate isUnassigning for this scope
+				// Determine action type (removed/added/updated)
 				isUnassigning := moveRequest.AssignedShiftID != nil && updatedMove.AssignedShiftID == nil
 				actionType := "updated"
 				if isUnassigning {
@@ -2459,21 +2456,53 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 					actionType = "added"
 				}
 
+				// Get shift IDs for affected drivers
+				// Map: driverID -> shiftID
+				driverShifts := make(map[string]string)
+				for _, driverID := range affectedDriverIDs {
+					var shiftID string
+					err := db.Get(&shiftID, `
+						SELECT id FROM shifts
+						WHERE driver_id = $1 AND status IN ('active', 'ready')
+						ORDER BY scheduled_start DESC
+						LIMIT 1
+					`, driverID)
+					if err == nil {
+						driverShifts[driverID] = shiftID
+					} else {
+						log.Printf("⚠️  Warning: Could not find active shift for driver %s: %v", driverID, err)
+					}
+				}
+
+				// Send notification to each affected shift
 				for i, driverID := range affectedDriverIDs {
-					driverPayload := &websocket.Message{
-						Data: map[string]interface{}{
-							"type":            "route_updated",
-							"message":         fmt.Sprintf("%s has %s Bin #%d from your route", managerName, actionType, binNumber),
+					shiftID, hasShift := driverShifts[driverID]
+					if !hasShift {
+						log.Printf("   [%d/%d] Skipping driver %s (no active shift)", i+1, len(affectedDriverIDs), driverID)
+						continue
+					}
+
+					log.Printf("   [%d/%d] Notifying shift %s (driver: %s)", i+1, len(affectedDriverIDs), shiftID, driverID)
+
+					// Call NotifyDriverOfRouteUpdate with full notification details
+					notifyErr := NotifyDriverOfRouteUpdate(
+						db,
+						centrifugoClient,
+						shiftID,
+						"route_updated",
+						map[string]interface{}{
 							"move_request_id": id,
 							"manager_name":    managerName,
 							"action_type":     actionType,
 							"bin_number":      binNumber,
+							"message":         fmt.Sprintf("%s has %s Bin #%d from your route", managerName, actionType, binNumber),
 						},
+					)
+					if notifyErr != nil {
+						log.Printf("⚠️  Failed to send notification to shift %s: %v", shiftID, notifyErr)
+					} else {
+						log.Printf("   ✅ Notification sent to shift %s", shiftID)
 					}
-					log.Printf("   [%d/%d] Driver ID: %s", i+1, len(affectedDriverIDs), driverID)
-					log.Printf("   Payload: %+v", driverPayload)
-					wsHub.BroadcastToUser(driverID, driverPayload)
-					log.Printf("   ✅ Notification sent to driver %s", driverID)
 				}
 			} else {
 				log.Printf("   ⚠️  No affected drivers to notify")
@@ -2481,11 +2510,11 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		} else {
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			log.Printf("⚠️  [WEBSOCKET] Skipping notifications")
+			log.Printf("⚠️  [CENTRIFUGO] Skipping notifications")
 			if !assignmentChanged && len(affectedDriverIDs) == 0 {
 				log.Printf("   Reason: No assignment changes and no affected drivers")
-			} else if wsHub == nil {
-				log.Printf("   Reason: WebSocket hub not available")
+			} else if centrifugoClient == nil {
+				log.Printf("   Reason: Centrifugo client not available")
 			}
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		}
