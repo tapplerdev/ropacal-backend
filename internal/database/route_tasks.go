@@ -31,9 +31,15 @@ func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 // GetShiftTasksWithDeleted retrieves ALL tasks for a shift including deleted ones (for audit/history)
 func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 	var tasks []models.RouteTask
-	query := `SELECT * FROM route_tasks
-	          WHERE shift_id = $1
-	          ORDER BY is_deleted ASC, sequence_order ASC`
+	query := `
+		SELECT
+			rt.*,
+			COALESCE(rt.bin_number, b.bin_number::int) as bin_number
+		FROM route_tasks rt
+		LEFT JOIN bins b ON rt.bin_id = b.id
+		WHERE rt.shift_id = $1
+		ORDER BY rt.is_deleted ASC, rt.sequence_order ASC
+	`
 
 	err := db.Select(&tasks, query, shiftID)
 	if err != nil {
