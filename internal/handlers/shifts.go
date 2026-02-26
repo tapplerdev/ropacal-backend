@@ -5552,11 +5552,30 @@ func optimizeRouteWithMapbox(
 	log.Printf("📍 [MAPBOX OPTIMIZER] Start: Driver location (%.6f, %.6f)", driverLat, driverLon)
 	log.Printf("🏭 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
 
+	// Determine starting location:
+	// - If there are placements, driver MUST start at warehouse (to pick up new bins)
+	// - If only collections/moves, driver can start from current location
+	hasPlacementsOrMoves := false
+	for _, task := range tasks {
+		if task.TaskType == "placement" || task.TaskType == "pickup" {
+			hasPlacementsOrMoves = true
+			break
+		}
+	}
+
+	startLocation := driverStartLocation
+	if hasPlacementsOrMoves {
+		startLocation = warehouseLocation
+		log.Printf("🏭 [MAPBOX OPTIMIZER] Route includes placements/moves - driver MUST start at warehouse")
+	} else {
+		log.Printf("📍 [MAPBOX OPTIMIZER] Route has only collections - driver starts from current location")
+	}
+
 	// Define vehicle with capacity
 	req.Vehicles[0] = optimization.Vehicle{
 		ID:            shift.DriverID,
 		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
-		StartLocation: driverStartLocation,
+		StartLocation: startLocation,
 		EndLocation:   warehouseLocation,
 		Capacities: map[string]int{
 			"bins": capacity,
