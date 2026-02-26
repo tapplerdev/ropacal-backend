@@ -55,7 +55,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		}
 
 		// log.Printf("📍 [LocationProxy] Received location from user=%s channel=%s",
-			req.User, req.Channel)
+			// req.User, req.Channel)
 
 		// 1. Validate channel format: driver:location:{driverId}
 		parts := strings.Split(req.Channel, ":")
@@ -101,7 +101,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		}
 
 		// log.Printf("📍 [LocationProxy] Driver %s: lat=%.6f, lng=%.6f, accuracy=%.1fm",
-			driverID, locationData.Latitude, locationData.Longitude, locationData.Accuracy)
+			// driverID, locationData.Latitude, locationData.Longitude, locationData.Accuracy)
 
 		// 4. Save ORIGINAL GPS to Redis (non-blocking)
 		if redisClient != nil {
@@ -133,14 +133,14 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 				snappedLat = newLat
 				snappedLng = newLng
 				// log.Printf("🗺️  [LocationProxy] Snapped: (%.6f, %.6f) → (%.6f, %.6f)",
-					locationData.Latitude, locationData.Longitude, snappedLat, snappedLng)
+					// locationData.Latitude, locationData.Longitude, snappedLat, snappedLng)
 			} else {
 				// log.Printf("✅ [LocationProxy] GPS accuracy good (%.1fm) - no snapping needed",
-					locationData.Accuracy)
+					// locationData.Accuracy)
 			}
 		} else if locationData.Accuracy <= 15 {
 			// log.Printf("✅ [LocationProxy] GPS accuracy excellent (%.1fm) - skipping OSRM",
-				locationData.Accuracy)
+				// locationData.Accuracy)
 		}
 
 		// 6. Return MODIFIED data to Centrifugo (it will broadcast this instead of original)
