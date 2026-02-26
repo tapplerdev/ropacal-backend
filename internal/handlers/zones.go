@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -865,5 +866,172 @@ func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Clien
 			"incident_type": req.IncidentType,
 			"created_at":    time.Unix(now, 0).Format(time.RFC3339),
 		})
+	}
+}
+
+// UpdateNoGoZone allows managers to edit no-go zone details
+// PATCH /api/manager/no-go-zones/{id}
+//
+// Request body:
+//
+//	{
+//	  "name":              "1185 Campbell Ave - San Jose",  // optional
+//	  "center_latitude":   37.3375,                         // optional (from geocoding)
+//	  "center_longitude":  -121.9283,                       // optional (from geocoding)
+//	  "radius_meters":     300,                             // optional
+//	  "status":            "resolved",                      // optional: active, monitoring, resolved
+//	  "resolution_notes":  "Issue resolved by landlord"     // optional
+//	}
+func UpdateNoGoZone(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		zoneID := chi.URLParam(r, "id")
+		log.Printf("📥 REQUEST: PATCH /api/manager/no-go-zones/%s", zoneID)
+
+		// Get user from context (manager only)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		var req struct {
+			Name             *string  `json:"name"`
+			CenterLatitude   *float64 `json:"center_latitude"`
+			CenterLongitude  *float64 `json:"center_longitude"`
+			RadiusMeters     *int     `json:"radius_meters"`
+			Status           *string  `json:"status"`
+			ResolutionNotes  *string  `json:"resolution_notes"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ [UpdateNoGoZone] Invalid request body: %v", err)
+			utils.RespondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		// Validate status if provided
+		if req.Status != nil {
+			validStatuses := map[string]bool{"active": true, "monitoring": true, "resolved": true}
+			if !validStatuses[*req.Status] {
+				utils.RespondError(w, http.StatusBadRequest, "status must be 'active', 'monitoring', or 'resolved'")
+				return
+			}
+		}
+
+		// Validate radius if provided
+		if req.RadiusMeters != nil && (*req.RadiusMeters < 100 || *req.RadiusMeters > 2000) {
+			utils.RespondError(w, http.StatusBadRequest, "radius_meters must be between 100 and 2000")
+			return
+		}
+
+		// Fetch existing zone
+		var zone models.NoGoZone
+		if err := db.Get(&zone, "SELECT * FROM no_go_zones WHERE id = $1", zoneID); err != nil {
+			if err == sql.ErrNoRows {
+				log.Printf("❌ [UpdateNoGoZone] Zone not found: %s", zoneID)
+				utils.RespondError(w, http.StatusNotFound, "zone not found")
+				return
+			}
+			log.Printf("❌ [UpdateNoGoZone] Database error: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "failed to fetch zone")
+			return
+		}
+
+		now := time.Now().Unix()
+
+		// Build dynamic UPDATE query
+		updates := []string{}
+		args := []interface{}{}
+		argIndex := 1
+
+		if req.Name != nil {
+			updates = append(updates, fmt.Sprintf("name = $%d", argIndex))
+			args = append(args, *req.Name)
+			argIndex++
+		}
+
+		if req.CenterLatitude != nil {
+			updates = append(updates, fmt.Sprintf("center_latitude = $%d", argIndex))
+			args = append(args, *req.CenterLatitude)
+			argIndex++
+		}
+
+		if req.CenterLongitude != nil {
+			updates = append(updates, fmt.Sprintf("center_longitude = $%d", argIndex))
+			args = append(args, *req.CenterLongitude)
+			argIndex++
+		}
+
+		if req.RadiusMeters != nil {
+			updates = append(updates, fmt.Sprintf("radius_meters = $%d", argIndex))
+			args = append(args, *req.RadiusMeters)
+			argIndex++
+		}
+
+		if req.Status != nil {
+			updates = append(updates, fmt.Sprintf("status = $%d", argIndex))
+			args = append(args, *req.Status)
+			argIndex++
+
+			// If status changed to 'resolved', set resolved_by and resolved_at
+			if *req.Status == "resolved" && zone.Status != "resolved" {
+				updates = append(updates, fmt.Sprintf("resolved_by_user_id = $%d", argIndex))
+				args = append(args, userClaims.UserID)
+				argIndex++
+
+				updates = append(updates, fmt.Sprintf("resolved_at = $%d", argIndex))
+				args = append(args, now)
+				argIndex++
+			}
+		}
+
+		if req.ResolutionNotes != nil {
+			updates = append(updates, fmt.Sprintf("resolution_notes = $%d", argIndex))
+			args = append(args, *req.ResolutionNotes)
+			argIndex++
+		}
+
+		// Always update updated_at
+		updates = append(updates, fmt.Sprintf("updated_at = $%d", argIndex))
+		args = append(args, now)
+		argIndex++
+
+		// Add zone ID as the last argument
+		args = append(args, zoneID)
+
+		if len(updates) == 0 {
+			utils.RespondError(w, http.StatusBadRequest, "no fields to update")
+			return
+		}
+
+		// Execute update
+		query := fmt.Sprintf("UPDATE no_go_zones SET %s WHERE id = $%d", strings.Join(updates, ", "), argIndex)
+		if _, err := db.Exec(query, args...); err != nil {
+			log.Printf("❌ [UpdateNoGoZone] Update failed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "failed to update zone")
+			return
+		}
+
+		// Fetch updated zone
+		var updatedZone models.NoGoZone
+		if err := db.Get(&updatedZone, "SELECT * FROM no_go_zones WHERE id = $1", zoneID); err != nil {
+			log.Printf("❌ [UpdateNoGoZone] Failed to fetch updated zone: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "failed to fetch updated zone")
+			return
+		}
+
+		log.Printf("✅ [UpdateNoGoZone] Zone %s updated successfully", zoneID)
+
+		// Broadcast update via Centrifugo
+		if centrifugoClient != nil {
+			zoneResp := updatedZone.ToResponse()
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "zone_updated", zoneResp); pubErr != nil {
+				log.Printf("⚠️ [UpdateNoGoZone] Centrifugo publish failed: %v", pubErr)
+			}
+		}
+
+		// Return updated zone
+		response := updatedZone.ToResponse()
+		utils.RespondJSON(w, http.StatusOK, response)
 	}
 }

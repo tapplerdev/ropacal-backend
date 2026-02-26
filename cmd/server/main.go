@@ -379,9 +379,9 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Post("/users", handlers.CreateUser(db))
 
 			// No-Go Zone management (admin only)
-			// TODO: Implement admin zone management handlers
+			r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db, centrifugoClient))
+			// TODO: Implement remaining admin zone management handlers
 			// r.Post("/no-go-zones", handlers.CreateNoGoZone(db))
-			// r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db))
 			// r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
 
 			// Field observations management
