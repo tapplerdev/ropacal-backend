@@ -36,6 +36,8 @@ type ZoneIncident struct {
 	VerifiedByUserID   *string  `json:"verified_by_user_id" db:"verified_by_user_id"`
 	VerifiedAt         *int64   `json:"verified_at" db:"verified_at"`
 	Status             string   `json:"status" db:"status"` // open, resolved, investigating
+	Source             *string  `json:"source" db:"source"` // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
+	MoveRequestID      *string  `json:"move_request_id" db:"move_request_id"` // Links back to the move request that triggered this incident
 }
 
 type ZoneRiskOverride struct {
@@ -89,6 +91,8 @@ type ZoneIncidentResponse struct {
 	VerifiedByName     *string  `json:"verified_by_name,omitempty" db:"verified_by_name"`
 	VerifiedAtIso      *string  `json:"verified_at_iso,omitempty" db:"verified_at"`
 	Status             string   `json:"status" db:"status"`
+	Source             *string  `json:"source,omitempty" db:"source"` // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
+	MoveRequestID      *string  `json:"move_request_id,omitempty" db:"move_request_id"` // Links back to the move request that triggered this incident
 }
 
 type ZoneRiskOverrideResponse struct {
@@ -150,6 +154,8 @@ func (i *ZoneIncident) ToResponse() ZoneIncidentResponse {
 		IsFieldObservation: i.IsFieldObservation,
 		VerifiedByUserID:   i.VerifiedByUserID,
 		Status:             i.Status,
+		Source:             i.Source,
+		MoveRequestID:      i.MoveRequestID,
 	}
 
 	if i.VerifiedAt != nil {

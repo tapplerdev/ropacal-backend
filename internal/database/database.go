@@ -364,6 +364,40 @@ func Migrate(db *sqlx.DB) error {
 			END IF;
 		END $$`,
 
+		// Migration: Add source and move_request_id columns to zone_incidents table
+		// source tracks how the incident was created: 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
+		// move_request_id links incidents back to the move request that triggered them (for auto-created no-go zones)
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='source') THEN
+				ALTER TABLE zone_incidents ADD COLUMN source TEXT;
+			END IF;
+		END $$`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+						   WHERE table_name='zone_incidents' AND column_name='move_request_id') THEN
+				ALTER TABLE zone_incidents ADD COLUMN move_request_id TEXT;
+			END IF;
+		END $$`,
+
+		// Add foreign key constraint for move_request_id
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='zone_incidents_move_request_id_fkey'
+						   AND table_name='zone_incidents') THEN
+				ALTER TABLE zone_incidents ADD CONSTRAINT zone_incidents_move_request_id_fkey
+					FOREIGN KEY (move_request_id) REFERENCES bin_move_requests(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
+		// Create indexes for new zone_incidents columns
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_source ON zone_incidents(source)`,
+		`CREATE INDEX IF NOT EXISTS idx_zone_incidents_move_request_id ON zone_incidents(move_request_id)`,
+
 		// ALTER TABLE migrations for existing shift_history table
 		`DO $$
 		BEGIN

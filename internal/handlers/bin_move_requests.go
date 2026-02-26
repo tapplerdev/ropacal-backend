@@ -299,7 +299,8 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 					incidentType = "missing"
 				}
 			}
-			zoneName := fmt.Sprintf("No-go zone (move request - %s)", incidentType)
+			// Use bin address for zone name (matches manual zone creation UX)
+			zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
 			binIDCopy := req.BinID
 			_, zoneErr := createZoneAndIncident(
 				db, centrifugoClient,

@@ -59,6 +59,8 @@ type ZoneIncidentResponse struct {
 	VerifiedByUserID   *string  `json:"verified_by_user_id,omitempty"`
 	VerifiedAtISO      *string  `json:"verified_at_iso,omitempty"`
 	Status             string   `json:"status"`
+	Source             *string  `json:"source,omitempty"` // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
+	MoveRequestID      *string  `json:"move_request_id,omitempty"` // Links back to the move request that triggered this incident
 }
 
 // GetNoGoZones returns all no-go zones (optionally filtered by status)
@@ -246,6 +248,8 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 			VerifiedByUserID   *string  `db:"verified_by_user_id"`
 			VerifiedAt         *int64   `db:"verified_at"`
 			Status             string   `db:"status"`
+			Source             *string  `db:"source"`
+			MoveRequestID      *string  `db:"move_request_id"`
 		}
 
 		var query string
@@ -260,6 +264,7 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 				       zi.is_field_observation,
 				       zi.verified_by_user_id, zi.verified_at,
 				       zi.status,
+				       zi.source, zi.move_request_id,
 				       b.bin_number
 				FROM zone_incidents zi
 				LEFT JOIN bins b ON zi.bin_id = b.id
@@ -279,6 +284,7 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 				       zi.is_field_observation,
 				       zi.verified_by_user_id, zi.verified_at,
 				       zi.status,
+				       zi.source, zi.move_request_id,
 				       b.bin_number
 				FROM zone_incidents zi
 				LEFT JOIN bins b ON zi.bin_id = b.id
@@ -314,6 +320,8 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 				IsFieldObservation: incident.IsFieldObservation,
 				VerifiedByUserID:   incident.VerifiedByUserID,
 				Status:             incident.Status,
+				Source:             incident.Source,
+				MoveRequestID:      incident.MoveRequestID,
 			}
 
 			if incident.VerifiedAt != nil {
