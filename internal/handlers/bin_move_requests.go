@@ -1897,19 +1897,24 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 				} else if len(affectedTasks) > 0 {
 					log.Printf("🎯 [UPDATE-MOVE] Found %d route task(s) affected by change", len(affectedTasks))
 
-					// If move_type changed from relocation → store, remove dropoff tasks
+					// If move_type changed from relocation → store, soft delete dropoff tasks
 					if moveTypeChanged && req.MoveType != nil && *req.MoveType == "store" {
 						for _, task := range affectedTasks {
 							if task.TaskType == "dropoff" {
 								_, deleteErr := tx.Exec(`
-									DELETE FROM route_tasks
-									WHERE id = $1
-								`, task.TaskID)
+									UPDATE route_tasks
+									SET is_deleted = true,
+										deleted_at = $1,
+										deleted_by = $2,
+										deletion_reason = $3,
+										updated_at = $1
+									WHERE id = $4 AND is_deleted = false
+								`, now, managerUserID, "move_type_changed_to_store", task.TaskID)
 
 								if deleteErr != nil {
-									log.Printf("⚠️  [UPDATE-MOVE] Failed to delete dropoff task %s: %v", task.TaskID, deleteErr)
+									log.Printf("⚠️  [UPDATE-MOVE] Failed to soft delete dropoff task %s: %v", task.TaskID, deleteErr)
 								} else {
-									log.Printf("✅ [UPDATE-MOVE] Deleted dropoff task %s (move_type → store)", task.TaskID)
+									log.Printf("✅ [UPDATE-MOVE] Soft deleted dropoff task %s (move_type → store)", task.TaskID)
 								}
 							}
 						}
@@ -2641,15 +2646,20 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 				"message": "Move request cancelled by manager",
 			})
 
-		// Delete route_tasks associated with this move request
+		// Soft delete route_tasks associated with this move request (for audit trail)
 		_, err = db.Exec(`
-			DELETE FROM route_tasks
-			WHERE move_request_id = $1 AND shift_id = $2 AND is_completed = 0
-		`, id, *moveRequest.AssignedShiftID)
+			UPDATE route_tasks
+			SET is_deleted = true,
+				deleted_at = $1,
+				deleted_by = $2,
+				deletion_reason = $3,
+				updated_at = $1
+			WHERE move_request_id = $4 AND shift_id = $5 AND is_completed = 0 AND is_deleted = false
+		`, now, managerID, "move_request_cancelled", id, *moveRequest.AssignedShiftID)
 		if err != nil {
-			log.Printf("⚠️  Failed to delete route_tasks for cancelled move request: %v", err)
+			log.Printf("⚠️  Failed to soft delete route_tasks for cancelled move request: %v", err)
 		} else {
-			log.Printf("✅ Deleted route_tasks for cancelled move request %s from shift %s", id, *moveRequest.AssignedShiftID)
+			log.Printf("✅ Soft deleted route_tasks for cancelled move request %s from shift %s", id, *moveRequest.AssignedShiftID)
 		}
 
 		// Notify driver that route has been updated

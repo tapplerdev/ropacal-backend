@@ -302,6 +302,16 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 			return
 		}
 
+		// Get authenticated user
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			http.Error(w, "User not authenticated", http.StatusUnauthorized)
+			return
+		}
+		managerUserID := userClaims.UserID
+
+		now := time.Now().Unix()
+
 		// Delete location
 		_, err = db.Exec("DELETE FROM potential_locations WHERE id = $1", id)
 		if err != nil {
@@ -344,16 +354,21 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 				for _, affected := range affectedShifts {
 					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
 
-					// Delete the placement task (potential location no longer exists)
+					// Soft delete the placement task (potential location no longer exists)
 					_, deleteErr := db.Exec(`
-						DELETE FROM route_tasks
-						WHERE id = $1
-					`, affected.TaskID)
+						UPDATE route_tasks
+						SET is_deleted = true,
+							deleted_at = $1,
+							deleted_by = $2,
+							deletion_reason = $3,
+							updated_at = $1
+						WHERE id = $4 AND is_deleted = false
+					`, now, managerUserID, "potential_location_deleted", affected.TaskID)
 
 					if deleteErr != nil {
-						log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to delete placement task %s: %v", affected.TaskID, deleteErr)
+						log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to soft delete placement task %s: %v", affected.TaskID, deleteErr)
 					} else {
-						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Deleted placement task %s", affected.TaskID)
+						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Soft deleted placement task %s", affected.TaskID)
 					}
 				}
 
@@ -620,16 +635,21 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugo
 				for _, affected := range affectedShifts {
 					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
 
-					// Delete the placement task (potential location converted to bin)
+					// Soft delete the placement task (potential location converted to bin)
 					_, deleteErr := db.Exec(`
-						DELETE FROM route_tasks
-						WHERE id = $1
-					`, affected.TaskID)
+						UPDATE route_tasks
+						SET is_deleted = true,
+							deleted_at = $1,
+							deleted_by = $2,
+							deletion_reason = $3,
+							updated_at = $1
+						WHERE id = $4 AND is_deleted = false
+					`, now, userID, "potential_location_converted_to_bin", affected.TaskID)
 
 					if deleteErr != nil {
-						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to delete placement task %s: %v", affected.TaskID, deleteErr)
+						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to soft delete placement task %s: %v", affected.TaskID, deleteErr)
 					} else {
-						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Deleted placement task %s", affected.TaskID)
+						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Soft deleted placement task %s", affected.TaskID)
 					}
 				}
 

@@ -1443,18 +1443,24 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Remove incomplete move request tasks from route_tasks
-		deleteTasksQuery := `DELETE FROM route_tasks
-								 WHERE shift_id = $1
+		// Soft delete incomplete move request tasks from route_tasks (for audit trail)
+		deleteTasksQuery := `UPDATE route_tasks
+								 SET is_deleted = true,
+								 	 deleted_at = $1,
+								 	 deleted_by = $2,
+								 	 deletion_reason = $3,
+								 	 updated_at = $1
+								 WHERE shift_id = $4
 								 AND is_completed = 0
+								 AND is_deleted = false
 								 AND bin_id IN (
 									SELECT bin_id FROM bin_move_requests
 									WHERE assigned_shift_id IS NULL
 									AND status = 'pending'
 								 )`
-		_, err = db.Exec(deleteTasksQuery, shift.ID)
+		_, err = db.Exec(deleteTasksQuery, now, userClaims.UserID, "shift_ended_before_completion", shift.ID)
 		if err != nil {
-			log.Printf("⚠️ Error removing incomplete move bins from shift: %v", err)
+			log.Printf("⚠️ Error soft deleting incomplete move bins from shift: %v", err)
 			// Don't fail the request - continue
 		}
 
@@ -5917,13 +5923,22 @@ func optimizeRouteWithMapbox(
 	log.Printf("✅ [MAPBOX OPTIMIZER] Optimization complete: %d stops, %.2f meters, %d seconds",
 		len(route.Stops), route.TotalDistance, route.TotalDuration)
 
-	// Step 5: Delete old route_tasks and create new ones from Mapbox response
-	_, err = db.Exec(`DELETE FROM route_tasks WHERE shift_id = $1`, shiftID)
+	// Step 5: Soft delete old route_tasks and create new ones from Mapbox response (for audit trail)
+	now := time.Now().Unix()
+	_, err = db.Exec(`
+		UPDATE route_tasks
+		SET is_deleted = true,
+			deleted_at = $1,
+			deleted_by = $2,
+			deletion_reason = $3,
+			updated_at = $1
+		WHERE shift_id = $4 AND is_deleted = false
+	`, now, "system", "shift_reoptimized", shiftID)
 	if err != nil {
-		return fmt.Errorf("failed to delete old tasks: %w", err)
+		return fmt.Errorf("failed to soft delete old tasks: %w", err)
 	}
 
-	log.Printf("🗑️  [MAPBOX OPTIMIZER] Deleted old route tasks")
+	log.Printf("🗑️  [MAPBOX OPTIMIZER] Soft deleted old route tasks")
 
 	// Step 6: Create new route_tasks from optimized stops
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
