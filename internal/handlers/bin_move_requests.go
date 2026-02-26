@@ -836,76 +836,13 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		return fmt.Errorf("failed to update shift: %w", err)
 	}
 
-	// 4. Re-optimize remaining route (tasks after the inserted move) - only for active shifts
-	if isActiveShift {
-		var remainingBins []models.ShiftBinWithDetails
-		err = tx.Select(&remainingBins, `
-			SELECT rt.id, rt.shift_id, rt.bin_id, rt.sequence_order,
-			       COALESCE(b.bin_number, 0) as bin_number, COALESCE(b.current_street, rt.address, '') as current_street,
-			       COALESCE(b.city, '') as city, COALESCE(b.zip, '') as zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
-			       COALESCE(b.latitude, rt.latitude) as latitude, COALESCE(b.longitude, rt.longitude) as longitude
-			FROM route_tasks rt
-			LEFT JOIN bins b ON rt.bin_id = b.id
-			WHERE rt.shift_id = $1 AND rt.sequence_order > $2 AND rt.is_completed = 0
-			  AND rt.move_request_id IS NULL
-			ORDER BY rt.sequence_order ASC
-		`, activeShift.ID, insertSequenceOrder + binsAdded - 1)
-		if err != nil {
-			return fmt.Errorf("failed to fetch remaining bins: %w", err)
-		}
-
-		if len(remainingBins) > 0 {
-			// Convert to BinWithPriority for optimizer
-			binsToOptimize := make([]services.BinWithPriority, len(remainingBins))
-			for i, sb := range remainingBins {
-				binsToOptimize[i] = services.BinWithPriority{
-					ID:             sb.BinID,
-					Latitude:       sb.Latitude,
-					Longitude:      sb.Longitude,
-					FillPercentage: sb.FillPercentage,
-					CurrentStreet:  sb.CurrentStreet,
-				}
-			}
-
-			// Use dropoff location as start for re-optimization (where driver will be after completing move)
-			// For relocation moves, use the new location; for store moves, use original location
-			var startLat, startLng float64
-			if moveRequest.MoveType == "relocation" && moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
-				startLat = *moveRequest.NewLatitude
-				startLng = *moveRequest.NewLongitude
-			} else {
-				// Store move - driver returns to pickup location after storing bin
-				startLat = moveRequest.OriginalLatitude
-				startLng = moveRequest.OriginalLongitude
-			}
-
-			insertedMoveLocation := services.OptimizerLocation{
-				Latitude:  startLat,
-				Longitude: startLng,
-			}
-
-			// Re-optimize remaining bins
-			optimizer := services.NewRouteOptimizer()
-			optimizedBins := optimizer.OptimizeRoute(binsToOptimize, insertedMoveLocation)
-
-			log.Printf("   Re-optimizing %d remaining bins after inserted move", len(optimizedBins))
-
-			// Update sequence order for optimized bins
-			for i, optimizedBin := range optimizedBins {
-				newSequence := insertSequenceOrder + binsAdded + i // After both move waypoints
-				_, err = tx.Exec(`
-					UPDATE route_tasks
-					SET sequence_order = $1
-					WHERE shift_id = $2 AND bin_id = $3
-				`, newSequence, activeShift.ID, optimizedBin.ID)
-				if err != nil {
-					return fmt.Errorf("failed to update sequence order: %w", err)
-				}
-			}
-
-			log.Printf("   ✅ Route re-optimized successfully")
-		}
-	}
+	// NOTE: Manual re-optimization removed - Mapbox handles optimization better
+	// When move requests are added to active shifts, the route will be re-optimized:
+	// 1. Automatically when driver starts shift (optimizeRouteWithMapbox)
+	// 2. When driver skips tasks (ReoptimizeActiveShift)
+	// 3. When manager edits shift (UpdateShift → ReoptimizeActiveShift)
+	// 4. Manually via dashboard re-optimize button
+	// The old greedy algorithm here was inferior to Mapbox Optimization v2 API
 
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
