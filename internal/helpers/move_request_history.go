@@ -9,13 +9,20 @@ import (
 )
 
 // LogMoveRequestCreated logs when a move request is created
-func LogMoveRequestCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName string) error {
+func LogMoveRequestCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, moveType string, destinationAddress *string) error {
 	historyID := uuid.New().String()
+
+	// Build metadata JSON with move type and destination address
+	metadata := `{"move_type":"` + moveType + `"`
+	if destinationAddress != nil {
+		metadata += `,"destination_address":"` + *destinationAddress + `"`
+	}
+	metadata += `}`
 
 	query := `
 		INSERT INTO move_request_history (
-			id, move_request_id, action_type, actor_id, actor_name, actor_role, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			id, move_request_id, action_type, actor_id, actor_name, actor_role, metadata, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
 	_, err := db.Exec(query,
@@ -25,6 +32,7 @@ func LogMoveRequestCreated(db *sqlx.DB, moveRequestID string, actorID string, ac
 		actorID,
 		actorName,
 		"manager",
+		metadata,
 		time.Now().Unix(),
 	)
 
