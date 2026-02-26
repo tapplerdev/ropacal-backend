@@ -122,7 +122,7 @@ func LogMoveRequestReassigned(db *sqlx.DB, moveRequestID string, actorID string,
 }
 
 // LogMoveRequestUnassigned logs when a move request is unassigned
-func LogMoveRequestUnassigned(db *sqlx.DB, moveRequestID string, actorID string, actorName string,
+func LogMoveRequestUnassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName string,
 	previousAssignmentType *string, previousAssignedUserID *string, previousAssignedUserName *string, previousAssignedShiftID *string) error {
 
 	historyID := uuid.New().String()

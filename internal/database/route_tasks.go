@@ -33,8 +33,38 @@ func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, 
 	var tasks []models.RouteTask
 	query := `
 		SELECT
-			rt.*,
-			COALESCE(rt.bin_number, b.bin_number::int) as bin_number
+			rt.id,
+			rt.shift_id,
+			rt.sequence_order,
+			rt.task_type,
+			rt.latitude,
+			rt.longitude,
+			rt.address,
+			rt.bin_id,
+			COALESCE(rt.bin_number, b.bin_number) as bin_number,
+			rt.fill_percentage,
+			rt.potential_location_id,
+			rt.new_bin_number,
+			rt.placement_source,
+			rt.move_request_id,
+			rt.destination_latitude,
+			rt.destination_longitude,
+			rt.destination_address,
+			rt.move_type,
+			rt.warehouse_action,
+			rt.bins_to_load,
+			rt.route_id,
+			rt.is_completed,
+			rt.completed_at,
+			rt.skipped,
+			rt.updated_fill_percentage,
+			rt.is_deleted,
+			rt.deleted_at,
+			rt.deleted_by,
+			rt.deletion_reason,
+			rt.task_data,
+			rt.created_at,
+			rt.updated_at
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
 		WHERE rt.shift_id = $1

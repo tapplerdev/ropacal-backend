@@ -3028,6 +3028,69 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 		if len(req.RemoveTaskIDs) > 0 {
 			log.Printf("🗑️  Removing %d tasks...", len(req.RemoveTaskIDs))
 
+			// VALIDATION: Ensure pickup/dropoff pairs are removed together
+			// Build set of task IDs being removed for quick lookup
+			removeSet := make(map[string]bool)
+			decodedTaskIDs := make(map[string]string) // taskID -> actualTaskID mapping
+			for _, taskID := range req.RemoveTaskIDs {
+				// Decode base64 task ID to UUID
+				decodedBytes, decodeErr := base64.StdEncoding.DecodeString(taskID)
+				actualTaskID := taskID
+				if decodeErr == nil {
+					actualTaskID = string(decodedBytes)
+				}
+				removeSet[actualTaskID] = true
+				decodedTaskIDs[taskID] = actualTaskID
+			}
+
+			// Check each task being removed - if it's a pickup/dropoff, ensure paired task is also being removed
+			for taskID, actualTaskID := range decodedTaskIDs {
+				var task models.RouteTask
+				err = tx.Get(&task, `SELECT * FROM route_tasks WHERE id = $1 AND shift_id = $2`, actualTaskID, shiftID)
+				if err == sql.ErrNoRows {
+					continue
+				}
+				if err != nil {
+					log.Printf("❌ Error validating task %s: %v", taskID, err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to validate task removal")
+					return
+				}
+
+				// Only validate pickup/dropoff tasks
+				if (task.TaskType == models.TaskTypePickup || task.TaskType == models.TaskTypeDropoff) && task.MoveRequestID != nil {
+					// Find paired tasks (other tasks for the same move request in this shift)
+					var pairedTasks []models.RouteTask
+					err = tx.Select(&pairedTasks, `
+						SELECT * FROM route_tasks
+						WHERE shift_id = $1
+						  AND move_request_id = $2
+						  AND id != $3
+						  AND is_deleted = FALSE
+					`, shiftID, *task.MoveRequestID, actualTaskID)
+					if err != nil && err != sql.ErrNoRows {
+						log.Printf("❌ Error finding paired tasks: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to validate task removal")
+						return
+					}
+
+					// Check if any paired task is NOT being removed
+					for _, paired := range pairedTasks {
+						if !removeSet[paired.ID] {
+							log.Printf("⚠️  Cannot remove %s without also removing paired %s (move_request_id=%s)",
+								task.TaskType, paired.TaskType, *task.MoveRequestID)
+							utils.RespondError(w, http.StatusBadRequest,
+								fmt.Sprintf("Must remove both pickup and dropoff tasks together for move request. Please select both tasks and try again."))
+							return
+						}
+					}
+				}
+			}
+
+			log.Printf("✅ Validation passed - all pickup/dropoff pairs will be removed together")
+
+			// Track which move requests have been logged (to avoid duplicate history entries)
+			loggedMoveRequests := make(map[string]bool)
+
 			for _, taskID := range req.RemoveTaskIDs {
 				// Decode base64 task ID to UUID
 				decodedBytes, decodeErr := base64.StdEncoding.DecodeString(taskID)
@@ -3076,7 +3139,31 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 				// Unassign resources based on task type
 				switch task.TaskType {
 				case models.TaskTypePickup, models.TaskTypeDropoff:
-					if task.MoveRequestID != nil {
+					if task.MoveRequestID != nil && !loggedMoveRequests[*task.MoveRequestID] {
+						// Get move request assignment details BEFORE unassigning (for history logging)
+						var moveReq struct {
+							AssignmentType *string `db:"assignment_type"`
+							AssignedUserID *string `db:"assigned_user_id"`
+							AssignedShiftID *string `db:"assigned_shift_id"`
+						}
+						err = tx.Get(&moveReq, `SELECT assignment_type, assigned_user_id, assigned_shift_id FROM bin_move_requests WHERE id = $1`, *task.MoveRequestID)
+						if err != nil {
+							log.Printf("❌ Error fetching move request for history: %v", err)
+							utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch move request")
+							return
+						}
+
+						// Get assigned user name if exists (for history log)
+						var assignedUserName *string
+						if moveReq.AssignedUserID != nil {
+							var userName string
+							err = tx.Get(&userName, `SELECT name FROM users WHERE id = $1`, *moveReq.AssignedUserID)
+							if err == nil {
+								assignedUserName = &userName
+							}
+						}
+
+						// Unassign the move request
 						_, err = tx.Exec(`
 							UPDATE bin_move_requests
 							SET assigned_shift_id = NULL,
@@ -3091,6 +3178,27 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 							return
 						}
 						log.Printf("✅ Unassigned move request %s (status → pending)", *task.MoveRequestID)
+
+						// Log history entry
+						err = helpers.LogMoveRequestUnassigned(
+							tx,
+							*task.MoveRequestID,
+							userClaims.UserID,
+							userClaims.Email,
+							moveReq.AssignmentType,
+							moveReq.AssignedUserID,
+							assignedUserName,
+							moveReq.AssignedShiftID,
+						)
+						if err != nil {
+							log.Printf("⚠️  Failed to log move request history: %v", err)
+							// Don't fail the entire operation, just log the error
+						} else {
+							log.Printf("📝 Logged unassignment in move request history")
+						}
+
+						// Mark as logged to avoid duplicate entries
+						loggedMoveRequests[*task.MoveRequestID] = true
 					}
 				case models.TaskTypePlacement:
 					if task.PotentialLocationID != nil {
