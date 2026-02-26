@@ -2608,26 +2608,29 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 		}
 
-		// Increment shift completed_bins counter (only for bin tasks, not warehouse stops)
-		binTasksSkipped := tasksSkipped
-		if task.TaskType == "warehouse_stop" {
-			binTasksSkipped = 0 // Warehouse stops don't count toward completed_bins
-			log.Printf("⏭️  Main task is warehouse_stop - not counting toward completed_bins")
-		}
+		// FIX: Do NOT increment completed_bins for skipped tasks!
+		// Skipped tasks should not count toward completion percentage.
+		// Only tasks that are actually completed (not skipped) should increment completed_bins.
+		// The mobile app now filters remainingTasks by is_completed=0, and counts
+		// actual completion by is_completed=1 (not including skipped tasks with is_completed=1 + skipped=true).
+		//
+		// Previous behavior: Skipped tasks counted toward completed_bins
+		// New behavior: Only truly completed tasks count toward completed_bins
+		// This prevents premature shift auto-end when drivers skip remaining tasks.
+		log.Printf("⏭️  Skipped %d task(s) - NOT incrementing completed_bins (skipped tasks don't count as completed)", tasksSkipped)
 
-		log.Printf("🔄 Updating shift completed_bins (skipping %d tasks, %d count toward completed_bins)", tasksSkipped, binTasksSkipped)
+		// Only update the shift's updated_at timestamp
 		_, err = tx.Exec(`
 			UPDATE shifts
-			SET completed_bins = completed_bins + $1,
-				updated_at = $2
-			WHERE id = $3
-		`, binTasksSkipped, now, shift.ID)
+			SET updated_at = $1
+			WHERE id = $2
+		`, now, shift.ID)
 		if err != nil {
 			log.Printf("❌ Error updating shift: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
 			return
 		}
-		log.Printf("✅ Shift updated for skip")
+		log.Printf("✅ Shift updated for skip (completed_bins unchanged)")
 
 		// Commit transaction
 		if err = tx.Commit(); err != nil {
