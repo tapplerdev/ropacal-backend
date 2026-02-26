@@ -62,14 +62,38 @@ func (m *MapboxOptimizer) OptimizeRoute(req *RouteRequest) (*RouteResponse, erro
 	log.Printf("✅ Solution received, parsing...")
 
 	// Debug: Log the full solution from Mapbox
-	solutionJSON, _ := json.MarshalIndent(solution, "", "  ")
+	solutionJSON, marshalErr := json.MarshalIndent(solution, "", "  ")
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("📥 MAPBOX RESPONSE (Solution JSON):")
-	log.Printf("%s", string(solutionJSON))
+	if marshalErr != nil {
+		log.Printf("❌ Failed to marshal solution: %v", marshalErr)
+		log.Printf("Raw solution map: %+v", solution)
+	} else {
+		log.Printf("%s", string(solutionJSON))
+	}
+
+	// Check for error/message fields in solution
+	if code, ok := solution["code"].(string); ok {
+		log.Printf("⚠️  [MAPBOX] Solution contains error code: %s", code)
+	}
+	if msg, ok := solution["message"].(string); ok {
+		log.Printf("⚠️  [MAPBOX] Solution contains message: %s", msg)
+	}
+	if status, ok := solution["status"].(string); ok {
+		log.Printf("📋 [MAPBOX] Solution status: %s", status)
+	}
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	response := m.parseMapboxSolution(solution, req)
 	response.OptimizerUsed = "mapbox"
+
+	log.Printf("✅ [MAPBOX OPTIMIZER] Received response from Mapbox")
+	log.Printf("📊 [MAPBOX OPTIMIZER] Response contains %d routes", len(response.Routes))
+
+	if len(response.Routes) == 0 {
+		log.Printf("❌ [MAPBOX OPTIMIZER] No routes in response! Dropped tasks: %v", response.DroppedTasks)
+		return nil, fmt.Errorf("Mapbox returned no routes")
+	}
 
 	log.Printf("✅ Optimization complete: %d routes, %.0fm total", len(response.Routes), response.TotalDistance)
 
