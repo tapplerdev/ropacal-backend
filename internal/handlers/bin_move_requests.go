@@ -119,6 +119,46 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			}
 		}
 
+		// Auto-fill warehouse destination for "store" moves
+		if req.MoveType == "store" {
+			log.Printf("🏭 [STORE MOVE] Auto-filling warehouse destination for move request")
+
+			// Fetch warehouse location from config (no fallback - must be configured)
+			var warehouseJSON []byte
+			err := db.QueryRow(`
+				SELECT value
+				FROM config
+				WHERE key = 'warehouse_location'
+			`).Scan(&warehouseJSON)
+
+			if err == sql.ErrNoRows {
+				log.Printf("❌ [STORE MOVE] Warehouse location not configured in database")
+				http.Error(w, "Warehouse location must be configured before creating store moves. Please contact your administrator.", http.StatusPreconditionFailed)
+				return
+			}
+
+			if err != nil {
+				log.Printf("❌ [STORE MOVE] Failed to fetch warehouse location: %v", err)
+				http.Error(w, "Failed to fetch warehouse location", http.StatusInternalServerError)
+				return
+			}
+
+			var warehouse models.WarehouseLocation
+			if err := json.Unmarshal(warehouseJSON, &warehouse); err != nil {
+				log.Printf("❌ [STORE MOVE] Failed to parse warehouse location: %v", err)
+				http.Error(w, "Failed to parse warehouse location", http.StatusInternalServerError)
+				return
+			}
+
+			// Auto-set destination to warehouse
+			req.NewLatitude = &warehouse.Latitude
+			req.NewLongitude = &warehouse.Longitude
+			newAddress = &warehouse.Address
+
+			log.Printf("✅ [STORE MOVE] Warehouse destination set: %s (%.6f, %.6f)",
+				warehouse.Address, warehouse.Latitude, warehouse.Longitude)
+		}
+
 		// Get requesting user ID from context (set by Auth middleware)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -300,14 +340,14 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 		// --- End no-go zone creation logic ---
 
-		// Log history: move request created
+		// Log history: move request created (with enhanced metadata)
 		var userName string
 		err = db.Get(&userName, `SELECT name FROM users WHERE id = $1`, userID)
 		if err != nil {
 			log.Printf("Warning: Failed to fetch user name for history: %v", err)
 			userName = "Unknown User"
 		}
-		err = helpers.LogMoveRequestCreated(db, id, userID, userName)
+		err = helpers.LogMoveRequestCreated(db, id, userID, userName, req.MoveType, newAddress)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request creation: %v", err)
 			// Don't fail the request, just log the warning
@@ -933,39 +973,51 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
+		log.Printf("🔍 [GET_MOVE_REQUEST] Fetching move request ID: %s", id)
+
 		if id == "" {
+			log.Printf("❌ [GET_MOVE_REQUEST] Missing move request ID")
 			http.Error(w, "Missing move request ID", http.StatusBadRequest)
 			return
 		}
 
 		// Fetch move request
+		log.Printf("   [STEP 1] Querying bin_move_requests table...")
 		var moveRequest models.BinMoveRequest
 		err := db.Get(&moveRequest, `
 			SELECT * FROM bin_move_requests WHERE id = $1
 		`, id)
 		if err != nil {
 			if err == sql.ErrNoRows {
+				log.Printf("❌ [GET_MOVE_REQUEST] Move request not found in database: %s", id)
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
 			}
-			log.Printf("Error fetching move request: %v", err)
+			log.Printf("❌ [GET_MOVE_REQUEST] Database error fetching move request: %v", err)
 			http.Error(w, "Failed to fetch move request", http.StatusInternalServerError)
 			return
 		}
+		log.Printf("✅ [STEP 1] Move request found - BinID: %s, Status: %s, MoveType: %s",
+			moveRequest.BinID, moveRequest.Status, moveRequest.MoveType)
 
 		// Build response
+		log.Printf("   [STEP 2] Building response from move request...")
 		response := moveRequest.ToBinMoveRequestResponse()
+		log.Printf("✅ [STEP 2] Response built successfully")
 
-	// Override urgency with smart calculation (resolved for completed/cancelled)
-	response.Urgency = calculateUrgency(moveRequest.Status, moveRequest.ScheduledDate)
+		// Override urgency with smart calculation (resolved for completed/cancelled)
+		response.Urgency = calculateUrgency(moveRequest.Status, moveRequest.ScheduledDate)
 
 		// Fetch associated bin details
+		log.Printf("   [STEP 3] Fetching bin details for BinID: %s", moveRequest.BinID)
 		var bin models.Bin
 		err = db.Get(&bin, `
 			SELECT id, bin_number, current_street, city, zip, latitude, longitude, status
 			FROM bins WHERE id = $1
 		`, moveRequest.BinID)
 		if err == nil {
+			log.Printf("✅ [STEP 3] Bin found - Number: %d, Address: %s, %s %s",
+				bin.BinNumber, bin.CurrentStreet, bin.City, bin.Zip)
 			binResp := bin.ToBinResponse()
 			response.Bin = &binResp
 			// Flatten bin fields for easy table display
@@ -973,10 +1025,14 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 			response.CurrentStreet = bin.CurrentStreet
 			response.City = bin.City
 			response.Zip = bin.Zip
+		} else {
+			log.Printf("⚠️  [STEP 3] Could not fetch bin: %v", err)
 		}
 
 		// Parse new address into separate fields if available
+		log.Printf("   [STEP 4] Parsing new address...")
 		if moveRequest.NewAddress != nil {
+			log.Printf("   New address: %s", *moveRequest.NewAddress)
 			// Split "street, city zip" format
 			parts := strings.Split(*moveRequest.NewAddress, ", ")
 			if len(parts) >= 2 {
@@ -989,23 +1045,34 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 					response.NewStreet = &street
 					response.NewCity = &city
 					response.NewZip = &zip
+					log.Printf("✅ [STEP 4] Address parsed - Street: %s, City: %s, Zip: %s", street, city, zip)
 				}
 			}
+		} else {
+			log.Printf("   No new address to parse")
 		}
 
 		// Fetch assigned driver name if assigned to a shift
+		log.Printf("   [STEP 5] Checking for assigned driver...")
 		if moveRequest.AssignedShiftID != nil {
+			log.Printf("   AssignedShiftID: %s, querying driver name...", *moveRequest.AssignedShiftID)
 			var driverName string
 			err = db.Get(&driverName, `
-				SELECT u.full_name FROM shifts s
+				SELECT u.name FROM shifts s
 				JOIN users u ON s.driver_id = u.id
 				WHERE s.id = $1
 			`, *moveRequest.AssignedShiftID)
 			if err == nil {
+				log.Printf("✅ [STEP 5] Driver name found: %s", driverName)
 				response.AssignedDriverName = &driverName
+			} else {
+				log.Printf("⚠️  [STEP 5] Could not fetch driver name: %v", err)
 			}
+		} else {
+			log.Printf("   No assigned shift")
 		}
 
+		log.Printf("🎉 [GET_MOVE_REQUEST] Successfully prepared response for move request %s", id)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	}

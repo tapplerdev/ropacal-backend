@@ -36,3 +36,17 @@ firebase-service-account.json
 # MacOS
 .DS_Store
 bin/
+
+# Backup files
+*.backup
+*.bak
+
+# Local database
+binly.db
+
+# Compiled binaries
+/ropacal-backend
+/bin/server
+/out
+/server
+/main
