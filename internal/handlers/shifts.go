@@ -3260,12 +3260,26 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 							task.Address = moveReq.Address
 						}
 					} else { // dropoff
+						// For relocation/redeployment moves, use destination from move request
 						if moveReq.DestLatitude != nil && moveReq.DestLongitude != nil {
 							task.Latitude = *moveReq.DestLatitude
 							task.Longitude = *moveReq.DestLongitude
-						}
-						if moveReq.DestAddress != nil {
-							task.DestinationAddress = moveReq.DestAddress
+							if moveReq.DestAddress != nil {
+								task.DestinationAddress = moveReq.DestAddress
+							}
+						} else {
+							// For "store" moves, destination is warehouse
+							if shift.WarehouseLatitude != nil && shift.WarehouseLongitude != nil {
+								task.Latitude = *shift.WarehouseLatitude
+								task.Longitude = *shift.WarehouseLongitude
+								if shift.WarehouseAddress != nil {
+									task.DestinationAddress = shift.WarehouseAddress
+								}
+								log.Printf("✅ [SHIFT UPDATE] Store move dropoff: using warehouse coordinates (%.6f, %.6f)", task.Latitude, task.Longitude)
+							} else {
+								log.Printf("⚠️  [SHIFT UPDATE] Warehouse coordinates not set for store move, skipping dropoff task for move request %s", *addReq.MoveRequestID)
+								continue // Skip this task entirely
+							}
 						}
 					}
 
@@ -5552,30 +5566,11 @@ func optimizeRouteWithMapbox(
 	log.Printf("📍 [MAPBOX OPTIMIZER] Start: Driver location (%.6f, %.6f)", driverLat, driverLon)
 	log.Printf("🏭 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
 
-	// Determine starting location:
-	// - If there are placements, driver MUST start at warehouse (to pick up new bins)
-	// - If only collections/moves, driver can start from current location
-	hasPlacementsOrMoves := false
-	for _, task := range tasks {
-		if task.TaskType == "placement" || task.TaskType == "pickup" {
-			hasPlacementsOrMoves = true
-			break
-		}
-	}
-
-	startLocation := driverStartLocation
-	if hasPlacementsOrMoves {
-		startLocation = warehouseLocation
-		log.Printf("🏭 [MAPBOX OPTIMIZER] Route includes placements/moves - driver MUST start at warehouse")
-	} else {
-		log.Printf("📍 [MAPBOX OPTIMIZER] Route has only collections - driver starts from current location")
-	}
-
 	// Define vehicle with capacity
 	req.Vehicles[0] = optimization.Vehicle{
 		ID:            shift.DriverID,
 		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
-		StartLocation: startLocation,
+		StartLocation: driverStartLocation,
 		EndLocation:   warehouseLocation,
 		Capacities: map[string]int{
 			"bins": capacity,
