@@ -571,6 +571,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 			UpdatedFillPct      *int     `db:"updated_fill_percentage" json:"updated_fill_percentage"`
 			BinStreet           *string  `db:"bin_street"            json:"bin_street"`
 			BinCity             *string  `db:"bin_city"              json:"bin_city"`
+			PhotoURL            *string  `db:"photo_url"             json:"photo_url"`
 			// Placement fields
 			PotentialLocationID *string  `db:"potential_location_id" json:"potential_location_id"`
 			NewBinNumber        *int     `db:"new_bin_number"        json:"new_bin_number"`
@@ -603,6 +604,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				rt.updated_fill_percentage,
 				b.current_street    AS bin_street,
 				b.city              AS bin_city,
+				bc.photo_url,
 				rt.potential_location_id,
 				rt.new_bin_number,
 				pl.address          AS placement_address,
@@ -615,6 +617,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				rt.bins_to_load
 			FROM route_tasks rt
 			LEFT JOIN bins b   ON b.id  = rt.bin_id
+			LEFT JOIN bin_checks bc ON bc.bin_id = rt.bin_id AND bc.shift_id = rt.shift_id
 			LEFT JOIN potential_locations pl ON pl.id = rt.potential_location_id
 			LEFT JOIN bins cb  ON cb.id = pl.converted_to_bin_id
 			LEFT JOIN bin_move_requests bmr ON bmr.id = rt.move_request_id
