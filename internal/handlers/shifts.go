@@ -2207,8 +2207,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		Address:   *shift.WarehouseAddress,
 	}
 
-	// Step 4: Get driver's current location (use warehouse as fallback)
-	driverStartLocation := warehouseLocation
+	// Step 4: Get driver's current location (NO warehouse fallback - let mobile app use device GPS)
+	// driverStartLocation := warehouseLocation  // COMMENTED OUT: Let Flutter navigation use actual device GPS
+	var driverStartLocation optimization.Location
 
 	// Try to get driver's last GPS location
 	var lastLocation struct {
@@ -2234,7 +2235,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		log.Printf("📍 [REOPTIMIZE] Using driver's current location: (%.6f, %.6f)",
 			*lastLocation.Latitude, *lastLocation.Longitude)
 	} else {
-		log.Printf("⚠️  [REOPTIMIZE] No driver location found, using warehouse")
+		// Use warehouse as fallback but log clearly
+		log.Printf("⚠️  [REOPTIMIZE] No driver location in database, using warehouse (mobile app should use device GPS for navigation)")
+		driverStartLocation = warehouseLocation
 	}
 
 	// Step 5: Build optimization request
