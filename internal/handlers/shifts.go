@@ -774,6 +774,39 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 		ready = true
 		message = "Ready to start shift"
 
+		// Check if shift has tasks requiring warehouse bins (placements or redeployments)
+		needsWarehouseBins := false
+		placementCount := 0
+		redeploymentCount := 0
+
+		var tasks []struct {
+			TaskType string  `db:"task_type"`
+			MoveType *string `db:"move_type"`
+		}
+
+		tasksQuery := `
+			SELECT rt.task_type, mr.move_type
+			FROM route_tasks rt
+			LEFT JOIN bin_move_requests mr ON rt.move_request_id = mr.id
+			WHERE rt.shift_id = $1 AND rt.is_deleted = false
+		`
+
+		if err := db.Select(&tasks, tasksQuery, shift.ID); err == nil {
+			for _, task := range tasks {
+				if task.TaskType == "placement" {
+					needsWarehouseBins = true
+					placementCount++
+				} else if task.TaskType == "pickup" && task.MoveType != nil && *task.MoveType == "redeployment" {
+					needsWarehouseBins = true
+					redeploymentCount++
+				}
+			}
+		}
+
+		if needsWarehouseBins {
+			log.Printf("🏭 Shift has %d placements + %d redeployments - will need bins prompt", placementCount, redeploymentCount)
+		}
+
 		log.Printf("✅ Preflight checks passed:")
 		log.Printf("   GPS Quality: %s (%.1fm)", checks["gps_quality"], accuracy)
 		log.Printf("   Location Cached: %v", checks["location_cached"])
@@ -781,11 +814,14 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 		log.Printf("   Estimated Start Time: < 5 seconds")
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success":               true,
-			"ready":                 ready,
-			"checks":                checks,
-			"message":               message,
-			"estimated_start_time":  "< 5 seconds",
+			"success":                     true,
+			"ready":                       ready,
+			"checks":                      checks,
+			"message":                     message,
+			"estimated_start_time":        "< 5 seconds",
+			"needs_warehouse_bins_prompt": needsWarehouseBins,
+			"placement_count":             placementCount,
+			"redeployment_count":          redeploymentCount,
 			"location": map[string]float64{
 				"latitude":  driverLocation.Latitude,
 				"longitude": driverLocation.Longitude,
@@ -807,6 +843,17 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 		}
 
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
+
+		// Parse optional request body for bins_preloaded flag
+		var req struct {
+			BinsPreloaded bool `json:"bins_preloaded"`
+		}
+		// If body parsing fails or field is missing, default to false (bins NOT preloaded)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("   ℹ️  No request body or parse error (using default): %v", err)
+			req.BinsPreloaded = false // Default: bins NOT preloaded
+		}
+		log.Printf("   🚚 Bins preloaded flag: %v", req.BinsPreloaded)
 
 		// Check if driver has any existing active or paused shift
 		var existingShift models.Shift
@@ -985,6 +1032,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 			*shift.WarehouseLatitude,
 			*shift.WarehouseLongitude,
 			warehouseAddr,
+			req.BinsPreloaded,
 		)
 
 		if err != nil {
@@ -5744,8 +5792,10 @@ func optimizeRouteWithMapbox(
 	driverLat, driverLon float64,
 	warehouseLat, warehouseLon float64,
 	warehouseAddr string,
+	binsPreloaded bool,
 ) error {
 	log.Printf("🚀 [MAPBOX OPTIMIZER] Starting Mapbox v2 route optimization")
+	log.Printf("   🚚 Bins preloaded: %v", binsPreloaded)
 
 	// Step 1: Fetch shift details
 	var shift struct {
@@ -5818,8 +5868,8 @@ func optimizeRouteWithMapbox(
 		WarehouseStops: make([]optimization.WarehouseStop, 0),
 	}
 
-	// Define driver's current location (where route starts)
-	driverStartLocation := optimization.Location{
+	// Define driver's current GPS location
+	driverGPSLocation := optimization.Location{
 		ID:        "driver-current",
 		Name:      "Driver Current Location",
 		Latitude:  driverLat,
@@ -5827,7 +5877,7 @@ func optimizeRouteWithMapbox(
 		Address:   "Current GPS Position",
 	}
 
-	// Define warehouse location (where route ends)
+	// Define warehouse location
 	warehouseLocation := optimization.Location{
 		ID:        "warehouse",
 		Name:      "Warehouse",
@@ -5836,14 +5886,26 @@ func optimizeRouteWithMapbox(
 		Address:   warehouseAddr,
 	}
 
-	log.Printf("📍 [MAPBOX OPTIMIZER] Start: Driver location (%.6f, %.6f)", driverLat, driverLon)
-	log.Printf("🏭 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
+	// Smart Start Location Logic:
+	// If bins are preloaded, pretend driver is starting FROM warehouse (skip warehouse pickup)
+	// If bins are NOT preloaded, start from driver's current GPS (will route to warehouse first)
+	var vehicleStartLocation optimization.Location
+	if binsPreloaded {
+		vehicleStartLocation = warehouseLocation
+		log.Printf("🚚 [MAPBOX OPTIMIZER] Bins preloaded → Start from WAREHOUSE (%.6f, %.6f)", warehouseLat, warehouseLon)
+		log.Printf("   📍 Driver actual GPS: (%.6f, %.6f) (for reference only)", driverLat, driverLon)
+	} else {
+		vehicleStartLocation = driverGPSLocation
+		log.Printf("🚚 [MAPBOX OPTIMIZER] Bins NOT preloaded → Start from DRIVER GPS (%.6f, %.6f)", driverLat, driverLon)
+		log.Printf("   🏭 Will route to warehouse first: (%.6f, %.6f)", warehouseLat, warehouseLon)
+	}
+	log.Printf("🏁 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
 
 	// Define vehicle with capacity
 	req.Vehicles[0] = optimization.Vehicle{
 		ID:            shift.DriverID,
 		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
-		StartLocation: driverStartLocation,
+		StartLocation: vehicleStartLocation,
 		EndLocation:   warehouseLocation,
 		Capacities: map[string]int{
 			"bins": capacity,
