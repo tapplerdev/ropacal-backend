@@ -17,6 +17,7 @@ type ShiftBin struct {
 }
 
 // ShiftBinWithDetails extends ShiftBin with bin details for API responses
+// MIGRATED: Now uses RouteTask field names (address, task_type, destination_address)
 type ShiftBinWithDetails struct {
 	ID                    string   `db:"id" json:"id"`
 	ShiftID               string   `db:"shift_id" json:"shift_id"`
@@ -27,16 +28,13 @@ type ShiftBinWithDetails struct {
 	UpdatedFillPercentage *int     `db:"updated_fill_percentage" json:"updated_fill_percentage"`
 	CreatedAt             int64    `db:"created_at" json:"created_at"`
 	BinNumber             int      `db:"bin_number" json:"bin_number"`
-	CurrentStreet         string   `db:"current_street" json:"current_street"`
-	City                  string   `db:"city" json:"city"`
-	Zip                   string   `db:"zip" json:"zip"`
+	Address               string   `db:"address" json:"address"` // RENAMED from CurrentStreet
 	FillPercentage        int      `db:"fill_percentage" json:"fill_percentage"`
 	Latitude              float64  `db:"latitude" json:"latitude"`
 	Longitude             float64  `db:"longitude" json:"longitude"`
-	StopType              string   `db:"stop_type" json:"stop_type"`
+	TaskType              string   `db:"task_type" json:"task_type"` // RENAMED from StopType
 	MoveRequestID         *string  `db:"move_request_id" json:"move_request_id"`
-	OriginalAddress       *string  `db:"original_address" json:"original_address"`
-	NewAddress            *string  `db:"new_address" json:"new_address"`
+	DestinationAddress    *string  `db:"destination_address" json:"destination_address"` // RENAMED from NewAddress
 	MoveType              *string  `db:"move_type" json:"move_type"`
 
 	// Placement task fields
