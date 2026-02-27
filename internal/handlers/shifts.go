@@ -2163,11 +2163,11 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		return fmt.Errorf("shift is not active (status: %s)", shift.Status)
 	}
 
-	// Step 2: Get remaining (uncompleted) route_tasks
+	// Step 2: Get remaining (uncompleted) route_tasks (exclude soft-deleted tasks)
 	var tasks []models.RouteTask
 	err = db.Select(&tasks, `
 		SELECT * FROM route_tasks
-		WHERE shift_id = $1 AND is_completed = 0
+		WHERE shift_id = $1 AND is_completed = 0 AND is_deleted = 0
 		ORDER BY sequence_order ASC
 	`, shiftID)
 	if err != nil {
@@ -3916,7 +3916,7 @@ func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWit
 			rt.task_data
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
-		WHERE rt.shift_id = $1
+		WHERE rt.shift_id = $1 AND rt.is_deleted = 0
 		ORDER BY rt.sequence_order ASC`
 
 	var tasks []models.ShiftBinWithDetails
