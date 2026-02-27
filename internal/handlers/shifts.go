@@ -5778,6 +5778,20 @@ func optimizeRouteWithMapbox(
 		log.Printf("   - %s: %d", taskType, count)
 	}
 
+	// 🔍 DEBUG: Log ORIGINAL task sequence from database (BEFORE Mapbox optimization)
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("🗂️  [DEBUG] ORIGINAL TASK SEQUENCE (from database BEFORE optimization):")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	for i, task := range tasks {
+		addr := "N/A"
+		if task.Address != nil {
+			addr = *task.Address
+		}
+		log.Printf("   #%d: [%s] %s - %s (Seq: %d)",
+			i+1, task.TaskType, task.ID[:8], addr, task.SequenceOrder)
+	}
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	// Log placement task details specifically
 	for i, task := range tasks {
 		if task.TaskType == "placement" {
@@ -5965,6 +5979,26 @@ func optimizeRouteWithMapbox(
 	log.Printf("✅ [MAPBOX OPTIMIZER] Optimization complete: %d stops, %.2f meters, %d seconds",
 		len(route.Stops), route.TotalDistance, route.TotalDuration)
 
+	// 🔍 DEBUG: Log MAPBOX RESPONSE - what order did Mapbox return?
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📦 [DEBUG] MAPBOX RESPONSE - Optimized Stop Sequence:")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	for i, stop := range route.Stops {
+		stopDesc := fmt.Sprintf("Type=%s", stop.Type)
+		if stop.CollectionID != "" {
+			stopDesc += fmt.Sprintf(", CollectionID=%s", stop.CollectionID)
+		}
+		if stop.PlacementID != "" {
+			stopDesc += fmt.Sprintf(", PlacementID=%s", stop.PlacementID)
+		}
+		if stop.MoveRequestID != "" {
+			stopDesc += fmt.Sprintf(", MoveRequestID=%s", stop.MoveRequestID)
+		}
+		log.Printf("   Stop #%d: %s - %.6f, %.6f - %s",
+			i+1, stopDesc, stop.Latitude, stop.Longitude, stop.Address)
+	}
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	// Step 5: Soft delete old route_tasks and create new ones from Mapbox response (for audit trail)
 	now := time.Now().Unix()
 	_, err = db.Exec(`
@@ -6129,6 +6163,39 @@ func optimizeRouteWithMapbox(
 	}
 
 	log.Printf("✅ [MAPBOX OPTIMIZER] Created %d optimized route tasks", len(route.Stops)-2) // -2 for start/end
+
+	// 🔍 DEBUG: Verify what was ACTUALLY saved to database
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("💾 [DEBUG] FINAL DATABASE STATE - Tasks saved with their sequence_order:")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	var finalTasks []models.RouteTask
+	finalTasksQuery := `
+		SELECT id, shift_id, task_type, sequence_order,
+		       bin_id, bin_number, latitude, longitude, address
+		FROM route_tasks
+		WHERE shift_id = $1 AND is_deleted = false
+		ORDER BY sequence_order ASC
+	`
+	err = db.Select(&finalTasks, finalTasksQuery, shiftID)
+	if err != nil {
+		log.Printf("⚠️  Warning: Could not fetch final tasks for debug logging: %v", err)
+	} else {
+		for i, task := range finalTasks {
+			addr := "N/A"
+			if task.Address != nil {
+				addr = *task.Address
+			}
+			binInfo := ""
+			if task.BinID != nil && task.BinNumber != nil {
+				binInfo = fmt.Sprintf(" [Bin #%d]", *task.BinNumber)
+			}
+			log.Printf("   #%d: [%s]%s %s - Seq: %d - %.6f, %.6f",
+				i+1, task.TaskType, binInfo, addr, task.SequenceOrder, task.Latitude, task.Longitude)
+		}
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("📊 [DEBUG] Total tasks in database after optimization: %d", len(finalTasks))
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	}
 
 	// Step 7: Save optimization metadata to shifts table
 	optimizationMetadata := map[string]interface{}{
