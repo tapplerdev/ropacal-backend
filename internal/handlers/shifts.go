@@ -1624,17 +1624,16 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				LIMIT 1
 			`, shift.ID, req.BinID).Scan(&taskID, &taskType)
 		} else {
-			// Warehouse or Placement task - no bin_id
-			log.Printf("[DIAGNOSTIC] 🔍 Looking for warehouse/placement task...")
+			// Warehouse or Placement task - use task_id from request
+			log.Printf("[DIAGNOSTIC] 🔍 Looking for task by ID: %s", req.TaskID)
 			err = db.QueryRow(`
 				SELECT id, task_type
 				FROM route_tasks
 				WHERE shift_id = $1
+				  AND id = $2
 				  AND is_completed = 0
-				  AND (task_type = 'warehouse_stop' OR task_type = 'placement')
-				ORDER BY sequence_order ASC
 				LIMIT 1
-			`, shift.ID).Scan(&taskID, &taskType)
+			`, shift.ID, req.TaskID).Scan(&taskID, &taskType)
 		}
 
 		if err == sql.ErrNoRows {
