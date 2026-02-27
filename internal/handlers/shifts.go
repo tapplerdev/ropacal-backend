@@ -3882,10 +3882,8 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 
 // getShiftTasksWithDetails fetches shift tasks with full details
 // ONLY uses route_tasks table (new unified task system)
-// MIGRATED: Returns data in RouteTask format (address, task_type, destination_address)
 func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
 	// Query route_tasks table with enhanced fields for all task types
-	// Returns data matching mobile app RouteTask model
 	query := `
 		SELECT
 			rt.id as id,
@@ -3897,13 +3895,16 @@ func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWit
 			rt.updated_fill_percentage,
 			rt.created_at,
 			COALESCE(b.bin_number, 0) as bin_number,
-			COALESCE(rt.address, '') as address,
+			COALESCE(rt.address, '') as current_street,
+			COALESCE(b.city, '') as city,
+			COALESCE(b.zip, '') as zip,
 			COALESCE(b.fill_percentage, 0) as fill_percentage,
 			rt.latitude,
 			rt.longitude,
-			rt.task_type as task_type,
+			rt.task_type as stop_type,
 			rt.move_request_id,
-			rt.destination_address as destination_address,
+			rt.address as original_address,
+			rt.destination_address as new_address,
 			rt.move_type,
 			rt.potential_location_id,
 			rt.new_bin_number,
