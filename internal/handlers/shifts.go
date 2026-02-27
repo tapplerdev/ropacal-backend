@@ -5766,6 +5766,28 @@ func optimizeRouteWithMapbox(
 
 	log.Printf("📋 [MAPBOX OPTIMIZER] Fetched %d tasks", len(tasks))
 
+	// Log detailed task breakdown by type
+	taskCounts := make(map[string]int)
+	for _, task := range tasks {
+		taskCounts[string(task.TaskType)]++
+	}
+	log.Printf("📊 [MAPBOX OPTIMIZER] Task breakdown:")
+	for taskType, count := range taskCounts {
+		log.Printf("   - %s: %d", taskType, count)
+	}
+
+	// Log placement task details specifically
+	for i, task := range tasks {
+		if task.TaskType == "placement" {
+			log.Printf("🎯 [PLACEMENT TASK #%d] ID=%s, PotentialLocationID=%v, Lat=%.6f, Lon=%.6f, Address=%v",
+				i+1, task.ID,
+				func() string { if task.PotentialLocationID != nil { return *task.PotentialLocationID } else { return "nil" } }(),
+				task.Latitude, task.Longitude,
+				func() string { if task.Address != nil { return *task.Address } else { return "nil" } }(),
+			)
+		}
+	}
+
 	if len(tasks) == 0 {
 		log.Printf("✅ [MAPBOX OPTIMIZER] No tasks to optimize")
 		return nil
@@ -5852,6 +5874,12 @@ func optimizeRouteWithMapbox(
 			}
 
 		case "placement":
+			log.Printf("🔍 [PLACEMENT] Processing placement task: ID=%s", task.ID)
+			log.Printf("   PotentialLocationID: %v", task.PotentialLocationID)
+			log.Printf("   NewBinNumber: %v", task.NewBinNumber)
+			log.Printf("   Latitude: %.6f, Longitude: %.6f", task.Latitude, task.Longitude)
+			log.Printf("   Address: %v", task.Address)
+
 			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
 				placement := optimization.Placement{
 					ID:                *task.PotentialLocationID,
@@ -5868,8 +5896,12 @@ func optimizeRouteWithMapbox(
 					DropoffDuration: 120, // 2 minutes dropoff
 				}
 				req.Placements = append(req.Placements, placement)
+				log.Printf("✅ [PLACEMENT] Added placement task to optimization request")
 			} else {
-				log.Printf("⚠️  Skipping placement task %s: missing required fields", task.ID)
+				log.Printf("❌ [PLACEMENT] Skipping placement task %s: MISSING REQUIRED FIELDS", task.ID)
+				log.Printf("   ❌ PotentialLocationID is nil: %v", task.PotentialLocationID == nil)
+				log.Printf("   ❌ Latitude is zero: %v", task.Latitude == 0)
+				log.Printf("   ❌ Longitude is zero: %v", task.Longitude == 0)
 			}
 
 		case "pickup":
