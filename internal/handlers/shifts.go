@@ -1738,6 +1738,9 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			return
 		}
 
+		// Track newly created bin ID for placement tasks (used later for check record)
+		var placementBinID *string
+
 		// Check if this bin is part of a move request
 		var moveRequest models.BinMoveRequest
 		moveErr := db.Get(&moveRequest, `
@@ -1919,6 +1922,9 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					} else {
 						log.Printf("[DIAGNOSTIC] ✅ Created new Bin #%d (ID: %s)", actualBinNumber, newBinID)
 
+						// Save the bin ID for check record insertion later
+						placementBinID = &newBinID
+
 						// Update potential_location record (mark as converted via shift)
 						_, err = db.Exec(`
 							UPDATE potential_locations
@@ -2008,7 +2014,16 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 		// Insert check record into checks table (only for bin-related stops, not warehouse)
 		var checkID *int
-		if req.BinID != "" && taskType != "warehouse_stop" {
+
+		// Determine which bin ID to use for check record
+		binIDForCheck := req.BinID
+		if placementBinID != nil {
+			// For placement tasks, use the newly created bin ID
+			binIDForCheck = *placementBinID
+			log.Printf("[DIAGNOSTIC] 📦 Using newly created bin ID for placement check record: %s", binIDForCheck)
+		}
+
+		if binIDForCheck != "" && taskType != "warehouse_stop" {
 			log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
 			log.Printf("[DIAGNOSTIC] 💾 CHECKS TABLE INSERT - fill_percentage value:")
 			if req.UpdatedFillPercentage != nil {
@@ -2022,7 +2037,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						   RETURNING id`
 
 			var returnedID int
-			err = db.QueryRow(checkQuery, req.BinID, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID).Scan(&returnedID)
+			err = db.QueryRow(checkQuery, binIDForCheck, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID).Scan(&returnedID)
 			if err != nil {
 				log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
 				// Don't fail the request - the bin is already marked complete
@@ -2037,7 +2052,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				}
 
 				// Auto-resolve any pending check recommendations for this bin
-				autoResolveCheckRecommendation(db, req.BinID, userClaims.UserID, now)
+				autoResolveCheckRecommendation(db, binIDForCheck, userClaims.UserID, now)
 			}
 		} else {
 			log.Printf("[DIAGNOSTIC] ⏭️  Skipping check record insert (warehouse stop or no bin_id)")
@@ -2050,7 +2065,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 			// Get bin details for zone creation
 			var bin models.Bin
-			err = db.Get(&bin, "SELECT * FROM bins WHERE id = $1", req.BinID)
+			err = db.Get(&bin, "SELECT * FROM bins WHERE id = $1", binIDForCheck)
 			if err != nil {
 				log.Printf("[DIAGNOSTIC] ❌ Error fetching bin details: %v", err)
 			} else {
@@ -2060,7 +2075,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 		// relocation_request is an operational note, not a location safety signal — skip zone creation
 		if err == nil && bin.Latitude != nil && bin.Longitude != nil && *req.IncidentType != "relocation_request" {
-			binIDCopy := req.BinID
+			binIDCopy := binIDForCheck
 			shiftIDCopy := shift.ID
 			zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
 			driverShiftSource := "driver_shift"
@@ -2098,14 +2113,14 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 		if *req.IncidentType == "missing" {
 			if _, updateErr := db.Exec(
 				`UPDATE bins SET status = 'missing', updated_at = $1 WHERE id = $2`,
-				now, req.BinID,
+				now, binIDForCheck,
 			); updateErr != nil {
-				log.Printf("[DIAGNOSTIC] ⚠️  Failed to mark bin %s as missing: %v", req.BinID, updateErr)
+				log.Printf("[DIAGNOSTIC] ⚠️  Failed to mark bin %s as missing: %v", binIDForCheck, updateErr)
 			} else {
-				log.Printf("[DIAGNOSTIC] 🔍 Bin %s marked as missing", req.BinID)
+				log.Printf("[DIAGNOSTIC] 🔍 Bin %s marked as missing", binIDForCheck)
 				if centrifugoClient != nil {
 					var updatedBin models.Bin
-					if fetchErr := db.Get(&updatedBin, "SELECT * FROM bins WHERE id = $1", req.BinID); fetchErr == nil {
+					if fetchErr := db.Get(&updatedBin, "SELECT * FROM bins WHERE id = $1", binIDForCheck); fetchErr == nil {
 						if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_updated", updatedBin); pubErr != nil {
 							log.Printf("[DIAGNOSTIC] ⚠️  Centrifugo bin_updated publish failed: %v", pubErr)
 						}
