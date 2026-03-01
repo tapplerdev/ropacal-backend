@@ -4022,6 +4022,47 @@ func GetDriverShiftHistory(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// GetDriverShiftHistoryByID returns all completed shifts for a specific driver (manager access)
+// GET /api/manager/drivers/{driverId}/shifts
+func GetDriverShiftHistoryByID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		driverID := chi.URLParam(r, "driverId")
+		log.Printf("📥 REQUEST: GET /api/manager/drivers/%s/shifts", driverID)
+
+		if driverID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "driver_id is required")
+			return
+		}
+
+		// Query all shifts where start_time is NOT NULL (shift was actually started)
+		// Order by most recent first, limit to 100 for performance
+		query := `
+			SELECT id, driver_id, route_id, status, start_time, end_time,
+			       total_pause_seconds, total_bins, completed_bins,
+			       created_at, updated_at
+			FROM shifts
+			WHERE driver_id = $1 AND start_time IS NOT NULL
+			ORDER BY start_time DESC
+			LIMIT 100`
+
+		var shifts []models.Shift
+		err := db.Select(&shifts, query, driverID)
+		if err != nil {
+			log.Printf("❌ Error fetching shift history for driver %s: %v", driverID, err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift history")
+			return
+		}
+
+		log.Printf("✅ Found %d shifts for driver %s", len(shifts), driverID)
+		log.Printf("📤 RESPONSE: 200 OK")
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    shifts,
+		})
+	}
+}
+
 // GetShiftDetails returns detailed information about a specific shift including all bins
 func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
