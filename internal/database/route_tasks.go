@@ -83,15 +83,14 @@ func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, 
 func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{}, error) {
 	// Query route_tasks directly and LEFT JOIN with bins table to get bin_number for collection tasks
 	// Also LEFT JOIN with checks table to get photo_url for completed tasks
-	// Explicitly cast float columns to text to avoid base64 encoding in JSON
 	query := `
 		SELECT
 			rt.id,
 			rt.shift_id,
 			rt.sequence_order,
 			rt.task_type,
-			rt.latitude::text as latitude,
-			rt.longitude::text as longitude,
+			rt.latitude,
+			rt.longitude,
 			rt.address,
 			rt.bin_id,
 			COALESCE(rt.bin_number, b.bin_number::int) as bin_number,
@@ -99,8 +98,8 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 			rt.potential_location_id,
 			rt.new_bin_number,
 			rt.move_request_id,
-			rt.destination_latitude::text as destination_latitude,
-			rt.destination_longitude::text as destination_longitude,
+			rt.destination_latitude,
+			rt.destination_longitude,
 			rt.destination_address,
 			rt.move_type,
 			rt.warehouse_action,
