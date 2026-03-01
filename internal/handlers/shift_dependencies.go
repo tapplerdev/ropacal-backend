@@ -1,8 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"net/http"
+	"time"
+
+	"ropacal-backend/internal/services/redis"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
@@ -16,6 +21,14 @@ type ActiveShiftDependency struct {
 	DriverName   string   `json:"driver_name"`
 	Status       string   `json:"status"`
 	AffectedTasks []AffectedTask `json:"affected_tasks"`
+
+	// Proximity information (for warning about driver being nearby)
+	CurrentTaskID         *string  `json:"current_task_id,omitempty"`
+	CurrentTaskAddress    *string  `json:"current_task_address,omitempty"`
+	CurrentTaskBinNumber  *int     `json:"current_task_bin_number,omitempty"`
+	DriverDistanceMiles   *float64 `json:"driver_distance_miles,omitempty"`
+	LocationAgeSeconds    *int64   `json:"location_age_seconds,omitempty"`
+	IsDriverNearby        bool     `json:"is_driver_nearby"`
 }
 
 // AffectedTask represents a task that would be affected by the change
@@ -30,7 +43,7 @@ type AffectedTask struct {
 
 // CheckBinDependencies checks if a bin is referenced in any active shifts
 // GET /api/bins/:id/active-shift-dependencies
-func CheckBinDependencies(db *sqlx.DB) http.HandlerFunc {
+func CheckBinDependencies(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		binID := chi.URLParam(r, "id")
 
@@ -106,6 +119,78 @@ func CheckBinDependencies(db *sqlx.DB) http.HandlerFunc {
 				Address:      address,
 				BinID:        &binID,
 			})
+		}
+
+		// Calculate proximity information for each shift
+		if redisClient != nil {
+			ctx := context.Background()
+			for shiftID, dep := range shiftMap {
+				// Get driver's current location from Redis
+				locationJSON, err := redisClient.GetDriverLocation(ctx, dep.DriverID)
+				if err != nil {
+					// Driver location not available - skip proximity calculation
+					log.Printf("⚠️  [CheckBinDependencies] No location for driver %s: %v", dep.DriverID, err)
+					continue
+				}
+
+				// Parse location
+				var driverLoc struct {
+					Latitude  float64 `json:"latitude"`
+					Longitude float64 `json:"longitude"`
+					Timestamp int64   `json:"timestamp"`
+				}
+				if err := json.Unmarshal([]byte(locationJSON), &driverLoc); err != nil {
+					log.Printf("⚠️  [CheckBinDependencies] Failed to parse location for driver %s: %v", dep.DriverID, err)
+					continue
+				}
+
+				// Get current task (first uncompleted task for this shift)
+				var currentTask struct {
+					ID        string   `db:"id"`
+					Address   *string  `db:"address"`
+					BinNumber *int     `db:"bin_number"`
+					Latitude  float64  `db:"latitude"`
+					Longitude float64  `db:"longitude"`
+				}
+				err = db.Get(&currentTask, `
+					SELECT id, address, bin_number, latitude, longitude
+					FROM route_tasks
+					WHERE shift_id = $1 AND is_completed = 0
+					ORDER BY sequence_order ASC
+					LIMIT 1
+				`, shiftID)
+
+				if err != nil {
+					// No current task found - skip proximity calculation
+					log.Printf("⚠️  [CheckBinDependencies] No current task for shift %s: %v", shiftID, err)
+					continue
+				}
+
+				// Calculate distance using haversine formula
+				distanceKm := haversineDistance(
+					driverLoc.Latitude, driverLoc.Longitude,
+					currentTask.Latitude, currentTask.Longitude,
+				)
+				distanceMiles := distanceKm * 0.621371 // Convert to miles
+
+				// Calculate location age
+				now := time.Now().Unix()
+				locationAge := now - (driverLoc.Timestamp / 1000) // Convert ms to seconds
+
+				// Determine if driver is nearby (within 5 miles and location is fresh)
+				isNearby := distanceMiles <= 5.0 && locationAge < 300 // 5 minutes
+
+				// Populate proximity fields
+				dep.CurrentTaskID = &currentTask.ID
+				dep.CurrentTaskAddress = currentTask.Address
+				dep.CurrentTaskBinNumber = currentTask.BinNumber
+				dep.DriverDistanceMiles = &distanceMiles
+				dep.LocationAgeSeconds = &locationAge
+				dep.IsDriverNearby = isNearby
+
+				log.Printf("📍 [CheckBinDependencies] Driver %s: %.2f miles from current task (nearby=%v, age=%ds)",
+					dep.DriverName, distanceMiles, isNearby, locationAge)
+			}
 		}
 
 		// Convert map to slice

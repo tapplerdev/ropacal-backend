@@ -31,6 +31,7 @@ type Vehicle struct {
 	StartLocation   Location
 	EndLocation     Location
 	Capacities      map[string]int // e.g., {"bins": 4, "weight_kg": 1000}
+	StartupBins     int            // Number of bins already on truck at start (for Google's startLoadDemands)
 	Capabilities    []string       // e.g., ["refrigeration", "ladder"]
 	RoutingProfile  string         // e.g., "mapbox/driving-traffic" (default if empty)
 	EarliestStart   *time.Time
@@ -84,6 +85,7 @@ type RouteRequest struct {
 	Placements     []Placement
 	MoveRequests   []MoveRequest
 	WarehouseStops []WarehouseStop
+	BinsPreloaded  bool // True if driver already loaded bins at warehouse before starting shift
 }
 
 // OptimizedStop represents a single stop in the optimized route

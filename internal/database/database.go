@@ -581,18 +581,24 @@ func Migrate(db *sqlx.DB) error {
 			notes TEXT,
 			created_at BIGINT NOT NULL,
 			updated_at BIGINT NOT NULL,
+			assigned_shift_id TEXT,
 			converted_to_bin_id TEXT,
 			converted_at BIGINT,
 			converted_by_user_id TEXT,
+			converted_via_shift_id TEXT,
 			FOREIGN KEY (requested_by_user_id) REFERENCES users(id) ON DELETE CASCADE,
+			FOREIGN KEY (assigned_shift_id) REFERENCES shifts(id) ON DELETE SET NULL,
 			FOREIGN KEY (converted_to_bin_id) REFERENCES bins(id) ON DELETE SET NULL,
-			FOREIGN KEY (converted_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+			FOREIGN KEY (converted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+			FOREIGN KEY (converted_via_shift_id) REFERENCES shifts(id) ON DELETE SET NULL
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_created_at ON potential_locations(created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_requested_by ON potential_locations(requested_by_user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_active ON potential_locations(created_at DESC) WHERE converted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_converted ON potential_locations(converted_to_bin_id) WHERE converted_to_bin_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_assigned_shift ON potential_locations(assigned_shift_id) WHERE assigned_shift_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_converted_via_shift ON potential_locations(converted_via_shift_id) WHERE converted_via_shift_id IS NOT NULL`,
 
 		// Migration: Update bin_move_requests move_type constraint to include 'store'
 		`ALTER TABLE bin_move_requests DROP CONSTRAINT IF EXISTS bin_move_requests_move_type_check`,

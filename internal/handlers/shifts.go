@@ -844,16 +844,19 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
-		// Parse optional request body for bins_preloaded flag
+		// DISABLED: bins_preloaded flag - always assume bins NOT preloaded for better route optimization
+		// Reason: Fake warehouse trick causes poor routing (routes driver 40km away instead of nearby stops)
+		// Now: Driver always starts at current GPS, Mapbox routes to warehouse naturally when needed
 		var req struct {
-			BinsPreloaded bool `json:"bins_preloaded"`
+			BinsPreloaded bool `json:"bins_preloaded"` // Still accept in API for backward compatibility
 		}
-		// If body parsing fails or field is missing, default to false (bins NOT preloaded)
+		// Ignore bins_preloaded from request - always use false
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			log.Printf("   ℹ️  No request body or parse error (using default): %v", err)
-			req.BinsPreloaded = false // Default: bins NOT preloaded
+			// Body parsing error or missing - that's fine
+			log.Printf("   ℹ️  No request body or parse error (ignored): %v", err)
 		}
-		log.Printf("   🚚 Bins preloaded flag: %v", req.BinsPreloaded)
+		req.BinsPreloaded = false // ALWAYS false - no fake warehouse trick
+		log.Printf("   🚚 Bins preloaded flag: DISABLED (always false for optimal routing)")
 
 		// Check if driver has any existing active or paused shift
 		var existingShift models.Shift
@@ -1033,6 +1036,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 			*shift.WarehouseLongitude,
 			warehouseAddr,
 			req.BinsPreloaded,
+			true, // isFirstOptimization = true (shift starting)
 		)
 
 		if err != nil {
@@ -1099,67 +1103,74 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 	// Get updated shift
 	db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
-	// Get route bins with details for WebSocket broadcast
-	bins, err := getShiftTasksWithDetails(db, shift.ID)
-	if err != nil {
-		log.Printf("❌ Error fetching route bins for WebSocket: %v", err)
-		bins = []models.ShiftBinWithDetails{} // Empty array on error
-	}
-
-	// Broadcast WebSocket update to driver (include bins!)
-	hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
-		"type": "shift_update",
-		"data": map[string]interface{}{
-			"id":                  shift.ID,
-			"driver_id":           shift.DriverID,
-			"route_id":            shift.RouteID,
-			"status":              shift.Status,
-			"start_time":          shift.StartTime,
-			"end_time":            shift.EndTime,
-			"total_pause_seconds": shift.TotalPauseSeconds,
-			"pause_start_time":    shift.PauseStartTime,
-			"total_bins":          shift.TotalBins,
-			"completed_bins":      shift.CompletedBins,
-			"bins":                bins, // ← Include route bins!
-			"created_at":          shift.CreatedAt,
-			"updated_at":          shift.UpdatedAt,
-		},
-	})
-
-	// Broadcast shift state change to all managers
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Printf("📡 BROADCASTING driver_shift_change TO MANAGERS")
-	log.Printf("   Driver ID: %s", shift.DriverID)
-	log.Printf("   Driver Email: %s", userClaims.Email)
-	log.Printf("   Status: %s", shift.Status)
-	log.Printf("   Shift ID: %s", shift.ID)
-
-	broadcastData := map[string]interface{}{
-		"type": "driver_shift_change",
-		"data": map[string]interface{}{
-			"driver_id": shift.DriverID,
-			"status":    shift.Status,
-			"shift_id":  shift.ID,
-		},
-	}
-	log.Printf("   Broadcast payload: %+v", broadcastData)
-
-	hub.BroadcastToRole("admin", broadcastData)
-	hub.BroadcastToRole("manager", broadcastData)
-	log.Printf("   ✅ BroadcastToRole('admin' + 'manager') called")
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
 	log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
-	log.Printf("📤 RESPONSE: 200 OK")
+	log.Printf("📤 RESPONSE: 200 OK - Returning immediately to mobile")
 	log.Printf("   Shift ID: %s", shift.ID)
 	log.Printf("   Status: %s", shift.Status)
 	log.Printf("   Start Time: %v", shift.StartTime)
 	log.Printf("   Route: %v", shift.RouteID)
 
+	// Return HTTP response IMMEDIATELY (don't wait for broadcasts)
 	utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"data":    shift,
 	})
+
+	// Do WebSocket broadcasts in background (async - don't block HTTP response)
+	go func() {
+		log.Printf("📡 [ASYNC] Starting background broadcasts for shift %s", shift.ID)
+
+		// Get route bins with details for WebSocket broadcast
+		bins, err := getShiftTasksWithDetails(db, shift.ID)
+		if err != nil {
+			log.Printf("❌ [ASYNC] Error fetching route bins for WebSocket: %v", err)
+			bins = []models.ShiftBinWithDetails{} // Empty array on error
+		}
+
+		// Broadcast WebSocket update to driver (include bins!)
+		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
+			"type": "shift_update",
+			"data": map[string]interface{}{
+				"id":                  shift.ID,
+				"driver_id":           shift.DriverID,
+				"route_id":            shift.RouteID,
+				"status":              shift.Status,
+				"start_time":          shift.StartTime,
+				"end_time":            shift.EndTime,
+				"total_pause_seconds": shift.TotalPauseSeconds,
+				"pause_start_time":    shift.PauseStartTime,
+				"total_bins":          shift.TotalBins,
+				"completed_bins":      shift.CompletedBins,
+				"bins":                bins, // ← Include route bins!
+				"created_at":          shift.CreatedAt,
+				"updated_at":          shift.UpdatedAt,
+			},
+		})
+
+		// Broadcast shift state change to all managers
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("📡 [ASYNC] BROADCASTING driver_shift_change TO MANAGERS")
+		log.Printf("   Driver ID: %s", shift.DriverID)
+		log.Printf("   Driver Email: %s", userClaims.Email)
+		log.Printf("   Status: %s", shift.Status)
+		log.Printf("   Shift ID: %s", shift.ID)
+
+		broadcastData := map[string]interface{}{
+			"type": "driver_shift_change",
+			"data": map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			},
+		}
+		log.Printf("   Broadcast payload: %+v", broadcastData)
+
+		hub.BroadcastToRole("admin", broadcastData)
+		hub.BroadcastToRole("manager", broadcastData)
+		log.Printf("   ✅ [ASYNC] BroadcastToRole('admin' + 'manager') called")
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("✅ [ASYNC] Background broadcasts complete for shift %s", shift.ID)
+	}()
 	}
 }
 
@@ -2195,7 +2206,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 // ReoptimizeActiveShift re-optimizes an active shift's remaining tasks using current traffic
 // skipGates: if true, skips time-based gates (for manager-initiated changes)
-func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centrifugo.Client, skipGates bool) error {
+func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID string, centrifugoClient *centrifugo.Client, skipGates bool) error {
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("🔄 [REOPTIMIZE] Starting re-optimization for shift %s", shiftID)
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -2224,6 +2235,32 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 
 	remainingTasks := len(tasks)
 	log.Printf("📊 [REOPTIMIZE] Found %d remaining tasks", remainingTasks)
+
+	// Step 2.5: Soft-delete all incomplete warehouse_stop tasks
+	// These will be regenerated by Mapbox based on current capacity constraints
+	result, err := db.Exec(`
+		UPDATE route_tasks
+		SET is_deleted = true, updated_at = $1
+		WHERE shift_id = $2 AND task_type = 'warehouse_stop' AND is_completed = 0 AND is_deleted = false
+	`, time.Now().Unix(), shiftID)
+	if err != nil {
+		log.Printf("⚠️  [REOPTIMIZE] Failed to soft-delete warehouse stops: %v", err)
+	} else {
+		deletedCount, _ := result.RowsAffected()
+		if deletedCount > 0 {
+			log.Printf("🗑️  [REOPTIMIZE] Soft-deleted %d incomplete warehouse_stop tasks (will regenerate)", deletedCount)
+			// Remove warehouse_stop tasks from our tasks slice
+			filteredTasks := make([]models.RouteTask, 0)
+			for _, task := range tasks {
+				if task.TaskType != "warehouse_stop" {
+					filteredTasks = append(filteredTasks, task)
+				}
+			}
+			tasks = filteredTasks
+			remainingTasks = len(tasks)
+			log.Printf("📊 [REOPTIMIZE] %d non-warehouse tasks to reoptimize", remainingTasks)
+		}
+	}
 
 	// Gate 1: Minimum tasks check
 	minTasks := 5
@@ -2255,38 +2292,45 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		Address:   *shift.WarehouseAddress,
 	}
 
-	// Step 4: Get driver's current location (NO warehouse fallback - let mobile app use device GPS)
-	// driverStartLocation := warehouseLocation  // COMMENTED OUT: Let Flutter navigation use actual device GPS
+	// Step 4: Get driver's current location from Redis (real-time GPS)
 	var driverStartLocation optimization.Location
 
-	// Try to get driver's last GPS location
-	var lastLocation struct {
-		Latitude  *float64 `db:"latitude"`
-		Longitude *float64 `db:"longitude"`
+	if redisClient == nil {
+		log.Printf("❌ [REOPTIMIZE] Redis client not available")
+		return fmt.Errorf("redis not available - cannot get driver location for reoptimization")
 	}
-	err = db.Get(&lastLocation, `
-		SELECT latitude, longitude
-		FROM driver_locations
-		WHERE driver_id = $1
-		ORDER BY timestamp DESC
-		LIMIT 1
-	`, shift.DriverID)
 
-	if err == nil && lastLocation.Latitude != nil && lastLocation.Longitude != nil {
-		driverStartLocation = optimization.Location{
-			ID:        "driver-current",
-			Name:      "Driver Current Location",
-			Latitude:  *lastLocation.Latitude,
-			Longitude: *lastLocation.Longitude,
-			Address:   "Current GPS Position",
-		}
-		log.Printf("📍 [REOPTIMIZE] Using driver's current location: (%.6f, %.6f)",
-			*lastLocation.Latitude, *lastLocation.Longitude)
-	} else {
-		// Use warehouse as fallback but log clearly
-		log.Printf("⚠️  [REOPTIMIZE] No driver location in database, using warehouse (mobile app should use device GPS for navigation)")
-		driverStartLocation = warehouseLocation
+	// Get driver's current GPS location from Redis (updated every 3 seconds by mobile app)
+	ctx := context.Background()
+	locationJSON, locationErr := redisClient.GetDriverLocation(ctx, shift.DriverID)
+
+	if locationErr != nil {
+		log.Printf("❌ [REOPTIMIZE] Driver location not available in Redis: %v", locationErr)
+		log.Printf("   Driver must have GPS enabled and mobile app running")
+		return fmt.Errorf("driver location not available - GPS must be enabled")
 	}
+
+	// Parse location JSON from Redis
+	var driverLocation struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+
+	if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
+		log.Printf("❌ [REOPTIMIZE] Failed to parse location JSON from Redis: %v", err)
+		return fmt.Errorf("failed to parse driver location data")
+	}
+
+	driverStartLocation = optimization.Location{
+		ID:        "driver-current",
+		Name:      "Driver Current Location",
+		Latitude:  driverLocation.Latitude,
+		Longitude: driverLocation.Longitude,
+		Address:   "Current GPS Position",
+	}
+
+	log.Printf("✅ [REOPTIMIZE] Using driver's current GPS from Redis: (%.6f, %.6f)",
+		driverLocation.Latitude, driverLocation.Longitude)
 
 	// Step 5: Build optimization request
 	req := &optimization.RouteRequest{
@@ -2311,6 +2355,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		Capacities: map[string]int{
 			"bins": capacity,
 		},
+		StartupBins: 0, // Will be set below based on bins currently on truck
 	}
 
 	// Helper functions for nil-safe value extraction
@@ -2328,7 +2373,67 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		return ""
 	}
 
+	// Step 5.5: Calculate bins currently on truck (two-warehouse trick)
+	// Count completed warehouse stops (bins loaded) and completed placements (bins used)
+	var allTasks []models.RouteTask
+	err = db.Select(&allTasks, `
+		SELECT * FROM route_tasks
+		WHERE shift_id = $1 AND is_deleted = false
+		ORDER BY sequence_order ASC
+	`, shiftID)
+	if err != nil {
+		log.Printf("⚠️  [REOPTIMIZE] Failed to fetch all tasks for bin calculation: %v", err)
+	}
+
+	warehouseStopsCompleted := 0
+	placementsCompleted := 0
+	for _, t := range allTasks {
+		if t.IsCompleted == 1 {
+			if t.TaskType == "warehouse_stop" {
+				warehouseStopsCompleted++
+			} else if t.TaskType == "placement" {
+				placementsCompleted++
+			}
+		}
+	}
+
+	// Calculate bins on truck
+	// Each warehouse stop loads 'capacity' bins, each placement uses 1 bin
+	binsLoaded := warehouseStopsCompleted * capacity
+	binsUsed := placementsCompleted
+	binsOnTruck := binsLoaded - binsUsed
+
+	if binsOnTruck < 0 {
+		binsOnTruck = 0 // Safety check
+	}
+
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("🔢 [REOPTIMIZE] Bin Inventory Calculation:")
+	log.Printf("   Warehouse stops completed: %d", warehouseStopsCompleted)
+	log.Printf("   Bins loaded: %d (capacity=%d)", binsLoaded, capacity)
+	log.Printf("   Placements completed: %d", placementsCompleted)
+	log.Printf("   Bins on truck: %d", binsOnTruck)
+	log.Printf("   Remaining placements: %d", len(tasks))
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Set startup bins to current truck inventory
+	// Google will use Vehicle.StartupBins for native startLoadDemands
+	// Mapbox will ignore it and use the two-warehouse trick
+	req.Vehicles[0].StartupBins = binsOnTruck
+	req.BinsPreloaded = (binsOnTruck > 0)
+	log.Printf("📦 [REOPTIMIZE] BinsPreloaded=%v, StartupBins=%d/%d", req.BinsPreloaded, binsOnTruck, capacity)
+
+	// Create fake warehouse at driver's current location for bins already on truck
+	driverWarehouseLocation := optimization.Location{
+		ID:        "driver-current-warehouse",
+		Name:      "Driver Current Location (has bins)",
+		Latitude:  driverLocation.Latitude,
+		Longitude: driverLocation.Longitude,
+		Address:   "Current GPS Position",
+	}
+
 	// Convert tasks to optimization format
+	placementIndex := 0
 	for _, task := range tasks {
 		switch task.TaskType {
 		case "collection":
@@ -2352,10 +2457,19 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 
 		case "placement":
 			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
+				// Two-warehouse trick: Use driver location for bins already on truck
+				warehouseLoc := warehouseLocation
+				if placementIndex < binsOnTruck {
+					warehouseLoc = driverWarehouseLocation
+					log.Printf("   📦 Placement %d/%d uses driver warehouse (has bin on truck)", placementIndex+1, len(tasks))
+				} else {
+					log.Printf("   🏭 Placement %d/%d uses real warehouse (needs reload)", placementIndex+1, len(tasks))
+				}
+
 				placement := optimization.Placement{
 					ID:                *task.PotentialLocationID,
 					NewBinNumber:      getIntValue(task.NewBinNumber),
-					WarehouseLocation: warehouseLocation,
+					WarehouseLocation: warehouseLoc,
 					PlacementLocation: optimization.Location{
 						ID:        *task.PotentialLocationID,
 						Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
@@ -2367,6 +2481,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 					DropoffDuration: 120,
 				}
 				req.Placements = append(req.Placements, placement)
+				placementIndex++
 			}
 
 		case "pickup":
@@ -2401,16 +2516,17 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 	log.Printf("📊 [REOPTIMIZE] Request: %d collections, %d placements, %d moves",
 		len(req.Collections), len(req.Placements), len(req.MoveRequests))
 
-	// Step 6: Call MapBox optimizer
-	log.Printf("🚀 [REOPTIMIZE] Calling MapBox Optimization v2 API...")
-	mapboxOptimizer := optimization.NewMapboxOptimizer()
-	response, err := mapboxOptimizer.OptimizeRoute(req)
+	// Step 6: Call optimizer (configured via OPTIMIZER_TYPE env var)
+	log.Printf("🚀 [REOPTIMIZE] Calling route optimizer...")
+	optimizer := optimization.NewOptimizer()
+	log.Printf("📍 [REOPTIMIZE] Using optimizer: %s", optimizer.Name())
+	response, err := optimizer.OptimizeRoute(req)
 	if err != nil {
-		return fmt.Errorf("MapBox optimization failed: %w", err)
+		return fmt.Errorf("optimization failed: %w", err)
 	}
 
 	if len(response.Routes) == 0 {
-		return fmt.Errorf("MapBox returned no routes (dropped tasks: %v)", response.DroppedTasks)
+		return fmt.Errorf("optimizer returned no routes (dropped tasks: %v)", response.DroppedTasks)
 	}
 
 	route := response.Routes[0]
@@ -2422,7 +2538,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		log.Printf("ℹ️  [REOPTIMIZE] Time savings check skipped (would need historical ETA data)")
 	}
 
-	// Step 8: Update route_tasks with new sequence_order
+	// Step 8: Update route_tasks with new sequence_order and create new warehouse_stop tasks
 	tx, err := db.Beginx()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
@@ -2434,13 +2550,120 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 		taskIDToOriginal[task.ID] = task
 	}
 
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📍 [REOPTIMIZE] Processing %d optimized stops", len(route.Stops))
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	sequenceOrder := 1
-	for _, stop := range route.Stops {
-		if stop.Type == optimization.StopTypeStart || stop.Type == optimization.StopTypeEnd {
+	warehouseStopsCreated := 0
+	tasksUpdated := 0
+
+	for i, stop := range route.Stops {
+		log.Printf("   Stop #%d: Type=%s, Location=%s", i+1, stop.Type, stop.LocationID)
+
+		// Skip start stops
+		if stop.Type == optimization.StopTypeStart {
+			log.Printf("      ⏭️  Skipped start stop")
 			continue
 		}
 
-		// Find the corresponding task
+		// Handle end stops (return to warehouse)
+		if stop.Type == optimization.StopTypeEnd {
+			// Create warehouse_stop task for return to warehouse
+			newTask := models.RouteTask{
+				ID:            uuid.New().String(),
+				ShiftID:       shiftID,
+				TaskType:      "warehouse_stop",
+				SequenceOrder: sequenceOrder,
+				Latitude:      stop.Latitude,
+				Longitude:     stop.Longitude,
+				Address:       &stop.Address,
+				IsCompleted:   0,
+				IsDeleted:     false,
+			}
+
+			_, err = tx.NamedExec(`
+				INSERT INTO route_tasks (
+					id, shift_id, task_type, sequence_order, latitude, longitude, address,
+					is_completed, is_deleted, created_at, updated_at
+				) VALUES (
+					:id, :shift_id, :task_type, :sequence_order, :latitude, :longitude, :address,
+					:is_completed, :is_deleted, :created_at, :updated_at
+				)
+			`, map[string]interface{}{
+				"id":             newTask.ID,
+				"shift_id":       newTask.ShiftID,
+				"task_type":      newTask.TaskType,
+				"sequence_order": newTask.SequenceOrder,
+				"latitude":       newTask.Latitude,
+				"longitude":      newTask.Longitude,
+				"address":        newTask.Address,
+				"is_completed":   0,
+				"is_deleted":     false,
+				"created_at":     time.Now().Unix(),
+				"updated_at":     time.Now().Unix(),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create end warehouse_stop: %w", err)
+			}
+			log.Printf("      ✅ Created warehouse_stop (return to warehouse) → seq=%d", sequenceOrder)
+			warehouseStopsCreated++
+			sequenceOrder++
+			continue
+		}
+
+		// Handle warehouse pickup stops
+		if stop.Type == optimization.StopTypePickup && (stop.LocationID == "warehouse" || stop.LocationID == "driver-current-warehouse") {
+			// Skip fake warehouse pickup stop (driver already has these bins on truck)
+			if stop.LocationID == "driver-current-warehouse" {
+				log.Printf("      ⏭️  Skipped fake warehouse pickup (bins already on truck)")
+				continue
+			}
+
+			// Create warehouse_stop task for real warehouse pickups
+			newTask := models.RouteTask{
+				ID:            uuid.New().String(),
+				ShiftID:       shiftID,
+				TaskType:      "warehouse_stop",
+				SequenceOrder: sequenceOrder,
+				Latitude:      stop.Latitude,
+				Longitude:     stop.Longitude,
+				Address:       &stop.Address,
+				IsCompleted:   0,
+				IsDeleted:     false,
+			}
+
+			_, err = tx.NamedExec(`
+				INSERT INTO route_tasks (
+					id, shift_id, task_type, sequence_order, latitude, longitude, address,
+					is_completed, is_deleted, created_at, updated_at
+				) VALUES (
+					:id, :shift_id, :task_type, :sequence_order, :latitude, :longitude, :address,
+					:is_completed, :is_deleted, :created_at, :updated_at
+				)
+			`, map[string]interface{}{
+				"id":             newTask.ID,
+				"shift_id":       newTask.ShiftID,
+				"task_type":      newTask.TaskType,
+				"sequence_order": newTask.SequenceOrder,
+				"latitude":       newTask.Latitude,
+				"longitude":      newTask.Longitude,
+				"address":        newTask.Address,
+				"is_completed":   0,
+				"is_deleted":     false,
+				"created_at":     time.Now().Unix(),
+				"updated_at":     time.Now().Unix(),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create warehouse pickup stop: %w", err)
+			}
+			log.Printf("      ✅ Created warehouse_stop (pickup bins) → seq=%d", sequenceOrder)
+			warehouseStopsCreated++
+			sequenceOrder++
+			continue
+		}
+
+		// Find the corresponding existing task (collection, placement, move)
 		var taskID string
 		if stop.CollectionID != "" {
 			// It's a collection
@@ -2451,7 +2674,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 				}
 			}
 		} else if stop.PlacementID != "" {
-			// It's a placement
+			// It's a placement dropoff
 			for _, origTask := range tasks {
 				if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil {
 					if stop.PlacementID == "placement-"+*origTask.PotentialLocationID {
@@ -2482,10 +2705,23 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 			if err != nil {
 				return fmt.Errorf("failed to update sequence_order: %w", err)
 			}
-			log.Printf("   Updated task %s → sequence_order = %d", taskID[:8], sequenceOrder)
+			taskType := "unknown"
+			if origTask, exists := taskIDToOriginal[taskID]; exists {
+				taskType = string(origTask.TaskType)
+			}
+			log.Printf("      ✅ Updated %s task %s → seq=%d", taskType, taskID[:8], sequenceOrder)
+			tasksUpdated++
 			sequenceOrder++
+		} else {
+			log.Printf("      ⚠️  No matching task found for stop")
 		}
 	}
+
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📊 [REOPTIMIZE] Summary:")
+	log.Printf("   🆕 Created %d warehouse_stop tasks", warehouseStopsCreated)
+	log.Printf("   🔄 Updated %d existing tasks", tasksUpdated)
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	err = tx.Commit()
 	if err != nil {
@@ -2520,7 +2756,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, shiftID string, centrifugoClient *centri
 
 // SkipTask marks a task as skipped with a required reason
 // If skipping a pickup task, automatically skips the paired dropoff
-func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/driver/shift/skip-task")
 
@@ -2729,13 +2965,16 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 		log.Printf("📡 WebSocket: Broadcasted shift update to driver %s", userClaims.UserID)
 
-		// Re-optimize the shift after skipping task (skipGates=false for driver-initiated)
-		if err := ReoptimizeActiveShift(db, shift.ID, nil, false); err != nil {
-			log.Printf("⚠️  Failed to re-optimize shift after task skip: %v", err)
-			// Don't fail the request if re-optimization fails
-		} else {
-			log.Printf("✅ Successfully re-optimized shift %s after task skip", shift.ID)
-		}
+		// DISABLED: Re-optimize the shift after skipping task (skipGates=false for driver-initiated)
+		// Reason: Two-warehouse trick causes suboptimal routes (35min penalty)
+		// Accepting current Mapbox Optimization v2 API limitations
+		// if err := ReoptimizeActiveShift(db, redisClient, shift.ID, nil, false); err != nil {
+		// 	log.Printf("⚠️  Failed to re-optimize shift after task skip: %v", err)
+		// 	// Don't fail the request if re-optimization fails
+		// } else {
+		// 	log.Printf("✅ Successfully re-optimized shift %s after task skip", shift.ID)
+		// }
+		log.Printf("ℹ️  Re-optimization disabled - driver continues with current route order")
 
 		// Return success
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
@@ -2748,7 +2987,7 @@ func SkipTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 
 // RemoveTasksFromShift removes one or more tasks from an active shift (manager-initiated)
 // This unassigns tasks without deleting the underlying resources
-func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/manager/shifts/:shift_id/tasks/remove")
 
@@ -2965,13 +3204,16 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 			}
 		}
 
-		// Re-optimize the shift after removing tasks (skip gates since manager-initiated)
-		if err := ReoptimizeActiveShift(db, shiftID, centrifugoClient, true); err != nil {
-			log.Printf("⚠️  Failed to re-optimize shift after task removal: %v", err)
-			// Don't fail the request if re-optimization fails
-		} else {
-			log.Printf("✅ Successfully re-optimized shift %s after removing %d tasks", shiftID, removedCount)
-		}
+		// DISABLED: Re-optimize the shift after removing tasks (skip gates since manager-initiated)
+		// Reason: Two-warehouse trick causes suboptimal routes (35min penalty)
+		// Accepting current Mapbox Optimization v2 API limitations
+		// if err := ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true); err != nil {
+		// 	log.Printf("⚠️  Failed to re-optimize shift after task removal: %v", err)
+		// 	// Don't fail the request if re-optimization fails
+		// } else {
+		// 	log.Printf("✅ Successfully re-optimized shift %s after removing %d tasks", shiftID, removedCount)
+		// }
+		log.Printf("ℹ️  Re-optimization disabled - driver continues with current route order")
 
 		// Return success response
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
@@ -2989,7 +3231,7 @@ func RemoveTasksFromShift(db *sqlx.DB, centrifugoClient *centrifugo.Client) http
 
 // UpdateShift comprehensively updates a shift (time, driver, add/remove tasks)
 // PATCH /api/manager/shifts/:id
-func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
+func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: PATCH /api/manager/shifts/:id")
 
@@ -3533,16 +3775,18 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 					return
 				}
 
-				// Insert task
+				// Insert task (with audit fields for manager addition)
 				_, err = tx.Exec(`
 					INSERT INTO route_tasks (
 						id, shift_id, task_type, bin_id, potential_location_id, move_request_id,
 						bin_number, latitude, longitude, address, destination_address,
-						fill_percentage, sequence_order, is_completed, created_at, updated_at
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+						fill_percentage, sequence_order, is_completed, created_at, updated_at,
+						added_by, addition_reason
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 				`, task.ID, task.ShiftID, task.TaskType, task.BinID, task.PotentialLocationID, task.MoveRequestID,
 					task.BinNumber, task.Latitude, task.Longitude, task.Address, task.DestinationAddress,
-					task.FillPercentage, task.SequenceOrder, task.IsCompleted, task.CreatedAt, task.UpdatedAt)
+					task.FillPercentage, task.SequenceOrder, task.IsCompleted, task.CreatedAt, task.UpdatedAt,
+					userClaims.UserID, req.Reason)
 				if err != nil {
 					log.Printf("❌ Error inserting task: %v", err)
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to add task")
@@ -3555,6 +3799,42 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 			changes["tasks_added"] = addedCount
 			log.Printf("✅ Added %d tasks", addedCount)
 		}
+
+	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+	// STEP 3.5: Recalculate total_bins if tasks were added/removed
+	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+	if addedCount > 0 || removedCount > 0 {
+		log.Printf("🔢 Recalculating total_bins after task changes...")
+
+		// Count active (non-deleted, non-warehouse_stop) tasks
+		var newTotalBins int
+		err = tx.Get(&newTotalBins, `
+			SELECT COUNT(*)
+			FROM route_tasks
+			WHERE shift_id = $1
+			  AND is_deleted = FALSE
+			  AND task_type != 'warehouse_stop'
+		`, shiftID)
+		if err != nil {
+			log.Printf("❌ Error counting tasks: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to recalculate total_bins")
+			return
+		}
+
+		// Update shifts.total_bins
+		_, err = tx.Exec(`
+			UPDATE shifts
+			SET total_bins = $1, updated_at = $2
+			WHERE id = $3
+		`, newTotalBins, now, shiftID)
+		if err != nil {
+			log.Printf("❌ Error updating total_bins: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to update total_bins")
+			return
+		}
+
+		log.Printf("✅ Updated total_bins: %d", newTotalBins)
+	}
 
 		// Commit transaction
 		if err = tx.Commit(); err != nil {
@@ -3578,14 +3858,18 @@ func UpdateShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *s
 				shift.DriverID = *req.DriverID
 			}
 
-			err = ReoptimizeActiveShift(db, shiftID, centrifugoClient, true)
-			if err != nil {
-				log.Printf("⚠️  Failed to re-optimize: %v", err)
-				// Don't fail the request
-			} else {
-				changes["route_reoptimized"] = true
-				log.Printf("✅ Route re-optimized")
-			}
+			// DISABLED: Re-optimize the shift after driver/time change
+			// Reason: Two-warehouse trick causes suboptimal routes (35min penalty)
+			// Accepting current Mapbox Optimization v2 API limitations
+			// err = ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true)
+			// if err != nil {
+			// 	log.Printf("⚠️  Failed to re-optimize: %v", err)
+			// 	// Don't fail the request
+			// } else {
+			// 	changes["route_reoptimized"] = true
+			// 	log.Printf("✅ Route re-optimized")
+			// }
+			log.Printf("ℹ️  Re-optimization disabled - driver continues with current route order")
 		}
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3879,6 +4163,145 @@ func GetShiftMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			"success": true,
 			"data":    responses,
 		})
+	}
+}
+
+// CheckShiftDriverProximity checks if the shift's driver is currently nearby their current task
+// GET /api/manager/shifts/:id/driver-proximity
+func CheckShiftDriverProximity(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shiftID := chi.URLParam(r, "id")
+		if shiftID == "" {
+			http.Error(w, "Shift ID is required", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("🔍 [PROXIMITY CHECK] Checking driver proximity for shift: %s", shiftID)
+
+		// Get shift details
+		var shift struct {
+			ID       string `db:"id"`
+			DriverID string `db:"driver_id"`
+			Status   string `db:"status"`
+		}
+		err := db.Get(&shift, `SELECT id, driver_id, status FROM shifts WHERE id = $1`, shiftID)
+		if err == sql.ErrNoRows {
+			http.Error(w, "Shift not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			log.Printf("❌ Error fetching shift: %v", err)
+			http.Error(w, "Failed to fetch shift", http.StatusInternalServerError)
+			return
+		}
+
+		// Only check proximity for active shifts
+		if shift.Status != "active" {
+			log.Printf("⚠️  [PROXIMITY CHECK] Shift status is '%s', not active - skipping proximity check", shift.Status)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"is_nearby": false,
+			})
+			return
+		}
+
+		// Get driver's current location from Redis
+		if redisClient == nil {
+			log.Printf("❌ [PROXIMITY CHECK] Redis client not available")
+			http.Error(w, "Location service unavailable", http.StatusInternalServerError)
+			return
+		}
+
+		ctx := context.Background()
+		locationJSON, err := redisClient.GetDriverLocation(ctx, shift.DriverID)
+		if err != nil {
+			log.Printf("⚠️  [PROXIMITY CHECK] No location for driver %s: %v", shift.DriverID, err)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"is_nearby": false,
+			})
+			return
+		}
+
+		// Parse location
+		var driverLoc struct {
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+			Timestamp int64   `json:"timestamp"`
+		}
+		if err := json.Unmarshal([]byte(locationJSON), &driverLoc); err != nil {
+			log.Printf("❌ [PROXIMITY CHECK] Failed to parse location for driver %s: %v", shift.DriverID, err)
+			http.Error(w, "Failed to parse location", http.StatusInternalServerError)
+			return
+		}
+
+		// Get current task (first uncompleted task for this shift)
+		var currentTask struct {
+			ID        string   `db:"id"`
+			Address   *string  `db:"address"`
+			BinNumber *int     `db:"bin_number"`
+			Latitude  float64  `db:"latitude"`
+			Longitude float64  `db:"longitude"`
+		}
+		err = db.Get(&currentTask, `
+			SELECT id, address, bin_number, latitude, longitude
+			FROM route_tasks
+			WHERE shift_id = $1 AND is_completed = 0
+			ORDER BY sequence_order ASC
+			LIMIT 1
+		`, shiftID)
+
+		if err == sql.ErrNoRows {
+			log.Printf("⚠️  [PROXIMITY CHECK] No current task for shift %s", shiftID)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"is_nearby": false,
+			})
+			return
+		}
+		if err != nil {
+			log.Printf("❌ [PROXIMITY CHECK] Error fetching current task: %v", err)
+			http.Error(w, "Failed to fetch current task", http.StatusInternalServerError)
+			return
+		}
+
+		// Get driver name
+		var driverName string
+		err = db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, shift.DriverID)
+		if err != nil {
+			driverName = "Unknown Driver"
+		}
+
+		// Calculate distance using haversine formula
+		distanceKm := haversineDistanceKm(
+			driverLoc.Latitude, driverLoc.Longitude,
+			currentTask.Latitude, currentTask.Longitude,
+		)
+		distanceMiles := distanceKm * 0.621371 // Convert to miles
+
+		// Calculate location age
+		now := time.Now().Unix()
+		locationAge := now - (driverLoc.Timestamp / 1000) // Convert ms to seconds
+
+		// Determine if driver is nearby (within 5 miles and location is fresh)
+		isNearby := distanceMiles <= 5.0 && locationAge < 300 // 5 minutes
+
+		log.Printf("📍 [PROXIMITY CHECK] Driver %s: %.2f miles from current task (nearby=%v, age=%ds)",
+			driverName, distanceMiles, isNearby, locationAge)
+
+		// Build response
+		response := map[string]interface{}{
+			"is_nearby":              isNearby,
+			"driver_distance_miles":  distanceMiles,
+			"location_age_seconds":   locationAge,
+			"current_task_id":        currentTask.ID,
+			"current_task_address":   currentTask.Address,
+			"current_task_bin_number": currentTask.BinNumber,
+			"driver_name":            driverName,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
@@ -5785,6 +6208,7 @@ func min(a, b int) int {
 }
 // optimizeRouteWithMapbox optimizes a shift's route using Mapbox Optimization v2 API
 // This replaces the old segmented HERE Maps optimization with intelligent capacity-aware routing
+// isFirstOptimization: true = shift starting (UPDATE tasks), false = mid-shift reoptimization (DELETE+CREATE tasks)
 func optimizeRouteWithMapbox(
 	db *sqlx.DB,
 	shiftID string,
@@ -5793,8 +6217,9 @@ func optimizeRouteWithMapbox(
 	warehouseLat, warehouseLon float64,
 	warehouseAddr string,
 	binsPreloaded bool,
+	isFirstOptimization bool,
 ) error {
-	log.Printf("🚀 [MAPBOX OPTIMIZER] Starting Mapbox v2 route optimization")
+	log.Printf("🚀 [MAPBOX OPTIMIZER] Starting Mapbox v2 route optimization (first_optimization=%v)", isFirstOptimization)
 	log.Printf("   🚚 Bins preloaded: %v", binsPreloaded)
 
 	// Step 1: Fetch shift details
@@ -5887,21 +6312,21 @@ func optimizeRouteWithMapbox(
 	}
 
 	// Smart Start Location Logic:
-	// If bins are preloaded, pretend driver is starting FROM warehouse (skip warehouse pickup)
-	// If bins are NOT preloaded, start from driver's current GPS (will route to warehouse first)
-	var vehicleStartLocation optimization.Location
-	if binsPreloaded {
-		vehicleStartLocation = warehouseLocation
-		log.Printf("🚚 [MAPBOX OPTIMIZER] Bins preloaded → Start from WAREHOUSE (%.6f, %.6f)", warehouseLat, warehouseLon)
-		log.Printf("   📍 Driver actual GPS: (%.6f, %.6f) (for reference only)", driverLat, driverLon)
-	} else {
-		vehicleStartLocation = driverGPSLocation
-		log.Printf("🚚 [MAPBOX OPTIMIZER] Bins NOT preloaded → Start from DRIVER GPS (%.6f, %.6f)", driverLat, driverLon)
-		log.Printf("   🏭 Will route to warehouse first: (%.6f, %.6f)", warehouseLat, warehouseLon)
-	}
+	// ALWAYS start from driver's current GPS location
+	// NO two-warehouse trick - always route to real warehouse when needed
+	vehicleStartLocation := driverGPSLocation
+
+	// binsPreloaded is ALWAYS false now for optimal routing
+	// Driver starts with empty truck, Mapbox routes to warehouse naturally
+	log.Printf("🚚 [MAPBOX OPTIMIZER] Starting from DRIVER GPS (%.6f, %.6f)", driverLat, driverLon)
+	log.Printf("   🏭 Will route to warehouse to pickup bins: (%.6f, %.6f)", warehouseLat, warehouseLon)
+	log.Printf("   ℹ️  No fake warehouse trick - better routing to nearby stops")
 	log.Printf("🏁 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
 
 	// Define vehicle with capacity
+	// startupBins is ALWAYS 0 (no bins preloaded)
+	startupBins := 0
+
 	req.Vehicles[0] = optimization.Vehicle{
 		ID:            shift.DriverID,
 		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
@@ -5910,7 +6335,12 @@ func optimizeRouteWithMapbox(
 		Capacities: map[string]int{
 			"bins": capacity,
 		},
+		StartupBins: startupBins, // Always 0
 	}
+
+	// BinsPreloaded is ALWAYS false - no fake warehouse trick
+	req.BinsPreloaded = false
+	log.Printf("📦 [OPTIMIZER] BinsPreloaded=false (DISABLED), StartupBins=0/%d", capacity)
 
 	// Helper functions for nil-safe value extraction
 	getIntValue := func(ptr *int) int {
@@ -5926,6 +6356,14 @@ func optimizeRouteWithMapbox(
 		}
 		return ""
 	}
+
+	// NO two-warehouse trick - binsPreloaded is always false
+	// All placements will use real warehouse location
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("🏭 [NO FAKE WAREHOUSE] All placements use REAL warehouse")
+	log.Printf("   Real warehouse location: (%.6f, %.6f)", warehouseLat, warehouseLon)
+	log.Printf("   Better routing - no 40km detours to distant locations")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// Convert tasks to optimization format
 	for _, task := range tasks {
@@ -5959,10 +6397,13 @@ func optimizeRouteWithMapbox(
 			log.Printf("   Address: %v", task.Address)
 
 			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
+				// All placements use real warehouse (no fake warehouse trick)
+				log.Printf("   🏭 Placement uses REAL warehouse")
+
 				placement := optimization.Placement{
 					ID:                *task.PotentialLocationID,
 					NewBinNumber:      getIntValue(task.NewBinNumber),
-					WarehouseLocation: warehouseLocation,
+					WarehouseLocation: warehouseLocation, // Always real warehouse
 					PlacementLocation: optimization.Location{
 						ID:        *task.PotentialLocationID,
 						Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
@@ -6020,13 +6461,14 @@ func optimizeRouteWithMapbox(
 	log.Printf("📊 [MAPBOX OPTIMIZER] Request: %d collections, %d placements, %d moves",
 		len(req.Collections), len(req.Placements), len(req.MoveRequests))
 
-	// Step 4: Call Mapbox optimizer
-	log.Printf("🚀 [MAPBOX OPTIMIZER] Calling Mapbox Optimization v2 API...")
-	mapboxOptimizer := optimization.NewMapboxOptimizer()
-	response, err := mapboxOptimizer.OptimizeRoute(req)
+	// Step 4: Call optimizer (configured via OPTIMIZER_TYPE env var)
+	log.Printf("🚀 [OPTIMIZER] Calling route optimizer...")
+	optimizer := optimization.NewOptimizer()
+	log.Printf("📍 [OPTIMIZER] Using optimizer: %s", optimizer.Name())
+	response, err := optimizer.OptimizeRoute(req)
 	if err != nil {
-		log.Printf("❌ [MAPBOX OPTIMIZER] Optimization FAILED: %v", err)
-		return fmt.Errorf("Mapbox optimization failed: %w", err)
+		log.Printf("❌ [OPTIMIZER] Optimization FAILED: %v", err)
+		return fmt.Errorf("optimization failed: %w", err)
 	}
 
 	log.Printf("✅ [MAPBOX OPTIMIZER] Received response from Mapbox")
@@ -6061,28 +6503,69 @@ func optimizeRouteWithMapbox(
 	}
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// Step 5: Soft delete old route_tasks and create new ones from Mapbox response (for audit trail)
+	// Step 5: Handle existing tasks based on optimization type
 	now := time.Now().Unix()
-	_, err = db.Exec(`
-		UPDATE route_tasks
-		SET is_deleted = true,
-			deleted_at = $1,
-			deleted_by = $2,
-			deletion_reason = $3,
-			updated_at = $1
-		WHERE shift_id = $4 AND is_deleted = false
-	`, now, "system", "shift_reoptimized", shiftID)
-	if err != nil {
-		return fmt.Errorf("failed to soft delete old tasks: %w", err)
+
+	if isFirstOptimization {
+		// FIRST OPTIMIZATION (shift start): Just update sequence_order, preserve task IDs
+		log.Printf("✏️  [MAPBOX OPTIMIZER] First optimization - will UPDATE existing tasks (no deletion)")
+	} else {
+		// SUBSEQUENT OPTIMIZATION (mid-shift): Soft delete old tasks for audit trail
+		_, err = db.Exec(`
+			UPDATE route_tasks
+			SET is_deleted = true,
+				deleted_at = $1,
+				deleted_by = $2,
+				deletion_reason = $3,
+				updated_at = $1
+			WHERE shift_id = $4 AND is_deleted = false
+		`, now, "system", "shift_reoptimized", shiftID)
+		if err != nil {
+			return fmt.Errorf("failed to soft delete old tasks: %w", err)
+		}
+		log.Printf("🗑️  [MAPBOX OPTIMIZER] Soft deleted old route tasks (mid-shift reoptimization)")
 	}
 
-	log.Printf("🗑️  [MAPBOX OPTIMIZER] Soft deleted old route tasks")
-
-	// Step 6: Create new route_tasks from optimized stops
+	// Step 6: Process optimized stops (UPDATE on first optimization, CREATE on subsequent)
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Printf("📍 Creating route tasks from %d optimized stops", len(route.Stops))
+	if isFirstOptimization {
+		log.Printf("📍 Updating %d existing route tasks with optimized order", len(route.Stops))
+	} else {
+		log.Printf("📍 Creating %d new route tasks from optimized stops", len(route.Stops))
+	}
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+	// Fetch existing tasks for matching (only if first optimization)
+	var existingTasks []models.RouteTask
+	existingTasksMap := make(map[string]*models.RouteTask) // key = bin_id or potential_location_id or move_request_id
+
+	if isFirstOptimization {
+		err = db.Select(&existingTasks, `
+			SELECT * FROM route_tasks
+			WHERE shift_id = $1 AND is_deleted = false
+			ORDER BY sequence_order ASC
+		`, shiftID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch existing tasks: %w", err)
+		}
+
+		// Build lookup map by identifiers
+		for i := range existingTasks {
+			task := &existingTasks[i]
+			if task.BinID != nil {
+				existingTasksMap[*task.BinID] = task
+			}
+			if task.PotentialLocationID != nil {
+				existingTasksMap[*task.PotentialLocationID] = task
+			}
+			if task.MoveRequestID != nil {
+				existingTasksMap[*task.MoveRequestID] = task
+			}
+		}
+		log.Printf("📋 Loaded %d existing tasks for matching", len(existingTasks))
+	}
+
+	sequenceOrder := 1 // Track sequence for non-skipped stops
 	for i, stop := range route.Stops {
 		log.Printf("")
 		log.Printf("🔍 Processing Stop #%d/%d:", i+1, len(route.Stops))
@@ -6093,10 +6576,15 @@ func optimizeRouteWithMapbox(
 		log.Printf("   MoveRequestID: '%s'", stop.MoveRequestID)
 		log.Printf("   Coordinates: (%.6f, %.6f)", stop.Latitude, stop.Longitude)
 
+		// Skip start stops
+		if stop.Type == optimization.StopTypeStart {
+			log.Printf("   ⏭️  SKIPPED: Start stop (driver already at warehouse)")
+			continue
+		}
+
 		var task models.RouteTask
-		task.ID = uuid.New().String()
 		task.ShiftID = shiftID
-		task.SequenceOrder = i + 1
+		task.SequenceOrder = sequenceOrder
 		task.Latitude = stop.Latitude
 		task.Longitude = stop.Longitude
 		task.Address = &stop.Address
@@ -6104,10 +6592,6 @@ func optimizeRouteWithMapbox(
 		// Determine task type and map to original task
 		// Note: Mapbox returns "service" for collections, "pickup"/"dropoff" for shipments
 		switch stop.Type {
-		case optimization.StopTypeStart:
-			// Skip start - driver is already at warehouse
-			log.Printf("   ⏭️  SKIPPED: Start stop (driver already at warehouse)")
-			continue
 
 		case optimization.StopTypeEnd:
 			// Map end to warehouse_stop so mobile knows to return to warehouse
@@ -6201,30 +6685,80 @@ func optimizeRouteWithMapbox(
 			log.Printf("   ✅ Mapped to task_type: '%s'", task.TaskType)
 		}
 
-		// Insert task
-		log.Printf("   💾 Inserting into database...")
-		insertQuery := `
-			INSERT INTO route_tasks (
-				id, shift_id, task_type, sequence_order,
-				bin_id, bin_number, fill_percentage,
-				potential_location_id, new_bin_number, placement_source,
-				move_request_id, destination_latitude, destination_longitude, destination_address,
-				latitude, longitude, address
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-		`
-		_, err = db.Exec(insertQuery,
-			task.ID, task.ShiftID, task.TaskType, task.SequenceOrder,
-			task.BinID, task.BinNumber, task.FillPercentage,
-			task.PotentialLocationID, task.NewBinNumber, task.PlacementSource,
-			task.MoveRequestID, task.DestinationLatitude, task.DestinationLongitude, task.DestinationAddress,
-			task.Latitude, task.Longitude, task.Address,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to insert optimized task: %w", err)
+		// Find existing task if first optimization
+		var existingTask *models.RouteTask
+		if isFirstOptimization {
+			// Try to match by bin_id, potential_location_id, or move_request_id
+			if task.BinID != nil {
+				existingTask = existingTasksMap[*task.BinID]
+			} else if task.PotentialLocationID != nil {
+				existingTask = existingTasksMap[*task.PotentialLocationID]
+			} else if task.MoveRequestID != nil {
+				existingTask = existingTasksMap[*task.MoveRequestID]
+			}
 		}
+
+		if isFirstOptimization && existingTask != nil {
+			// UPDATE existing task (preserve task ID, update sequence and coordinates)
+			log.Printf("   ✏️  Updating existing task (ID: %s) with new sequence: %d", existingTask.ID, task.SequenceOrder)
+			updateQuery := `
+				UPDATE route_tasks SET
+					sequence_order = $1,
+					latitude = $2,
+					longitude = $3,
+					address = $4,
+					updated_at = $5
+				WHERE id = $6
+			`
+			_, err = db.Exec(updateQuery,
+				task.SequenceOrder,
+				task.Latitude,
+				task.Longitude,
+				task.Address,
+				now,
+				existingTask.ID,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to update existing task: %w", err)
+			}
+		} else {
+			// INSERT new task (first optimization but no match, or subsequent optimization)
+			task.ID = uuid.New().String() // Generate new UUID
+			if !isFirstOptimization {
+				log.Printf("   💾 Inserting new task (reoptimization)...")
+			} else {
+				log.Printf("   💾 Inserting new task (warehouse stop, no existing match)...")
+			}
+			insertQuery := `
+				INSERT INTO route_tasks (
+					id, shift_id, task_type, sequence_order,
+					bin_id, bin_number, fill_percentage,
+					potential_location_id, new_bin_number, placement_source,
+					move_request_id, destination_latitude, destination_longitude, destination_address,
+					latitude, longitude, address
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			`
+			_, err = db.Exec(insertQuery,
+				task.ID, task.ShiftID, task.TaskType, task.SequenceOrder,
+				task.BinID, task.BinNumber, task.FillPercentage,
+				task.PotentialLocationID, task.NewBinNumber, task.PlacementSource,
+				task.MoveRequestID, task.DestinationLatitude, task.DestinationLongitude, task.DestinationAddress,
+				task.Latitude, task.Longitude, task.Address,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to insert optimized task: %w", err)
+			}
+		}
+
+		// Increment sequence for next non-skipped stop
+		sequenceOrder++
 	}
 
-	log.Printf("✅ [MAPBOX OPTIMIZER] Created %d optimized route tasks", len(route.Stops)-2) // -2 for start/end
+	if isFirstOptimization {
+		log.Printf("✅ [MAPBOX OPTIMIZER] Updated existing tasks with optimized sequence order")
+	} else {
+		log.Printf("✅ [MAPBOX OPTIMIZER] Created %d new optimized route tasks", len(route.Stops)-2) // -2 for start/end
+	}
 
 	// 🔍 DEBUG: Verify what was ACTUALLY saved to database
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

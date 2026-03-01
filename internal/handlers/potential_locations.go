@@ -14,6 +14,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -280,7 +281,7 @@ func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 
 // DeletePotentialLocation removes a potential location (hard delete)
 // DELETE /api/potential-locations/:id (requires admin role)
-func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func DeletePotentialLocation(db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -393,7 +394,7 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 					}
 
 					// Re-optimize the shift (skip gates since this is manager-initiated)
-					if reoptErr := ReoptimizeActiveShift(db, shiftID, centrifugoClient, true); reoptErr != nil {
+					if reoptErr := ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true); reoptErr != nil {
 						log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to re-optimize shift %s: %v", shiftID, reoptErr)
 					} else {
 						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Successfully re-optimized shift %s", shiftID)
@@ -422,7 +423,7 @@ func DeletePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 
 // ConvertPotentialLocationToBin converts a potential location to an active bin
 // POST /api/potential-locations/:id/convert (requires admin role)
-func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func ConvertPotentialLocationToBin(db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] ========== START ==========")
@@ -676,7 +677,7 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugo
 					}
 
 					// Re-optimize the shift (skip gates since this is manager-initiated)
-					if reoptErr := ReoptimizeActiveShift(db, shiftID, centrifugoClient, true); reoptErr != nil {
+					if reoptErr := ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true); reoptErr != nil {
 						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to re-optimize shift %s: %v", shiftID, reoptErr)
 					} else {
 						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Successfully re-optimized shift %s", shiftID)

@@ -16,10 +16,15 @@ type PotentialLocation struct {
 	Notes             *string  `json:"notes,omitempty" db:"notes"`
 	CreatedAt         int64    `json:"created_at" db:"created_at"`
 	UpdatedAt         int64    `json:"updated_at" db:"updated_at"`
+
+	// Assignment tracking
+	AssignedShiftID *string `json:"assigned_shift_id,omitempty" db:"assigned_shift_id"` // Which shift this is currently assigned to
+
+	// Conversion tracking (when converted to real bin)
 	ConvertedToBinID    *string `json:"converted_to_bin_id,omitempty" db:"converted_to_bin_id"`
 	ConvertedAt         *int64  `json:"converted_at,omitempty" db:"converted_at"`
 	ConvertedByUserID   *string `json:"converted_by_user_id,omitempty" db:"converted_by_user_id"`
-	ConvertedViaShiftID *string `json:"converted_via_shift_id,omitempty" db:"converted_via_shift_id"`
+	ConvertedViaShiftID *string `json:"converted_via_shift_id,omitempty" db:"converted_via_shift_id"` // Which shift converted it
 }
 
 // PotentialLocationResponse is what we send to the client with ISO timestamps

@@ -26,6 +26,10 @@ db/*.db-wal
 firebase-service-account.json
 *-firebase-*.json
 
+# Google Cloud service account (NEVER commit this!)
+service-account-key.json
+*-service-account*.json
+
 # IDE
 .vscode/
 .idea/

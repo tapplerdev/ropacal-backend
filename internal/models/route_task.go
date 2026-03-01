@@ -55,11 +55,15 @@ type RouteTask struct {
 	Skipped               bool   `json:"skipped" db:"skipped"`
 	UpdatedFillPercentage *int   `json:"updated_fill_percentage,omitempty" db:"updated_fill_percentage"`
 
+	// Addition tracking (for audit trail)
+	AddedBy        *string `json:"added_by,omitempty" db:"added_by"`             // User ID who added the task (NULL if created with shift)
+	AdditionReason *string `json:"addition_reason,omitempty" db:"addition_reason"` // Reason task was added
+
 	// Deletion tracking (for audit trail)
-	IsDeleted       bool    `json:"is_deleted" db:"is_deleted"`
-	DeletedAt       *int64  `json:"deleted_at,omitempty" db:"deleted_at"`
-	DeletedBy       *string `json:"deleted_by,omitempty" db:"deleted_by"`       // User ID who deleted the task
-	DeletionReason  *string `json:"deletion_reason,omitempty" db:"deletion_reason"`
+	IsDeleted      bool    `json:"is_deleted" db:"is_deleted"`
+	DeletedAt      *int64  `json:"deleted_at,omitempty" db:"deleted_at"`
+	DeletedBy      *string `json:"deleted_by,omitempty" db:"deleted_by"`       // User ID who deleted the task
+	DeletionReason *string `json:"deletion_reason,omitempty" db:"deletion_reason"`
 
 	// Metadata
 	TaskData  *json.RawMessage `json:"task_data,omitempty" db:"task_data"`

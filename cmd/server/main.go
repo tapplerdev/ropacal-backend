@@ -25,12 +25,13 @@ func main() {
 	log.Println("🚀 ROPACAL BACKEND SERVER STARTING")
 	log.Println("═══════════════════════════════════════════════════════════════════")
 
-	// Load .env file
+	// Load .env file (override existing env vars for local development)
 	log.Println("📂 Loading environment variables...")
-	if err := godotenv.Load(); err != nil {
-		log.Println("⚠️  Warning: .env file not found, using environment variables from system")
+	// Load .env from current working directory (project root)
+	if err := godotenv.Overload(".env"); err != nil {
+		log.Printf("⚠️  Warning: .env file not found: %v", err)
 	} else {
-		log.Println("✅ .env file loaded successfully")
+		log.Println("✅ .env file loaded successfully (overriding system env vars)")
 	}
 
 	// Get database URL
@@ -222,7 +223,7 @@ func main() {
 			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
 			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
 			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
-			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db)) // Check if bin is in active shifts
+			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db, redisClient)) // Check if bin is in active shifts
 		})
 
 		// Checks endpoints
@@ -282,7 +283,7 @@ func main() {
 			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub))
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
 			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub, centrifugoClient))
-			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, wsHub))
+			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, redisClient, wsHub))
 
 			// Shift history
 			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
@@ -322,8 +323,8 @@ func main() {
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService))
 			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
 			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService))
-			r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, centrifugoClient, fcmService)) // Comprehensive shift editing
-			r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, centrifugoClient))
+			r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, redisClient, centrifugoClient, fcmService)) // Comprehensive shift editing
+			r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, redisClient, centrifugoClient))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
 
 			// Task-based shift creation (agnostic shift builder)
@@ -334,6 +335,7 @@ func main() {
 			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                           // Get single shift (register after)
 			r.Get("/manager/shifts/{shiftId}/tasks/history", handlers.GetShiftTasksWithHistory(db)) // Get ALL tasks including deleted ones for audit trail
 			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db)) // Compare Mapbox v2 optimization
+			r.Get("/manager/shifts/{id}/driver-proximity", handlers.CheckShiftDriverProximity(db, redisClient)) // Check if driver is nearby current task
 
 			// One-time data migration endpoints (can be removed after use)
 			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
@@ -344,9 +346,9 @@ func main() {
 r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))            // List all move requests (register first - exact match)
 			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))        // Get single move request (register after)
 			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db)) // Check if move request is in active shifts
-			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db, wsHub, centrifugoClient)) // Update move request
+			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db, redisClient, wsHub, centrifugoClient)) // Update move request
 			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService))
-			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, wsHub, centrifugoClient))
+			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, redisClient, wsHub, centrifugoClient))
 			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(db))
 			r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(db))
 			r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(db))
@@ -362,8 +364,8 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 
 			// Potential Locations management (managers can delete and convert)
 			r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
-			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, wsHub, centrifugoClient))
-			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, wsHub, centrifugoClient))
+			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, redisClient, wsHub, centrifugoClient))
+			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, redisClient, wsHub, centrifugoClient))
 			r.Get("/bins/{binId}/nearby-potential-locations", handlers.GetNearbyPotentialLocations(db))
 
 			// Fleet management

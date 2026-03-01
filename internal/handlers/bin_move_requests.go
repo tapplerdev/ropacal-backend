@@ -14,6 +14,7 @@ import (
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -1352,7 +1353,7 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 
 // UpdateBinMoveRequest updates move request details (date, notes, location, assignment, etc.)
 // PUT /api/manager/bins/move-requests/:id
-func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -2065,7 +2066,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 			err := db.Get(&shiftStatus, `SELECT status FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID)
 			if err == nil && shiftStatus == "active" {
 				log.Printf("🔄 [UPDATE-MOVE] Triggering re-optimization for shift %s (manager-initiated change)", *moveRequest.AssignedShiftID)
-				if reoptErr := ReoptimizeActiveShift(db, *moveRequest.AssignedShiftID, centrifugoClient, true); reoptErr != nil {
+				if reoptErr := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); reoptErr != nil {
 					log.Printf("⚠️  [UPDATE-MOVE] Failed to re-optimize shift: %v", reoptErr)
 					// Don't fail the entire request if re-optimization fails
 				} else {
@@ -2548,7 +2549,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 
 // CancelBinMoveRequest cancels a pending move request
 // PUT /api/manager/bins/move-requests/:id/cancel
-func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CancelBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -2670,7 +2671,7 @@ func CancelBinMoveRequest(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *c
 		}
 
 		// Re-optimize the shift (skip gates since this is manager-initiated)
-		if err := ReoptimizeActiveShift(db, *moveRequest.AssignedShiftID, centrifugoClient, true); err != nil {
+		if err := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); err != nil {
 			log.Printf("⚠️  Failed to re-optimize shift after move request cancellation: %v", err)
 			// Don't fail the entire request if re-optimization fails
 		} else {
