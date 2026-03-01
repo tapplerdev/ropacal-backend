@@ -1873,8 +1873,8 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						INSERT INTO bins (
 							id, bin_number, current_street, city, zip,
 							latitude, longitude, status, fill_percentage,
-							last_checked_at, created_by_user_id, created_at, updated_at
-						) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+							last_checked_at, created_by_user_id, placement_photo_url, created_at, updated_at
+						) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 					`
 
 					// Use driver-provided bin number (required)
@@ -1910,6 +1910,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						0, // New bins start at 0% fill
 						now,
 						userClaims.UserID,
+						req.PhotoUrl, // Placement photo from driver
 						now,
 						now,
 					)
