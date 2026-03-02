@@ -4104,7 +4104,14 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 			bins = []models.ShiftBinWithDetails{} // Return empty array on error
 		}
 
-		log.Printf("✅ Shift found with %d bins", len(bins))
+		// Also get tasks from route_tasks table (new task-based system)
+		tasks, err := database.GetShiftTasks(db, shiftID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
+			tasks = []models.RouteTask{} // Empty tasks array on error
+		}
+
+		log.Printf("✅ Shift found with %d bins, %d tasks", len(bins), len(tasks))
 		log.Printf("📤 RESPONSE: 200 OK")
 
 		// Return shift with bins array
@@ -4123,6 +4130,7 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
 				"bins":                bins,
+				"tasks":               tasks, // New task-based field
 			},
 		})
 	}
