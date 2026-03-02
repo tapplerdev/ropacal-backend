@@ -392,43 +392,16 @@ func CreateShiftWithTasks(
 		}
 	}
 
-	// Insert warehouse deployment task pairs (warehouse_stop load + placement with source="warehouse")
-	// Each deployment: driver goes to warehouse to load the bin, then drives to destination to place it
+	// Insert warehouse deployment placement tasks (source="warehouse")
+	// ❌ REMOVED: warehouse_stop "load" task creation
+	// Mapbox will automatically route to warehouse for placements - no explicit load stop needed
 	nextSeq := len(tasks) + 1
 	if len(warehouseDeployments) > 0 {
-		log.Printf("🏭 Inserting %d warehouse deployment task pair(s)...", len(warehouseDeployments))
+		log.Printf("🏭 Inserting %d warehouse deployment placement task(s)...", len(warehouseDeployments))
+		log.Printf("   ℹ️  Mapbox will automatically handle warehouse pickup routing")
 
-		// Group all deployments into a single warehouse_stop "load" task (efficient: one trip to warehouse)
-		// then individual placement tasks for each bin
-		binIDs := make([]string, 0, len(warehouseDeployments))
-		for _, d := range warehouseDeployments {
-			binIDs = append(binIDs, d.BinID)
-		}
-		loadTaskDataRaw, _ := json.Marshal(map[string]interface{}{
-			"warehouse_action": "load",
-			"bin_ids":          binIDs,
-		})
-
-		// warehouse_stop task: go to warehouse and load all deployment bins
-		loadStopID := uuid.New().String()
-		loadAction := "load"
-		_, err = tx.Exec(
-			taskQuery,
-			loadStopID, shiftID, nextSeq, "warehouse_stop",
-			warehouseLat, warehouseLon, warehouseAddr,
-			nil, nil, nil,          // bin_id, bin_number, fill_percentage
-			nil, nil, nil,          // potential_location_id, new_bin_number, placement_source
-			nil, nil, nil, nil, nil, // move_request fields
-			loadAction, len(warehouseDeployments), // warehouse_action, bins_to_load
-			nil, loadTaskDataRaw, now,
-		)
-		if err != nil {
-			return "", 0, fmt.Errorf("failed to create warehouse load stop: %w", err)
-		}
-		log.Printf("   ✅ Warehouse load stop inserted (seq %d, loading %d bins)", nextSeq, len(warehouseDeployments))
-		nextSeq++
-
-		// placement tasks: one per deployment bin, with placement_source="warehouse"
+		// Create placement tasks: one per deployment bin, with placement_source="warehouse"
+		// Mapbox treats these as shipments (pickup at warehouse, dropoff at destination)
 		for _, d := range warehouseDeployments {
 			placeSrc := "warehouse"
 			addr := d.DestinationAddress
@@ -450,55 +423,13 @@ func CreateShiftWithTasks(
 			nextSeq++
 		}
 
-		totalBins += 1 + len(warehouseDeployments) // warehouse_stop load + placements
+		totalBins += len(warehouseDeployments) // Only count placements, not warehouse_stop
 	}
 
-	// Smart warehouse task insertion: Ensure shift always ends at warehouse
-	// Check if last task is a warehouse_stop, if not, append one
-	var lastTaskType string
-	if len(tasks) > 0 {
-		lastTaskType, _ = tasks[len(tasks)-1]["task_type"].(string)
-	}
-	// If we appended warehouse deployment tasks, the last task is now a placement (not warehouse_stop)
-	if len(warehouseDeployments) > 0 {
-		lastTaskType = "placement"
-	}
-
-	if lastTaskType != "warehouse_stop" {
-		log.Printf("🏭 Last task is '%s', appending final warehouse stop", lastTaskType)
-
-		// Create final warehouse task (nextSeq accounts for any deployment tasks already inserted)
-		warehouseTaskID := uuid.New().String()
-		warehouseSequence := nextSeq
-
-		_, err = tx.Exec(
-			taskQuery,
-			warehouseTaskID, shiftID, warehouseSequence, "warehouse_stop",
-			warehouseLat, warehouseLon, warehouseAddr,
-			nil, nil, nil,          // bin_id, bin_number, fill_percentage
-			nil, nil, nil,          // potential_location_id, new_bin_number, placement_source
-			nil, nil, nil, nil, nil, // move_request fields
-			nil, nil,               // warehouse_action, bins_to_load (nil = just return)
-			nil, []byte("{}"), now, // route_id, task_data, created_at
-		)
-		if err != nil {
-			return "", 0, fmt.Errorf("failed to create final warehouse task: %w", err)
-		}
-
-		// Update shift total_bins to include the warehouse task
-		_, err = tx.Exec(
-			`UPDATE shifts SET total_bins = $1, updated_at = $2 WHERE id = $3`,
-			warehouseSequence, now, shiftID,
-		)
-		if err != nil {
-			return "", 0, fmt.Errorf("failed to update shift total_bins: %w", err)
-		}
-
-		log.Printf("✅ Added final warehouse stop (sequence %d) - shift now ends at warehouse", warehouseSequence)
-		totalBins = warehouseSequence // Update for return value
-	} else {
-		log.Printf("✅ Last task is already warehouse_stop - no need to append")
-	}
+	// ❌ REMOVED: Auto-append warehouse stop logic
+	// Mapbox Optimization v2 will automatically add warehouse stops (end stops) as needed
+	// Let the optimizer handle warehouse returns for optimal routing
+	log.Printf("✅ Created shift with %d tasks - Mapbox will add warehouse stops during optimization", len(tasks))
 
 	err = tx.Commit()
 	if err != nil {
