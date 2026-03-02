@@ -134,7 +134,6 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 				"pause_start_time":    shift.PauseStartTime,
 				"total_bins":          shift.TotalBins,
 				"completed_bins":      shift.CompletedBins,
-				"bins":                bins, // Legacy field
 				"tasks":               tasks, // New task-based field
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
@@ -199,7 +198,7 @@ func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
 				"total_bins":          shift.TotalBins,
 				"completed_bins":      shift.CompletedBins,
 				"truck_bin_capacity":  shift.TruckBinCapacity,
-				"bins":                bins,
+				"tasks":                bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
 			},
@@ -1132,7 +1131,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 			bins = []models.ShiftBinWithDetails{} // Empty array on error
 		}
 
-		// Broadcast WebSocket update to driver (include bins!)
+		// Broadcast WebSocket update to driver (include tasks!)
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
 			"data": map[string]interface{}{
@@ -1146,7 +1145,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 				"pause_start_time":    shift.PauseStartTime,
 				"total_bins":          shift.TotalBins,
 				"completed_bins":      shift.CompletedBins,
-				"bins":                bins, // ← Include route bins!
+				"tasks":               bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
 			},
@@ -2167,12 +2166,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 		}
 		log.Printf("✅ Fetched %d tasks", len(bins))
 
-		// Get updated tasks list (new task-based system)
-		tasks, err := database.GetShiftTasks(db, shift.ID)
-		if err != nil {
-			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
-			tasks = []models.RouteTask{}
-		}
 
 		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
 		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
@@ -2187,8 +2180,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				"status":         shift.Status,
 				"completed_bins": logicalCompleted,
 				"total_bins":     logicalTotal,
-				"bins":           bins,
-				"tasks":          tasks,
+				"tasks":          bins, // ← Changed to use bins instead of duplicate tasks field
 			},
 		})
 
@@ -2961,12 +2953,6 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub) http.H
 			bins = []models.ShiftBinWithDetails{}
 		}
 
-		// Get updated tasks list (new task-based system)
-		tasks, err := database.GetShiftTasks(db, shift.ID)
-		if err != nil {
-			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
-			tasks = []models.RouteTask{}
-		}
 
 		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
 		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
@@ -2979,8 +2965,7 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub) http.H
 				"status":         shift.Status,
 				"completed_bins": logicalCompleted,
 				"total_bins":     logicalTotal,
-				"bins":           bins,
-				"tasks":          tasks,
+				"tasks":          bins,
 			},
 		})
 
@@ -4129,7 +4114,6 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 				"completed_bins":      shift.CompletedBins,
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
-				"bins":                bins,
 				"tasks":               tasks, // New task-based field
 			},
 		})
@@ -4632,7 +4616,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 				"pause_start_time":    shift.PauseStartTime,
 				"total_bins":          shift.TotalBins,
 				"completed_bins":      shift.CompletedBins,
-				"bins":                bins,
+				"tasks":                bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
 				"message":             "New route assigned!",
@@ -4662,7 +4646,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 				"route_id":          req.RouteID,
 				"status":            shift.Status,
 				"total_bins":        totalBins,
-				"bins":              bins,
+				"tasks":              bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
 				"notification_sent": notificationSent,
 			},
 		})
