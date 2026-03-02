@@ -50,10 +50,11 @@ type RouteTask struct {
 	RouteID *string `json:"route_id,omitempty" db:"route_id"`
 
 	// Completion tracking
-	IsCompleted           int    `json:"is_completed" db:"is_completed"`
-	CompletedAt           *int64 `json:"completed_at,omitempty" db:"completed_at"`
-	Skipped               bool   `json:"skipped" db:"skipped"`
-	UpdatedFillPercentage *int   `json:"updated_fill_percentage,omitempty" db:"updated_fill_percentage"`
+	IsCompleted           int     `json:"is_completed" db:"is_completed"`
+	CompletedAt           *int64  `json:"completed_at,omitempty" db:"completed_at"`
+	Skipped               bool    `json:"skipped" db:"skipped"`
+	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty" db:"updated_fill_percentage"`
+	PhotoURL              *string `json:"photo_url,omitempty" db:"photo_url"` // Photo taken during task completion
 
 	// Addition tracking (for audit trail)
 	AddedBy        *string `json:"added_by,omitempty" db:"added_by"`             // User ID who added the task (NULL if created with shift)

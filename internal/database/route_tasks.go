@@ -16,9 +16,23 @@ import (
 // GetShiftTasks retrieves all active (non-deleted) tasks for a shift ordered by sequence
 func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 	var tasks []models.RouteTask
-	query := `SELECT * FROM route_tasks
-	          WHERE shift_id = $1 AND is_deleted = FALSE
-	          ORDER BY sequence_order ASC`
+	query := `
+		SELECT
+			rt.*,
+			c.photo_url
+		FROM route_tasks rt
+		LEFT JOIN LATERAL (
+			SELECT photo_url
+			FROM checks
+			WHERE bin_id = rt.bin_id
+				AND shift_id = rt.shift_id
+				AND checked_on = rt.completed_at
+			ORDER BY checked_on DESC
+			LIMIT 1
+		) c ON true
+		WHERE rt.shift_id = $1 AND rt.is_deleted = FALSE
+		ORDER BY rt.sequence_order ASC
+	`
 
 	err := db.Select(&tasks, query, shiftID)
 	if err != nil {
@@ -142,6 +156,16 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 			return nil, fmt.Errorf("failed to scan task row: %w", err)
 		}
 		tasks = append(tasks, task)
+	}
+
+	// Log first 3 tasks to see coordinate data types
+	if len(tasks) > 0 {
+		log.Println("[DIAGNOSTIC] 🔍 RAW TASK DATA FROM DATABASE (first 3 tasks):")
+		for i := 0; i < len(tasks) && i < 3; i++ {
+			task := tasks[i]
+			log.Printf("[DIAGNOSTIC]    Task #%d: task_type=%v, lat=%v (type=%T), lng=%v (type=%T), addr=%v",
+				i, task["task_type"], task["latitude"], task["latitude"], task["longitude"], task["longitude"], task["address"])
+		}
 	}
 
 	return tasks, nil
