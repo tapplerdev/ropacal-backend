@@ -3044,6 +3044,26 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 
 			log.Printf("[MANUAL MOVE] ✅ Bin relocated to %s", *moveRequest.NewAddress)
 		}
+			// If this was a relocation/redeployment to a potential location, mark location as converted
+			if moveRequest.SourcePotentialLocationID != nil {
+				log.Printf("[MANUAL MOVE]    → Manual relocation to potential location - marking as converted")
+				
+				_, err = db.Exec(`
+					UPDATE potential_locations
+					SET converted_to_bin_id = $1,
+					    converted_at = $2,
+					    converted_by_user_id = $3,
+					    updated_at = $2
+					WHERE id = $4
+				`, moveRequest.BinID, now, userID, *moveRequest.SourcePotentialLocationID)
+				
+				if err != nil {
+					log.Printf("[MANUAL MOVE] ⚠️  Error converting potential location: %v", err)
+				} else {
+					log.Printf("[MANUAL MOVE] ✅ Potential location marked as converted")
+				}
+			}
+
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{

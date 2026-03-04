@@ -487,6 +487,8 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS created_by_user_id TEXT`,
 		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS retired_at BIGINT`,
 		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS retired_by_user_id TEXT`,
+		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS placement_photo_url TEXT`,
+		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS source_potential_location_id TEXT`,
 
 		// Add foreign key constraints (using DO block for IF NOT EXISTS)
 		`DO $$
@@ -505,8 +507,17 @@ func Migrate(db *sqlx.DB) error {
 			END IF;
 		END $$`,
 
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+						   WHERE constraint_name='fk_bins_source_potential_location' AND table_name='bins') THEN
+				ALTER TABLE bins ADD CONSTRAINT fk_bins_source_potential_location FOREIGN KEY (source_potential_location_id) REFERENCES potential_locations(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+
 		`CREATE INDEX IF NOT EXISTS idx_bins_retired_at ON bins(retired_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_bins_status ON bins(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_bins_source_potential_location ON bins(source_potential_location_id)`,
 
 		// Migration: Update bins status constraint to include new statuses
 		`ALTER TABLE bins DROP CONSTRAINT IF EXISTS bins_status_check`,

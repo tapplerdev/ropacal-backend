@@ -124,13 +124,13 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			INSERT INTO bins (
 				id, bin_number, current_street, city, zip, status,
 				fill_percentage, checked, move_requested, latitude, longitude,
-				created_by_user_id, created_at, updated_at
+				created_by_user_id, source_potential_location_id, created_at, updated_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		`,
 			id, binNumber, req.CurrentStreet, req.City, req.Zip, req.Status,
 			fillPercentage, 0, 0, req.Latitude, req.Longitude,
-			userClaims.UserID, now, now,
+			userClaims.UserID, req.SourcePotentialLocationID, now, now,
 		)
 
 		if err != nil {
@@ -143,6 +143,27 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			log.Printf("❌ [CREATE-BIN] Database insert failed: %v", err)
 			http.Error(w, "Failed to create bin", http.StatusInternalServerError)
 			return
+		}
+
+		// If bin was created from a potential location, mark it as converted
+		if req.SourcePotentialLocationID != nil {
+			log.Printf("[CREATE-BIN] 📍 Created from potential location %s - marking as converted", *req.SourcePotentialLocationID)
+
+			_, err = db.Exec(`
+				UPDATE potential_locations
+				SET converted_to_bin_id = $1,
+					converted_at = $2,
+					converted_by_user_id = $3,
+					updated_at = $2
+				WHERE id = $4
+			`, id, now, userClaims.UserID, *req.SourcePotentialLocationID)
+
+			if err != nil {
+				log.Printf("[CREATE-BIN] ⚠️  Error converting potential location: %v", err)
+				// Don't fail the whole request - bin was created successfully
+			} else {
+				log.Printf("[CREATE-BIN] ✅ Potential location marked as converted (manual placement)")
+			}
 		}
 
 		// Fetch created bin
@@ -312,6 +333,14 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		}
 		// Otherwise: keep existing coordinates (no change to query)
 
+		// Handle source_potential_location_id
+		// If provided in request, update it; otherwise keep existing value
+		if req.SourcePotentialLocationID != nil {
+			paramCount++
+			query += `, source_potential_location_id = $` + fmt.Sprintf("%d", paramCount)
+			args = append(args, *req.SourcePotentialLocationID)
+		}
+
 		paramCount++
 		query += `, updated_at = $` + fmt.Sprintf("%d", paramCount) + ` WHERE id = $` + fmt.Sprintf("%d", paramCount+1)
 		args = append(args, time.Now().Unix(), id)
@@ -376,6 +405,26 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 		// ── Change log + optional no-go zone creation ───────────────────────────
 		nowUnix := time.Now().Unix()
+
+		// ── Potential Location Conversion (if address changed via potential location) ──
+		if req.SourcePotentialLocationID != nil && addrChanged {
+			log.Printf("[UPDATE-BIN] 📍 Manual relocation to potential location - marking as converted")
+
+			_, err = db.Exec(`
+				UPDATE potential_locations
+				SET converted_to_bin_id = $1,
+				    converted_at = $2,
+				    converted_by_user_id = $3,
+				    updated_at = $2
+				WHERE id = $4
+			`, id, nowUnix, userID, *req.SourcePotentialLocationID)
+
+			if err != nil {
+				log.Printf("[UPDATE-BIN] ⚠️  Error converting potential location: %v", err)
+			} else {
+				log.Printf("[UPDATE-BIN] ✅ Potential location marked as converted")
+			}
+		}
 
 		// Detect what changed and build old/new JSONB snapshots
 		changeType := ""

@@ -5440,8 +5440,8 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 		}
 
 		// If this was a warehouse redeployment to a potential location, mark location as converted
-		if moveRequest.MoveType == "redeployment" && moveRequest.SourcePotentialLocationID != nil {
-			log.Printf("[MOVE]    → Warehouse redeployment to potential location - marking as converted")
+		if moveRequest.SourcePotentialLocationID != nil && (moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment") {
+			log.Printf("[MOVE]    → Relocation/redeployment to potential location - marking as converted")
 
 			// Get shift ID from assigned_shift_id
 			var shiftID *string
