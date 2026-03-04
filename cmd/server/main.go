@@ -315,6 +315,9 @@ func main() {
 		// Diagnostic logging endpoint (no auth required for easier debugging)
 		r.Post("/api/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
 
+		// App error logging endpoint (no auth required for mobile app error reporting)
+		r.Post("/api/logs/app-error", handlers.LogAppError(db))
+
 		// Manager endpoints (require authentication + admin role)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
@@ -390,6 +393,11 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			// Field observations management
 			r.Get("/field-observations", handlers.GetFieldObservations(db))
 			r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
+
+			// App error logs management (for viewing driver errors in dashboard)
+			r.Get("/manager/logs/app-errors", handlers.GetAppErrorLogs(db))
+			r.Get("/manager/logs/app-error-stats", handlers.GetAppErrorStats(db))
+			r.Patch("/manager/logs/app-errors/{id}/resolve", handlers.ResolveAppErrorLog(db))
 		})
 	})
 
