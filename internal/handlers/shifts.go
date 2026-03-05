@@ -2037,12 +2037,12 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: NULL")
 			}
 
-			checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id)
-						   VALUES ($1, $2, $3, $4, $5, $6, $7)
+			checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id, shift_id)
+						   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 						   RETURNING id`
 
 			var returnedID int
-			err = db.QueryRow(checkQuery, binIDForCheck, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID).Scan(&returnedID)
+			err = db.QueryRow(checkQuery, binIDForCheck, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID, shift.ID).Scan(&returnedID)
 			if err != nil {
 				log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
 				// Don't fail the request - the bin is already marked complete
