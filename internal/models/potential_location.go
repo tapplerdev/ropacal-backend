@@ -22,9 +22,16 @@ type PotentialLocation struct {
 
 	// Conversion tracking (when converted to real bin)
 	ConvertedToBinID    *string `json:"converted_to_bin_id,omitempty" db:"converted_to_bin_id"`
-	ConvertedAt         *int64  `json:"converted_at,omitempty" db:"converted_at"`
-	ConvertedByUserID   *string `json:"converted_by_user_id,omitempty" db:"converted_by_user_id"`
 	ConvertedViaShiftID *string `json:"converted_via_shift_id,omitempty" db:"converted_via_shift_id"` // Which shift converted it
+
+	// Conversion snapshot fields - capture bin state at moment of conversion
+	ConvertedBinNumberSnapshot *int    `json:"converted_bin_number_snapshot,omitempty" db:"converted_bin_number_snapshot"` // Bin number at time of conversion
+	ConvertedAddressSnapshot   *string `json:"converted_address_snapshot,omitempty" db:"converted_address_snapshot"`       // Address at time of conversion
+	ConvertedAt                *int64  `json:"converted_at,omitempty" db:"converted_at"`                                   // When conversion happened
+	ConvertedByUserID          *string `json:"converted_by_user_id,omitempty" db:"converted_by_user_id"`                   // Who performed conversion
+	ConversionStatus           *string `json:"conversion_status,omitempty" db:"conversion_status"`                         // 'active', 'pending', 'converted'
+	BinCurrentStatus           *string `json:"bin_current_status,omitempty" db:"bin_current_status"`                       // 'active', 'deleted', 'renumbered', 'moved'
+	ConversionMetadata         *string `json:"conversion_metadata,omitempty" db:"conversion_metadata"`                     // JSONB with conversion context
 }
 
 // PotentialLocationResponse is what we send to the client with ISO timestamps
@@ -41,12 +48,19 @@ type PotentialLocationResponse struct {
 	Notes                 *string  `json:"notes,omitempty"`
 	CreatedAtIso          string   `json:"created_at_iso"`
 	ConvertedToBinID      *string  `json:"converted_to_bin_id,omitempty"`
-	ConvertedAtIso        *string  `json:"converted_at_iso,omitempty"`
-	ConvertedByUserID     *string  `json:"converted_by_user_id,omitempty"`
 	ConvertedViaShiftID   *string  `json:"converted_via_shift_id,omitempty"`
 	ConvertedByDriverName  *string `json:"converted_by_driver_name,omitempty"`  // Driver who placed the bin (from shifts JOIN)
 	ConvertedByManagerName *string `json:"converted_by_manager_name,omitempty"` // Manager who manually converted (from users JOIN)
 	BinNumber             *int     `json:"bin_number,omitempty"`                 // From JOIN with bins table
+
+	// Conversion snapshot fields
+	ConvertedBinNumberSnapshot *int    `json:"converted_bin_number_snapshot,omitempty"` // Bin number at time of conversion
+	ConvertedAddressSnapshot   *string `json:"converted_address_snapshot,omitempty"`    // Address at time of conversion
+	ConvertedAtIso             *string `json:"converted_at_iso,omitempty"`              // When conversion happened (ISO format)
+	ConvertedByUserID          *string `json:"converted_by_user_id,omitempty"`          // Who performed conversion
+	ConversionStatus           *string `json:"conversion_status,omitempty"`             // 'active', 'pending', 'converted'
+	BinCurrentStatus           *string `json:"bin_current_status,omitempty"`            // 'active', 'deleted', 'renumbered', 'moved'
+	ConversionMetadata         *string `json:"conversion_metadata,omitempty"`           // JSON string with conversion context
 }
 
 // CreatePotentialLocationRequest is the request body for POST /api/potential-locations
@@ -68,20 +82,25 @@ type ConvertToBinRequest struct {
 // ToPotentialLocationResponse converts a PotentialLocation to PotentialLocationResponse
 func (pl *PotentialLocation) ToPotentialLocationResponse() PotentialLocationResponse {
 	resp := PotentialLocationResponse{
-		ID:                  pl.ID,
-		Address:             pl.Address,
-		Street:              pl.Street,
-		City:                pl.City,
-		Zip:                 pl.Zip,
-		Latitude:            pl.Latitude,
-		Longitude:           pl.Longitude,
-		RequestedByUserID:   pl.RequestedByUserID,
-		RequestedByName:     pl.RequestedByName,
-		Notes:               pl.Notes,
-		CreatedAtIso:        time.Unix(pl.CreatedAt, 0).Format(time.RFC3339),
-		ConvertedToBinID:    pl.ConvertedToBinID,
-		ConvertedByUserID:   pl.ConvertedByUserID,
-		ConvertedViaShiftID: pl.ConvertedViaShiftID,
+		ID:                         pl.ID,
+		Address:                    pl.Address,
+		Street:                     pl.Street,
+		City:                       pl.City,
+		Zip:                        pl.Zip,
+		Latitude:                   pl.Latitude,
+		Longitude:                  pl.Longitude,
+		RequestedByUserID:          pl.RequestedByUserID,
+		RequestedByName:            pl.RequestedByName,
+		Notes:                      pl.Notes,
+		CreatedAtIso:               time.Unix(pl.CreatedAt, 0).Format(time.RFC3339),
+		ConvertedToBinID:           pl.ConvertedToBinID,
+		ConvertedViaShiftID:        pl.ConvertedViaShiftID,
+		ConvertedBinNumberSnapshot: pl.ConvertedBinNumberSnapshot,
+		ConvertedAddressSnapshot:   pl.ConvertedAddressSnapshot,
+		ConvertedByUserID:          pl.ConvertedByUserID,
+		ConversionStatus:           pl.ConversionStatus,
+		BinCurrentStatus:           pl.BinCurrentStatus,
+		ConversionMetadata:         pl.ConversionMetadata,
 	}
 
 	if pl.ConvertedAt != nil {

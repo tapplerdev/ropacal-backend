@@ -145,24 +145,42 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
-		// If bin was created from a potential location, mark it as converted
+		// If bin was created from a potential location, mark it as converted with snapshot
 		if req.SourcePotentialLocationID != nil {
-			log.Printf("[CREATE-BIN] 📍 Created from potential location %s - marking as converted", *req.SourcePotentialLocationID)
+			log.Printf("[CREATE-BIN] 📍 Created from potential location %s - capturing conversion snapshot", *req.SourcePotentialLocationID)
+
+			// Build conversion metadata
+			metadata := map[string]interface{}{
+				"is_new_bin":  true,
+				"created_via": "manager_portal",
+				"bin_id":      id,
+				"created_by":  userClaims.UserID,
+				"created_at":  now,
+			}
+			metadataJSON, _ := json.Marshal(metadata)
+
+			// Build full address for snapshot
+			fullAddress := fmt.Sprintf("%s, %s, %s", req.CurrentStreet, req.City, req.Zip)
 
 			_, err = db.Exec(`
 				UPDATE potential_locations
 				SET converted_to_bin_id = $1,
-					converted_at = $2,
-					converted_by_user_id = $3,
-					updated_at = $2
-				WHERE id = $4
-			`, id, now, userClaims.UserID, *req.SourcePotentialLocationID)
+					converted_bin_number_snapshot = $2,
+					converted_address_snapshot = $3,
+					converted_at = $4,
+					converted_by_user_id = $5,
+					conversion_status = 'converted',
+					bin_current_status = 'active',
+					conversion_metadata = $6,
+					updated_at = $4
+				WHERE id = $7
+			`, id, binNumber, fullAddress, now, userClaims.UserID, string(metadataJSON), *req.SourcePotentialLocationID)
 
 			if err != nil {
-				log.Printf("[CREATE-BIN] ⚠️  Error converting potential location: %v", err)
+				log.Printf("[CREATE-BIN] ⚠️  Error capturing conversion snapshot: %v", err)
 				// Don't fail the whole request - bin was created successfully
 			} else {
-				log.Printf("[CREATE-BIN] ✅ Potential location marked as converted (manual placement)")
+				log.Printf("[CREATE-BIN] ✅ Conversion snapshot captured: Bin #%d at %s", binNumber, fullAddress)
 			}
 		}
 
@@ -406,23 +424,52 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		// ── Change log + optional no-go zone creation ───────────────────────────
 		nowUnix := time.Now().Unix()
 
-		// ── Potential Location Conversion (if address changed via potential location) ──
-		if req.SourcePotentialLocationID != nil && addrChanged {
-			log.Printf("[UPDATE-BIN] 📍 Manual relocation to potential location - marking as converted")
+		// ── Potential Location Conversion (if bin relocated to potential location) ──
+		if req.SourcePotentialLocationID != nil {
+			// Check if this is a NEW potential location assignment
+			isNewAssignment := existing.SourcePotentialLocationID == nil ||
+				*existing.SourcePotentialLocationID != *req.SourcePotentialLocationID
 
-			_, err = db.Exec(`
-				UPDATE potential_locations
-				SET converted_to_bin_id = $1,
-				    converted_at = $2,
-				    converted_by_user_id = $3,
-				    updated_at = $2
-				WHERE id = $4
-			`, id, nowUnix, userID, *req.SourcePotentialLocationID)
+			if isNewAssignment {
+				log.Printf("[UPDATE-BIN] 📍 Bin #%d relocated to potential location %s - capturing snapshot",
+					existing.BinNumber, *req.SourcePotentialLocationID)
 
-			if err != nil {
-				log.Printf("[UPDATE-BIN] ⚠️  Error converting potential location: %v", err)
-			} else {
-				log.Printf("[UPDATE-BIN] ✅ Potential location marked as converted")
+				// Build conversion metadata with previous bin state
+				metadata := map[string]interface{}{
+					"is_new_bin":              false,
+					"created_via":             "bin_relocation",
+					"bin_id":                  id,
+					"bin_previous_address":    fmt.Sprintf("%s, %s, %s", existing.CurrentStreet, existing.City, existing.Zip),
+					"bin_previous_latitude":   existing.Latitude,
+					"bin_previous_longitude":  existing.Longitude,
+					"relocation_date":         nowUnix,
+					"relocation_by":           userID,
+				}
+				metadataJSON, _ := json.Marshal(metadata)
+
+				// Build full address for snapshot (use new address from request)
+				fullAddress := fmt.Sprintf("%s, %s, %s", req.CurrentStreet, req.City, req.Zip)
+
+				_, err = db.Exec(`
+					UPDATE potential_locations
+					SET converted_to_bin_id = $1,
+						converted_bin_number_snapshot = $2,
+						converted_address_snapshot = $3,
+						converted_at = $4,
+						converted_by_user_id = $5,
+						conversion_status = 'converted',
+						bin_current_status = 'active',
+						conversion_metadata = $6,
+						updated_at = $4
+					WHERE id = $7
+				`, id, existing.BinNumber, fullAddress, nowUnix, userID, string(metadataJSON), *req.SourcePotentialLocationID)
+
+				if err != nil {
+					log.Printf("[UPDATE-BIN] ⚠️  Error capturing relocation snapshot: %v", err)
+				} else {
+					log.Printf("[UPDATE-BIN] ✅ Relocation snapshot captured: Bin #%d moved from %s to %s",
+						existing.BinNumber, metadata["bin_previous_address"], fullAddress)
+				}
 			}
 		}
 
@@ -466,6 +513,41 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				oldValues["longitude"] = existing.Longitude
 				newValues["latitude"] = *req.Latitude
 				newValues["longitude"] = *req.Longitude
+			}
+		}
+
+		// Update potential location status if bin was modified
+		if changeType != "" && existing.SourcePotentialLocationID != nil {
+			log.Printf("[UPDATE-BIN] 📍 Bin #%d (from potential location) was modified: %s", existing.BinNumber, changeType)
+
+			// Determine new status based on change type
+			var newStatus string
+			switch changeType {
+			case "bin_number_change":
+				newStatus = "renumbered"
+				log.Printf("[UPDATE-BIN] Bin renumbered: #%d → #%d", existing.BinNumber, req.BinNumber)
+			case "address_change", "coordinates_change":
+				newStatus = "moved"
+				log.Printf("[UPDATE-BIN] Bin address/coordinates changed")
+			default:
+				// For other changes (status, fill, etc.), keep as 'active'
+				newStatus = "active"
+			}
+
+			// Update potential location status
+			if newStatus != "active" {
+				_, err = db.Exec(`
+					UPDATE potential_locations
+					SET bin_current_status = $1,
+						updated_at = $2
+					WHERE id = $3
+				`, newStatus, nowUnix, *existing.SourcePotentialLocationID)
+
+				if err != nil {
+					log.Printf("[UPDATE-BIN] ⚠️  Error updating potential location status: %v", err)
+				} else {
+					log.Printf("[UPDATE-BIN] ✅ Potential location status updated to '%s'", newStatus)
+				}
 			}
 		}
 
@@ -668,8 +750,46 @@ func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			return
 		}
 
+		log.Printf("[DELETE-BIN] Deleting bin ID: %s", id)
+
+		// Get bin first to check if it was converted from a potential location
+		var bin models.Bin
+		err := db.Get(&bin, "SELECT * FROM bins WHERE id = $1", id)
+		if err == sql.ErrNoRows {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			log.Printf("❌ [DELETE-BIN] Error fetching bin: %v", err)
+			http.Error(w, "Failed to fetch bin", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[DELETE-BIN] Found bin #%d, potential_location_id: %v", bin.BinNumber, bin.SourcePotentialLocationID)
+
+		// If bin was converted from a potential location, update its status to 'deleted'
+		if bin.SourcePotentialLocationID != nil {
+			log.Printf("[DELETE-BIN] 📍 Updating potential location %s to mark bin as deleted", *bin.SourcePotentialLocationID)
+
+			_, err = db.Exec(`
+				UPDATE potential_locations
+				SET bin_current_status = 'deleted',
+					updated_at = $1
+				WHERE id = $2
+			`, time.Now().Unix(), *bin.SourcePotentialLocationID)
+
+			if err != nil {
+				log.Printf("[DELETE-BIN] ⚠️  Error updating potential location status: %v", err)
+				// Don't fail the deletion - continue
+			} else {
+				log.Printf("[DELETE-BIN] ✅ Potential location marked with bin_current_status='deleted'")
+			}
+		}
+
+		// Delete the bin
 		result, err := db.Exec("DELETE FROM bins WHERE id = $1", id)
 		if err != nil {
+			log.Printf("❌ [DELETE-BIN] Error deleting bin: %v", err)
 			http.Error(w, "Failed to delete", http.StatusInternalServerError)
 			return
 		}
@@ -679,6 +799,8 @@ func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
+
+		log.Printf("✅ [DELETE-BIN] Bin #%d deleted successfully", bin.BinNumber)
 
 		// Broadcast to all managers
 		wsHub.BroadcastToRole("admin", map[string]interface{}{

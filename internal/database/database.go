@@ -718,6 +718,21 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_app_error_logs_context ON app_error_logs(context)`,
 		`CREATE INDEX IF NOT EXISTS idx_app_error_logs_shift_id ON app_error_logs(shift_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_app_error_logs_is_resolved ON app_error_logs(is_resolved)`,
+
+		// Add conversion tracking fields to potential_locations
+		// Captures snapshot of bin state when potential location is converted to a bin
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS converted_bin_number_snapshot INT`,
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS converted_address_snapshot TEXT`,
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS converted_at BIGINT`,
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS converted_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL`,
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS conversion_status TEXT CHECK(conversion_status IN ('active', 'pending', 'converted'))`,
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS bin_current_status TEXT`,
+		`ALTER TABLE potential_locations ADD COLUMN IF NOT EXISTS conversion_metadata JSONB`,
+
+		// Create indexes for conversion tracking
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_conversion_status ON potential_locations(conversion_status)`,
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_converted_at ON potential_locations(converted_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_potential_locations_bin_current_status ON potential_locations(bin_current_status)`,
 	}
 
 	for _, migration := range migrations {
