@@ -298,7 +298,7 @@ func CompleteRouteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		}
 
 		// Complete task
-		err = database.CompleteTask(db, taskID, req.UpdatedFillPercentage, req.PhotoURL, req.NewBinID)
+		err = database.CompleteTask(db, taskID, req.UpdatedFillPercentage)
 		if err != nil {
 			log.Printf("❌ Error completing task: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")

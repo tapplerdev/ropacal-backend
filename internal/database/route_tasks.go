@@ -78,9 +78,19 @@ func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, 
 			rt.deletion_reason,
 			rt.task_data,
 			rt.created_at,
-			rt.updated_at
+			rt.updated_at,
+			c.photo_url
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
+		LEFT JOIN LATERAL (
+			SELECT photo_url
+			FROM checks
+			WHERE bin_id = rt.bin_id
+				AND shift_id = rt.shift_id
+				AND checked_on = rt.completed_at
+			ORDER BY checked_on DESC
+			LIMIT 1
+		) c ON true
 		WHERE rt.shift_id = $1
 		ORDER BY rt.is_deleted ASC, rt.sequence_order ASC
 	`
@@ -441,12 +451,11 @@ func CreateShiftWithTasks(
 }
 
 // CompleteTask marks a task as completed
+// Photo is stored in the checks table (not route_tasks) — see shifts.go CompleteTask handler
 func CompleteTask(
 	db *sqlx.DB,
 	taskID string,
 	updatedFillPercentage *int,
-	photoURL *string,
-	newBinID *string,
 ) error {
 	now := time.Now().Unix()
 
