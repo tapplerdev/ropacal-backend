@@ -2957,7 +2957,7 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 
 			log.Printf("[MANUAL MOVE] ✅ Bin status updated to %s", newStatus)
 
-		} else if moveRequest.MoveType == "relocation" {
+		} else if moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment" {
 			// Update bin location to new coordinates
 			log.Printf("[MANUAL MOVE]    → Relocating bin to new address")
 
