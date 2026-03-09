@@ -284,7 +284,7 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 }
 
 // CompleteRouteTask marks a task as completed (RESTful endpoint)
-func CompleteRouteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func CompleteRouteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: PUT /api/shifts/tasks/:taskId/complete")
 
@@ -367,6 +367,13 @@ func CompleteRouteTask(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 				// Broadcast to driver
 				hub.BroadcastToUser(shift.DriverID, updateMsg)
 				log.Printf("📡 WebSocket: Broadcasted shift update to driver %s", shift.DriverID)
+
+				// Publish shift_update via Centrifugo
+				if centrifugoClient != nil {
+					if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, updateMsg); pubErr != nil {
+						log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+					}
+				}
 
 				// Broadcast to managers
 				hub.BroadcastToRole("manager", updateMsg)

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -424,7 +425,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 
 // AssignMoveToShift explicitly assigns a pending move request to a shift
 // POST /api/manager/bins/move-requests/:id/assign-to-shift
-func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
+func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		moveRequestID := chi.URLParam(r, "id")
 		log.Printf("🚚 [ASSIGN TO SHIFT] Starting assignment for move request: %s", moveRequestID)
@@ -497,7 +498,7 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 
 		// Call the assignment logic
-		err = assignMoveToShift(db, wsHub, fcmService, moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition, managerID, managerName)
+		err = assignMoveToShift(db, wsHub, fcmService, centrifugoClient, moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition, managerID, managerName)
 		if err != nil {
 			log.Printf("❌ [ASSIGN TO SHIFT] Error assigning move to shift: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -513,7 +514,7 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 }
 
 // assignMoveToShift inserts move at specified position in shift and re-optimizes route
-func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string, insertAfterBinID *string, insertPosition *string, managerID string, managerName string) error {
+func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string, insertAfterBinID *string, insertPosition *string, managerID string, managerName string) error {
 	log.Printf("🚚 ASSIGN MOVE: Assigning move request for bin #%d to shift", bin.BinNumber)
 
 	// Store previous assignment info for history logging
@@ -897,17 +898,28 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		WHERE mr.id = $1
 	`, moveRequest.ID)
 	if err == nil {
+		moveRequestAssignedData := map[string]interface{}{
+			"move_request": moveRequestWithBin,
+			"updated_route": map[string]interface{}{
+				"shift_id": activeShift.ID,
+				"bins":     updatedBins,
+			},
+		}
 		wsHub.BroadcastToUser(activeShift.DriverID, map[string]interface{}{
 			"type": "move_request_assigned",
-			"data": map[string]interface{}{
-				"move_request": moveRequestWithBin,
-				"updated_route": map[string]interface{}{
-					"shift_id": activeShift.ID,
-					"bins":     updatedBins,
-				},
-			},
+			"data": moveRequestAssignedData,
 		})
 		log.Printf("✅ move_request_assigned notification sent")
+
+		// Publish via Centrifugo shift channel
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(context.Background(), activeShift.ID, map[string]interface{}{
+				"type": "move_request_assigned",
+				"data": moveRequestAssignedData,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish move_request_assigned to Centrifugo: %v", pubErr)
+			}
+		}
 	} else {
 		log.Printf("⚠️  Failed to fetch updated move request for WebSocket: %v", err)
 	}

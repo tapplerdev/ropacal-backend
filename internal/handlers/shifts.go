@@ -836,7 +836,7 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 }
 
 // StartShift starts an assigned shift
-func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http.HandlerFunc {
+func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/driver/shift/start")
 
@@ -1132,24 +1132,35 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 		}
 
 		// Broadcast WebSocket update to driver (include tasks!)
+		shiftUpdateData := map[string]interface{}{
+			"id":                  shift.ID,
+			"driver_id":           shift.DriverID,
+			"route_id":            shift.RouteID,
+			"status":              shift.Status,
+			"start_time":          shift.StartTime,
+			"end_time":            shift.EndTime,
+			"total_pause_seconds": shift.TotalPauseSeconds,
+			"pause_start_time":    shift.PauseStartTime,
+			"total_bins":          shift.TotalBins,
+			"completed_bins":      shift.CompletedBins,
+			"tasks":               bins,
+			"created_at":          shift.CreatedAt,
+			"updated_at":          shift.UpdatedAt,
+		}
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
-			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"pause_start_time":    shift.PauseStartTime,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"tasks":               bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
-			},
+			"data": shiftUpdateData,
 		})
+
+		// Also publish via Centrifugo shift channel
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+				"type": "shift_update",
+				"data": shiftUpdateData,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+			}
+		}
 
 		// Broadcast shift state change to all managers
 		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1172,6 +1183,20 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 		hub.BroadcastToRole("admin", broadcastData)
 		hub.BroadcastToRole("manager", broadcastData)
 		log.Printf("   ✅ [ASYNC] BroadcastToRole('admin' + 'manager') called")
+
+		// Also publish via Centrifugo for mobile app notification pipeline
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+			} else {
+				log.Printf("📡 Published driver_shift_change via Centrifugo (start)")
+			}
+		}
+
 		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Printf("✅ [ASYNC] Background broadcasts complete for shift %s", shift.ID)
 	}()
@@ -1179,7 +1204,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client) http
 }
 
 // PauseShift pauses an active shift
-func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func PauseShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/driver/shift/pause")
 
@@ -1222,6 +1247,16 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			"data": shift,
 		})
 
+		// Publish shift_update via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+				"type": "shift_update",
+				"data": shift,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+			}
+		}
+
 		// Broadcast shift state change to all managers
 		broadcastPayload := map[string]interface{}{
 			"type": "driver_shift_change",
@@ -1234,6 +1269,17 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		hub.BroadcastToRole("admin", broadcastPayload)
 		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Driver paused shift")
+
+		// Also publish driver_shift_change via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+			}
+		}
 
 		log.Printf("⏸️  Shift paused: %s", shift.ID)
 
@@ -1248,7 +1294,7 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 }
 
 // ResumeShift resumes a paused shift
-func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func ResumeShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -1296,6 +1342,16 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			"data": shift,
 		})
 
+		// Publish shift_update via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+				"type": "shift_update",
+				"data": shift,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+			}
+		}
+
 		// Broadcast shift state change to all managers
 		broadcastPayload := map[string]interface{}{
 			"type": "driver_shift_change",
@@ -1308,6 +1364,17 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		hub.BroadcastToRole("admin", broadcastPayload)
 		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Driver resumed shift")
+
+		// Also publish driver_shift_change via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+			}
+		}
 
 		log.Printf("▶️  Shift resumed: %s (total pause: %ds)", shift.ID, totalPause)
 
@@ -1322,7 +1389,7 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 }
 
 // EndShift ends the current shift
-func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -1541,6 +1608,16 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			"data": shift,
 		})
 
+		// Publish shift_update via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+				"type": "shift_update",
+				"data": shift,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+			}
+		}
+
 		// Broadcast shift state change to all managers
 		broadcastPayload := map[string]interface{}{
 			"type": "driver_shift_change",
@@ -1553,6 +1630,17 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		hub.BroadcastToRole("admin", broadcastPayload)
 		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Driver ended shift")
+
+		// Also publish driver_shift_change via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shift.ID,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+			}
+		}
 
 		log.Printf("🏁 Shift ended: %s (%dm active)", shift.ID, activeDuration/60)
 
@@ -2173,16 +2261,27 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			logicalCompleted, logicalTotal, shift.CompletedBins, shift.TotalBins)
 
 		// Broadcast WebSocket update with bins
+		completeTaskUpdateData := map[string]interface{}{
+			"id":             shift.ID,
+			"status":         shift.Status,
+			"completed_bins": logicalCompleted,
+			"total_bins":     logicalTotal,
+			"tasks":          bins,
+		}
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
-			"data": map[string]interface{}{
-				"id":             shift.ID,
-				"status":         shift.Status,
-				"completed_bins": logicalCompleted,
-				"total_bins":     logicalTotal,
-				"tasks":          bins, // ← Changed to use bins instead of duplicate tasks field
-			},
+			"data": completeTaskUpdateData,
 		})
+
+		// Publish shift_update via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+				"type": "shift_update",
+				"data": completeTaskUpdateData,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+			}
+		}
 
 		log.Printf("[DIAGNOSTIC] ✅ Bin completed: %d/%d (logical)", logicalCompleted, logicalTotal)
 
@@ -2769,7 +2868,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 
 // SkipTask marks a task as skipped with a required reason
 // If skipping a pickup task, automatically skips the paired dropoff
-func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub) http.HandlerFunc {
+func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/driver/shift/skip-task")
 
@@ -2958,16 +3057,27 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub) http.H
 		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
 
 		// Broadcast WebSocket update with bins
+		skipTaskUpdateData := map[string]interface{}{
+			"id":             shift.ID,
+			"status":         shift.Status,
+			"completed_bins": logicalCompleted,
+			"total_bins":     logicalTotal,
+			"tasks":          bins,
+		}
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 			"type": "shift_update",
-			"data": map[string]interface{}{
-				"id":             shift.ID,
-				"status":         shift.Status,
-				"completed_bins": logicalCompleted,
-				"total_bins":     logicalTotal,
-				"tasks":          bins,
-			},
+			"data": skipTaskUpdateData,
 		})
+
+		// Publish shift_update via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+				"type": "shift_update",
+				"data": skipTaskUpdateData,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+			}
+		}
 
 		log.Printf("📡 WebSocket: Broadcasted shift update to driver %s", userClaims.UserID)
 
@@ -4455,7 +4565,7 @@ func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWit
 }
 
 // AssignRoute assigns a route to a driver (manager only)
-func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
+func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -4603,25 +4713,36 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		log.Printf("   Total connected clients: %d", hub.GetClientCount())
 		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+		routeAssignedData := map[string]interface{}{
+			"id":                  shift.ID,
+			"driver_id":           shift.DriverID,
+			"route_id":            shift.RouteID,
+			"status":              shift.Status,
+			"start_time":          shift.StartTime,
+			"end_time":            shift.EndTime,
+			"total_pause_seconds": shift.TotalPauseSeconds,
+			"pause_start_time":    shift.PauseStartTime,
+			"total_bins":          shift.TotalBins,
+			"completed_bins":      shift.CompletedBins,
+			"tasks":               bins,
+			"created_at":          shift.CreatedAt,
+			"updated_at":          shift.UpdatedAt,
+			"message":             "New route assigned!",
+		}
 		hub.BroadcastToUser(req.DriverID, map[string]interface{}{
 			"type": "route_assigned",
-			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status, // CRITICAL: Include status for ShiftState.fromJson()
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"pause_start_time":    shift.PauseStartTime,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"tasks":                bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
-				"message":             "New route assigned!",
-			},
+			"data": routeAssignedData,
 		})
+
+		// Publish route_assigned via Centrifugo shift channel
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+				"type": "route_assigned",
+				"data": routeAssignedData,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish route_assigned to Centrifugo: %v", pubErr)
+			}
+		}
 
 		// Broadcast shift state change to all managers (new driver assigned)
 		broadcastPayload := map[string]interface{}{
@@ -4635,6 +4756,17 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 		hub.BroadcastToRole("admin", broadcastPayload)
 		hub.BroadcastToRole("manager", broadcastPayload)
 		log.Printf("📡 Broadcast driver_shift_change to managers: Route assigned to driver")
+
+		// Also publish via Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				"driver_id": req.DriverID,
+				"status":    shift.Status,
+				"shift_id":  shiftID,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+			}
+		}
 
 		log.Printf("✅ Route assigned: %s to driver %s (%d bins)", req.RouteID, req.DriverID, totalBins)
 
@@ -4704,7 +4836,7 @@ func RegisterFCMToken(db *sqlx.DB) http.HandlerFunc {
 }
 
 // ClearAllShifts deletes all shifts from the database (for testing purposes)
-func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("🗑️  REQUEST: DELETE /api/admin/shifts/clear")
 
@@ -4753,6 +4885,28 @@ func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			}
 			hub.BroadcastToRole("admin", broadcastPayload)
 			hub.BroadcastToRole("manager", broadcastPayload)
+
+			// Also publish via Centrifugo
+			if centrifugoClient != nil {
+				// shift_deleted to company channel (drivers subscribe to company:events)
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_deleted", map[string]interface{}{
+					"driver_id": driverID,
+					"shift_id":  "all",
+					"message":   "All shifts have been cleared by manager",
+					"reason":    "manager_clear_all",
+				}); pubErr != nil {
+					log.Printf("⚠️  Failed to publish shift_deleted to Centrifugo: %v", pubErr)
+				}
+
+				// driver_shift_change to company channel
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+					"driver_id": driverID,
+					"status":    "ended",
+					"shift_id":  "all",
+				}); pubErr != nil {
+					log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+				}
+			}
 		}
 
 		log.Printf("✅ WebSocket events sent to %d drivers", len(affectedDrivers))

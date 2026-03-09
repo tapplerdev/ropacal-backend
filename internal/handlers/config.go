@@ -8,6 +8,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 )
 
@@ -46,7 +47,7 @@ func GetWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // UpdateWarehouseLocation updates the warehouse location in config
-func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var input models.WarehouseLocation
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -107,6 +108,15 @@ func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 			"data": input,
 		})
 		log.Printf("✅ Warehouse update broadcast sent")
+
+		// Also publish via Centrifugo for mobile app notification pipeline
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "warehouse_location_updated", input); pubErr != nil {
+				log.Printf("⚠️  Failed to publish warehouse_location_updated to Centrifugo: %v", pubErr)
+			} else {
+				log.Printf("📡 Published warehouse_location_updated via Centrifugo")
+			}
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{

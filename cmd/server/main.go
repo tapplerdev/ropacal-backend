@@ -212,7 +212,7 @@ func main() {
 
 		// Config endpoints (warehouse location)
 		r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
-		r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub))
+		r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub, centrifugoClient))
 
 		// Bins endpoints (read-only - no auth required)
 		r.Get("/bins", handlers.GetBins(db))
@@ -281,12 +281,12 @@ func main() {
 			// Shift management
 			r.Get("/driver/shift/current", handlers.GetCurrentShift(db))
 			r.Post("/driver/shift/preflight", handlers.PreflightCheck(db, redisClient))
-			r.Post("/driver/shift/start", handlers.StartShift(db, wsHub, redisClient))
-			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub))
-			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub))
-			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub))
+			r.Post("/driver/shift/start", handlers.StartShift(db, wsHub, redisClient, centrifugoClient))
+			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub, centrifugoClient))
+			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub, centrifugoClient))
+			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub, centrifugoClient))
 			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub, centrifugoClient))
-			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, redisClient, wsHub))
+			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, redisClient, wsHub, centrifugoClient))
 
 			// Shift history
 			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
@@ -305,7 +305,7 @@ func main() {
 			// Route Task endpoints (task-based shift system)
 			r.Get("/shifts/{shiftId}/tasks", handlers.GetShiftTasks(db))
 			r.Get("/shifts/{shiftId}/tasks/detailed", handlers.GetShiftTasksDetailed(db))
-			r.Put("/shifts/tasks/{taskId}/complete", handlers.CompleteRouteTask(db, wsHub))
+			r.Put("/shifts/tasks/{taskId}/complete", handlers.CompleteRouteTask(db, wsHub, centrifugoClient))
 
 			// Potential Locations (drivers can create requests)
 			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub, centrifugoClient))
@@ -326,12 +326,12 @@ func main() {
 			r.Use(middleware.Auth)
 			r.Use(middleware.RequireRole("admin"))
 
-			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService))
+			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService, centrifugoClient))
 			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
 			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService))
 			r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, redisClient, centrifugoClient, fcmService)) // Comprehensive shift editing
 			r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, redisClient, centrifugoClient))
-			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
+			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub, centrifugoClient))
 
 			// Task-based shift creation (agnostic shift builder)
 			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub, centrifugoClient))
@@ -353,7 +353,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))        // Get single move request (register after)
 			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db)) // Check if move request is in active shifts
 			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db, redisClient, wsHub, centrifugoClient)) // Update move request
-			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService))
+			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService, centrifugoClient))
 			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, redisClient, wsHub, centrifugoClient))
 			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(db))
 			r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(db))
