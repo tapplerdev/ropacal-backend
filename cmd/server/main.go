@@ -157,6 +157,11 @@ func main() {
 		log.Println("✅ Location batch writer started (30-second intervals)")
 	}
 
+	// Start daily digest scheduler (sends at 8 AM & 2 PM)
+	digestScheduler := services.NewDigestScheduler(db, fcmService, centrifugoClient)
+	digestScheduler.Start()
+	log.Println("✅ Daily digest scheduler started (hourly check, sends at 8 AM & 2 PM)")
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()
@@ -401,6 +406,9 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Get("/manager/logs/app-errors", handlers.GetAppErrorLogs(db))
 			r.Get("/manager/logs/app-error-stats", handlers.GetAppErrorStats(db))
 			r.Patch("/manager/logs/app-errors/{id}/resolve", handlers.ResolveAppErrorLog(db))
+
+			// Daily digest (manual trigger)
+			r.Post("/manager/daily-digest", handlers.TriggerDigest(digestScheduler))
 		})
 	})
 

@@ -1,0 +1,294 @@
+package services
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strconv"
+	"time"
+
+	"ropacal-backend/internal/services/centrifugo"
+
+	"github.com/jmoiron/sqlx"
+)
+
+// DigestScheduler sends daily summary notifications to admins at 8 AM and 2 PM.
+// It checks overdue/urgent move requests and warehouse bins, then sends FCM
+// multicast pushes. Uses the config table for idempotency.
+type DigestScheduler struct {
+	db               *sqlx.DB
+	fcmService       *FCMService
+	centrifugoClient *centrifugo.Client
+	ticker           *time.Ticker
+	stopChan         chan bool
+}
+
+// DigestResult contains the outcome of a digest run.
+type DigestResult struct {
+	AlreadySent    bool   `json:"already_sent"`
+	Window         string `json:"window"`
+	OverdueCount   int    `json:"overdue_count"`
+	UrgentCount    int    `json:"urgent_count"`
+	SoonCount      int    `json:"soon_count"`
+	WarehouseCount int    `json:"warehouse_count"`
+	TokensSent     int    `json:"tokens_sent"`
+}
+
+// NewDigestScheduler creates a new digest scheduler that checks hourly.
+func NewDigestScheduler(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *DigestScheduler {
+	return &DigestScheduler{
+		db:               db,
+		fcmService:       fcmService,
+		centrifugoClient: centrifugoClient,
+		ticker:           time.NewTicker(1 * time.Hour),
+		stopChan:         make(chan bool),
+	}
+}
+
+// Start begins the background scheduler goroutine.
+func (s *DigestScheduler) Start() {
+	log.Println("📬 [Digest] Starting daily digest scheduler (hourly check, sends at 8 AM & 2 PM)")
+
+	go func() {
+		// Check immediately on startup
+		s.checkAndSend()
+
+		for {
+			select {
+			case <-s.stopChan:
+				log.Println("🛑 [Digest] Stopping...")
+				return
+			case <-s.ticker.C:
+				s.checkAndSend()
+			}
+		}
+	}()
+}
+
+// Stop halts the scheduler.
+func (s *DigestScheduler) Stop() {
+	s.ticker.Stop()
+	s.stopChan <- true
+}
+
+// checkAndSend checks the current hour and sends if it's a digest window.
+func (s *DigestScheduler) checkAndSend() {
+	now := time.Now()
+	hour := now.Hour()
+
+	// Only send at 8 AM or 2 PM
+	if hour != 8 && hour != 14 {
+		return
+	}
+
+	window := "morning"
+	if hour == 14 {
+		window = "afternoon"
+	}
+
+	result, err := s.RunDigest(window)
+	if err != nil {
+		log.Printf("❌ [Digest] Failed to send %s digest: %v", window, err)
+		return
+	}
+
+	if result.AlreadySent {
+		log.Printf("📬 [Digest] %s digest already sent today, skipping", window)
+	} else {
+		log.Printf("✅ [Digest] %s digest sent — overdue:%d urgent:%d soon:%d warehouse:%d tokens:%d",
+			window, result.OverdueCount, result.UrgentCount, result.SoonCount, result.WarehouseCount, result.TokensSent)
+	}
+}
+
+// RunDigest executes the digest logic. Can be called from the scheduler or the HTTP endpoint.
+// The window parameter should be "morning" or "afternoon".
+func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
+	ctx := context.Background()
+	today := time.Now().Format("2006-01-02")
+	configKey := fmt.Sprintf("last_%s_digest", window)
+
+	// Step 0: Idempotency check — has this window already been sent today?
+	var lastSent string
+	err := s.db.QueryRow(`SELECT value->>'date' FROM config WHERE key = $1`, configKey).Scan(&lastSent)
+	if err == nil && lastSent == today {
+		return &DigestResult{AlreadySent: true, Window: window}, nil
+	}
+
+	// Step 1: Query active move requests and compute urgency
+	type moveRow struct {
+		Status        string `db:"status"`
+		ScheduledDate int64  `db:"scheduled_date"`
+	}
+	var moves []moveRow
+	err = s.db.Select(&moves, `
+		SELECT status, scheduled_date FROM bin_move_requests
+		WHERE status IN ('pending', 'in_progress')
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query move requests: %w", err)
+	}
+
+	now := time.Now().Unix()
+	overdueCount, urgentCount, soonCount := 0, 0, 0
+	for _, m := range moves {
+		hoursUntil := float64(m.ScheduledDate-now) / 3600.0
+		if hoursUntil < 0 {
+			overdueCount++
+		} else if hoursUntil < 24 {
+			urgentCount++
+		} else if hoursUntil < 72 {
+			soonCount++
+		}
+	}
+
+	// Step 2: Query warehouse bins
+	var warehouseCount int
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM bins WHERE status = 'in_storage'`).Scan(&warehouseCount)
+	if err != nil {
+		return nil, fmt.Errorf("query warehouse bins: %w", err)
+	}
+
+	// Step 3: Nothing to report?
+	if overdueCount == 0 && urgentCount == 0 && soonCount == 0 && warehouseCount == 0 {
+		s.updateConfigTimestamp(configKey, today)
+		return &DigestResult{Window: window}, nil
+	}
+
+	// Step 4: Get admin FCM tokens
+	var tokens []string
+	err = s.db.Select(&tokens, `
+		SELECT ft.token FROM fcm_tokens ft
+		JOIN users u ON ft.user_id = u.id
+		WHERE u.role = 'admin'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query admin tokens: %w", err)
+	}
+
+	if len(tokens) == 0 {
+		log.Println("⚠️  [Digest] No admin FCM tokens found, skipping push")
+		s.updateConfigTimestamp(configKey, today)
+		return &DigestResult{
+			Window:         window,
+			OverdueCount:   overdueCount,
+			UrgentCount:    urgentCount,
+			SoonCount:      soonCount,
+			WarehouseCount: warehouseCount,
+		}, nil
+	}
+
+	// Step 5: Send FCM notifications (only for non-zero counts)
+	if s.fcmService != nil {
+		if overdueCount > 0 {
+			title := fmt.Sprintf("%d Overdue Move Request%s", overdueCount, plural(overdueCount))
+			body := "These moves are past their scheduled date."
+			data := map[string]string{
+				"type":           "digest_overdue_moves",
+				"overdue_count":  strconv.Itoa(overdueCount),
+				"deep_link":      "/manager/move-requests",
+			}
+			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
+				log.Printf("⚠️  [Digest] Failed to send overdue notification: %v", err)
+			}
+		}
+
+		if urgentCount > 0 || soonCount > 0 {
+			total := urgentCount + soonCount
+			title := fmt.Sprintf("%d Move Request%s Due Soon", total, plural(total))
+			parts := []string{}
+			if urgentCount > 0 {
+				parts = append(parts, fmt.Sprintf("%d urgent (< 24h)", urgentCount))
+			}
+			if soonCount > 0 {
+				parts = append(parts, fmt.Sprintf("%d due within 3 days", soonCount))
+			}
+			body := fmt.Sprintf("%s.", joinParts(parts))
+			data := map[string]string{
+				"type":          "digest_upcoming_moves",
+				"urgent_count":  strconv.Itoa(urgentCount),
+				"soon_count":    strconv.Itoa(soonCount),
+				"deep_link":     "/manager/move-requests",
+			}
+			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
+				log.Printf("⚠️  [Digest] Failed to send upcoming notification: %v", err)
+			}
+		}
+
+		if warehouseCount > 0 {
+			title := fmt.Sprintf("%d Bin%s in Warehouse", warehouseCount, plural(warehouseCount))
+			body := "Awaiting redeployment."
+			data := map[string]string{
+				"type":             "digest_warehouse_bins",
+				"warehouse_count":  strconv.Itoa(warehouseCount),
+				"deep_link":        "/manager/move-requests",
+			}
+			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
+				log.Printf("⚠️  [Digest] Failed to send warehouse notification: %v", err)
+			}
+		}
+	}
+
+	// Step 6: Also publish to Centrifugo for any connected dashboard/app
+	if s.centrifugoClient != nil {
+		digestData := map[string]interface{}{
+			"window":          window,
+			"overdue_count":   overdueCount,
+			"urgent_count":    urgentCount,
+			"soon_count":      soonCount,
+			"warehouse_count": warehouseCount,
+		}
+
+		if overdueCount > 0 {
+			_ = s.centrifugoClient.PublishCompanyEvent(ctx, "digest_overdue_moves", digestData)
+		}
+		if urgentCount > 0 || soonCount > 0 {
+			_ = s.centrifugoClient.PublishCompanyEvent(ctx, "digest_upcoming_moves", digestData)
+		}
+		if warehouseCount > 0 {
+			_ = s.centrifugoClient.PublishCompanyEvent(ctx, "digest_warehouse_bins", digestData)
+		}
+	}
+
+	// Step 7: Mark as sent
+	s.updateConfigTimestamp(configKey, today)
+
+	return &DigestResult{
+		Window:         window,
+		OverdueCount:   overdueCount,
+		UrgentCount:    urgentCount,
+		SoonCount:      soonCount,
+		WarehouseCount: warehouseCount,
+		TokensSent:     len(tokens),
+	}, nil
+}
+
+// updateConfigTimestamp upserts the config key with today's date.
+func (s *DigestScheduler) updateConfigTimestamp(key, date string) {
+	value := fmt.Sprintf(`{"date": "%s", "timestamp": %d}`, date, time.Now().Unix())
+	_, err := s.db.Exec(`
+		INSERT INTO config (key, value, updated_by, updated_at)
+		VALUES ($1, $2::jsonb, 'system', CURRENT_TIMESTAMP)
+		ON CONFLICT (key)
+		DO UPDATE SET value = $2::jsonb, updated_by = 'system', updated_at = CURRENT_TIMESTAMP
+	`, key, value)
+	if err != nil {
+		log.Printf("⚠️  [Digest] Failed to update config %s: %v", key, err)
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func joinParts(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return parts[0] + ", " + parts[1]
+}
