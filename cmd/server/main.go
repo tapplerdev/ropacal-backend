@@ -222,9 +222,9 @@ func main() {
 		// Bins mutation endpoints (require authentication)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
-			r.Post("/bins", handlers.CreateBin(db, wsHub))
+			r.Post("/bins", handlers.CreateBin(db, wsHub, centrifugoClient))
 			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
-			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub))
+			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub, centrifugoClient))
 			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
 			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db, redisClient)) // Check if bin is in active shifts
 		})
@@ -328,7 +328,7 @@ func main() {
 
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService, centrifugoClient))
 			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
-			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService))
+			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService, centrifugoClient))
 			r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, redisClient, centrifugoClient, fcmService)) // Comprehensive shift editing
 			r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, redisClient, centrifugoClient))
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub, centrifugoClient))

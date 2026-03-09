@@ -59,7 +59,7 @@ func GetBins(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func CreateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req models.CreateBinRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -201,6 +201,15 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			"data": created.ToBinResponse(),
 		})
 		log.Printf("📤 [CREATE-BIN] WebSocket event broadcasted to managers")
+
+		// Publish to Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_created", created.ToBinResponse()); pubErr != nil {
+				log.Printf("⚠️  [CREATE-BIN] Failed to publish bin_created to Centrifugo: %v", pubErr)
+			} else {
+				log.Printf("📡 [CREATE-BIN] Centrifugo: Published bin_created to company:events")
+			}
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -735,6 +744,15 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		})
 		log.Printf("📤 [UPDATE-BIN] WebSocket event broadcasted to managers")
 
+		// Publish to Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_updated", updated.ToBinResponse()); pubErr != nil {
+				log.Printf("⚠️  [UPDATE-BIN] Failed to publish bin_updated to Centrifugo: %v", pubErr)
+			} else {
+				log.Printf("📡 [UPDATE-BIN] Centrifugo: Published bin_updated to company:events")
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(updated.ToBinResponse())
 
@@ -742,7 +760,7 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 	}
 }
 
-func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
+func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -810,6 +828,17 @@ func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub) http.HandlerFunc {
 			},
 		})
 		log.Printf("📤 [DELETE-BIN] WebSocket event broadcasted to managers")
+
+		// Publish to Centrifugo
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_deleted", map[string]interface{}{
+				"bin_id": id,
+			}); pubErr != nil {
+				log.Printf("⚠️  [DELETE-BIN] Failed to publish bin_deleted to Centrifugo: %v", pubErr)
+			} else {
+				log.Printf("📡 [DELETE-BIN] Centrifugo: Published bin_deleted to company:events")
+			}
+		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}

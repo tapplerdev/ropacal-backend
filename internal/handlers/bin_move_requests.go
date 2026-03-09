@@ -863,25 +863,39 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	// 6. Send WebSocket update to driver
 	log.Printf("📡 Broadcasting urgent move update to driver %s", activeShift.DriverID)
+	urgentMoveData := map[string]interface{}{
+		"shift": map[string]interface{}{
+			"id":             updatedShift.ID,
+			"status":         updatedShift.Status,
+			"total_bins":     updatedShift.TotalBins,
+			"completed_bins": updatedShift.CompletedBins,
+			"bins":           updatedBins,
+		},
+		"urgent_bin": map[string]interface{}{
+			"bin_number":     bin.BinNumber,
+			"current_street": bin.CurrentStreet,
+			"city":           bin.City,
+			"zip":            bin.Zip,
+		},
+		"message": fmt.Sprintf("Urgent: Bin #%d added as your next stop", bin.BinNumber),
+	}
 	wsHub.BroadcastToUser(activeShift.DriverID, map[string]interface{}{
 		"type": "urgent_move_inserted",
-		"data": map[string]interface{}{
-			"shift": map[string]interface{}{
-				"id":             updatedShift.ID,
-				"status":         updatedShift.Status,
-				"total_bins":     updatedShift.TotalBins,
-				"completed_bins": updatedShift.CompletedBins,
-				"bins":           updatedBins,
-			},
-			"urgent_bin": map[string]interface{}{
-				"bin_number":     bin.BinNumber,
-				"current_street": bin.CurrentStreet,
-				"city":           bin.City,
-				"zip":            bin.Zip,
-			},
-			"message": fmt.Sprintf("Urgent: Bin #%d added as your next stop", bin.BinNumber),
-		},
+		"data": urgentMoveData,
 	})
+
+	// Publish via Centrifugo to driver:events and shift:updates
+	if centrifugoClient != nil {
+		if pubErr := centrifugoClient.PublishDriverEvent(context.Background(), activeShift.DriverID, "urgent_move_inserted", urgentMoveData); pubErr != nil {
+			log.Printf("⚠️  Failed to publish urgent_move_inserted to driver:events: %v", pubErr)
+		}
+		if pubErr := centrifugoClient.PublishShiftUpdate(context.Background(), activeShift.ID, map[string]interface{}{
+			"type": "urgent_move_inserted",
+			"data": urgentMoveData,
+		}); pubErr != nil {
+			log.Printf("⚠️  Failed to publish urgent_move_inserted to shift:updates: %v", pubErr)
+		}
+	}
 
 	// 6b. Send move_request_assigned WebSocket notification (for mobile app)
 	log.Printf("📡 Broadcasting move_request_assigned to driver %s", activeShift.DriverID)

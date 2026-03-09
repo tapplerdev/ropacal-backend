@@ -1082,25 +1082,28 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
 
 			// Broadcast move request status update to dashboard
+			moveReqData := map[string]interface{}{
+				"shift_id":    shift.ID,
+				"new_status":  "in_progress",
+				"count":       rowsAffected,
+				"updated_at":  now,
+			}
 			hub.BroadcastToRole("admin", map[string]interface{}{
 				"type": "move_request_status_updated",
-				"data": map[string]interface{}{
-					"shift_id":    shift.ID,
-					"new_status":  "in_progress",
-					"count":       rowsAffected,
-					"updated_at":  now,
-				},
+				"data": moveReqData,
 			})
 			hub.BroadcastToRole("manager", map[string]interface{}{
 				"type": "move_request_status_updated",
-				"data": map[string]interface{}{
-					"shift_id":    shift.ID,
-					"new_status":  "in_progress",
-					"count":       rowsAffected,
-					"updated_at":  now,
-				},
+				"data": moveReqData,
 			})
 			log.Printf("📡 Broadcast move_request_status_updated to managers: %d move requests → in_progress", rowsAffected)
+
+			// Publish to Centrifugo
+			if centrifugoClient != nil {
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_status_updated", moveReqData); pubErr != nil {
+					log.Printf("⚠️  Failed to publish move_request_status_updated to Centrifugo: %v", pubErr)
+				}
+			}
 		}
 	}
 
@@ -1852,7 +1855,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			// For pickup, we just mark the task complete (already done above) and continue
 			if taskType == "dropoff" {
 				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
-				err = handleMoveRequestCompletion(db, hub, moveRequest, req, now)
+				err = handleMoveRequestCompletion(db, hub, centrifugoClient, moveRequest, req, now)
 				if err != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
 					// Don't fail - just log
@@ -1938,6 +1941,18 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						},
 					})
 					log.Printf("[DIAGNOSTIC] 📡 Broadcast bin_redeployed event to managers")
+				}
+
+				// Publish bin_redeployed via Centrifugo
+				if centrifugoClient != nil {
+					if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_redeployed", map[string]interface{}{
+						"bin_id":   *taskBinID,
+						"address":  addrVal,
+						"status":   "active",
+						"shift_id": shift.ID,
+					}); pubErr != nil {
+						log.Printf("[DIAGNOSTIC] ⚠️  Failed to publish bin_redeployed to Centrifugo: %v", pubErr)
+					}
 				}
 			} else {
 				// ── POTENTIAL LOCATION PLACEMENT ──────────────────────────────────────
@@ -2052,6 +2067,22 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 								}
 								hub.BroadcastToRole("manager", binCreatedMsg)
 								log.Printf("[DIAGNOSTIC] 📡 Broadcast bin_created event to managers")
+							}
+
+							// Publish bin_created via Centrifugo
+							if centrifugoClient != nil {
+								if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_created", map[string]interface{}{
+									"bin_id":     newBinID,
+									"bin_number": actualBinNumber,
+									"street":     potentialLocation.Street,
+									"city":       potentialLocation.City,
+									"zip":        potentialLocation.Zip,
+									"status":     "active",
+									"created_by": "driver_placement",
+									"shift_id":   shift.ID,
+								}); pubErr != nil {
+									log.Printf("[DIAGNOSTIC] ⚠️  Failed to publish bin_created to Centrifugo: %v", pubErr)
+								}
 							}
 
 							// Also publish potential_location_converted via Centrifugo so the
@@ -5487,7 +5518,7 @@ func executeMerge(db *sqlx.DB, primaryZone, secondaryZone models.NoGoZone, now i
 }
 
 // handleMoveRequestCompletion handles move request completion logic
-func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest models.BinMoveRequest, req struct {
+func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, req struct {
 	TaskID                string     `json:"task_id"`
 	BinID                 string  `json:"bin_id"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
@@ -5530,25 +5561,28 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 	}
 
 	// Broadcast move request completion to dashboard
+	moveCompletedData := map[string]interface{}{
+		"move_request_id": moveRequest.ID,
+		"bin_id":          moveRequest.BinID,
+		"new_status":      "completed",
+		"completed_at":    now,
+	}
 	hub.BroadcastToRole("admin", map[string]interface{}{
 		"type": "move_request_status_updated",
-		"data": map[string]interface{}{
-			"move_request_id": moveRequest.ID,
-			"bin_id":          moveRequest.BinID,
-			"new_status":      "completed",
-			"completed_at":    now,
-		},
+		"data": moveCompletedData,
 	})
 	hub.BroadcastToRole("manager", map[string]interface{}{
 		"type": "move_request_status_updated",
-		"data": map[string]interface{}{
-			"move_request_id": moveRequest.ID,
-			"bin_id":          moveRequest.BinID,
-			"new_status":      "completed",
-			"completed_at":    now,
-		},
+		"data": moveCompletedData,
 	})
 	log.Printf("📡 Broadcast move_request_status_updated to managers: Move request %s → completed", moveRequest.ID)
+
+	// Publish to Centrifugo
+	if centrifugoClient != nil {
+		if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "move_request_status_updated", moveCompletedData); pubErr != nil {
+			log.Printf("⚠️  Failed to publish move_request_status_updated to Centrifugo: %v", pubErr)
+		}
+	}
 
 	if moveRequest.MoveType == "pickup_only" {
 		// Pickup for retirement or storage
@@ -5618,16 +5652,24 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, moveRequest mo
 				log.Printf("[MOVE] ✅ Potential location marked as converted")
 
 				// Broadcast potential_location_converted event to dashboard
+				plConvertedData := map[string]interface{}{
+					"potential_location_id": *moveRequest.SourcePotentialLocationID,
+					"bin_id":                moveRequest.BinID,
+					"shift_id":              shiftID,
+					"converted_at":          now,
+				}
 				hub.BroadcastToRole("manager", map[string]interface{}{
 					"type": "potential_location_converted",
-					"data": map[string]interface{}{
-						"potential_location_id": *moveRequest.SourcePotentialLocationID,
-						"bin_id":                moveRequest.BinID,
-						"shift_id":              shiftID,
-						"converted_at":          now,
-					},
+					"data": plConvertedData,
 				})
 				log.Printf("📡 Broadcast potential_location_converted to managers")
+
+				// Publish to Centrifugo
+				if centrifugoClient != nil {
+					if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "potential_location_converted", plConvertedData); pubErr != nil {
+						log.Printf("⚠️  Failed to publish potential_location_converted to Centrifugo: %v", pubErr)
+					}
+				}
 			}
 		}
 
@@ -5910,22 +5952,37 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		}
 
 		// 6. Broadcast to dashboard (managers/admins)
+		cancelDashboardData := map[string]interface{}{
+			"shift_id":     shiftID,
+			"driver_id":    shift.DriverID,
+			"cancelled_at": now,
+		}
 		wsHub.BroadcastToRole("admin", map[string]interface{}{
 			"type": "shift_cancelled",
-			"data": map[string]interface{}{
-				"shift_id":     shiftID,
-				"driver_id":    shift.DriverID,
-				"cancelled_at": now,
-			},
+			"data": cancelDashboardData,
 		})
 		wsHub.BroadcastToRole("manager", map[string]interface{}{
 			"type": "shift_cancelled",
-			"data": map[string]interface{}{
-				"shift_id":     shiftID,
-				"driver_id":    shift.DriverID,
-				"cancelled_at": now,
-			},
+			"data": cancelDashboardData,
 		})
+
+		// Publish shift_cancelled + driver_shift_change to Centrifugo company:events
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_cancelled", cancelDashboardData); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_cancelled to company:events: %v", pubErr)
+			}
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				"driver_id": shift.DriverID,
+				"status":    "cancelled",
+				"shift_id":  shiftID,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish driver_shift_change to company:events: %v", pubErr)
+			}
+			// Notify driver via driver:events channel
+			if pubErr := centrifugoClient.PublishDriverEvent(r.Context(), shift.DriverID, "shift_cancelled", cancelDashboardData); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_cancelled to driver:events:%s: %v", shift.DriverID, pubErr)
+			}
+		}
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
@@ -5941,7 +5998,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 
 // CancelAllActiveShifts cancels all active or paused shifts
 // POST /api/manager/shifts/cancel-all-active
-func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService) http.HandlerFunc {
+func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("❌ REQUEST: POST /api/manager/shifts/cancel-all-active")
 
@@ -6075,15 +6132,37 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 
 		// 4. Send notifications to each affected driver
 		for _, shift := range shifts {
+			cancelData := map[string]interface{}{
+				"shift_id":     shift.ID,
+				"cancelled_at": now,
+				"message":      "Your shift has been cancelled by management",
+			}
+
 			// WebSocket notification
 			wsHub.BroadcastToUser(shift.DriverID, map[string]interface{}{
 				"type": "shift_cancelled",
-				"data": map[string]interface{}{
-					"shift_id":     shift.ID,
-					"cancelled_at": now,
-					"message":      "Your shift has been cancelled by management",
-				},
+				"data": cancelData,
 			})
+
+			// Centrifugo: notify driver + shift channel + company
+			if centrifugoClient != nil {
+				if pubErr := centrifugoClient.PublishDriverEvent(r.Context(), shift.DriverID, "shift_cancelled", cancelData); pubErr != nil {
+					log.Printf("⚠️  Failed to publish shift_cancelled to driver:events:%s: %v", shift.DriverID, pubErr)
+				}
+				if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+					"type": "shift_cancelled",
+					"data": cancelData,
+				}); pubErr != nil {
+					log.Printf("⚠️  Failed to publish shift_cancelled to shift:updates:%s: %v", shift.ID, pubErr)
+				}
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+					"driver_id": shift.DriverID,
+					"status":    "cancelled",
+					"shift_id":  shift.ID,
+				}); pubErr != nil {
+					log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+				}
+			}
 
 			// FCM push notification
 			if fcmService != nil {
@@ -6105,22 +6184,26 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 		log.Printf("📡 Sent notifications to %d driver(s)", len(shifts))
 
 		// 5. Broadcast to dashboard
+		bulkCancelData := map[string]interface{}{
+			"cancelled_count": len(shifts),
+			"shift_ids":       shiftIDs,
+			"cancelled_at":    now,
+		}
 		wsHub.BroadcastToRole("admin", map[string]interface{}{
 			"type": "bulk_shifts_cancelled",
-			"data": map[string]interface{}{
-				"cancelled_count": len(shifts),
-				"shift_ids":       shiftIDs,
-				"cancelled_at":    now,
-			},
+			"data": bulkCancelData,
 		})
 		wsHub.BroadcastToRole("manager", map[string]interface{}{
 			"type": "bulk_shifts_cancelled",
-			"data": map[string]interface{}{
-				"cancelled_count": len(shifts),
-				"shift_ids":       shiftIDs,
-				"cancelled_at":    now,
-			},
+			"data": bulkCancelData,
 		})
+
+		// Publish bulk_shifts_cancelled to Centrifugo company:events
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bulk_shifts_cancelled", bulkCancelData); pubErr != nil {
+				log.Printf("⚠️  Failed to publish bulk_shifts_cancelled to Centrifugo: %v", pubErr)
+			}
+		}
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
