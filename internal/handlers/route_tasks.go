@@ -259,17 +259,27 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 		hub.BroadcastToRole("admin", shiftNotification)
 		log.Printf("📡 WebSocket: Broadcasted new shift to managers and admins")
 
-		// Publish shift_created to Centrifugo company:events so all dashboards update in real-time
+		// Publish shift_created to Centrifugo
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_created", map[string]interface{}{
+			shiftCreatedData := map[string]interface{}{
 				"shift_id":   shiftID,
 				"driver_id":  req.DriverID,
 				"status":     "ready",
 				"task_count": taskCount,
-			}); pubErr != nil {
-				log.Printf("⚠️  Failed to publish shift_created via Centrifugo: %v", pubErr)
+			}
+
+			// 1. Publish to company:events (for manager dashboards)
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_created", shiftCreatedData); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_created to company:events: %v", pubErr)
 			} else {
 				log.Printf("📡 Centrifugo: Published shift_created to company:events")
+			}
+
+			// 2. Publish to driver:events:{driverId} (for the assigned driver)
+			if pubErr := centrifugoClient.PublishDriverEvent(r.Context(), req.DriverID, "shift_created", shiftCreatedData); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_created to driver:events:%s: %v", req.DriverID, pubErr)
+			} else {
+				log.Printf("📡 Centrifugo: Published shift_created to driver:events:%s", req.DriverID)
 			}
 		}
 

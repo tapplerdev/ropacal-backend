@@ -153,6 +153,32 @@ func (c *Client) PublishManagerNotification(ctx context.Context, managerID strin
 	return nil
 }
 
+// PublishDriverEvent publishes a driver-specific event (e.g. shift_created, route_assigned)
+// Channel: driver:events:{driverID}
+// Used for events that target a specific driver BEFORE a shift/channel exists
+func (c *Client) PublishDriverEvent(ctx context.Context, driverID string, eventType string, data interface{}) error {
+	channel := fmt.Sprintf("driver:events:%s", driverID)
+
+	payload := CompanyEvent{
+		Type: eventType,
+		Data: data,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal driver event data: %w", err)
+	}
+
+	result, err := c.client.Publish(ctx, channel, jsonData)
+	if err != nil {
+		log.Printf("❌ [Centrifugo] Publish failed - Channel: %s, Type: %s, Error: %v", channel, eventType, err)
+		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
+	}
+
+	_ = result
+	return nil
+}
+
 // CompanyEvent represents a company-wide broadcast event payload
 type CompanyEvent struct {
 	Type string      `json:"type"`

@@ -157,6 +157,12 @@ func authorizeSubscription(db *sqlx.DB, userID string, channel string) (bool, er
 			// Check if user is the driver themselves OR a manager
 			return canViewDriverLocation(db, userID, driverID)
 		}
+		// Channel format: driver:events:{driverId}
+		// Only the driver themselves can subscribe to their own events
+		if channelType == "events" && len(parts) == 3 {
+			driverID := parts[2]
+			return userID == driverID, nil
+		}
 
 	case "shift":
 		// Channel format: shift:updates:{shiftId}
