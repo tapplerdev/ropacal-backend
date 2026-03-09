@@ -334,7 +334,7 @@ func main() {
 			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub))
 
 			// Task-based shift creation (agnostic shift builder)
-			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub))
+			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub, centrifugoClient))
 			r.Get("/manager/shifts", handlers.GetAllShifts(db))                   // List all shifts with filtering (register first - exact match)
 			r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db))                    // Completed shift history with task stats
 			r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))     // Per-task granular breakdown for a shift

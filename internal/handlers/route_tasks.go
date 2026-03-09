@@ -12,6 +12,7 @@ import (
 	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 )
@@ -104,7 +105,7 @@ func GetShiftTasksWithHistory(db *sqlx.DB) http.HandlerFunc {
 }
 
 // CreateShiftWithTasks creates a new shift with tasks (Manager only)
-func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/manager/shifts/create-with-tasks")
 
@@ -257,6 +258,20 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 		hub.BroadcastToRole("manager", shiftNotification)
 		hub.BroadcastToRole("admin", shiftNotification)
 		log.Printf("📡 WebSocket: Broadcasted new shift to managers and admins")
+
+		// Publish shift_created to Centrifugo company:events so all dashboards update in real-time
+		if centrifugoClient != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_created", map[string]interface{}{
+				"shift_id":   shiftID,
+				"driver_id":  req.DriverID,
+				"status":     "ready",
+				"task_count": taskCount,
+			}); pubErr != nil {
+				log.Printf("⚠️  Failed to publish shift_created via Centrifugo: %v", pubErr)
+			} else {
+				log.Printf("📡 Centrifugo: Published shift_created to company:events")
+			}
+		}
 
 		utils.RespondJSON(w, http.StatusCreated, map[string]interface{}{
 			"success": true,
