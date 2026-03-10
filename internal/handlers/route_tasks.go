@@ -12,6 +12,7 @@ import (
 	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
@@ -105,7 +106,7 @@ func GetShiftTasksWithHistory(db *sqlx.DB) http.HandlerFunc {
 }
 
 // CreateShiftWithTasks creates a new shift with tasks (Manager only)
-func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/manager/shifts/create-with-tasks")
 
@@ -280,6 +281,27 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 				log.Printf("⚠️  Failed to publish shift_created to driver:events:%s: %v", req.DriverID, pubErr)
 			} else {
 				log.Printf("📡 Centrifugo: Published shift_created to driver:events:%s", req.DriverID)
+			}
+		}
+
+		// Send FCM push notification to driver
+		if fcmService != nil {
+			var driverFCMToken models.FCMToken
+			tokenErr := db.Get(&driverFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, req.DriverID)
+			if tokenErr != nil {
+				log.Printf("⚠️  No FCM token found for driver %s: %v", req.DriverID, tokenErr)
+			} else {
+				fcmErr := fcmService.SendShiftUpdateNotification(
+					driverFCMToken.Token,
+					shiftID,
+					"shift_created",
+					nil,
+				)
+				if fcmErr != nil {
+					log.Printf("⚠️  Failed to send FCM notification: %v", fcmErr)
+				} else {
+					log.Printf("📱 Sent FCM shift_created to driver %s", req.DriverID)
+				}
 			}
 		}
 
