@@ -11,6 +11,7 @@ import (
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
 
@@ -85,6 +86,22 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 		log.Printf("❌ [FCM-INIT] private_key is MISSING or not a string!")
 	}
 
+	// Test OAuth2 token exchange BEFORE initializing Firebase
+	// This catches credential issues immediately instead of failing on first Send()
+	conf, err := google.JWTConfigFromJSON(credentialsJSON, "https://www.googleapis.com/auth/firebase.messaging")
+	if err != nil {
+		log.Printf("❌ [FCM-INIT] Failed to parse JWT config from credentials: %v", err)
+		return nil, fmt.Errorf("invalid service account credentials: %w", err)
+	}
+	log.Printf("🔐 [FCM-INIT] JWT config parsed — requesting OAuth2 token from %s...", conf.TokenURL)
+
+	token, err := conf.TokenSource(ctx).Token()
+	if err != nil {
+		log.Printf("❌ [FCM-INIT] OAuth2 token exchange FAILED: %v", err)
+		return nil, fmt.Errorf("OAuth2 token exchange failed (credentials may be revoked): %w", err)
+	}
+	log.Printf("✅ [FCM-INIT] OAuth2 token obtained! Type: %s, Expires: %v", token.TokenType, token.Expiry)
+
 	// Initialize Firebase app with JSON credentials
 	opt := option.WithCredentialsJSON(credentialsJSON)
 	app, err := firebase.NewApp(ctx, nil, opt)
@@ -98,7 +115,7 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 		return nil, fmt.Errorf("error getting messaging client: %w", err)
 	}
 
-	log.Printf("✅ [FCM-INIT] Firebase Messaging client created (credentials will be validated on first send)")
+	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (OAuth2 credentials verified)")
 	return &FCMService{client: client}, nil
 }
 
