@@ -232,8 +232,10 @@ func (s *FCMService) sendRaw(ctx context.Context, req *fcmSendRequest) (string, 
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("❌ [FCM-HTTP] Status %d: %s", resp.StatusCode, string(respBody))
-		return "", fmt.Errorf("FCM API returned status %d: %s", resp.StatusCode, string(respBody))
+		// Log full response on one line for Railway visibility
+		compactBody := strings.ReplaceAll(strings.ReplaceAll(string(respBody), "\n", " "), "  ", "")
+		log.Printf("❌ [FCM-HTTP] Status %d | Full response: %s", resp.StatusCode, compactBody)
+		return "", fmt.Errorf("FCM API returned status %d: %s", resp.StatusCode, compactBody)
 	}
 
 	var result fcmSendResponse
