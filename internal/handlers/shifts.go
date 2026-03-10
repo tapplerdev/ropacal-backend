@@ -5935,12 +5935,13 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 
 		// 5. Send FCM push notification to driver
 		if fcmService != nil {
-			// Get driver's FCM token
-			var fcmToken sql.NullString
-			err = db.Get(&fcmToken, "SELECT fcm_token FROM users WHERE id = $1", shift.DriverID)
-			if err == nil && fcmToken.Valid && fcmToken.String != "" {
+			var driverFCMToken models.FCMToken
+			tokenErr := db.Get(&driverFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, shift.DriverID)
+			if tokenErr != nil {
+				log.Printf("⚠️  No FCM token found for driver %s: %v", shift.DriverID, tokenErr)
+			} else {
 				fcmErr := fcmService.SendShiftUpdateNotification(
-					fcmToken.String,
+					driverFCMToken.Token,
 					shiftID,
 					"shift_cancelled",
 					map[string]string{"cancelled_by": userClaims.Email},
@@ -5948,7 +5949,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 				if fcmErr != nil {
 					log.Printf("⚠️  Failed to send FCM notification: %v", fcmErr)
 				} else {
-					log.Printf("📱 Sent FCM notification to driver")
+					log.Printf("📱 Sent FCM shift_cancelled to driver %s", shift.DriverID)
 				}
 			}
 		}
@@ -6168,17 +6169,21 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 
 			// FCM push notification
 			if fcmService != nil {
-				var fcmToken sql.NullString
-				err = db.Get(&fcmToken, "SELECT fcm_token FROM users WHERE id = $1", shift.DriverID)
-				if err == nil && fcmToken.Valid && fcmToken.String != "" {
+				var bulkFCMToken models.FCMToken
+				tokenErr := db.Get(&bulkFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, shift.DriverID)
+				if tokenErr != nil {
+					log.Printf("⚠️  No FCM token found for driver %s: %v", shift.DriverID, tokenErr)
+				} else {
 					fcmErr := fcmService.SendShiftUpdateNotification(
-						fcmToken.String,
+						bulkFCMToken.Token,
 						shift.ID,
 						"shift_deleted",
 						nil,
 					)
 					if fcmErr != nil {
 						log.Printf("⚠️  Failed to send FCM to driver %s: %v", shift.DriverID, fcmErr)
+					} else {
+						log.Printf("📱 Sent FCM shift_deleted to driver %s", shift.DriverID)
 					}
 				}
 			}
