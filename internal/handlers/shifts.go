@@ -4057,7 +4057,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		if fcmService != nil && changes["driver_changed"].(bool) {
 			// Notify old driver
 			var oldDriverToken models.FCMToken
-			if tokenErr := db.Get(&oldDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, oldDriverID); tokenErr == nil {
+			if tokenErr := db.Get(&oldDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, oldDriverID); tokenErr == nil {
 				go fcmService.SendShiftUpdateNotification(oldDriverToken.Token, shiftID, "shift_reassigned", nil)
 				log.Printf("📱 Sent FCM notification to old driver: %s", oldDriverID)
 			}
@@ -4065,7 +4065,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			// Notify new driver
 			if req.DriverID != nil {
 				var newDriverToken models.FCMToken
-				if tokenErr := db.Get(&newDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, *req.DriverID); tokenErr == nil {
+				if tokenErr := db.Get(&newDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, *req.DriverID); tokenErr == nil {
 					go fcmService.SendShiftUpdateNotification(newDriverToken.Token, shiftID, "shift_created", nil)
 					log.Printf("📱 Sent FCM notification to new driver: %s", *req.DriverID)
 				}
@@ -4724,7 +4724,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		// Send push notification
 		var fcmToken models.FCMToken
-		tokenErr := db.Get(&fcmToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, req.DriverID)
+		tokenErr := db.Get(&fcmToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, req.DriverID)
 		notificationSent := false
 
 		if tokenErr == nil {
@@ -4855,6 +4855,17 @@ func RegisterFCMToken(db *sqlx.DB) http.HandlerFunc {
 			log.Printf("❌ Error registering FCM token: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to register FCM token")
 			return
+		}
+
+		// Clean up stale tokens for this user (keep only the current one)
+		result, cleanupErr := db.Exec(
+			`DELETE FROM fcm_tokens WHERE user_id = $1 AND token != $2`,
+			userClaims.UserID, req.Token,
+		)
+		if cleanupErr != nil {
+			log.Printf("⚠️  Failed to clean up old FCM tokens: %v", cleanupErr)
+		} else if rows, _ := result.RowsAffected(); rows > 0 {
+			log.Printf("🧹 Cleaned up %d stale FCM token(s) for %s", rows, userClaims.Email)
 		}
 
 		log.Printf("📱 FCM token registered: %s (%s)", userClaims.Email, req.DeviceType)
@@ -5936,7 +5947,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		// 5. Send FCM push notification to driver
 		if fcmService != nil {
 			var driverFCMToken models.FCMToken
-			tokenErr := db.Get(&driverFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, shift.DriverID)
+			tokenErr := db.Get(&driverFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, shift.DriverID)
 			if tokenErr != nil {
 				log.Printf("⚠️  No FCM token found for driver %s: %v", shift.DriverID, tokenErr)
 			} else {
@@ -6170,7 +6181,7 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			// FCM push notification
 			if fcmService != nil {
 				var bulkFCMToken models.FCMToken
-				tokenErr := db.Get(&bulkFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, shift.DriverID)
+				tokenErr := db.Get(&bulkFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, shift.DriverID)
 				if tokenErr != nil {
 					log.Printf("⚠️  No FCM token found for driver %s: %v", shift.DriverID, tokenErr)
 				} else {
