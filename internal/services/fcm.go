@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -119,6 +121,22 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	client, err := app.Messaging(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error getting messaging client: %w", err)
+	}
+
+	// Direct HTTP test to FCM v1 API — bypasses Firebase SDK entirely
+	testBody := `{"message":{"topic":"__fcm_init_test__","data":{"test":"1"}}}`
+	httpReq, _ := http.NewRequest("POST",
+		fmt.Sprintf("https://fcm.googleapis.com/v1/projects/%s/messages:send", creds2.ProjectID),
+		strings.NewReader(testBody))
+	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpResp, httpErr := http.DefaultClient.Do(httpReq)
+	if httpErr != nil {
+		log.Printf("❌ [FCM-INIT] Direct HTTP test NETWORK ERROR: %v", httpErr)
+	} else {
+		respBody, _ := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		log.Printf("🔐 [FCM-INIT] Direct HTTP test: status=%d body=%s", httpResp.StatusCode, string(respBody))
 	}
 
 	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (using verified token source, project: %s)", creds2.ProjectID)
