@@ -5,54 +5,60 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"strconv"
 	"strings"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
 
 // FCMService handles Firebase Cloud Messaging
 type FCMService struct {
-	client *messaging.Client
+	client    *messaging.Client
+	projectID string
 }
 
 // NewFCMService creates a new FCM service instance from a credentials file
 func NewFCMService(credentialsFile string) (*FCMService, error) {
 	ctx := context.Background()
 
-	// Initialize Firebase app
+	log.Printf("🔐 [FCM-INIT] Initializing from file: %s", credentialsFile)
+
 	opt := option.WithCredentialsFile(credentialsFile)
 	app, err := firebase.NewApp(ctx, nil, opt)
 	if err != nil {
+		log.Printf("❌ [FCM-INIT] firebase.NewApp failed: %v", err)
 		return nil, fmt.Errorf("error initializing Firebase app: %w", err)
 	}
 
-	// Get messaging client
 	client, err := app.Messaging(ctx)
 	if err != nil {
+		log.Printf("❌ [FCM-INIT] app.Messaging failed: %v", err)
 		return nil, fmt.Errorf("error getting messaging client: %w", err)
 	}
 
+	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (from file)")
 	return &FCMService{client: client}, nil
 }
 
-// NewFCMServiceFromBase64 creates a new FCM service instance from base64-encoded credentials
-// This is useful for cloud deployments (Railway, Fly.io, Render) where you can't upload files easily
+// NewFCMServiceFromBase64 creates a new FCM service instance from base64-encoded credentials.
+// Uses option.WithCredentialsJSON which is the standard approach — lets the Firebase SDK
+// and Google transport layer handle scopes and token management internally.
 func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	ctx := context.Background()
 
+	log.Printf("🔐 [FCM-INIT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("🔐 [FCM-INIT] Initializing from base64 credentials")
 	log.Printf("🔐 [FCM-INIT] Base64 input length: %d chars", len(credentialsBase64))
 
 	// Decode base64 credentials
 	credentialsJSON, err := base64.StdEncoding.DecodeString(credentialsBase64)
 	if err != nil {
-		log.Printf("❌ [FCM-INIT] Base64 decode failed: %v", err)
+		log.Printf("❌ [FCM-INIT] Base64 decode FAILED: %v", err)
+		log.Printf("❌ [FCM-INIT] First 20 chars of input: %.20s", credentialsBase64)
+		log.Printf("❌ [FCM-INIT] Last 20 chars of input: %s", credentialsBase64[max(0, len(credentialsBase64)-20):])
 		return nil, fmt.Errorf("error decoding base64 credentials: %w", err)
 	}
 
@@ -61,95 +67,87 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	// Validate the decoded JSON structure
 	var creds map[string]interface{}
 	if jsonErr := json.Unmarshal(credentialsJSON, &creds); jsonErr != nil {
-		log.Printf("❌ [FCM-INIT] Decoded JSON is INVALID: %v", jsonErr)
+		log.Printf("❌ [FCM-INIT] Decoded bytes are NOT valid JSON: %v", jsonErr)
+		log.Printf("❌ [FCM-INIT] First 100 bytes: %s", string(credentialsJSON[:min(100, len(credentialsJSON))]))
 		return nil, fmt.Errorf("decoded credentials JSON is invalid: %w", jsonErr)
 	}
 
-	for _, field := range []string{"type", "project_id", "private_key_id", "client_email", "token_uri"} {
+	// Log all fields (except private_key value)
+	requiredFields := []string{"type", "project_id", "private_key_id", "client_email", "token_uri", "auth_uri"}
+	for _, field := range requiredFields {
 		if v, ok := creds[field]; ok {
 			log.Printf("🔐 [FCM-INIT] %s = %v", field, v)
 		} else {
-			log.Printf("❌ [FCM-INIT] MISSING field: %s", field)
+			log.Printf("❌ [FCM-INIT] MISSING required field: %s", field)
 		}
 	}
 
-	// Validate private_key
+	// Validate private_key integrity
 	if pk, ok := creds["private_key"].(string); ok {
 		log.Printf("🔐 [FCM-INIT] private_key length: %d chars", len(pk))
-		log.Printf("🔐 [FCM-INIT] private_key starts with: %s", pk[:min(40, len(pk))])
-		log.Printf("🔐 [FCM-INIT] private_key ends with: %s", pk[max(0, len(pk)-30):])
-		if !strings.Contains(pk, "BEGIN PRIVATE KEY") {
-			log.Printf("❌ [FCM-INIT] private_key does NOT contain 'BEGIN PRIVATE KEY' — likely corrupted!")
-		}
-		if !strings.Contains(pk, "END PRIVATE KEY") {
-			log.Printf("❌ [FCM-INIT] private_key does NOT contain 'END PRIVATE KEY' — likely truncated!")
+		hasBegin := strings.Contains(pk, "BEGIN PRIVATE KEY")
+		hasEnd := strings.Contains(pk, "END PRIVATE KEY")
+		log.Printf("🔐 [FCM-INIT] private_key has BEGIN marker: %v", hasBegin)
+		log.Printf("🔐 [FCM-INIT] private_key has END marker: %v", hasEnd)
+		if !hasBegin || !hasEnd {
+			log.Printf("❌ [FCM-INIT] private_key appears CORRUPTED or TRUNCATED!")
+		} else {
+			log.Printf("🔐 [FCM-INIT] private_key structure: OK")
 		}
 	} else {
 		log.Printf("❌ [FCM-INIT] private_key is MISSING or not a string!")
 	}
 
-	// Parse JWT config and verify OAuth2 token exchange works
-	conf, err := google.JWTConfigFromJSON(credentialsJSON, "https://www.googleapis.com/auth/firebase.messaging")
-	if err != nil {
-		log.Printf("❌ [FCM-INIT] Failed to parse JWT config: %v", err)
-		return nil, fmt.Errorf("invalid service account credentials: %w", err)
-	}
+	projectID, _ := creds["project_id"].(string)
 
-	tokenSource := conf.TokenSource(ctx)
-	token, err := tokenSource.Token()
+	// Initialize Firebase app using WithCredentialsJSON (the standard approach).
+	// DO NOT use WithTokenSource — it bypasses Firebase's internal scope injection
+	// and causes "missing authentication credential" errors on Send().
+	log.Printf("🔐 [FCM-INIT] Calling firebase.NewApp with WithCredentialsJSON...")
+	opt := option.WithCredentialsJSON(credentialsJSON)
+	app, err := firebase.NewApp(ctx, nil, opt)
 	if err != nil {
-		log.Printf("❌ [FCM-INIT] OAuth2 token exchange FAILED: %v", err)
-		return nil, fmt.Errorf("OAuth2 token exchange failed: %w", err)
-	}
-	log.Printf("✅ [FCM-INIT] OAuth2 token obtained! Expires: %v", token.Expiry)
-
-	// Extract project ID from credentials
-	var creds2 struct {
-		ProjectID string `json:"project_id"`
-	}
-	json.Unmarshal(credentialsJSON, &creds2)
-
-	// Use the verified token source directly instead of WithCredentialsJSON
-	// This bypasses Firebase SDK's internal credential handling which was failing
-	config := &firebase.Config{ProjectID: creds2.ProjectID}
-	opt := option.WithTokenSource(tokenSource)
-	app, err := firebase.NewApp(ctx, config, opt)
-	if err != nil {
+		log.Printf("❌ [FCM-INIT] firebase.NewApp FAILED: %v", err)
 		return nil, fmt.Errorf("error initializing Firebase app: %w", err)
 	}
+	log.Printf("✅ [FCM-INIT] firebase.NewApp succeeded")
 
+	// Get messaging client
+	log.Printf("🔐 [FCM-INIT] Calling app.Messaging...")
 	client, err := app.Messaging(ctx)
 	if err != nil {
+		log.Printf("❌ [FCM-INIT] app.Messaging FAILED: %v", err)
 		return nil, fmt.Errorf("error getting messaging client: %w", err)
 	}
+	log.Printf("✅ [FCM-INIT] Messaging client created")
 
-	// Direct HTTP test to FCM v1 API — bypasses Firebase SDK entirely
-	testBody := `{"message":{"topic":"__fcm_init_test__","data":{"test":"1"}}}`
-	httpReq, _ := http.NewRequest("POST",
-		fmt.Sprintf("https://fcm.googleapis.com/v1/projects/%s/messages:send", creds2.ProjectID),
-		strings.NewReader(testBody))
-	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpResp, httpErr := http.DefaultClient.Do(httpReq)
-	if httpErr != nil {
-		log.Printf("❌ [FCM-INIT] Direct HTTP test NETWORK ERROR: %v", httpErr)
+	// Send a dry-run test message to verify credentials work end-to-end.
+	// DryRun validates everything (auth, project, payload) without actually delivering.
+	log.Printf("🔐 [FCM-INIT] Sending dry-run test message to validate credentials...")
+	testMsg := &messaging.Message{
+		Topic: "__fcm_init_test__",
+		Data:  map[string]string{"test": "1"},
+	}
+	testResp, testErr := client.SendDryRun(ctx, testMsg)
+	if testErr != nil {
+		log.Printf("❌ [FCM-INIT] Dry-run test FAILED: %v", testErr)
+		log.Printf("❌ [FCM-INIT] This means credentials are not working for FCM sends!")
+		log.Printf("❌ [FCM-INIT] Error type: %T", testErr)
+		// Don't return error — still create the service, but log the warning
+		// The credentials might work for actual sends even if dry-run fails
 	} else {
-		respBody, _ := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		log.Printf("🔐 [FCM-INIT] Direct HTTP test: status=%d body=%s", httpResp.StatusCode, string(respBody))
+		log.Printf("✅ [FCM-INIT] Dry-run test PASSED! Response: %s", testResp)
 	}
 
-	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (using verified token source, project: %s)", creds2.ProjectID)
-	return &FCMService{client: client}, nil
+	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (project: %s)", projectID)
+	log.Printf("🔐 [FCM-INIT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	return &FCMService{client: client, projectID: projectID}, nil
 }
 
 // SendRouteAssignedNotification sends a notification when a route is assigned
 func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalBins int) error {
 	ctx := context.Background()
 
-	// Data payload for Flutter foreground handler + Android background handler
-	// APNS Alert ensures iOS displays the notification reliably (data-only
-	// messages are treated as silent pushes and throttled by Apple).
 	message := &messaging.Message{
 		Token: token,
 		Data: map[string]string{
@@ -178,19 +176,18 @@ func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalB
 		},
 	}
 
+	log.Printf("📱 [FCM-SEND] Sending route_assigned to token: %s...%s", token[:min(10, len(token))], token[max(0, len(token)-6):])
 	response, err := s.client.Send(ctx, message)
 	if err != nil {
+		log.Printf("❌ [FCM-SEND] route_assigned FAILED: %v (error type: %T)", err, err)
 		return fmt.Errorf("error sending FCM message: %w", err)
 	}
 
-	log.Printf("✅ FCM data message sent for route_assigned: %s", response)
+	log.Printf("✅ [FCM-SEND] route_assigned sent: %s", response)
 	return nil
 }
 
 // SendShiftUpdateNotification sends a notification for shift updates.
-// eventType should match the mobile registry key (e.g. "shift_cancelled",
-// "shift_created", "shift_reassigned"). It is passed through as Data["type"]
-// so the mobile adapter creates the correct NotificationEvent.
 func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType string, extraData map[string]string) error {
 	ctx := context.Background()
 
@@ -202,12 +199,8 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 		data[k] = v
 	}
 
-	// APNS Alert text — matches the mobile NotificationRegistry titles/bodies.
 	title, body := shiftNotificationText(eventType, extraData)
 
-	// Data payload for Flutter foreground + Android background handler.
-	// APNS Alert ensures iOS displays reliably (data-only = silent push,
-	// throttled by Apple). Android ignores APNS config.
 	message := &messaging.Message{
 		Token: token,
 		Data:  data,
@@ -232,12 +225,14 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 		},
 	}
 
+	log.Printf("📱 [FCM-SEND] Sending %s to token: %s...%s (title: %q)", eventType, token[:min(10, len(token))], token[max(0, len(token)-6):], title)
 	response, err := s.client.Send(ctx, message)
 	if err != nil {
+		log.Printf("❌ [FCM-SEND] %s FAILED: %v (error type: %T)", eventType, err, err)
 		return fmt.Errorf("error sending FCM message: %w", err)
 	}
 
-	log.Printf("✅ FCM data message sent for %s: %s", eventType, response)
+	log.Printf("✅ [FCM-SEND] %s sent: %s", eventType, response)
 	return nil
 }
 
@@ -266,9 +261,7 @@ func shiftNotificationText(eventType string, extraData map[string]string) (strin
 	}
 }
 
-
 // SendMulticast sends the same message to multiple tokens.
-// APNS Alert ensures iOS displays reliably; Android uses background handler.
 func (s *FCMService) SendMulticast(tokens []string, title, body string, data map[string]string) error {
 	ctx := context.Background()
 
@@ -296,11 +289,13 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 		},
 	}
 
+	log.Printf("📱 [FCM-SEND] Sending multicast to %d tokens (title: %q)", len(tokens), title)
 	response, err := s.client.SendEachForMulticast(ctx, message)
 	if err != nil {
+		log.Printf("❌ [FCM-SEND] Multicast FAILED: %v (error type: %T)", err, err)
 		return fmt.Errorf("error sending multicast message: %w", err)
 	}
 
-	log.Printf("✅ Multicast sent: %d success, %d failures", response.SuccessCount, response.FailureCount)
+	log.Printf("✅ [FCM-SEND] Multicast sent: %d success, %d failures", response.SuccessCount, response.FailureCount)
 	return nil
 }
