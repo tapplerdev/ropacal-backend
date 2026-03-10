@@ -1,60 +1,116 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
-	firebase "firebase.google.com/go/v4"
-	"firebase.google.com/go/v4/messaging"
-	"google.golang.org/api/option"
+	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2"
 )
 
-// FCMService handles Firebase Cloud Messaging
+const (
+	fcmSendEndpoint = "https://fcm.googleapis.com/v1/projects/%s/messages:send"
+	fcmScope        = "https://www.googleapis.com/auth/firebase.messaging"
+)
+
+// FCMService handles Firebase Cloud Messaging via direct HTTP v1 API.
+// Bypasses the Firebase Admin SDK to avoid its internal transport auth issues.
 type FCMService struct {
-	client    *messaging.Client
-	projectID string
+	tokenSource oauth2.TokenSource
+	projectID   string
+	httpClient  *http.Client
 }
 
-// NewFCMService creates a new FCM service instance from a credentials file
+// ── FCM v1 API request/response types ──────────────────────────────────────
+
+type fcmSendRequest struct {
+	ValidateOnly bool       `json:"validate_only,omitempty"`
+	Message      fcmMessage `json:"message"`
+}
+
+type fcmMessage struct {
+	Token        string            `json:"token,omitempty"`
+	Topic        string            `json:"topic,omitempty"`
+	Notification *fcmNotification  `json:"notification,omitempty"`
+	Data         map[string]string `json:"data,omitempty"`
+	Android      *fcmAndroidConfig `json:"android,omitempty"`
+	APNS         *fcmAPNSConfig    `json:"apns,omitempty"`
+}
+
+type fcmNotification struct {
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
+}
+
+type fcmAndroidConfig struct {
+	Priority string `json:"priority,omitempty"`
+}
+
+type fcmAPNSConfig struct {
+	Headers map[string]string `json:"headers,omitempty"`
+	Payload *fcmAPNSPayload   `json:"payload,omitempty"`
+}
+
+type fcmAPNSPayload struct {
+	Aps *fcmAps `json:"aps,omitempty"`
+}
+
+type fcmAps struct {
+	Alert          *fcmApsAlert `json:"alert,omitempty"`
+	MutableContent int          `json:"mutable-content,omitempty"`
+	Sound          string       `json:"sound,omitempty"`
+}
+
+type fcmApsAlert struct {
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
+}
+
+type fcmSendResponse struct {
+	Name  string       `json:"name"`
+	Error *fcmAPIError `json:"error,omitempty"`
+}
+
+type fcmAPIError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Status  string `json:"status"`
+}
+
+// ── Constructors ───────────────────────────────────────────────────────────
+
+// NewFCMService creates a new FCM service from a credentials file.
 func NewFCMService(credentialsFile string) (*FCMService, error) {
 	ctx := context.Background()
-
 	log.Printf("🔐 [FCM-INIT] Initializing from file: %s", credentialsFile)
 
-	opt := option.WithCredentialsFile(credentialsFile)
-	app, err := firebase.NewApp(ctx, nil, opt)
+	credentialsJSON, err := os.ReadFile(credentialsFile)
 	if err != nil {
-		log.Printf("❌ [FCM-INIT] firebase.NewApp failed: %v", err)
-		return nil, fmt.Errorf("error initializing Firebase app: %w", err)
+		return nil, fmt.Errorf("error reading credentials file: %w", err)
 	}
 
-	client, err := app.Messaging(ctx)
-	if err != nil {
-		log.Printf("❌ [FCM-INIT] app.Messaging failed: %v", err)
-		return nil, fmt.Errorf("error getting messaging client: %w", err)
-	}
-
-	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (from file)")
-	return &FCMService{client: client}, nil
+	return newFCMServiceFromJSON(ctx, credentialsJSON)
 }
 
-// NewFCMServiceFromBase64 creates a new FCM service instance from base64-encoded credentials.
-// Uses GOOGLE_APPLICATION_CREDENTIALS (Application Default Credentials) — the most standard
-// and battle-tested credential path in all Google Cloud SDKs.
+// NewFCMServiceFromBase64 creates a new FCM service from base64-encoded credentials.
+// Uses direct HTTP to the FCM v1 API with OAuth2 tokens from the service account.
 func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	ctx := context.Background()
 
 	log.Printf("🔐 [FCM-INIT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Printf("🔐 [FCM-INIT] Initializing from base64 credentials")
+	log.Printf("🔐 [FCM-INIT] Initializing from base64 credentials (direct HTTP mode)")
 	log.Printf("🔐 [FCM-INIT] Base64 input length: %d chars", len(credentialsBase64))
 
-	// Decode base64 credentials
 	credentialsJSON, err := base64.StdEncoding.DecodeString(credentialsBase64)
 	if err != nil {
 		log.Printf("❌ [FCM-INIT] Base64 decode FAILED: %v", err)
@@ -63,119 +119,163 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 
 	log.Printf("🔐 [FCM-INIT] Decoded JSON length: %d bytes", len(credentialsJSON))
 
-	// Validate the decoded JSON structure
+	return newFCMServiceFromJSON(ctx, credentialsJSON)
+}
+
+// newFCMServiceFromJSON is the shared init path for both constructors.
+func newFCMServiceFromJSON(ctx context.Context, credentialsJSON []byte) (*FCMService, error) {
+	// Validate JSON structure
 	var creds map[string]interface{}
-	if jsonErr := json.Unmarshal(credentialsJSON, &creds); jsonErr != nil {
-		log.Printf("❌ [FCM-INIT] Decoded bytes are NOT valid JSON: %v", jsonErr)
-		return nil, fmt.Errorf("decoded credentials JSON is invalid: %w", jsonErr)
+	if err := json.Unmarshal(credentialsJSON, &creds); err != nil {
+		log.Printf("❌ [FCM-INIT] Credentials JSON is invalid: %v", err)
+		return nil, fmt.Errorf("invalid credentials JSON: %w", err)
 	}
 
-	// Log all fields (except private_key value)
+	// Log credential fields for diagnostics
 	for _, field := range []string{"type", "project_id", "private_key_id", "client_email", "token_uri"} {
 		if v, ok := creds[field]; ok {
 			log.Printf("🔐 [FCM-INIT] %s = %v", field, v)
 		} else {
-			log.Printf("❌ [FCM-INIT] MISSING required field: %s", field)
+			log.Printf("❌ [FCM-INIT] MISSING field: %s", field)
 		}
 	}
 
-	// Validate private_key integrity
 	if pk, ok := creds["private_key"].(string); ok {
 		hasBegin := strings.Contains(pk, "BEGIN PRIVATE KEY")
 		hasEnd := strings.Contains(pk, "END PRIVATE KEY")
 		log.Printf("🔐 [FCM-INIT] private_key: %d chars, BEGIN=%v, END=%v", len(pk), hasBegin, hasEnd)
-	} else {
-		log.Printf("❌ [FCM-INIT] private_key is MISSING or not a string!")
 	}
 
 	projectID, _ := creds["project_id"].(string)
+	if projectID == "" {
+		return nil, fmt.Errorf("credentials JSON missing project_id")
+	}
 
-	// Write credentials to a temp file and use GOOGLE_APPLICATION_CREDENTIALS.
-	// This is Google's recommended approach for cloud deployments — uses the
-	// Application Default Credentials (ADC) path, the most tested credential
-	// flow in all Google SDKs.
-	tmpFile, err := os.CreateTemp("", "firebase-creds-*.json")
+	// Create OAuth2 token source from service account credentials
+	googleCreds, err := google.CredentialsFromJSON(ctx, credentialsJSON, fcmScope)
 	if err != nil {
-		log.Printf("❌ [FCM-INIT] Failed to create temp file: %v", err)
-		return nil, fmt.Errorf("error creating temp credentials file: %w", err)
+		log.Printf("❌ [FCM-INIT] Failed to create credentials: %v", err)
+		return nil, fmt.Errorf("error creating Google credentials: %w", err)
 	}
 
-	if _, err := tmpFile.Write(credentialsJSON); err != nil {
-		log.Printf("❌ [FCM-INIT] Failed to write temp file: %v", err)
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-		return nil, fmt.Errorf("error writing credentials to temp file: %w", err)
-	}
-	tmpFile.Close()
+	tokenSource := googleCreds.TokenSource
+	log.Printf("✅ [FCM-INIT] OAuth2 token source created")
 
-	log.Printf("🔐 [FCM-INIT] Wrote credentials to temp file: %s", tmpFile.Name())
-
-	// Set GOOGLE_APPLICATION_CREDENTIALS so the SDK uses ADC
-	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tmpFile.Name())
-	log.Printf("🔐 [FCM-INIT] Set GOOGLE_APPLICATION_CREDENTIALS=%s", tmpFile.Name())
-
-	// Initialize Firebase app with default credentials (reads from GOOGLE_APPLICATION_CREDENTIALS)
-	log.Printf("🔐 [FCM-INIT] Calling firebase.NewApp with Application Default Credentials...")
-	app, err := firebase.NewApp(ctx, nil)
+	// Verify we can actually obtain a token
+	token, err := tokenSource.Token()
 	if err != nil {
-		log.Printf("❌ [FCM-INIT] firebase.NewApp FAILED: %v", err)
-		return nil, fmt.Errorf("error initializing Firebase app: %w", err)
+		log.Printf("❌ [FCM-INIT] Failed to obtain initial token: %v", err)
+		return nil, fmt.Errorf("error obtaining OAuth2 token: %w", err)
 	}
-	log.Printf("✅ [FCM-INIT] firebase.NewApp succeeded")
+	log.Printf("✅ [FCM-INIT] Initial token obtained (expires: %s)", token.Expiry.Format(time.RFC3339))
 
-	// Get messaging client
-	log.Printf("🔐 [FCM-INIT] Calling app.Messaging...")
-	client, err := app.Messaging(ctx)
-	if err != nil {
-		log.Printf("❌ [FCM-INIT] app.Messaging FAILED: %v", err)
-		return nil, fmt.Errorf("error getting messaging client: %w", err)
+	svc := &FCMService{
+		tokenSource: tokenSource,
+		projectID:   projectID,
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
-	log.Printf("✅ [FCM-INIT] Messaging client created")
 
-	// Send a dry-run test message to verify credentials work end-to-end
-	log.Printf("🔐 [FCM-INIT] Sending dry-run test to validate credentials...")
-	testMsg := &messaging.Message{
-		Topic: "__fcm_init_test__",
-		Data:  map[string]string{"test": "1"},
-	}
-	testResp, testErr := client.SendDryRun(ctx, testMsg)
+	// Validate with a dry-run send
+	log.Printf("🔐 [FCM-INIT] Sending dry-run test...")
+	testResp, testErr := svc.sendRaw(ctx, &fcmSendRequest{
+		ValidateOnly: true,
+		Message: fcmMessage{
+			Topic: "__fcm_init_test__",
+			Data:  map[string]string{"test": "1"},
+		},
+	})
 	if testErr != nil {
-		log.Printf("❌ [FCM-INIT] Dry-run FAILED: %v (type: %T)", testErr, testErr)
+		log.Printf("❌ [FCM-INIT] Dry-run FAILED: %v", testErr)
 	} else {
 		log.Printf("✅ [FCM-INIT] Dry-run PASSED: %s", testResp)
 	}
 
-	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (project: %s, credential path: ADC)", projectID)
+	log.Printf("✅ [FCM-INIT] FCM service ready (project: %s, mode: direct HTTP)", projectID)
 	log.Printf("🔐 [FCM-INIT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	return &FCMService{client: client, projectID: projectID}, nil
+	return svc, nil
 }
 
-// SendRouteAssignedNotification sends a notification when a route is assigned
+// ── Core send method ───────────────────────────────────────────────────────
+
+// sendRaw sends a message to the FCM v1 HTTP API directly.
+func (s *FCMService) sendRaw(ctx context.Context, req *fcmSendRequest) (string, error) {
+	// Get fresh OAuth2 token
+	token, err := s.tokenSource.Token()
+	if err != nil {
+		return "", fmt.Errorf("failed to get OAuth2 token: %w", err)
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf(fcmSendEndpoint, s.projectID)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	httpReq.Header.Set("Content-Type", "application/json; UTF-8")
+
+	log.Printf("📡 [FCM-HTTP] POST %s (token expires: %s, body: %d bytes, validateOnly: %v)",
+		url, token.Expiry.Format(time.RFC3339), len(body), req.ValidateOnly)
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("❌ [FCM-HTTP] Status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("FCM API returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result fcmSendResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	log.Printf("✅ [FCM-HTTP] Success: %s", result.Name)
+	return result.Name, nil
+}
+
+// send is the main entry point for sending a single message.
+func (s *FCMService) send(ctx context.Context, msg fcmMessage) (string, error) {
+	return s.sendRaw(ctx, &fcmSendRequest{Message: msg})
+}
+
+// ── Public API (unchanged signatures) ──────────────────────────────────────
+
+// SendRouteAssignedNotification sends a notification when a route is assigned.
 func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalBins int) error {
 	ctx := context.Background()
 
-	message := &messaging.Message{
+	title := "New Route Assigned!"
+	body := fmt.Sprintf("You have %d bins to collect today.", totalBins)
+
+	msg := fcmMessage{
 		Token: token,
 		Data: map[string]string{
 			"type":       "route_assigned",
 			"route_id":   routeID,
 			"total_bins": strconv.Itoa(totalBins),
 		},
-		Android: &messaging.AndroidConfig{
-			Priority: "high",
-		},
-		APNS: &messaging.APNSConfig{
+		Android: &fcmAndroidConfig{Priority: "high"},
+		APNS: &fcmAPNSConfig{
 			Headers: map[string]string{
 				"apns-push-type": "alert",
 				"apns-priority":  "10",
 			},
-			Payload: &messaging.APNSPayload{
-				Aps: &messaging.Aps{
-					Alert: &messaging.ApsAlert{
-						Title: "New Route Assigned!",
-						Body:  fmt.Sprintf("You have %d bins to collect today.", totalBins),
-					},
-					MutableContent: true,
+			Payload: &fcmAPNSPayload{
+				Aps: &fcmAps{
+					Alert:          &fcmApsAlert{Title: title, Body: body},
+					MutableContent: 1,
 					Sound:          "default",
 				},
 			},
@@ -183,13 +283,13 @@ func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalB
 	}
 
 	log.Printf("📱 [FCM-SEND] Sending route_assigned to token: %s...%s", token[:min(10, len(token))], token[max(0, len(token)-6):])
-	response, err := s.client.Send(ctx, message)
+	resp, err := s.send(ctx, msg)
 	if err != nil {
-		log.Printf("❌ [FCM-SEND] route_assigned FAILED: %v (error type: %T)", err, err)
+		log.Printf("❌ [FCM-SEND] route_assigned FAILED: %v", err)
 		return fmt.Errorf("error sending FCM message: %w", err)
 	}
 
-	log.Printf("✅ [FCM-SEND] route_assigned sent: %s", response)
+	log.Printf("✅ [FCM-SEND] route_assigned sent: %s", resp)
 	return nil
 }
 
@@ -207,24 +307,19 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 
 	title, body := shiftNotificationText(eventType, extraData)
 
-	message := &messaging.Message{
-		Token: token,
-		Data:  data,
-		Android: &messaging.AndroidConfig{
-			Priority: "high",
-		},
-		APNS: &messaging.APNSConfig{
+	msg := fcmMessage{
+		Token:   token,
+		Data:    data,
+		Android: &fcmAndroidConfig{Priority: "high"},
+		APNS: &fcmAPNSConfig{
 			Headers: map[string]string{
 				"apns-push-type": "alert",
 				"apns-priority":  "10",
 			},
-			Payload: &messaging.APNSPayload{
-				Aps: &messaging.Aps{
-					Alert: &messaging.ApsAlert{
-						Title: title,
-						Body:  body,
-					},
-					MutableContent: true,
+			Payload: &fcmAPNSPayload{
+				Aps: &fcmAps{
+					Alert:          &fcmApsAlert{Title: title, Body: body},
+					MutableContent: 1,
 					Sound:          "default",
 				},
 			},
@@ -232,13 +327,13 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 	}
 
 	log.Printf("📱 [FCM-SEND] Sending %s to token: %s...%s (title: %q)", eventType, token[:min(10, len(token))], token[max(0, len(token)-6):], title)
-	response, err := s.client.Send(ctx, message)
+	resp, err := s.send(ctx, msg)
 	if err != nil {
-		log.Printf("❌ [FCM-SEND] %s FAILED: %v (error type: %T)", eventType, err, err)
+		log.Printf("❌ [FCM-SEND] %s FAILED: %v", eventType, err)
 		return fmt.Errorf("error sending FCM message: %w", err)
 	}
 
-	log.Printf("✅ [FCM-SEND] %s sent: %s", eventType, response)
+	log.Printf("✅ [FCM-SEND] %s sent: %s", eventType, resp)
 	return nil
 }
 
@@ -268,40 +363,49 @@ func shiftNotificationText(eventType string, extraData map[string]string) (strin
 }
 
 // SendMulticast sends the same message to multiple tokens.
+// FCM v1 API has no native multicast — sends individually to each token.
 func (s *FCMService) SendMulticast(tokens []string, title, body string, data map[string]string) error {
 	ctx := context.Background()
 
-	message := &messaging.MulticastMessage{
-		Tokens: tokens,
-		Data:   data,
-		Android: &messaging.AndroidConfig{
-			Priority: "high",
-		},
-		APNS: &messaging.APNSConfig{
-			Headers: map[string]string{
-				"apns-push-type": "alert",
-				"apns-priority":  "10",
-			},
-			Payload: &messaging.APNSPayload{
-				Aps: &messaging.Aps{
-					Alert: &messaging.ApsAlert{
-						Title: title,
-						Body:  body,
+	log.Printf("📱 [FCM-SEND] Sending multicast to %d tokens (title: %q)", len(tokens), title)
+
+	successCount := 0
+	failureCount := 0
+
+	for _, token := range tokens {
+		msg := fcmMessage{
+			Token: token,
+			Data:  data,
+			Android: &fcmAndroidConfig{Priority: "high"},
+			APNS: &fcmAPNSConfig{
+				Headers: map[string]string{
+					"apns-push-type": "alert",
+					"apns-priority":  "10",
+				},
+				Payload: &fcmAPNSPayload{
+					Aps: &fcmAps{
+						Alert:          &fcmApsAlert{Title: title, Body: body},
+						MutableContent: 1,
+						Sound:          "default",
 					},
-					MutableContent: true,
-					Sound:          "default",
 				},
 			},
-		},
+		}
+
+		_, err := s.send(ctx, msg)
+		if err != nil {
+			log.Printf("❌ [FCM-SEND] Multicast token %s...%s failed: %v",
+				token[:min(10, len(token))], token[max(0, len(token)-6):], err)
+			failureCount++
+		} else {
+			successCount++
+		}
 	}
 
-	log.Printf("📱 [FCM-SEND] Sending multicast to %d tokens (title: %q)", len(tokens), title)
-	response, err := s.client.SendEachForMulticast(ctx, message)
-	if err != nil {
-		log.Printf("❌ [FCM-SEND] Multicast FAILED: %v (error type: %T)", err, err)
-		return fmt.Errorf("error sending multicast message: %w", err)
-	}
+	log.Printf("✅ [FCM-SEND] Multicast done: %d success, %d failures", successCount, failureCount)
 
-	log.Printf("✅ [FCM-SEND] Multicast sent: %d success, %d failures", response.SuccessCount, response.FailureCount)
+	if failureCount > 0 && successCount == 0 {
+		return fmt.Errorf("all %d multicast messages failed", failureCount)
+	}
 	return nil
 }
