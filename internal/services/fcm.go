@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 
@@ -44,8 +45,8 @@ func NewFCMService(credentialsFile string) (*FCMService, error) {
 }
 
 // NewFCMServiceFromBase64 creates a new FCM service instance from base64-encoded credentials.
-// Uses option.WithCredentialsJSON which is the standard approach — lets the Firebase SDK
-// and Google transport layer handle scopes and token management internally.
+// Uses GOOGLE_APPLICATION_CREDENTIALS (Application Default Credentials) — the most standard
+// and battle-tested credential path in all Google Cloud SDKs.
 func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	ctx := context.Background()
 
@@ -57,8 +58,6 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	credentialsJSON, err := base64.StdEncoding.DecodeString(credentialsBase64)
 	if err != nil {
 		log.Printf("❌ [FCM-INIT] Base64 decode FAILED: %v", err)
-		log.Printf("❌ [FCM-INIT] First 20 chars of input: %.20s", credentialsBase64)
-		log.Printf("❌ [FCM-INIT] Last 20 chars of input: %s", credentialsBase64[max(0, len(credentialsBase64)-20):])
 		return nil, fmt.Errorf("error decoding base64 credentials: %w", err)
 	}
 
@@ -68,13 +67,11 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	var creds map[string]interface{}
 	if jsonErr := json.Unmarshal(credentialsJSON, &creds); jsonErr != nil {
 		log.Printf("❌ [FCM-INIT] Decoded bytes are NOT valid JSON: %v", jsonErr)
-		log.Printf("❌ [FCM-INIT] First 100 bytes: %s", string(credentialsJSON[:min(100, len(credentialsJSON))]))
 		return nil, fmt.Errorf("decoded credentials JSON is invalid: %w", jsonErr)
 	}
 
 	// Log all fields (except private_key value)
-	requiredFields := []string{"type", "project_id", "private_key_id", "client_email", "token_uri", "auth_uri"}
-	for _, field := range requiredFields {
+	for _, field := range []string{"type", "project_id", "private_key_id", "client_email", "token_uri"} {
 		if v, ok := creds[field]; ok {
 			log.Printf("🔐 [FCM-INIT] %s = %v", field, v)
 		} else {
@@ -84,28 +81,42 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 
 	// Validate private_key integrity
 	if pk, ok := creds["private_key"].(string); ok {
-		log.Printf("🔐 [FCM-INIT] private_key length: %d chars", len(pk))
 		hasBegin := strings.Contains(pk, "BEGIN PRIVATE KEY")
 		hasEnd := strings.Contains(pk, "END PRIVATE KEY")
-		log.Printf("🔐 [FCM-INIT] private_key has BEGIN marker: %v", hasBegin)
-		log.Printf("🔐 [FCM-INIT] private_key has END marker: %v", hasEnd)
-		if !hasBegin || !hasEnd {
-			log.Printf("❌ [FCM-INIT] private_key appears CORRUPTED or TRUNCATED!")
-		} else {
-			log.Printf("🔐 [FCM-INIT] private_key structure: OK")
-		}
+		log.Printf("🔐 [FCM-INIT] private_key: %d chars, BEGIN=%v, END=%v", len(pk), hasBegin, hasEnd)
 	} else {
 		log.Printf("❌ [FCM-INIT] private_key is MISSING or not a string!")
 	}
 
 	projectID, _ := creds["project_id"].(string)
 
-	// Initialize Firebase app using WithCredentialsJSON (the standard approach).
-	// DO NOT use WithTokenSource — it bypasses Firebase's internal scope injection
-	// and causes "missing authentication credential" errors on Send().
-	log.Printf("🔐 [FCM-INIT] Calling firebase.NewApp with WithCredentialsJSON...")
-	opt := option.WithCredentialsJSON(credentialsJSON)
-	app, err := firebase.NewApp(ctx, nil, opt)
+	// Write credentials to a temp file and use GOOGLE_APPLICATION_CREDENTIALS.
+	// This is Google's recommended approach for cloud deployments — uses the
+	// Application Default Credentials (ADC) path, the most tested credential
+	// flow in all Google SDKs.
+	tmpFile, err := os.CreateTemp("", "firebase-creds-*.json")
+	if err != nil {
+		log.Printf("❌ [FCM-INIT] Failed to create temp file: %v", err)
+		return nil, fmt.Errorf("error creating temp credentials file: %w", err)
+	}
+
+	if _, err := tmpFile.Write(credentialsJSON); err != nil {
+		log.Printf("❌ [FCM-INIT] Failed to write temp file: %v", err)
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return nil, fmt.Errorf("error writing credentials to temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	log.Printf("🔐 [FCM-INIT] Wrote credentials to temp file: %s", tmpFile.Name())
+
+	// Set GOOGLE_APPLICATION_CREDENTIALS so the SDK uses ADC
+	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tmpFile.Name())
+	log.Printf("🔐 [FCM-INIT] Set GOOGLE_APPLICATION_CREDENTIALS=%s", tmpFile.Name())
+
+	// Initialize Firebase app with default credentials (reads from GOOGLE_APPLICATION_CREDENTIALS)
+	log.Printf("🔐 [FCM-INIT] Calling firebase.NewApp with Application Default Credentials...")
+	app, err := firebase.NewApp(ctx, nil)
 	if err != nil {
 		log.Printf("❌ [FCM-INIT] firebase.NewApp FAILED: %v", err)
 		return nil, fmt.Errorf("error initializing Firebase app: %w", err)
@@ -121,25 +132,20 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	}
 	log.Printf("✅ [FCM-INIT] Messaging client created")
 
-	// Send a dry-run test message to verify credentials work end-to-end.
-	// DryRun validates everything (auth, project, payload) without actually delivering.
-	log.Printf("🔐 [FCM-INIT] Sending dry-run test message to validate credentials...")
+	// Send a dry-run test message to verify credentials work end-to-end
+	log.Printf("🔐 [FCM-INIT] Sending dry-run test to validate credentials...")
 	testMsg := &messaging.Message{
 		Topic: "__fcm_init_test__",
 		Data:  map[string]string{"test": "1"},
 	}
 	testResp, testErr := client.SendDryRun(ctx, testMsg)
 	if testErr != nil {
-		log.Printf("❌ [FCM-INIT] Dry-run test FAILED: %v", testErr)
-		log.Printf("❌ [FCM-INIT] This means credentials are not working for FCM sends!")
-		log.Printf("❌ [FCM-INIT] Error type: %T", testErr)
-		// Don't return error — still create the service, but log the warning
-		// The credentials might work for actual sends even if dry-run fails
+		log.Printf("❌ [FCM-INIT] Dry-run FAILED: %v (type: %T)", testErr, testErr)
 	} else {
-		log.Printf("✅ [FCM-INIT] Dry-run test PASSED! Response: %s", testResp)
+		log.Printf("✅ [FCM-INIT] Dry-run PASSED: %s", testResp)
 	}
 
-	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (project: %s)", projectID)
+	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (project: %s, credential path: ADC)", projectID)
 	log.Printf("🔐 [FCM-INIT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	return &FCMService{client: client, projectID: projectID}, nil
 }
