@@ -3,9 +3,11 @@ package services
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -42,10 +44,45 @@ func NewFCMService(credentialsFile string) (*FCMService, error) {
 func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 	ctx := context.Background()
 
+	log.Printf("🔐 [FCM-INIT] Base64 input length: %d chars", len(credentialsBase64))
+
 	// Decode base64 credentials
 	credentialsJSON, err := base64.StdEncoding.DecodeString(credentialsBase64)
 	if err != nil {
+		log.Printf("❌ [FCM-INIT] Base64 decode failed: %v", err)
 		return nil, fmt.Errorf("error decoding base64 credentials: %w", err)
+	}
+
+	log.Printf("🔐 [FCM-INIT] Decoded JSON length: %d bytes", len(credentialsJSON))
+
+	// Validate the decoded JSON structure
+	var creds map[string]interface{}
+	if jsonErr := json.Unmarshal(credentialsJSON, &creds); jsonErr != nil {
+		log.Printf("❌ [FCM-INIT] Decoded JSON is INVALID: %v", jsonErr)
+		return nil, fmt.Errorf("decoded credentials JSON is invalid: %w", jsonErr)
+	}
+
+	for _, field := range []string{"type", "project_id", "private_key_id", "client_email", "token_uri"} {
+		if v, ok := creds[field]; ok {
+			log.Printf("🔐 [FCM-INIT] %s = %v", field, v)
+		} else {
+			log.Printf("❌ [FCM-INIT] MISSING field: %s", field)
+		}
+	}
+
+	// Validate private_key
+	if pk, ok := creds["private_key"].(string); ok {
+		log.Printf("🔐 [FCM-INIT] private_key length: %d chars", len(pk))
+		log.Printf("🔐 [FCM-INIT] private_key starts with: %s", pk[:min(40, len(pk))])
+		log.Printf("🔐 [FCM-INIT] private_key ends with: %s", pk[max(0, len(pk)-30):])
+		if !strings.Contains(pk, "BEGIN PRIVATE KEY") {
+			log.Printf("❌ [FCM-INIT] private_key does NOT contain 'BEGIN PRIVATE KEY' — likely corrupted!")
+		}
+		if !strings.Contains(pk, "END PRIVATE KEY") {
+			log.Printf("❌ [FCM-INIT] private_key does NOT contain 'END PRIVATE KEY' — likely truncated!")
+		}
+	} else {
+		log.Printf("❌ [FCM-INIT] private_key is MISSING or not a string!")
 	}
 
 	// Initialize Firebase app with JSON credentials
@@ -61,6 +98,7 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 		return nil, fmt.Errorf("error getting messaging client: %w", err)
 	}
 
+	log.Printf("✅ [FCM-INIT] Firebase Messaging client created (credentials will be validated on first send)")
 	return &FCMService{client: client}, nil
 }
 
