@@ -4058,7 +4058,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			// Notify old driver
 			var oldDriverToken models.FCMToken
 			if tokenErr := db.Get(&oldDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, oldDriverID); tokenErr == nil {
-				go fcmService.SendShiftUpdateNotification(oldDriverToken.Token, shiftID, "reassigned")
+				go fcmService.SendShiftUpdateNotification(oldDriverToken.Token, shiftID, "shift_reassigned", nil)
 				log.Printf("📱 Sent FCM notification to old driver: %s", oldDriverID)
 			}
 
@@ -4066,7 +4066,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			if req.DriverID != nil {
 				var newDriverToken models.FCMToken
 				if tokenErr := db.Get(&newDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, *req.DriverID); tokenErr == nil {
-					go fcmService.SendShiftUpdateNotification(newDriverToken.Token, shiftID, "assigned")
+					go fcmService.SendShiftUpdateNotification(newDriverToken.Token, shiftID, "shift_created", nil)
 					log.Printf("📱 Sent FCM notification to new driver: %s", *req.DriverID)
 				}
 			}
@@ -5922,6 +5922,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 				"type":         "shift_cancelled",
 				"shift_id":     shiftID,
 				"cancelled_at": now,
+				"cancelled_by": userClaims.Email,
 				"message":      "Your shift has been cancelled by management",
 			}
 			err := centrifugoClient.PublishShiftUpdate(r.Context(), shiftID, cancellationData)
@@ -5942,6 +5943,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 					fcmToken.String,
 					shiftID,
 					"shift_cancelled",
+					map[string]string{"cancelled_by": userClaims.Email},
 				)
 				if fcmErr != nil {
 					log.Printf("⚠️  Failed to send FCM notification: %v", fcmErr)
@@ -6172,7 +6174,8 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 					fcmErr := fcmService.SendShiftUpdateNotification(
 						fcmToken.String,
 						shift.ID,
-						"shift_cancelled",
+						"shift_deleted",
+						nil,
 					)
 					if fcmErr != nil {
 						log.Printf("⚠️  Failed to send FCM to driver %s: %v", shift.DriverID, fcmErr)

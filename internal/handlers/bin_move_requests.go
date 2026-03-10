@@ -952,7 +952,8 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 			err := fcmService.SendShiftUpdateNotification(
 				fcmToken.Token,
 				activeShift.ID,
-				fmt.Sprintf("urgent_move_bin_%d", bin.BinNumber),
+				"move_request_assigned",
+				map[string]string{"bin_number": fmt.Sprintf("%d", bin.BinNumber)},
 			)
 			if err != nil {
 				log.Printf("⚠️  Failed to send FCM notification: %v", err)

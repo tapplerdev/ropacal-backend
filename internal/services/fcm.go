@@ -68,12 +68,9 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalBins int) error {
 	ctx := context.Background()
 
+	// Data-only message — Flutter background handler creates the notification
 	message := &messaging.Message{
 		Token: token,
-		Notification: &messaging.Notification{
-			Title: "New Route Assigned!",
-			Body:  fmt.Sprintf("You have %d bins to collect today. Slide to start your shift.", totalBins),
-		},
 		Data: map[string]string{
 			"type":       "route_assigned",
 			"route_id":   routeID,
@@ -86,6 +83,7 @@ func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalB
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
 					ContentAvailable: true,
+					MutableContent:   true,
 					Sound:            "default",
 				},
 			},
@@ -97,25 +95,32 @@ func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalB
 		return fmt.Errorf("error sending FCM message: %w", err)
 	}
 
-	log.Printf("✅ FCM notification sent successfully: %s", response)
+	log.Printf("✅ FCM data message sent for route_assigned: %s", response)
 	return nil
 }
 
-// SendShiftUpdateNotification sends a notification for shift updates
-func (s *FCMService) SendShiftUpdateNotification(token, shiftID, status string) error {
+// SendShiftUpdateNotification sends a notification for shift updates.
+// eventType should match the mobile registry key (e.g. "shift_cancelled",
+// "shift_created", "shift_reassigned"). It is passed through as Data["type"]
+// so the mobile adapter creates the correct NotificationEvent.
+func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType string, extraData map[string]string) error {
 	ctx := context.Background()
 
+	data := map[string]string{
+		"type":     eventType,
+		"shift_id": shiftID,
+	}
+	for k, v := range extraData {
+		data[k] = v
+	}
+
+	// Data-only message: no Notification field.
+	// Android/iOS will NOT auto-display anything — the Flutter background
+	// handler creates an awesome_notifications OS notification with our
+	// custom channels, sound, and styling.
 	message := &messaging.Message{
 		Token: token,
-		Notification: &messaging.Notification{
-			Title: "Shift Update",
-			Body:  fmt.Sprintf("Your shift status has been updated to: %s", status),
-		},
-		Data: map[string]string{
-			"type":     "shift_update",
-			"shift_id": shiftID,
-			"status":   status,
-		},
+		Data:  data,
 		Android: &messaging.AndroidConfig{
 			Priority: "high",
 		},
@@ -123,6 +128,7 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, status string) 
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
 					ContentAvailable: true,
+					MutableContent:   true,
 					Sound:            "default",
 				},
 			},
@@ -134,21 +140,19 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, status string) 
 		return fmt.Errorf("error sending FCM message: %w", err)
 	}
 
-	log.Printf("✅ FCM notification sent successfully: %s", response)
+	log.Printf("✅ FCM data message sent for %s: %s", eventType, response)
 	return nil
 }
 
-// SendMulticast sends the same message to multiple tokens
+
+// SendMulticast sends the same data-only message to multiple tokens.
+// Flutter background handler creates the notification with custom channels.
 func (s *FCMService) SendMulticast(tokens []string, title, body string, data map[string]string) error {
 	ctx := context.Background()
 
 	message := &messaging.MulticastMessage{
 		Tokens: tokens,
-		Notification: &messaging.Notification{
-			Title: title,
-			Body:  body,
-		},
-		Data: data,
+		Data:   data,
 		Android: &messaging.AndroidConfig{
 			Priority: "high",
 		},
@@ -156,6 +160,7 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
 					ContentAvailable: true,
+					MutableContent:   true,
 					Sound:            "default",
 				},
 			},
