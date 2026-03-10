@@ -68,7 +68,9 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalBins int) error {
 	ctx := context.Background()
 
-	// Data-only message — Flutter background handler creates the notification
+	// Data payload for Flutter foreground handler + Android background handler
+	// APNS Alert ensures iOS displays the notification reliably (data-only
+	// messages are treated as silent pushes and throttled by Apple).
 	message := &messaging.Message{
 		Token: token,
 		Data: map[string]string{
@@ -80,11 +82,18 @@ func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalB
 			Priority: "high",
 		},
 		APNS: &messaging.APNSConfig{
+			Headers: map[string]string{
+				"apns-push-type": "alert",
+				"apns-priority":  "10",
+			},
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
-					ContentAvailable: true,
-					MutableContent:   true,
-					Sound:            "default",
+					Alert: &messaging.ApsAlert{
+						Title: "New Route Assigned!",
+						Body:  fmt.Sprintf("You have %d bins to collect today.", totalBins),
+					},
+					MutableContent: true,
+					Sound:          "default",
 				},
 			},
 		},
@@ -114,10 +123,12 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 		data[k] = v
 	}
 
-	// Data-only message: no Notification field.
-	// Android/iOS will NOT auto-display anything — the Flutter background
-	// handler creates an awesome_notifications OS notification with our
-	// custom channels, sound, and styling.
+	// APNS Alert text — matches the mobile NotificationRegistry titles/bodies.
+	title, body := shiftNotificationText(eventType, extraData)
+
+	// Data payload for Flutter foreground + Android background handler.
+	// APNS Alert ensures iOS displays reliably (data-only = silent push,
+	// throttled by Apple). Android ignores APNS config.
 	message := &messaging.Message{
 		Token: token,
 		Data:  data,
@@ -125,11 +136,18 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 			Priority: "high",
 		},
 		APNS: &messaging.APNSConfig{
+			Headers: map[string]string{
+				"apns-push-type": "alert",
+				"apns-priority":  "10",
+			},
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
-					ContentAvailable: true,
-					MutableContent:   true,
-					Sound:            "default",
+					Alert: &messaging.ApsAlert{
+						Title: title,
+						Body:  body,
+					},
+					MutableContent: true,
+					Sound:          "default",
 				},
 			},
 		},
@@ -144,9 +162,34 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 	return nil
 }
 
+// shiftNotificationText returns iOS-visible title & body that match
+// the mobile NotificationRegistry for the given event type.
+func shiftNotificationText(eventType string, extraData map[string]string) (string, string) {
+	switch eventType {
+	case "shift_created":
+		return "New Shift Assigned", "You have a new shift. Tap to view."
+	case "shift_cancelled":
+		if cb := extraData["cancelled_by"]; cb != "" {
+			return "Shift Cancelled", fmt.Sprintf("Your shift has been cancelled by %s.", cb)
+		}
+		return "Shift Cancelled", "Your shift has been cancelled by management."
+	case "shift_reassigned":
+		return "Shift Reassigned", "Your shift has been reassigned to another driver."
+	case "shift_deleted":
+		return "Shift Cleared", "Your shift has been cleared by management."
+	case "move_request_assigned":
+		if bn := extraData["bin_number"]; bn != "" {
+			return fmt.Sprintf("Move Request: Bin #%s", bn), "You have a new move request. Tap to view."
+		}
+		return "New Move Request Assigned", "You have a new move request. Tap to view."
+	default:
+		return "Shift Update", "Your shift has been updated."
+	}
+}
 
-// SendMulticast sends the same data-only message to multiple tokens.
-// Flutter background handler creates the notification with custom channels.
+
+// SendMulticast sends the same message to multiple tokens.
+// APNS Alert ensures iOS displays reliably; Android uses background handler.
 func (s *FCMService) SendMulticast(tokens []string, title, body string, data map[string]string) error {
 	ctx := context.Background()
 
@@ -157,11 +200,18 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 			Priority: "high",
 		},
 		APNS: &messaging.APNSConfig{
+			Headers: map[string]string{
+				"apns-push-type": "alert",
+				"apns-priority":  "10",
+			},
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
-					ContentAvailable: true,
-					MutableContent:   true,
-					Sound:            "default",
+					Alert: &messaging.ApsAlert{
+						Title: title,
+						Body:  body,
+					},
+					MutableContent: true,
+					Sound:          "default",
 				},
 			},
 		},
