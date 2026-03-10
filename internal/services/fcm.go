@@ -86,36 +86,42 @@ func NewFCMServiceFromBase64(credentialsBase64 string) (*FCMService, error) {
 		log.Printf("❌ [FCM-INIT] private_key is MISSING or not a string!")
 	}
 
-	// Test OAuth2 token exchange BEFORE initializing Firebase
-	// This catches credential issues immediately instead of failing on first Send()
+	// Parse JWT config and verify OAuth2 token exchange works
 	conf, err := google.JWTConfigFromJSON(credentialsJSON, "https://www.googleapis.com/auth/firebase.messaging")
 	if err != nil {
-		log.Printf("❌ [FCM-INIT] Failed to parse JWT config from credentials: %v", err)
+		log.Printf("❌ [FCM-INIT] Failed to parse JWT config: %v", err)
 		return nil, fmt.Errorf("invalid service account credentials: %w", err)
 	}
-	log.Printf("🔐 [FCM-INIT] JWT config parsed — requesting OAuth2 token from %s...", conf.TokenURL)
 
-	token, err := conf.TokenSource(ctx).Token()
+	tokenSource := conf.TokenSource(ctx)
+	token, err := tokenSource.Token()
 	if err != nil {
 		log.Printf("❌ [FCM-INIT] OAuth2 token exchange FAILED: %v", err)
-		return nil, fmt.Errorf("OAuth2 token exchange failed (credentials may be revoked): %w", err)
+		return nil, fmt.Errorf("OAuth2 token exchange failed: %w", err)
 	}
-	log.Printf("✅ [FCM-INIT] OAuth2 token obtained! Type: %s, Expires: %v", token.TokenType, token.Expiry)
+	log.Printf("✅ [FCM-INIT] OAuth2 token obtained! Expires: %v", token.Expiry)
 
-	// Initialize Firebase app with JSON credentials
-	opt := option.WithCredentialsJSON(credentialsJSON)
-	app, err := firebase.NewApp(ctx, nil, opt)
+	// Extract project ID from credentials
+	var creds2 struct {
+		ProjectID string `json:"project_id"`
+	}
+	json.Unmarshal(credentialsJSON, &creds2)
+
+	// Use the verified token source directly instead of WithCredentialsJSON
+	// This bypasses Firebase SDK's internal credential handling which was failing
+	config := &firebase.Config{ProjectID: creds2.ProjectID}
+	opt := option.WithTokenSource(tokenSource)
+	app, err := firebase.NewApp(ctx, config, opt)
 	if err != nil {
 		return nil, fmt.Errorf("error initializing Firebase app: %w", err)
 	}
 
-	// Get messaging client
 	client, err := app.Messaging(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error getting messaging client: %w", err)
 	}
 
-	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (OAuth2 credentials verified)")
+	log.Printf("✅ [FCM-INIT] Firebase Messaging client ready (using verified token source, project: %s)", creds2.ProjectID)
 	return &FCMService{client: client}, nil
 }
 
