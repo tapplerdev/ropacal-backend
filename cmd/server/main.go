@@ -321,10 +321,10 @@ func main() {
 		})
 
 		// Diagnostic logging endpoint (no auth required for easier debugging)
-		r.Post("/api/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
+		r.Post("/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
 
 		// App error logging endpoint (no auth required for mobile app error reporting)
-		r.Post("/api/logs/app-error", handlers.LogAppError(db))
+		r.Post("/logs/app-error", handlers.LogAppError(db))
 
 		// Manager endpoints (require authentication + admin role)
 		r.Group(func(r chi.Router) {
