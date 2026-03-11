@@ -407,14 +407,22 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 
 		// Publish move_request_created to company:events so all manager dashboards update
+		moveCreatedData := map[string]interface{}{
+			"move_request_id": id,
+			"bin_id":          req.BinID,
+			"status":          "pending",
+		}
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_created", map[string]interface{}{
-				"move_request_id": id,
-				"bin_id":          req.BinID,
-				"status":          "pending",
-			}); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_created", moveCreatedData); pubErr != nil {
 				log.Printf("⚠️  Failed to publish move_request_created to Centrifugo: %v", pubErr)
 			}
+
+			// Create per-user notifications for admins
+			adminIDs, _ := services.GetAdminUserIDs(db)
+			services.CreateNotificationForUsers(db, centrifugoClient, adminIDs, "move_request_created",
+				"New Move Request",
+				fmt.Sprintf("Move request created for bin %s", req.BinID),
+				moveCreatedData)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -6022,6 +6022,13 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			if pubErr := centrifugoClient.PublishDriverEvent(r.Context(), shift.DriverID, "shift_cancelled", cancelDashboardData); pubErr != nil {
 				log.Printf("⚠️  Failed to publish shift_cancelled to driver:events:%s: %v", shift.DriverID, pubErr)
 			}
+
+			// Create per-user notifications for admins
+			adminIDs, _ := services.GetAdminUserIDs(db)
+			services.CreateNotificationForUsers(db, centrifugoClient, adminIDs, "shift_cancelled",
+				"Shift Cancelled",
+				fmt.Sprintf("Shift %s has been cancelled", shiftID),
+				cancelDashboardData)
 		}
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{

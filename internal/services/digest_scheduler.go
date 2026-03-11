@@ -191,7 +191,8 @@ func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send overdue notification: %v", err)
 			}
-			logNotification(s.db, "digest_overdue_moves", title, body, data, len(tokens))
+			adminIDs, _ := GetAdminUserIDs(s.db)
+			CreateNotificationForUsers(s.db, s.centrifugoClient, adminIDs, "digest_overdue_moves", title, body, data)
 		}
 
 		if urgentCount > 0 || soonCount > 0 {
@@ -214,7 +215,8 @@ func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send upcoming notification: %v", err)
 			}
-			logNotification(s.db, "digest_upcoming_moves", title, body, data, len(tokens))
+			adminIDs, _ := GetAdminUserIDs(s.db)
+			CreateNotificationForUsers(s.db, s.centrifugoClient, adminIDs, "digest_upcoming_moves", title, body, data)
 		}
 
 		if warehouseCount > 0 {
@@ -228,7 +230,8 @@ func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send warehouse notification: %v", err)
 			}
-			logNotification(s.db, "digest_warehouse_bins", title, body, data, len(tokens))
+			adminIDs, _ := GetAdminUserIDs(s.db)
+			CreateNotificationForUsers(s.db, s.centrifugoClient, adminIDs, "digest_warehouse_bins", title, body, data)
 		}
 	}
 

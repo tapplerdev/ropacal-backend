@@ -772,6 +772,35 @@ func Migrate(db *sqlx.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_notification_log_type ON notification_log(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_notification_log_created_at ON notification_log(created_at DESC)`,
+
+		// Per-user notification inbox
+		`CREATE TABLE IF NOT EXISTS user_notifications (
+			id                 TEXT PRIMARY KEY,
+			user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			notification_log_id TEXT REFERENCES notification_log(id) ON DELETE SET NULL,
+			type               TEXT NOT NULL,
+			title              TEXT NOT NULL,
+			body               TEXT NOT NULL,
+			data               JSONB,
+			delivery_status    TEXT NOT NULL DEFAULT 'pending'
+			                     CHECK(delivery_status IN ('pending', 'delivered', 'failed')),
+			read_at            BIGINT,
+			created_at         BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_notifs_user_id ON user_notifications(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_notifs_unread ON user_notifications(user_id, read_at) WHERE read_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_user_notifs_created ON user_notifications(user_id, created_at DESC)`,
+
+		// Per-user notification preferences
+		`CREATE TABLE IF NOT EXISTS user_notification_preferences (
+			user_id       TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			drift_alerts  BOOLEAN NOT NULL DEFAULT TRUE,
+			digests       BOOLEAN NOT NULL DEFAULT TRUE,
+			shift_events  BOOLEAN NOT NULL DEFAULT TRUE,
+			move_requests BOOLEAN NOT NULL DEFAULT TRUE,
+			created_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+			updated_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+		)`,
 	}
 
 	for _, migration := range migrations {

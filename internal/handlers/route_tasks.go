@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -282,6 +283,13 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			} else {
 				log.Printf("📡 Centrifugo: Published shift_created to driver:events:%s", req.DriverID)
 			}
+
+			// Create per-user notifications for admins
+			adminIDs, _ := services.GetAdminUserIDs(db)
+			services.CreateNotificationForUsers(db, centrifugoClient, adminIDs, "shift_created",
+				fmt.Sprintf("New Shift Created"),
+				fmt.Sprintf("Shift with %d tasks assigned", taskCount),
+				shiftCreatedData)
 		}
 
 		// Send FCM push notification to driver

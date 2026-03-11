@@ -330,6 +330,14 @@ func main() {
 			// Incident reporting (drivers can report both check-based and field observations)
 			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteShiftBin)
 			// r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
+
+			// Per-user notification inbox
+			r.Get("/notifications", handlers.GetUserNotifications(db))
+			r.Get("/notifications/unread-count", handlers.GetUnreadCount(db))
+			r.Patch("/notifications/{id}/read", handlers.MarkNotificationRead(db))
+			r.Patch("/notifications/read-all", handlers.MarkAllNotificationsRead(db))
+			r.Get("/notifications/preferences", handlers.GetNotificationPreferences(db))
+			r.Put("/notifications/preferences", handlers.UpdateNotificationPreferences(db))
 		})
 
 		// Diagnostic logging endpoint (no auth required for easier debugging)
@@ -426,6 +434,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Get("/manager/notification-settings", handlers.GetNotificationSettings(db))
 			r.Put("/manager/notification-settings", handlers.UpdateNotificationSettings(db))
 			r.Get("/manager/notification-log", handlers.GetNotificationLog(db))
+			r.Get("/manager/notification-log/{id}/recipients", handlers.GetNotificationRecipients(db))
 		})
 	})
 

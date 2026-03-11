@@ -321,8 +321,9 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 			}
 		}
 
-		// Log notification to history
-		logNotification(m.db, "bin_drift_alert", title, body, alert, len(tokens))
+		// Create per-user notifications for admins
+		adminIDs, _ := GetAdminUserIDs(m.db)
+		CreateNotificationForUsers(m.db, m.centrifugoClient, adminIDs, "bin_drift_alert", title, body, alert)
 
 		log.Printf("📢 [AirtagMonitor] Alert sent: %s — %s", title, body)
 	}
