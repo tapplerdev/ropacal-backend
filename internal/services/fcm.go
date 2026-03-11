@@ -307,7 +307,7 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 		data[k] = v
 	}
 
-	title, body := shiftNotificationText(eventType, extraData)
+	title, body := ShiftNotificationText(eventType, extraData)
 
 	msg := fcmMessage{
 		Token:   token,
@@ -339,9 +339,10 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 	return nil
 }
 
-// shiftNotificationText returns iOS-visible title & body that match
+// ShiftNotificationText returns iOS-visible title & body that match
 // the mobile NotificationRegistry for the given event type.
-func shiftNotificationText(eventType string, extraData map[string]string) (string, string) {
+// Exported so handlers can reuse the same text when calling CreateNotificationForUsers.
+func ShiftNotificationText(eventType string, extraData map[string]string) (string, string) {
 	switch eventType {
 	case "shift_created":
 		return "New Shift Assigned", "You have a new shift. Tap to view."
@@ -359,6 +360,8 @@ func shiftNotificationText(eventType string, extraData map[string]string) (strin
 			return fmt.Sprintf("Move Request: Bin #%s", bn), "You have a new move request. Tap to view."
 		}
 		return "New Move Request Assigned", "You have a new move request. Tap to view."
+	case "route_assigned":
+		return "New Route Assigned!", "You have a new route. Tap to view."
 	default:
 		return "Shift Update", "Your shift has been updated."
 	}

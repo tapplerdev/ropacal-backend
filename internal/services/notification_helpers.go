@@ -76,7 +76,7 @@ func preferenceCategory(notifType string) string {
 		return "drift_alerts"
 	case strings.HasPrefix(notifType, "digest_"):
 		return "digests"
-	case strings.Contains(notifType, "shift"):
+	case strings.Contains(notifType, "shift") || notifType == "route_assigned":
 		return "shift_events"
 	case strings.Contains(notifType, "move_request"):
 		return "move_requests"

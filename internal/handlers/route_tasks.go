@@ -292,8 +292,10 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 				shiftCreatedData)
 		}
 
-		// Send FCM push notification to driver
-		if fcmService != nil {
+		// Send FCM push notification to driver (preference-aware)
+		driverTitle, driverBody := services.ShiftNotificationText("shift_created", nil)
+		_, driverNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{req.DriverID}, "shift_created", driverTitle, driverBody, map[string]string{"shift_id": shiftID})
+		if len(driverNotifIDs) > 0 && fcmService != nil {
 			var driverFCMToken models.FCMToken
 			tokenErr := db.Get(&driverFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, req.DriverID)
 			if tokenErr != nil {

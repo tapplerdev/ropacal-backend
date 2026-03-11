@@ -946,8 +946,11 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		log.Printf("⚠️  Failed to fetch updated move request for WebSocket: %v", err)
 	}
 
-	// 7. Send push notification to driver
-	if fcmService != nil {
+	// 7. Send push notification to driver (preference-aware)
+	moveExtra := map[string]string{"bin_number": fmt.Sprintf("%d", bin.BinNumber)}
+	moveTitle, moveBody := services.ShiftNotificationText("move_request_assigned", moveExtra)
+	_, moveNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{activeShift.DriverID}, "move_request_assigned", moveTitle, moveBody, map[string]string{"shift_id": activeShift.ID, "bin_number": fmt.Sprintf("%d", bin.BinNumber)})
+	if len(moveNotifIDs) > 0 && fcmService != nil {
 		var fcmToken models.FCMToken
 		tokenErr := db.Get(&fcmToken, `
 			SELECT * FROM fcm_tokens
@@ -961,7 +964,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 				fcmToken.Token,
 				activeShift.ID,
 				"move_request_assigned",
-				map[string]string{"bin_number": fmt.Sprintf("%d", bin.BinNumber)},
+				moveExtra,
 			)
 			if err != nil {
 				log.Printf("⚠️  Failed to send FCM notification: %v", err)
