@@ -103,16 +103,20 @@ func (s *DigestScheduler) checkAndSend() {
 
 // RunDigest executes the digest logic. Can be called from the scheduler or the HTTP endpoint.
 // The window parameter should be "morning" or "afternoon".
-func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
+// If force is true, the idempotency check is skipped (useful for testing).
+func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult, error) {
 	ctx := context.Background()
 	today := time.Now().Format("2006-01-02")
 	configKey := fmt.Sprintf("last_%s_digest", window)
 
 	// Step 0: Idempotency check — has this window already been sent today?
-	var lastSent string
-	err := s.db.QueryRow(`SELECT value->>'date' FROM config WHERE key = $1`, configKey).Scan(&lastSent)
-	if err == nil && lastSent == today {
-		return &DigestResult{AlreadySent: true, Window: window}, nil
+	skipDedup := len(force) > 0 && force[0]
+	if !skipDedup {
+		var lastSent string
+		dedupErr := s.db.QueryRow(`SELECT value->>'date' FROM config WHERE key = $1`, configKey).Scan(&lastSent)
+		if dedupErr == nil && lastSent == today {
+			return &DigestResult{AlreadySent: true, Window: window}, nil
+		}
 	}
 
 	// Step 1: Query active move requests and compute urgency
@@ -121,7 +125,7 @@ func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
 		ScheduledDate int64  `db:"scheduled_date"`
 	}
 	var moves []moveRow
-	err = s.db.Select(&moves, `
+	err := s.db.Select(&moves, `
 		SELECT status, scheduled_date FROM bin_move_requests
 		WHERE status IN ('pending', 'in_progress')
 	`)

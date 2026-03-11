@@ -22,7 +22,10 @@ func TriggerDigest(scheduler *services.DigestScheduler) http.HandlerFunc {
 			return
 		}
 
-		result, err := scheduler.RunDigest(window)
+		forceStr := r.URL.Query().Get("force")
+		forceRun := forceStr == "true" || forceStr == "1"
+
+		result, err := scheduler.RunDigest(window, forceRun)
 		if err != nil {
 			log.Printf("❌ [Digest] Manual trigger failed: %v", err)
 			http.Error(w, "digest failed: "+err.Error(), http.StatusInternalServerError)
