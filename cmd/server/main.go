@@ -209,6 +209,13 @@ func main() {
 	// Centrifugo location publish proxy (processes GPS data before broadcast)
 	r.Post("/api/centrifugo/publish-location", handlers.CentrifugoLocationPublishProxy(db, redisClient, osrmClient))
 
+	// Internal API routes (secured with INTERNAL_API_KEY, used by FindMy bridge)
+	r.Route("/api/internal", func(r chi.Router) {
+		r.Use(handlers.InternalAPIKey)
+		r.Get("/airtag-accounts", handlers.GetAirtagAccounts(db))
+		r.Put("/airtag-accounts/{id}/state", handlers.UpdateAirtagAccountState(db))
+	})
+
 	// API routes
 	r.Route("/api", func(r chi.Router) {
 		// Geocoding endpoints (no auth required)

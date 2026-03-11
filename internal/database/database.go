@@ -733,6 +733,32 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_conversion_status ON potential_locations(conversion_status)`,
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_converted_at ON potential_locations(converted_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_bin_current_status ON potential_locations(bin_current_status)`,
+
+		// AirTag accounts table — stores Apple iCloud credentials for FindMy bridge
+		`CREATE TABLE IF NOT EXISTS airtag_accounts (
+			id            TEXT PRIMARY KEY,
+			email         TEXT NOT NULL UNIQUE,
+			password      TEXT NOT NULL,
+			account_state TEXT,
+			created_at    BIGINT NOT NULL,
+			updated_at    BIGINT NOT NULL
+		)`,
+
+		// AirTag keys table — stores FindMy accessory keys per account
+		`CREATE TABLE IF NOT EXISTS airtag_keys (
+			id                      TEXT PRIMARY KEY,
+			account_id              TEXT NOT NULL REFERENCES airtag_accounts(id) ON DELETE CASCADE,
+			name                    TEXT NOT NULL,
+			tag_uuid                TEXT NOT NULL,
+			private_key             TEXT NOT NULL,
+			shared_secret           TEXT NOT NULL,
+			secondary_shared_secret TEXT NOT NULL,
+			pairing_date            TEXT,
+			product_id              BIGINT,
+			created_at              BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_airtag_keys_account_id ON airtag_keys(account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_airtag_keys_tag_uuid ON airtag_keys(tag_uuid)`,
 	}
 
 	for _, migration := range migrations {
