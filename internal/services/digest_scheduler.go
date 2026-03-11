@@ -76,14 +76,15 @@ func (s *DigestScheduler) checkAndSend() {
 	now := time.Now()
 	hour := now.Hour()
 
-	// Only send at 8 AM or 2 PM
-	if hour != 8 && hour != 14 {
-		return
-	}
+	settings := loadNotificationSettings(s.db)
 
-	window := "morning"
-	if hour == 14 {
+	var window string
+	if hour == settings.MorningDigestHour && settings.MorningDigestEnabled {
+		window = "morning"
+	} else if hour == settings.AfternoonDigestHour && settings.AfternoonDigestEnabled {
 		window = "afternoon"
+	} else {
+		return
 	}
 
 	result, err := s.RunDigest(window)
@@ -190,6 +191,7 @@ func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send overdue notification: %v", err)
 			}
+			logNotification(s.db, "digest_overdue_moves", title, body, data, len(tokens))
 		}
 
 		if urgentCount > 0 || soonCount > 0 {
@@ -212,6 +214,7 @@ func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send upcoming notification: %v", err)
 			}
+			logNotification(s.db, "digest_upcoming_moves", title, body, data, len(tokens))
 		}
 
 		if warehouseCount > 0 {
@@ -225,6 +228,7 @@ func (s *DigestScheduler) RunDigest(window string) (*DigestResult, error) {
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send warehouse notification: %v", err)
 			}
+			logNotification(s.db, "digest_warehouse_bins", title, body, data, len(tokens))
 		}
 	}
 

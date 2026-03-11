@@ -759,6 +759,19 @@ func Migrate(db *sqlx.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_airtag_keys_account_id ON airtag_keys(account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_airtag_keys_tag_uuid ON airtag_keys(tag_uuid)`,
+
+		// Notification log table — records every sent notification for audit trail
+		`CREATE TABLE IF NOT EXISTS notification_log (
+			id               TEXT PRIMARY KEY,
+			type             TEXT NOT NULL,
+			title            TEXT NOT NULL,
+			body             TEXT NOT NULL,
+			data             JSONB,
+			recipients_count INTEGER DEFAULT 0,
+			created_at       BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_notification_log_type ON notification_log(type)`,
+		`CREATE INDEX IF NOT EXISTS idx_notification_log_created_at ON notification_log(created_at DESC)`,
 	}
 
 	for _, migration := range migrations {

@@ -421,6 +421,11 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 
 			// Daily digest (manual trigger)
 			r.Post("/manager/daily-digest", handlers.TriggerDigest(digestScheduler))
+
+			// Notification settings & history
+			r.Get("/manager/notification-settings", handlers.GetNotificationSettings(db))
+			r.Put("/manager/notification-settings", handlers.UpdateNotificationSettings(db))
+			r.Get("/manager/notification-log", handlers.GetNotificationLog(db))
 		})
 	})
 

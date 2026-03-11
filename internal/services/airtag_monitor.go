@@ -55,7 +55,7 @@ type binRow struct {
 	City          string   `db:"city"`
 }
 
-const driftThresholdMeters = 500.0
+const defaultDriftThresholdMeters = 500.0
 
 // NewAirtagMonitor creates a new monitor that checks every 5 minutes.
 func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *AirtagMonitor {
@@ -77,7 +77,7 @@ func (m *AirtagMonitor) Start() {
 		return
 	}
 
-	log.Printf("📡 [AirtagMonitor] Starting drift monitor (5-minute intervals, threshold=%dm)", int(driftThresholdMeters))
+	log.Printf("📡 [AirtagMonitor] Starting drift monitor (5-minute intervals, settings loaded from DB)")
 
 	go func() {
 		// Check immediately on startup
@@ -103,6 +103,17 @@ func (m *AirtagMonitor) Stop() {
 
 func (m *AirtagMonitor) checkDrift() {
 	ctx := context.Background()
+
+	// 0. Read notification settings — skip if drift alerts disabled
+	settings := loadNotificationSettings(m.db)
+	if !settings.DriftAlertsEnabled {
+		return
+	}
+
+	threshold := float64(settings.DriftThresholdMeters)
+	if threshold < 50 {
+		threshold = defaultDriftThresholdMeters
+	}
 
 	// 1. Fetch AirTag positions from bridge
 	airtags, err := m.fetchAirtagLocations()
@@ -163,7 +174,7 @@ func (m *AirtagMonitor) checkDrift() {
 
 		distance := haversineMeters(*bin.Latitude, *bin.Longitude, at.Latitude, at.Longitude)
 
-		if distance > driftThresholdMeters {
+		if distance > threshold {
 			log.Printf("🚨 [AirtagMonitor] Bin %d drifted %.0fm (status: %s)", bin.BinNumber, distance, bin.Status)
 
 			alert := map[string]interface{}{
@@ -309,6 +320,9 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 				log.Printf("⚠️  [AirtagMonitor] Failed to send FCM drift alert: %v", sendErr)
 			}
 		}
+
+		// Log notification to history
+		logNotification(m.db, "bin_drift_alert", title, body, alert, len(tokens))
 
 		log.Printf("📢 [AirtagMonitor] Alert sent: %s — %s", title, body)
 	}
