@@ -104,6 +104,66 @@ func (gs *HEREGeocodingService) GeocodeAddress(street, city, zip string) (float6
 	return lat, lng, nil
 }
 
+// HEREReverseGeocodeResponse represents the response from HERE Reverse Geocoding API
+type HEREReverseGeocodeResponse struct {
+	Items []struct {
+		Address struct {
+			Street     string `json:"street"`
+			City       string `json:"city"`
+			State      string `json:"state"`
+			PostalCode string `json:"postalCode"`
+		} `json:"address"`
+	} `json:"items"`
+}
+
+// ReverseGeocode converts coordinates to a street address via HERE Maps.
+// Returns (street, city, zip, error).
+func (gs *HEREGeocodingService) ReverseGeocode(lat, lng float64) (string, string, string, error) {
+	baseURL := "https://revgeocode.search.hereapi.com/v1/revgeocode"
+	params := url.Values{}
+	params.Add("at", fmt.Sprintf("%f,%f", lat, lng))
+	params.Add("apiKey", gs.apiKey)
+
+	fullURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
+
+	log.Printf("🌍 Reverse geocoding: %.6f, %.6f", lat, lng)
+
+	resp, err := http.Get(fullURL)
+	if err != nil {
+		return "", "", "", fmt.Errorf("reverse geocode request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", "", "", fmt.Errorf("reverse geocode API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var result HEREReverseGeocodeResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", "", "", fmt.Errorf("failed to parse reverse geocode response: %w", err)
+	}
+
+	if len(result.Items) == 0 {
+		return "", "", "", fmt.Errorf("no reverse geocode results for %.6f, %.6f", lat, lng)
+	}
+
+	addr := result.Items[0].Address
+	city := addr.City
+	if addr.State != "" {
+		city = city + ", " + addr.State
+	}
+
+	log.Printf("   ✅ Reverse geocoded: %s, %s %s", addr.Street, city, addr.PostalCode)
+
+	return addr.Street, city, addr.PostalCode, nil
+}
+
 // CompareCoordinates compares old and new coordinates and returns distance moved
 func (gs *HEREGeocodingService) CompareCoordinates(oldLat, oldLng, newLat, newLng float64) (float64, bool) {
 	// If old coordinates are zero/missing, don't flag for review

@@ -5619,19 +5619,45 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 		log.Printf("[MOVE] ✅ Bin status updated to %s", newStatus)
 
 	} else if moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment" {
-		// Update bin location to new coordinates
+		// Update bin location to new coordinates with reverse-geocoded address from HERE Maps
 		log.Printf("[MOVE]    → Relocating bin to new address (type: %s)", moveRequest.MoveType)
+
+		street := ""
+		if moveRequest.NewAddress != nil {
+			street = *moveRequest.NewAddress
+		}
+		city := ""
+		zip := ""
+
+		// Reverse geocode the destination coordinates via HERE Maps for accurate address
+		if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+			geocoder := services.NewHEREGeocodingService(HereAPIKey)
+			rgStreet, rgCity, rgZip, rgErr := geocoder.ReverseGeocode(*moveRequest.NewLatitude, *moveRequest.NewLongitude)
+			if rgErr != nil {
+				log.Printf("[MOVE] ⚠️  Reverse geocode failed, using move request address: %v", rgErr)
+			} else {
+				street = rgStreet
+				city = rgCity
+				zip = rgZip
+				log.Printf("[MOVE] ✅ Reverse geocoded: %s, %s %s", street, city, zip)
+			}
+		}
+
 		_, err = db.Exec(`
 			UPDATE bins
 			SET latitude = $1,
 			    longitude = $2,
 			    current_street = $3,
+			    city = $4,
+			    zip = $5,
 			    status = 'active',
-			    updated_at = $4
-			WHERE id = $5
+			    updated_at = $6
+			WHERE id = $7
 		`, moveRequest.NewLatitude,
 			moveRequest.NewLongitude,
-			moveRequest.NewAddress,
+			street,
+			city,
+			zip,
 			now,
 			moveRequest.BinID)
 		if err != nil {

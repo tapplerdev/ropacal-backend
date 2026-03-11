@@ -162,6 +162,11 @@ func main() {
 	digestScheduler.Start()
 	log.Println("✅ Daily digest scheduler started (hourly check, sends at 8 AM & 2 PM)")
 
+	// Start AirTag drift monitor (checks every 5 minutes)
+	airtagMonitor := services.NewAirtagMonitor(db, fcmService, centrifugoClient)
+	airtagMonitor.Start()
+	log.Println("✅ AirTag drift monitor started (5-minute intervals)")
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()
