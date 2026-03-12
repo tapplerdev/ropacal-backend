@@ -659,7 +659,7 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 	}
 
 	// Build title/body
-	title := fmt.Sprintf("Battery Alert: %d Tag%s Need Attention", totalBad, plural(totalBad))
+	title := "Battery Alert"
 	parts := []string{}
 	if criticalCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d tag%s with critical battery", criticalCount, plural(criticalCount)))
