@@ -419,7 +419,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 
 			// Create per-user notifications for admins
 			adminIDs, _ := services.GetAdminUserIDs(db)
-			services.CreateNotificationForUsers(db, centrifugoClient, adminIDs, "move_request_created",
+			services.CreateNotificationForUsers(db, adminIDs, "move_request_created",
 				"New Move Request",
 				fmt.Sprintf("Move request created for bin %s", req.BinID),
 				moveCreatedData)
@@ -949,7 +949,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// 7. Send push notification to driver (preference-aware)
 	moveExtra := map[string]string{"bin_number": fmt.Sprintf("%d", bin.BinNumber)}
 	moveTitle, moveBody := services.ShiftNotificationText("move_request_assigned", moveExtra)
-	_, moveNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{activeShift.DriverID}, "move_request_assigned", moveTitle, moveBody, map[string]string{"shift_id": activeShift.ID, "bin_number": fmt.Sprintf("%d", bin.BinNumber)})
+	_, moveNotifIDs := services.CreateNotificationForUsers(db, []string{activeShift.DriverID}, "move_request_assigned", moveTitle, moveBody, map[string]string{"shift_id": activeShift.ID, "bin_number": fmt.Sprintf("%d", bin.BinNumber)})
 	if len(moveNotifIDs) > 0 && fcmService != nil {
 		var fcmToken models.FCMToken
 		tokenErr := db.Get(&fcmToken, `

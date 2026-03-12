@@ -4057,7 +4057,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		if fcmService != nil && changes["driver_changed"].(bool) {
 			// Notify old driver
 			title, body := services.ShiftNotificationText("shift_reassigned", nil)
-			_, oldNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{oldDriverID}, "shift_reassigned", title, body, map[string]string{"shift_id": shiftID})
+			_, oldNotifIDs := services.CreateNotificationForUsers(db, []string{oldDriverID}, "shift_reassigned", title, body, map[string]string{"shift_id": shiftID})
 			if len(oldNotifIDs) > 0 {
 				var oldDriverToken models.FCMToken
 				if tokenErr := db.Get(&oldDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, oldDriverID); tokenErr == nil {
@@ -4069,7 +4069,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			// Notify new driver
 			if req.DriverID != nil {
 				newTitle, newBody := services.ShiftNotificationText("shift_created", nil)
-				_, newNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{*req.DriverID}, "shift_created", newTitle, newBody, map[string]string{"shift_id": shiftID})
+				_, newNotifIDs := services.CreateNotificationForUsers(db, []string{*req.DriverID}, "shift_created", newTitle, newBody, map[string]string{"shift_id": shiftID})
 				if len(newNotifIDs) > 0 {
 					var newDriverToken models.FCMToken
 					if tokenErr := db.Get(&newDriverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, *req.DriverID); tokenErr == nil {
@@ -4732,7 +4732,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 
 		// Send push notification (preference-aware)
 		raTitle, raBody := services.ShiftNotificationText("route_assigned", nil)
-		_, raNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{req.DriverID}, "route_assigned", raTitle, raBody, map[string]string{"route_id": req.RouteID})
+		_, raNotifIDs := services.CreateNotificationForUsers(db, []string{req.DriverID}, "route_assigned", raTitle, raBody, map[string]string{"route_id": req.RouteID})
 		notificationSent := false
 
 		if len(raNotifIDs) > 0 {
@@ -5985,7 +5985,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		// 5. Send FCM push notification to driver (preference-aware)
 		cancelExtra := map[string]string{"cancelled_by": userClaims.Email}
 		cancelTitle, cancelBody := services.ShiftNotificationText("shift_cancelled", cancelExtra)
-		_, cancelNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{shift.DriverID}, "shift_cancelled", cancelTitle, cancelBody, map[string]string{"shift_id": shiftID})
+		_, cancelNotifIDs := services.CreateNotificationForUsers(db, []string{shift.DriverID}, "shift_cancelled", cancelTitle, cancelBody, map[string]string{"shift_id": shiftID})
 		if len(cancelNotifIDs) > 0 && fcmService != nil {
 			var driverFCMToken models.FCMToken
 			tokenErr := db.Get(&driverFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, shift.DriverID)
@@ -6040,7 +6040,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 
 			// Create per-user notifications for admins
 			adminIDs, _ := services.GetAdminUserIDs(db)
-			services.CreateNotificationForUsers(db, centrifugoClient, adminIDs, "shift_cancelled",
+			services.CreateNotificationForUsers(db, adminIDs, "shift_cancelled",
 				"Shift Cancelled",
 				fmt.Sprintf("Shift %s has been cancelled", shiftID),
 				cancelDashboardData)
@@ -6228,7 +6228,7 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 
 			// FCM push notification (preference-aware)
 			delTitle, delBody := services.ShiftNotificationText("shift_deleted", nil)
-			_, delNotifIDs := services.CreateNotificationForUsers(db, centrifugoClient, []string{shift.DriverID}, "shift_deleted", delTitle, delBody, map[string]string{"shift_id": shift.ID})
+			_, delNotifIDs := services.CreateNotificationForUsers(db, []string{shift.DriverID}, "shift_deleted", delTitle, delBody, map[string]string{"shift_id": shift.ID})
 			if len(delNotifIDs) > 0 && fcmService != nil {
 				var bulkFCMToken models.FCMToken
 				tokenErr := db.Get(&bulkFCMToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, shift.DriverID)

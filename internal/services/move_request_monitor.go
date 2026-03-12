@@ -211,5 +211,5 @@ func (m *MoveRequestMonitor) sendAlert(ctx context.Context, notifType, title, bo
 
 	// Create per-user notifications for admins
 	adminIDs, _ := GetAdminUserIDs(m.db)
-	CreateNotificationForUsers(m.db, m.centrifugoClient, adminIDs, notifType, title, body, data)
+	CreateNotificationForUsers(m.db, adminIDs, notifType, title, body, data)
 }

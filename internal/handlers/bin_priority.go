@@ -27,68 +27,36 @@ type BinWithPriority struct {
 // calculateBinPriority computes a weighted priority score for a bin
 // Higher score = higher priority
 //
-// Scoring factors:
-// 1. Move requests (urgent: +1000, scheduled within 7 days: +500)
-// 2. Fill percentage (>80%: +300, >60%: +150, >40%: +50)
-// 3. Days since check (7+ days: +200, 14+ days: +400, 30+ days: +800)
-// 4. Check recommendations (+100)
+// Scoring is purely based on days since last check:
+//   - 0-3 days:  0 (CHECKED)
+//   - 4-6 days:  200 (CHECK SOON)
+//   - 7-13 days: 500 (OVERDUE)
+//   - 14+ days:  1000 (CRITICAL)
+//
+// For never-checked bins, created_at is used as the baseline.
 func calculateBinPriority(bin models.Bin, moveRequest *models.BinMoveRequest, hasCheckRec bool, now int64) (float64, *int) {
-	score := 0.0
 	var daysSinceCheck *int
 
-	// Factor 1: Move requests (highest priority)
-	if moveRequest != nil && (moveRequest.Status == "pending" || moveRequest.Status == "in_progress") {
-		if moveRequest.Urgency == "urgent" {
-			score += 1000.0
-		} else {
-			// Scheduled move - check how soon
-			daysUntilMove := (moveRequest.ScheduledDate - now) / 86400
-			if daysUntilMove <= 1 {
-				score += 800.0 // Tomorrow or today
-			} else if daysUntilMove <= 3 {
-				score += 600.0 // Within 3 days
-			} else if daysUntilMove <= 7 {
-				score += 400.0 // Within a week
-			} else {
-				score += 100.0 // Future scheduled
-			}
-		}
-	}
-
-	// Factor 2: Fill percentage
-	if bin.FillPercentage != nil {
-		fill := *bin.FillPercentage
-		if fill >= 80 {
-			score += 300.0
-		} else if fill >= 60 {
-			score += 150.0
-		} else if fill >= 40 {
-			score += 50.0
-		}
-	}
-
-	// Factor 3: Days since last check
 	if bin.LastCheckedAt != nil {
 		daysSince := int((now - *bin.LastCheckedAt) / 86400)
 		daysSinceCheck = &daysSince
-
-		if daysSince >= 30 {
-			score += 800.0
-		} else if daysSince >= 14 {
-			score += 400.0
-		} else if daysSince >= 7 {
-			score += 200.0
-		}
 	} else {
-		// Never checked - highest time priority
+		// Never checked — use creation date as baseline
 		daysSince := int((now - bin.CreatedAt) / 86400)
 		daysSinceCheck = &daysSince
-		score += 1000.0
 	}
 
-	// Factor 4: Check recommendations
-	if hasCheckRec {
-		score += 100.0
+	score := 0.0
+	if daysSinceCheck != nil {
+		d := *daysSinceCheck
+		switch {
+		case d >= 14:
+			score = 1000.0
+		case d >= 7:
+			score = 500.0
+		case d >= 4:
+			score = 200.0
+		}
 	}
 
 	return score, daysSinceCheck

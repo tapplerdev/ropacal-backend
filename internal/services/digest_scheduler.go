@@ -2,10 +2,10 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
-	"strings"
 	"time"
 
 	"ropacal-backend/internal/services/centrifugo"
@@ -13,9 +13,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// DigestScheduler sends daily summary notifications to admins at 8 AM and 2 PM.
-// It checks overdue/urgent move requests and warehouse bins, then sends FCM
-// multicast pushes. Uses the config table for idempotency.
+// DigestScheduler sends daily report notifications to admins.
+// - Daily Move Report: consolidates overdue/urgent/soon moves + warehouse bins into ONE notification with snapshot
+// - Daily Bin Check Report: bins not checked in 7+ days, grouped by severity
 type DigestScheduler struct {
 	db               *sqlx.DB
 	fcmService       *FCMService
@@ -24,7 +24,7 @@ type DigestScheduler struct {
 	stopChan         chan bool
 }
 
-// DigestResult contains the outcome of a digest run.
+// DigestResult contains the outcome of a report run.
 type DigestResult struct {
 	AlreadySent    bool   `json:"already_sent"`
 	Window         string `json:"window"`
@@ -32,6 +32,8 @@ type DigestResult struct {
 	UrgentCount    int    `json:"urgent_count"`
 	SoonCount      int    `json:"soon_count"`
 	WarehouseCount int    `json:"warehouse_count"`
+	CriticalBins   int    `json:"critical_bins,omitempty"`
+	OverdueBins    int    `json:"overdue_bins,omitempty"`
 	TokensSent     int    `json:"tokens_sent"`
 }
 
@@ -48,16 +50,15 @@ func NewDigestScheduler(db *sqlx.DB, fcmService *FCMService, centrifugoClient *c
 
 // Start begins the background scheduler goroutine.
 func (s *DigestScheduler) Start() {
-	log.Println("📬 [Digest] Starting daily digest scheduler (minute-level check)")
+	log.Println("📬 [DailyReport] Starting daily report scheduler (minute-level check)")
 
 	go func() {
-		// Check immediately on startup
 		s.checkAndSend()
 
 		for {
 			select {
 			case <-s.stopChan:
-				log.Println("🛑 [Digest] Stopping...")
+				log.Println("🛑 [DailyReport] Stopping...")
 				return
 			case <-s.ticker.C:
 				s.checkAndSend()
@@ -72,14 +73,13 @@ func (s *DigestScheduler) Stop() {
 	s.stopChan <- true
 }
 
-// checkAndSend checks the current hour and sends if it's a digest window.
+// checkAndSend checks the current time against configured report times.
 func (s *DigestScheduler) checkAndSend() {
 	settings := loadNotificationSettings(s.db)
 
-	// Load timezone from settings (default: America/New_York)
 	loc, err := time.LoadLocation(settings.Timezone)
 	if err != nil {
-		log.Printf("❌ [Digest] Invalid timezone %q, falling back to America/New_York: %v", settings.Timezone, err)
+		log.Printf("❌ [DailyReport] Invalid timezone %q, falling back to America/New_York: %v", settings.Timezone, err)
 		loc, _ = time.LoadLocation("America/New_York")
 	}
 
@@ -87,69 +87,86 @@ func (s *DigestScheduler) checkAndSend() {
 	hour := now.Hour()
 	minute := now.Minute()
 
-	log.Printf("🕐 [Digest] Time check: current=%d:%02d (%s), morning=%d:%02d (enabled=%v), afternoon=%d:%02d (enabled=%v)",
+	log.Printf("🕐 [DailyReport] Time check: current=%d:%02d (%s), move_report=%d:%02d (enabled=%v), bin_check=%d:%02d (enabled=%v)",
 		hour, minute, settings.Timezone,
-		settings.MorningDigestHour, settings.MorningDigestMinute, settings.MorningDigestEnabled,
-		settings.AfternoonDigestHour, settings.AfternoonDigestMinute, settings.AfternoonDigestEnabled)
+		settings.DailyMoveReportHour, settings.DailyMoveReportMinute, settings.DailyMoveReportEnabled,
+		settings.DailyBinCheckHour, settings.DailyBinCheckMinute, settings.DailyBinCheckEnabled)
 
-	var window string
-	if hour == settings.MorningDigestHour && minute == settings.MorningDigestMinute && settings.MorningDigestEnabled {
-		window = "morning"
-	} else if hour == settings.AfternoonDigestHour && minute == settings.AfternoonDigestMinute && settings.AfternoonDigestEnabled {
-		window = "afternoon"
-	} else {
-		log.Printf("🕐 [Digest] No match — skipping")
-		return
+	// Check daily move report
+	if hour == settings.DailyMoveReportHour && minute == settings.DailyMoveReportMinute && settings.DailyMoveReportEnabled {
+		result, err := s.RunDailyMoveReport()
+		if err != nil {
+			log.Printf("❌ [DailyReport] Failed to send move report: %v", err)
+		} else if result.AlreadySent {
+			log.Printf("📬 [DailyReport] Move report already sent today, skipping")
+		} else {
+			log.Printf("✅ [DailyReport] Move report sent — overdue:%d urgent:%d soon:%d warehouse:%d tokens:%d",
+				result.OverdueCount, result.UrgentCount, result.SoonCount, result.WarehouseCount, result.TokensSent)
+		}
 	}
 
-	result, err := s.RunDigest(window)
-	if err != nil {
-		log.Printf("❌ [Digest] Failed to send %s digest: %v", window, err)
-		return
+	// Check daily bin check report
+	if hour == settings.DailyBinCheckHour && minute == settings.DailyBinCheckMinute && settings.DailyBinCheckEnabled {
+		result, err := s.RunDailyBinCheckReport()
+		if err != nil {
+			log.Printf("❌ [DailyReport] Failed to send bin check report: %v", err)
+		} else if result.AlreadySent {
+			log.Printf("📬 [DailyReport] Bin check report already sent today, skipping")
+		} else {
+			log.Printf("✅ [DailyReport] Bin check report sent — critical:%d overdue:%d tokens:%d",
+				result.CriticalBins, result.OverdueBins, result.TokensSent)
+		}
 	}
 
-	if result.AlreadySent {
-		log.Printf("📬 [Digest] %s digest already sent today, skipping", window)
-	} else {
-		log.Printf("✅ [Digest] %s digest sent — overdue:%d urgent:%d soon:%d warehouse:%d tokens:%d",
-			window, result.OverdueCount, result.UrgentCount, result.SoonCount, result.WarehouseCount, result.TokensSent)
+	// Backward compat: also check old morning/afternoon digest times
+	if hour == settings.MorningDigestHour && minute == settings.MorningDigestMinute && settings.MorningDigestEnabled &&
+		!(hour == settings.DailyMoveReportHour && minute == settings.DailyMoveReportMinute && settings.DailyMoveReportEnabled) {
+		log.Printf("🔄 [DailyReport] Legacy morning digest time hit — running as daily move report")
+		s.RunDailyMoveReport()
 	}
 }
 
-// RunDigest executes the digest logic. Can be called from the scheduler or the HTTP endpoint.
-// The window parameter should be "morning" or "afternoon".
-// If force is true, the idempotency check is skipped (useful for testing).
-func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult, error) {
+// RunDailyMoveReport sends ONE consolidated notification with overdue, upcoming, and warehouse data + snapshot.
+func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, error) {
 	ctx := context.Background()
 
-	// Use timezone-aware date for idempotency
 	settings := loadNotificationSettings(s.db)
 	loc, err := time.LoadLocation(settings.Timezone)
 	if err != nil {
 		loc, _ = time.LoadLocation("America/New_York")
 	}
 	today := time.Now().In(loc).Format("2006-01-02")
-	configKey := fmt.Sprintf("last_%s_digest", window)
+	configKey := "last_daily_move_report"
 
-	// Step 0: Idempotency check — has this window already been sent today?
+	// Idempotency check
 	skipDedup := len(force) > 0 && force[0]
 	if !skipDedup {
 		var lastSent string
 		dedupErr := s.db.QueryRow(`SELECT value->>'date' FROM config WHERE key = $1`, configKey).Scan(&lastSent)
 		if dedupErr == nil && lastSent == today {
-			return &DigestResult{AlreadySent: true, Window: window}, nil
+			return &DigestResult{AlreadySent: true, Window: "daily_move_report"}, nil
 		}
 	}
 
-	// Step 1: Query active move requests and compute urgency
+	// Query move requests with bin details for snapshot
 	type moveRow struct {
-		Status        string `db:"status"`
-		ScheduledDate int64  `db:"scheduled_date"`
+		ID              string  `db:"id"`
+		BinID           string  `db:"bin_id"`
+		BinNumber       int     `db:"bin_number"`
+		Status          string  `db:"status"`
+		ScheduledDate   int64   `db:"scheduled_date"`
+		OriginalAddress string  `db:"original_address"`
+		NewAddress      *string `db:"new_address"`
 	}
 	var moves []moveRow
 	err = s.db.Select(&moves, `
-		SELECT status, scheduled_date FROM bin_move_requests
-		WHERE status IN ('pending', 'in_progress')
+		SELECT bmr.id, bmr.bin_id, b.bin_number, bmr.status, bmr.scheduled_date,
+			   COALESCE(b.current_street || ', ' || b.city, 'Unknown') as original_address,
+			   bmr.new_address
+		FROM bin_move_requests bmr
+		JOIN bins b ON bmr.bin_id = b.id
+		WHERE bmr.status IN ('pending', 'in_progress')
+		ORDER BY bmr.scheduled_date ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query move requests: %w", err)
@@ -157,154 +174,371 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 
 	now := time.Now().Unix()
 	overdueCount, urgentCount, soonCount := 0, 0, 0
+
+	type snapshotItem struct {
+		BinNumber       int     `json:"bin_number"`
+		Address         string  `json:"address"`
+		Status          string  `json:"status"`
+		DaysOverdue     int     `json:"days_overdue,omitempty"`
+		HoursUntil      int     `json:"hours_until,omitempty"`
+		MoveRequestID   string  `json:"move_request_id"`
+	}
+
+	var overdueItems, upcomingItems []snapshotItem
+
 	for _, m := range moves {
 		hoursUntil := float64(m.ScheduledDate-now) / 3600.0
+		addr := m.OriginalAddress
+		if m.NewAddress != nil && *m.NewAddress != "" {
+			addr = *m.NewAddress
+		}
+
 		if hoursUntil < 0 {
 			overdueCount++
+			if len(overdueItems) < 15 {
+				overdueItems = append(overdueItems, snapshotItem{
+					BinNumber:     m.BinNumber,
+					Address:       addr,
+					Status:        m.Status,
+					DaysOverdue:   int(-hoursUntil / 24),
+					MoveRequestID: m.ID,
+				})
+			}
 		} else if hoursUntil < 24 {
 			urgentCount++
+			if len(upcomingItems) < 15 {
+				upcomingItems = append(upcomingItems, snapshotItem{
+					BinNumber:     m.BinNumber,
+					Address:       addr,
+					Status:        m.Status,
+					HoursUntil:    int(hoursUntil),
+					MoveRequestID: m.ID,
+				})
+			}
 		} else if hoursUntil < 72 {
 			soonCount++
+			if len(upcomingItems) < 15 {
+				upcomingItems = append(upcomingItems, snapshotItem{
+					BinNumber:     m.BinNumber,
+					Address:       addr,
+					Status:        m.Status,
+					HoursUntil:    int(hoursUntil),
+					MoveRequestID: m.ID,
+				})
+			}
 		}
 	}
 
-	// Step 2: Query warehouse bins
-	var warehouseCount int
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM bins WHERE status = 'in_storage'`).Scan(&warehouseCount)
+	// Query warehouse bins
+	type warehouseBin struct {
+		BinNumber     int    `db:"bin_number"`
+		Address       string `db:"address"`
+		DaysInStorage int    `db:"days_in_storage"`
+	}
+	var warehouseBins []warehouseBin
+	err = s.db.Select(&warehouseBins, `
+		SELECT bin_number,
+			   COALESCE(current_street || ', ' || city, 'Warehouse') as address,
+			   GREATEST(($1 - updated_at) / 86400, 0) as days_in_storage
+		FROM bins WHERE status = 'in_storage'
+		ORDER BY updated_at ASC
+		LIMIT 15
+	`, now)
 	if err != nil {
 		return nil, fmt.Errorf("query warehouse bins: %w", err)
 	}
+	warehouseCount := 0
+	s.db.QueryRow(`SELECT COUNT(*) FROM bins WHERE status = 'in_storage'`).Scan(&warehouseCount)
 
-	// Step 3: Nothing to report?
+	// Nothing to report?
 	if overdueCount == 0 && urgentCount == 0 && soonCount == 0 && warehouseCount == 0 {
 		if !skipDedup {
 			s.updateConfigTimestamp(configKey, today)
 		}
-		return &DigestResult{Window: window}, nil
+		return &DigestResult{Window: "daily_move_report"}, nil
 	}
 
-	// Step 4: Get admin FCM tokens
+	// Build title/body
+	totalMoves := overdueCount + urgentCount + soonCount
+	title := fmt.Sprintf("Daily Move Report: %d Active Request%s", totalMoves, plural(totalMoves))
+	parts := []string{}
+	if overdueCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d overdue", overdueCount))
+	}
+	if urgentCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d urgent", urgentCount))
+	}
+	if soonCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d due soon", soonCount))
+	}
+	if warehouseCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d in warehouse", warehouseCount))
+	}
+	body := joinParts(parts)
+
+	// Build warehouse snapshot items
+	type warehouseSnapshotItem struct {
+		BinNumber     int    `json:"bin_number"`
+		Address       string `json:"address"`
+		DaysInStorage int    `json:"days_in_storage"`
+	}
+	var warehouseSnapshot []warehouseSnapshotItem
+	for _, wb := range warehouseBins {
+		warehouseSnapshot = append(warehouseSnapshot, warehouseSnapshotItem{
+			BinNumber:     wb.BinNumber,
+			Address:       wb.Address,
+			DaysInStorage: wb.DaysInStorage,
+		})
+	}
+
+	// Rich payload for DB storage (JSONB — no size limit)
+	richData := map[string]interface{}{
+		"type":             "daily_move_report",
+		"overdue_count":    overdueCount,
+		"urgent_count":     urgentCount,
+		"soon_count":       soonCount,
+		"warehouse_count":  warehouseCount,
+		"overdue_items":    overdueItems,
+		"upcoming_items":   upcomingItems,
+		"warehouse_items":  warehouseSnapshot,
+		"report_date":      today,
+		"deep_link":        "/manager/move-requests",
+		"subtitle":         "Daily Report",
+	}
+
+	// Flat payload for FCM push (must be map[string]string, <4KB)
+	fcmData := map[string]string{
+		"type":            "daily_move_report",
+		"overdue_count":   strconv.Itoa(overdueCount),
+		"urgent_count":    strconv.Itoa(urgentCount),
+		"soon_count":      strconv.Itoa(soonCount),
+		"warehouse_count": strconv.Itoa(warehouseCount),
+		"deep_link":       "/manager/move-requests",
+		"subtitle":        "Daily Report",
+	}
+
+	// Get admin tokens
 	var tokens []string
-	err = s.db.Select(&tokens, `
+	s.db.Select(&tokens, `
 		SELECT ft.token FROM fcm_tokens ft
 		JOIN users u ON ft.user_id = u.id
 		WHERE u.role = 'admin'
 	`)
-	if err != nil {
-		return nil, fmt.Errorf("query admin tokens: %w", err)
+
+	// Send FCM
+	if s.fcmService != nil && len(tokens) > 0 {
+		if err := s.fcmService.SendMulticast(tokens, title, body, fcmData); err != nil {
+			log.Printf("⚠️  [DailyReport] Failed to send move report FCM: %v", err)
+		}
+	} else if s.fcmService == nil {
+		log.Println("⚠️  [DailyReport] FCM service is nil — push notifications will NOT be sent")
 	}
 
-	if len(tokens) == 0 {
-		log.Println("⚠️  [Digest] No admin FCM tokens found, skipping push")
-		if !skipDedup {
-			s.updateConfigTimestamp(configKey, today)
-		}
-		return &DigestResult{
-			Window:         window,
-			OverdueCount:   overdueCount,
-			UrgentCount:    urgentCount,
-			SoonCount:      soonCount,
-			WarehouseCount: warehouseCount,
-		}, nil
-	}
+	// Store in DB (one notification per admin with rich snapshot)
+	adminIDs, _ := GetAdminUserIDs(s.db)
+	CreateNotificationForUsers(s.db, adminIDs, "daily_move_report", title, body, richData)
 
-	// Step 5: Send FCM notifications (only for non-zero counts)
-	if s.fcmService == nil {
-		log.Println("⚠️  [Digest] FCM service is nil — push notifications will NOT be sent. Notifications still saved to DB.")
-	}
-	if s.fcmService != nil {
-		if overdueCount > 0 {
-			title := fmt.Sprintf("%d Overdue Move Request%s", overdueCount, plural(overdueCount))
-			body := "These moves are past their scheduled date."
-			data := map[string]string{
-				"type":           "digest_overdue_moves",
-				"overdue_count":  strconv.Itoa(overdueCount),
-				"deep_link":      "/manager/move-requests",
-				"subtitle":       fmt.Sprintf("%s Digest", strings.ToUpper(window[:1])+window[1:]),
-			}
-			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
-				log.Printf("⚠️  [Digest] Failed to send overdue notification: %v", err)
-			}
-			adminIDs, _ := GetAdminUserIDs(s.db)
-			CreateNotificationForUsers(s.db, s.centrifugoClient, adminIDs, "digest_overdue_moves", title, body, data)
-		}
-
-		if urgentCount > 0 || soonCount > 0 {
-			total := urgentCount + soonCount
-			title := fmt.Sprintf("%d Move Request%s Due Soon", total, plural(total))
-			parts := []string{}
-			if urgentCount > 0 {
-				parts = append(parts, fmt.Sprintf("%d urgent (< 24h)", urgentCount))
-			}
-			if soonCount > 0 {
-				parts = append(parts, fmt.Sprintf("%d due within 3 days", soonCount))
-			}
-			body := fmt.Sprintf("%s.", joinParts(parts))
-			data := map[string]string{
-				"type":          "digest_upcoming_moves",
-				"urgent_count":  strconv.Itoa(urgentCount),
-				"soon_count":    strconv.Itoa(soonCount),
-				"deep_link":     "/manager/move-requests",
-				"subtitle":      fmt.Sprintf("%s Digest", strings.ToUpper(window[:1])+window[1:]),
-			}
-			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
-				log.Printf("⚠️  [Digest] Failed to send upcoming notification: %v", err)
-			}
-			adminIDs, _ := GetAdminUserIDs(s.db)
-			CreateNotificationForUsers(s.db, s.centrifugoClient, adminIDs, "digest_upcoming_moves", title, body, data)
-		}
-
-		if warehouseCount > 0 {
-			title := fmt.Sprintf("%d Bin%s in Warehouse", warehouseCount, plural(warehouseCount))
-			body := "Awaiting redeployment."
-			data := map[string]string{
-				"type":             "digest_warehouse_bins",
-				"warehouse_count":  strconv.Itoa(warehouseCount),
-				"deep_link":        "/manager/move-requests",
-				"subtitle":         fmt.Sprintf("%s Digest", strings.ToUpper(window[:1])+window[1:]),
-			}
-			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
-				log.Printf("⚠️  [Digest] Failed to send warehouse notification: %v", err)
-			}
-			adminIDs, _ := GetAdminUserIDs(s.db)
-			CreateNotificationForUsers(s.db, s.centrifugoClient, adminIDs, "digest_warehouse_bins", title, body, data)
-		}
-	}
-
-	// Step 6: Also publish to Centrifugo for any connected dashboard/app
+	// Publish to Centrifugo for real-time dashboard
 	if s.centrifugoClient != nil {
-		digestData := map[string]interface{}{
-			"window":          window,
+		_ = s.centrifugoClient.PublishCompanyEvent(ctx, "daily_move_report", map[string]interface{}{
 			"overdue_count":   overdueCount,
 			"urgent_count":    urgentCount,
 			"soon_count":      soonCount,
 			"warehouse_count": warehouseCount,
-		}
-
-		if overdueCount > 0 {
-			_ = s.centrifugoClient.PublishCompanyEvent(ctx, "digest_overdue_moves", digestData)
-		}
-		if urgentCount > 0 || soonCount > 0 {
-			_ = s.centrifugoClient.PublishCompanyEvent(ctx, "digest_upcoming_moves", digestData)
-		}
-		if warehouseCount > 0 {
-			_ = s.centrifugoClient.PublishCompanyEvent(ctx, "digest_warehouse_bins", digestData)
-		}
+		})
 	}
 
-	// Step 7: Mark as sent (skip if force/test so the real scheduled run still fires)
+	// Mark as sent
 	if !skipDedup {
 		s.updateConfigTimestamp(configKey, today)
 	}
 
 	return &DigestResult{
-		Window:         window,
+		Window:         "daily_move_report",
 		OverdueCount:   overdueCount,
 		UrgentCount:    urgentCount,
 		SoonCount:      soonCount,
 		WarehouseCount: warehouseCount,
 		TokensSent:     len(tokens),
 	}, nil
+}
+
+// RunDailyBinCheckReport sends ONE notification summarizing bins that need checking (7+ days).
+func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, error) {
+	ctx := context.Background()
+
+	settings := loadNotificationSettings(s.db)
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		loc, _ = time.LoadLocation("America/New_York")
+	}
+	today := time.Now().In(loc).Format("2006-01-02")
+	configKey := "last_daily_bin_check_report"
+
+	// Idempotency check
+	skipDedup := len(force) > 0 && force[0]
+	if !skipDedup {
+		var lastSent string
+		dedupErr := s.db.QueryRow(`SELECT value->>'date' FROM config WHERE key = $1`, configKey).Scan(&lastSent)
+		if dedupErr == nil && lastSent == today {
+			return &DigestResult{AlreadySent: true, Window: "daily_bin_check_report"}, nil
+		}
+	}
+
+	now := time.Now().Unix()
+
+	// Query active bins (skip missing, retired, in_storage)
+	type binRow struct {
+		ID            string  `db:"id"`
+		BinNumber     int     `db:"bin_number"`
+		Address       string  `db:"address"`
+		LastCheckedAt *int64  `db:"last_checked_at"`
+		CreatedAt     int64   `db:"created_at"`
+	}
+	var bins []binRow
+	err = s.db.Select(&bins, `
+		SELECT id, bin_number,
+			   COALESCE(current_street || ', ' || city, 'Unknown') as address,
+			   last_checked_at, created_at
+		FROM bins
+		WHERE status IN ('active', 'pending_move')
+		ORDER BY COALESCE(last_checked_at, created_at) ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query bins: %w", err)
+	}
+
+	type binCheckItem struct {
+		BinNumber      int    `json:"bin_number"`
+		Address        string `json:"address"`
+		DaysSinceCheck int    `json:"days_since_check"`
+		BinID          string `json:"bin_id"`
+	}
+
+	var criticalItems, overdueItems []binCheckItem
+	criticalCount, overdueCount := 0, 0
+
+	for _, b := range bins {
+		var daysSince int
+		if b.LastCheckedAt != nil {
+			daysSince = int((now - *b.LastCheckedAt) / 86400)
+		} else {
+			daysSince = int((now - b.CreatedAt) / 86400)
+		}
+
+		if daysSince >= 14 {
+			criticalCount++
+			if len(criticalItems) < 15 {
+				criticalItems = append(criticalItems, binCheckItem{
+					BinNumber:      b.BinNumber,
+					Address:        b.Address,
+					DaysSinceCheck: daysSince,
+					BinID:          b.ID,
+				})
+			}
+		} else if daysSince >= 7 {
+			overdueCount++
+			if len(overdueItems) < 15 {
+				overdueItems = append(overdueItems, binCheckItem{
+					BinNumber:      b.BinNumber,
+					Address:        b.Address,
+					DaysSinceCheck: daysSince,
+					BinID:          b.ID,
+				})
+			}
+		}
+	}
+
+	totalBins := criticalCount + overdueCount
+	if totalBins == 0 {
+		if !skipDedup {
+			s.updateConfigTimestamp(configKey, today)
+		}
+		return &DigestResult{Window: "daily_bin_check_report"}, nil
+	}
+
+	// Build title/body
+	title := fmt.Sprintf("%d Bin%s Need Checking", totalBins, plural(totalBins))
+	parts := []string{}
+	if criticalCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d critical (14+ days)", criticalCount))
+	}
+	if overdueCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d overdue (7-13 days)", overdueCount))
+	}
+	body := joinParts(parts)
+
+	// Rich payload for DB
+	richData := map[string]interface{}{
+		"type":           "daily_bin_check_report",
+		"critical_count": criticalCount,
+		"overdue_count":  overdueCount,
+		"critical_items": criticalItems,
+		"overdue_items":  overdueItems,
+		"report_date":    today,
+		"deep_link":      "/manager/bins",
+		"subtitle":       "Daily Check Report",
+	}
+
+	// Flat payload for FCM
+	fcmData := map[string]string{
+		"type":           "daily_bin_check_report",
+		"critical_count": strconv.Itoa(criticalCount),
+		"overdue_count":  strconv.Itoa(overdueCount),
+		"deep_link":      "/manager/bins",
+		"subtitle":       "Daily Check Report",
+	}
+
+	// Get admin tokens
+	var tokens []string
+	s.db.Select(&tokens, `
+		SELECT ft.token FROM fcm_tokens ft
+		JOIN users u ON ft.user_id = u.id
+		WHERE u.role = 'admin'
+	`)
+
+	// Send FCM
+	if s.fcmService != nil && len(tokens) > 0 {
+		if err := s.fcmService.SendMulticast(tokens, title, body, fcmData); err != nil {
+			log.Printf("⚠️  [DailyReport] Failed to send bin check report FCM: %v", err)
+		}
+	}
+
+	// Store in DB
+	adminIDs, _ := GetAdminUserIDs(s.db)
+	CreateNotificationForUsers(s.db, adminIDs, "daily_bin_check_report", title, body, richData)
+
+	// Centrifugo
+	if s.centrifugoClient != nil {
+		_ = s.centrifugoClient.PublishCompanyEvent(ctx, "daily_bin_check_report", map[string]interface{}{
+			"critical_count": criticalCount,
+			"overdue_count":  overdueCount,
+		})
+	}
+
+	if !skipDedup {
+		s.updateConfigTimestamp(configKey, today)
+	}
+
+	return &DigestResult{
+		Window:       "daily_bin_check_report",
+		CriticalBins: criticalCount,
+		OverdueBins:  overdueCount,
+		TokensSent:   len(tokens),
+	}, nil
+}
+
+// RunDigest is kept for backward compatibility with the HTTP trigger endpoint.
+// It delegates to RunDailyMoveReport.
+func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult, error) {
+	switch window {
+	case "daily_move_report", "morning", "afternoon":
+		return s.RunDailyMoveReport(force...)
+	case "daily_bin_check_report":
+		return s.RunDailyBinCheckReport(force...)
+	default:
+		return s.RunDailyMoveReport(force...)
+	}
 }
 
 // updateConfigTimestamp upserts the config key with today's date.
@@ -317,7 +551,7 @@ func (s *DigestScheduler) updateConfigTimestamp(key, date string) {
 		DO UPDATE SET value = $2::jsonb, updated_by = 'system', updated_at = CURRENT_TIMESTAMP
 	`, key, value)
 	if err != nil {
-		log.Printf("⚠️  [Digest] Failed to update config %s: %v", key, err)
+		log.Printf("⚠️  [DailyReport] Failed to update config %s: %v", key, err)
 	}
 }
 
@@ -332,8 +566,18 @@ func joinParts(parts []string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	if len(parts) == 1 {
-		return parts[0]
+	result := parts[0]
+	for i := 1; i < len(parts); i++ {
+		result += ", " + parts[i]
 	}
-	return parts[0] + ", " + parts[1]
+	return result
+}
+
+// marshalSnapshot is a helper to safely marshal snapshot data for logging.
+func marshalSnapshot(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }

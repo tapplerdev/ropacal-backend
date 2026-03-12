@@ -30,6 +30,12 @@ type NotificationSettings struct {
 	OverdueMoveCheckIntervalMin int    `json:"overdue_move_check_interval_minutes"`
 	DueSoonAlertsEnabled        bool   `json:"due_soon_alerts_enabled"`
 	DueSoonHoursBefore          int    `json:"due_soon_hours_before"`
+	DailyMoveReportEnabled      bool   `json:"daily_move_report_enabled"`
+	DailyMoveReportHour         int    `json:"daily_move_report_hour"`
+	DailyMoveReportMinute       int    `json:"daily_move_report_minute"`
+	DailyBinCheckEnabled        bool   `json:"daily_bin_check_enabled"`
+	DailyBinCheckHour           int    `json:"daily_bin_check_hour"`
+	DailyBinCheckMinute         int    `json:"daily_bin_check_minute"`
 }
 
 // DefaultNotificationSettings returns the default settings
@@ -51,6 +57,12 @@ func DefaultNotificationSettings() NotificationSettings {
 		OverdueMoveCheckIntervalMin: 15,
 		DueSoonAlertsEnabled:        true,
 		DueSoonHoursBefore:          24,
+		DailyMoveReportEnabled:      true,
+		DailyMoveReportHour:         8,
+		DailyMoveReportMinute:       0,
+		DailyBinCheckEnabled:        true,
+		DailyBinCheckHour:           9,
+		DailyBinCheckMinute:         0,
 	}
 }
 
@@ -138,6 +150,22 @@ func UpdateNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 		}
 		if settings.DueSoonHoursBefore < 1 || settings.DueSoonHoursBefore > 168 {
 			http.Error(w, `{"error":"Due soon hours must be between 1 and 168 (7 days)"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.DailyMoveReportHour < 0 || settings.DailyMoveReportHour > 23 {
+			http.Error(w, `{"error":"Daily move report hour must be 0-23"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.DailyMoveReportMinute < 0 || settings.DailyMoveReportMinute > 59 {
+			http.Error(w, `{"error":"Daily move report minute must be 0-59"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.DailyBinCheckHour < 0 || settings.DailyBinCheckHour > 23 {
+			http.Error(w, `{"error":"Daily bin check hour must be 0-23"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.DailyBinCheckMinute < 0 || settings.DailyBinCheckMinute > 59 {
+			http.Error(w, `{"error":"Daily bin check minute must be 0-59"}`, http.StatusBadRequest)
 			return
 		}
 

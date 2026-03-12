@@ -1,15 +1,12 @@
 package services
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"time"
-
-	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -32,6 +29,13 @@ type notificationSettings struct {
 	OverdueMoveCheckIntervalMin int  `json:"overdue_move_check_interval_minutes"`
 	DueSoonAlertsEnabled        bool `json:"due_soon_alerts_enabled"`
 	DueSoonHoursBefore          int  `json:"due_soon_hours_before"`
+	// Daily reports (replace morning/afternoon digest)
+	DailyMoveReportEnabled bool `json:"daily_move_report_enabled"`
+	DailyMoveReportHour    int  `json:"daily_move_report_hour"`
+	DailyMoveReportMinute  int  `json:"daily_move_report_minute"`
+	DailyBinCheckEnabled   bool `json:"daily_bin_check_enabled"`
+	DailyBinCheckHour      int  `json:"daily_bin_check_hour"`
+	DailyBinCheckMinute    int  `json:"daily_bin_check_minute"`
 }
 
 func defaultNotificationSettings() notificationSettings {
@@ -52,6 +56,12 @@ func defaultNotificationSettings() notificationSettings {
 		OverdueMoveCheckIntervalMin: 15,
 		DueSoonAlertsEnabled:        true,
 		DueSoonHoursBefore:          24,
+		DailyMoveReportEnabled:      true,
+		DailyMoveReportHour:         8,
+		DailyMoveReportMinute:       0,
+		DailyBinCheckEnabled:        true,
+		DailyBinCheckHour:           9,
+		DailyBinCheckMinute:         0,
 	}
 }
 
@@ -86,6 +96,23 @@ func loadNotificationSettings(db *sqlx.DB) notificationSettings {
 		settings.DueSoonHoursBefore = 24
 	}
 
+	// Migrate old morning/afternoon digest to new daily move report fields
+	if settings.DailyMoveReportHour == 0 && settings.DailyMoveReportMinute == 0 && !settings.DailyMoveReportEnabled {
+		if settings.MorningDigestEnabled {
+			settings.DailyMoveReportEnabled = true
+			settings.DailyMoveReportHour = settings.MorningDigestHour
+			settings.DailyMoveReportMinute = settings.MorningDigestMinute
+		} else {
+			// First run or old settings — use defaults
+			settings.DailyMoveReportEnabled = true
+			settings.DailyMoveReportHour = 8
+		}
+	}
+	if settings.DailyBinCheckHour == 0 && settings.DailyBinCheckMinute == 0 && !settings.DailyBinCheckEnabled {
+		settings.DailyBinCheckEnabled = true
+		settings.DailyBinCheckHour = 9
+	}
+
 	return settings
 }
 
@@ -109,6 +136,8 @@ func preferenceCategory(notifType string) string {
 	case strings.HasPrefix(notifType, "bin_drift"):
 		return "drift_alerts"
 	case strings.HasPrefix(notifType, "digest_"):
+		return "digests"
+	case notifType == "daily_move_report" || notifType == "daily_bin_check_report":
 		return "digests"
 	case strings.Contains(notifType, "shift") || notifType == "route_assigned":
 		return "shift_events"
@@ -135,10 +164,10 @@ func GetAdminUserIDs(db *sqlx.DB) ([]string, error) {
 // CreateNotificationForUsers is the central function that:
 // 1. Inserts into notification_log (global audit)
 // 2. For each recipient, checks preferences, inserts into user_notifications
-// 3. Publishes a Centrifugo event for real-time delivery
+// Note: Real-time Centrifugo events are published by the callers (digest_scheduler,
+// move_request_monitor, etc.) with the semantic event type, NOT here.
 func CreateNotificationForUsers(
 	db *sqlx.DB,
-	centrifugoClient *centrifugo.Client,
 	recipientUserIDs []string,
 	notifType, title, body string,
 	data interface{},
@@ -183,19 +212,6 @@ func CreateNotificationForUsers(
 			continue
 		}
 		userNotifIDs = append(userNotifIDs, notifID)
-
-		// Publish real-time event
-		if centrifugoClient != nil {
-			_ = centrifugoClient.PublishCompanyEvent(context.Background(), "user_notification_created", map[string]interface{}{
-				"id":         notifID,
-				"user_id":    userID,
-				"type":       notifType,
-				"title":      title,
-				"body":       body,
-				"data":       data,
-				"created_at": now,
-			})
-		}
 	}
 
 	return logID, userNotifIDs
