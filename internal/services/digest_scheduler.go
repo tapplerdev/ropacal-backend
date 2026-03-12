@@ -594,6 +594,7 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 	}
 
 	// Fetch AirTag locations from bridge
+	log.Printf("🔋 [BatteryReport] bridgeURL=%q", s.bridgeURL)
 	if s.bridgeURL == "" {
 		log.Println("⚠️  [DailyReport] FINDMY_BRIDGE_URL not set — skipping battery report")
 		return &DigestResult{Window: "daily_battery_report"}, nil
@@ -602,6 +603,13 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 	airtags, err := s.fetchBridgeAirtagLocations()
 	if err != nil {
 		return nil, fmt.Errorf("fetch airtag locations: %w", err)
+	}
+
+	log.Printf("🔋 [BatteryReport] Fetched %d airtags from bridge", len(airtags))
+	for i, at := range airtags {
+		if i < 10 || at.BatteryStatus >= 2 {
+			log.Printf("🔋 [BatteryReport]   Bin %d (%s): battery_status=%d", at.BinNumber, at.Name, at.BatteryStatus)
+		}
 	}
 
 	// Filter low (2) and critical (3) battery
