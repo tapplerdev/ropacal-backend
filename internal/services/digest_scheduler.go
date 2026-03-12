@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -735,32 +733,12 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 }
 
 // fetchBridgeAirtagLocations fetches AirTag locations from the FindMy bridge service.
-func (s *DigestScheduler) fetchBridgeAirtagLocations() ([]airtagEntry, error) {
-	url := s.bridgeURL + "/api/airtag-locations"
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+func (s *DigestScheduler) fetchBridgeAirtagLocations() ([]AirtagEntry, error) {
+	resp, err := FetchAirtagLocations(s.bridgeURL)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("bridge returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	var apiResp airtagAPIResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return apiResp.Data, nil
+	return resp.Data, nil
 }
 
 // updateConfigTimestamp upserts the config key with today's date.

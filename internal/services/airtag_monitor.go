@@ -28,14 +28,15 @@ type AirtagMonitor struct {
 	stopChan         chan bool
 }
 
-// airtagAPIResponse is the response from the FindMy bridge /api/airtag-locations endpoint.
-type airtagAPIResponse struct {
-	Data    []airtagEntry `json:"data"`
-	Count   int           `json:"count"`
-	LastSync *string      `json:"last_sync_at"`
+// AirtagAPIResponse is the response from the FindMy bridge /api/airtag-locations endpoint.
+type AirtagAPIResponse struct {
+	Data     []AirtagEntry `json:"data"`
+	Count    int           `json:"count"`
+	LastSync *string       `json:"last_sync_at"`
 }
 
-type airtagEntry struct {
+// AirtagEntry represents a single AirTag location from the FindMy bridge.
+type AirtagEntry struct {
 	BinNumber     int     `json:"bin_number"`
 	Name          string  `json:"name"`
 	Latitude      float64 `json:"latitude"`
@@ -44,6 +45,36 @@ type airtagEntry struct {
 	City          string  `json:"city"`
 	LastSeen      string  `json:"last_seen"`
 	BatteryStatus int     `json:"battery_status"` // 0=Full, 1=Medium, 2=Low, 3=Critical
+}
+
+// FetchAirtagLocations fetches AirTag locations from the FindMy bridge.
+// Shared by AirtagMonitor, DigestScheduler, and the proxy handler.
+func FetchAirtagLocations(bridgeURL string) (*AirtagAPIResponse, error) {
+	url := bridgeURL + "/api/airtag-locations"
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("bridge returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var apiResp AirtagAPIResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &apiResp, nil
 }
 
 type binRow struct {
@@ -205,32 +236,12 @@ func (m *AirtagMonitor) checkDrift() {
 	m.sendAlerts(ctx, alerts)
 }
 
-func (m *AirtagMonitor) fetchAirtagLocations() ([]airtagEntry, error) {
-	url := m.bridgeURL + "/api/airtag-locations"
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+func (m *AirtagMonitor) fetchAirtagLocations() ([]AirtagEntry, error) {
+	resp, err := FetchAirtagLocations(m.bridgeURL)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("bridge returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	var apiResp airtagAPIResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return apiResp.Data, nil
+	return resp.Data, nil
 }
 
 func (m *AirtagMonitor) getInTransitBinIDs() ([]string, error) {

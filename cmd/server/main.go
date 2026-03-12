@@ -445,6 +445,9 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Put("/manager/notification-settings", handlers.UpdateNotificationSettings(db))
 			r.Get("/manager/notification-log", handlers.GetNotificationLog(db))
 			r.Get("/manager/notification-log/{id}/recipients", handlers.GetNotificationRecipients(db))
+
+			// AirTag locations (proxied from FindMy bridge)
+			r.Get("/manager/airtag-locations", handlers.GetAirtagLocations())
 		})
 	})
 
