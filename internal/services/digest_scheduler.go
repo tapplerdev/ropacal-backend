@@ -345,6 +345,9 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 			"urgent_count":    urgentCount,
 			"soon_count":      soonCount,
 			"warehouse_count": warehouseCount,
+			"overdue_items":   overdueItems,
+			"upcoming_items":  upcomingItems,
+			"warehouse_items": warehouseSnapshot,
 		})
 	}
 
@@ -513,6 +516,8 @@ func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, 
 		_ = s.centrifugoClient.PublishCompanyEvent(ctx, "daily_bin_check_report", map[string]interface{}{
 			"critical_count": criticalCount,
 			"overdue_count":  overdueCount,
+			"critical_items": criticalItems,
+			"overdue_items":  overdueItems,
 		})
 	}
 
