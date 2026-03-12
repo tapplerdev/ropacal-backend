@@ -137,8 +137,10 @@ func preferenceCategory(notifType string) string {
 		return "drift_alerts"
 	case strings.HasPrefix(notifType, "digest_"):
 		return "digests"
-	case notifType == "daily_move_report" || notifType == "daily_bin_check_report":
+	case notifType == "daily_move_report":
 		return "digests"
+	case notifType == "daily_bin_check_report":
+		return "bin_check_reports"
 	case strings.Contains(notifType, "shift") || notifType == "route_assigned":
 		return "shift_events"
 	case notifType == "move_request_overdue":
