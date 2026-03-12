@@ -22,6 +22,7 @@ type UserNotificationPreferences struct {
 	OverdueMoveAlerts bool   `json:"overdue_move_alerts" db:"overdue_move_alerts"`
 	DueSoonAlerts     bool   `json:"due_soon_alerts" db:"due_soon_alerts"`
 	BinCheckReports   bool   `json:"bin_check_reports" db:"bin_check_reports"`
+	BatteryAlerts     bool   `json:"battery_alerts" db:"battery_alerts"`
 }
 
 // GetNotificationPreferences returns the current user's notification preferences.
@@ -34,7 +35,7 @@ func GetNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var prefs UserNotificationPreferences
-		err := db.Get(&prefs, `SELECT user_id, drift_alerts, digests, shift_events, move_requests, overdue_move_alerts, due_soon_alerts, bin_check_reports FROM user_notification_preferences WHERE user_id = $1`, user.UserID)
+		err := db.Get(&prefs, `SELECT user_id, drift_alerts, digests, shift_events, move_requests, overdue_move_alerts, due_soon_alerts, bin_check_reports, battery_alerts FROM user_notification_preferences WHERE user_id = $1`, user.UserID)
 		if err == sql.ErrNoRows {
 			prefs = UserNotificationPreferences{
 				UserID:            user.UserID,
@@ -45,6 +46,7 @@ func GetNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
 				OverdueMoveAlerts: true,
 				DueSoonAlerts:     true,
 				BinCheckReports:   true,
+				BatteryAlerts:     true,
 			}
 		} else if err != nil {
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch preferences")
@@ -72,6 +74,7 @@ func UpdateNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
 			OverdueMoveAlerts bool `json:"overdue_move_alerts"`
 			DueSoonAlerts     bool `json:"due_soon_alerts"`
 			BinCheckReports   bool `json:"bin_check_reports"`
+			BatteryAlerts     bool `json:"battery_alerts"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			utils.RespondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -80,13 +83,13 @@ func UpdateNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
 
 		now := time.Now().Unix()
 		_, err := db.Exec(`
-			INSERT INTO user_notification_preferences (user_id, drift_alerts, digests, shift_events, move_requests, overdue_move_alerts, due_soon_alerts, bin_check_reports, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+			INSERT INTO user_notification_preferences (user_id, drift_alerts, digests, shift_events, move_requests, overdue_move_alerts, due_soon_alerts, bin_check_reports, battery_alerts, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
 			ON CONFLICT (user_id) DO UPDATE SET
 				drift_alerts = $2, digests = $3, shift_events = $4, move_requests = $5,
-				overdue_move_alerts = $6, due_soon_alerts = $7, bin_check_reports = $8, updated_at = $9
+				overdue_move_alerts = $6, due_soon_alerts = $7, bin_check_reports = $8, battery_alerts = $9, updated_at = $10
 		`, user.UserID, input.DriftAlerts, input.Digests, input.ShiftEvents, input.MoveRequests,
-			input.OverdueMoveAlerts, input.DueSoonAlerts, input.BinCheckReports, now)
+			input.OverdueMoveAlerts, input.DueSoonAlerts, input.BinCheckReports, input.BatteryAlerts, now)
 		if err != nil {
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to save preferences")
 			return
@@ -103,6 +106,7 @@ func UpdateNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
 				OverdueMoveAlerts: input.OverdueMoveAlerts,
 				DueSoonAlerts:     input.DueSoonAlerts,
 				BinCheckReports:   input.BinCheckReports,
+				BatteryAlerts:     input.BatteryAlerts,
 			},
 		})
 	}

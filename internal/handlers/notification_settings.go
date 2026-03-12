@@ -36,6 +36,9 @@ type NotificationSettings struct {
 	DailyBinCheckEnabled        bool   `json:"daily_bin_check_enabled"`
 	DailyBinCheckHour           int    `json:"daily_bin_check_hour"`
 	DailyBinCheckMinute         int    `json:"daily_bin_check_minute"`
+	DailyBatteryReportEnabled   bool   `json:"daily_battery_report_enabled"`
+	DailyBatteryReportHour      int    `json:"daily_battery_report_hour"`
+	DailyBatteryReportMinute    int    `json:"daily_battery_report_minute"`
 }
 
 // DefaultNotificationSettings returns the default settings
@@ -63,6 +66,9 @@ func DefaultNotificationSettings() NotificationSettings {
 		DailyBinCheckEnabled:        true,
 		DailyBinCheckHour:           9,
 		DailyBinCheckMinute:         0,
+		DailyBatteryReportEnabled:   true,
+		DailyBatteryReportHour:      10,
+		DailyBatteryReportMinute:    0,
 	}
 }
 
@@ -166,6 +172,14 @@ func UpdateNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 		}
 		if settings.DailyBinCheckMinute < 0 || settings.DailyBinCheckMinute > 59 {
 			http.Error(w, `{"error":"Daily bin check minute must be 0-59"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.DailyBatteryReportHour < 0 || settings.DailyBatteryReportHour > 23 {
+			http.Error(w, `{"error":"Daily battery report hour must be 0-23"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.DailyBatteryReportMinute < 0 || settings.DailyBatteryReportMinute > 59 {
+			http.Error(w, `{"error":"Daily battery report minute must be 0-59"}`, http.StatusBadRequest)
 			return
 		}
 

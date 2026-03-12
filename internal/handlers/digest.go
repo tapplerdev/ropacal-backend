@@ -20,9 +20,10 @@ func TriggerDigest(scheduler *services.DigestScheduler) http.HandlerFunc {
 		validWindows := map[string]bool{
 			"morning": true, "afternoon": true,
 			"daily_move_report": true, "daily_bin_check_report": true,
+			"daily_battery_report": true,
 		}
 		if !validWindows[window] {
-			http.Error(w, "window must be 'morning', 'afternoon', 'daily_move_report', or 'daily_bin_check_report'", http.StatusBadRequest)
+			http.Error(w, "window must be 'morning', 'afternoon', 'daily_move_report', 'daily_bin_check_report', or 'daily_battery_report'", http.StatusBadRequest)
 			return
 		}
 

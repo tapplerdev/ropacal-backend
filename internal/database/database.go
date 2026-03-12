@@ -823,6 +823,7 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS overdue_move_alerts BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS due_soon_alerts BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS bin_check_reports BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS battery_alerts BOOLEAN NOT NULL DEFAULT TRUE`,
 	}
 
 	for _, migration := range migrations {

@@ -36,6 +36,9 @@ type notificationSettings struct {
 	DailyBinCheckEnabled   bool `json:"daily_bin_check_enabled"`
 	DailyBinCheckHour      int  `json:"daily_bin_check_hour"`
 	DailyBinCheckMinute    int  `json:"daily_bin_check_minute"`
+	DailyBatteryReportEnabled bool `json:"daily_battery_report_enabled"`
+	DailyBatteryReportHour    int  `json:"daily_battery_report_hour"`
+	DailyBatteryReportMinute  int  `json:"daily_battery_report_minute"`
 }
 
 func defaultNotificationSettings() notificationSettings {
@@ -59,9 +62,12 @@ func defaultNotificationSettings() notificationSettings {
 		DailyMoveReportEnabled:      true,
 		DailyMoveReportHour:         8,
 		DailyMoveReportMinute:       0,
-		DailyBinCheckEnabled:        true,
-		DailyBinCheckHour:           9,
-		DailyBinCheckMinute:         0,
+		DailyBinCheckEnabled:          true,
+		DailyBinCheckHour:             9,
+		DailyBinCheckMinute:           0,
+		DailyBatteryReportEnabled:     true,
+		DailyBatteryReportHour:        10,
+		DailyBatteryReportMinute:      0,
 	}
 }
 
@@ -112,6 +118,10 @@ func loadNotificationSettings(db *sqlx.DB) notificationSettings {
 		settings.DailyBinCheckEnabled = true
 		settings.DailyBinCheckHour = 9
 	}
+	if settings.DailyBatteryReportHour == 0 && settings.DailyBatteryReportMinute == 0 && !settings.DailyBatteryReportEnabled {
+		settings.DailyBatteryReportEnabled = true
+		settings.DailyBatteryReportHour = 10
+	}
 
 	return settings
 }
@@ -141,6 +151,8 @@ func preferenceCategory(notifType string) string {
 		return "digests"
 	case notifType == "daily_bin_check_report":
 		return "bin_check_reports"
+	case notifType == "daily_battery_report":
+		return "battery_alerts"
 	case strings.Contains(notifType, "shift") || notifType == "route_assigned":
 		return "shift_events"
 	case notifType == "move_request_overdue":

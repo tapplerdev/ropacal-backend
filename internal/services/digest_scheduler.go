@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +24,7 @@ type DigestScheduler struct {
 	db               *sqlx.DB
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
+	bridgeURL        string
 	ticker           *time.Ticker
 	stopChan         chan bool
 }
@@ -44,6 +48,7 @@ func NewDigestScheduler(db *sqlx.DB, fcmService *FCMService, centrifugoClient *c
 		db:               db,
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
+		bridgeURL:        os.Getenv("FINDMY_BRIDGE_URL"),
 		ticker:           time.NewTicker(1 * time.Minute),
 		stopChan:         make(chan bool),
 	}
@@ -88,10 +93,11 @@ func (s *DigestScheduler) checkAndSend() {
 	hour := now.Hour()
 	minute := now.Minute()
 
-	log.Printf("🕐 [DailyReport] Time check: current=%d:%02d (%s), move_report=%d:%02d (enabled=%v), bin_check=%d:%02d (enabled=%v)",
+	log.Printf("🕐 [DailyReport] Time check: current=%d:%02d (%s), move=%d:%02d (on=%v), bincheck=%d:%02d (on=%v), battery=%d:%02d (on=%v)",
 		hour, minute, settings.Timezone,
 		settings.DailyMoveReportHour, settings.DailyMoveReportMinute, settings.DailyMoveReportEnabled,
-		settings.DailyBinCheckHour, settings.DailyBinCheckMinute, settings.DailyBinCheckEnabled)
+		settings.DailyBinCheckHour, settings.DailyBinCheckMinute, settings.DailyBinCheckEnabled,
+		settings.DailyBatteryReportHour, settings.DailyBatteryReportMinute, settings.DailyBatteryReportEnabled)
 
 	// Check daily move report
 	if hour == settings.DailyMoveReportHour && minute == settings.DailyMoveReportMinute && settings.DailyMoveReportEnabled {
@@ -115,6 +121,19 @@ func (s *DigestScheduler) checkAndSend() {
 			log.Printf("📬 [DailyReport] Bin check report already sent today, skipping")
 		} else {
 			log.Printf("✅ [DailyReport] Bin check report sent — critical:%d overdue:%d tokens:%d",
+				result.CriticalBins, result.OverdueBins, result.TokensSent)
+		}
+	}
+
+	// Check daily battery report
+	if hour == settings.DailyBatteryReportHour && minute == settings.DailyBatteryReportMinute && settings.DailyBatteryReportEnabled {
+		result, err := s.RunDailyBatteryReport()
+		if err != nil {
+			log.Printf("❌ [DailyReport] Failed to send battery report: %v", err)
+		} else if result.AlreadySent {
+			log.Printf("📬 [DailyReport] Battery report already sent today, skipping")
+		} else {
+			log.Printf("✅ [DailyReport] Battery report sent — critical:%d low:%d tokens:%d",
 				result.CriticalBins, result.OverdueBins, result.TokensSent)
 		}
 	}
@@ -545,9 +564,195 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 		return s.RunDailyMoveReport(force...)
 	case "daily_bin_check_report":
 		return s.RunDailyBinCheckReport(force...)
+	case "daily_battery_report":
+		return s.RunDailyBatteryReport(force...)
 	default:
 		return s.RunDailyMoveReport(force...)
 	}
+}
+
+// RunDailyBatteryReport sends ONE notification summarizing AirTags with low or critical battery.
+func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, error) {
+	ctx := context.Background()
+
+	settings := loadNotificationSettings(s.db)
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		loc, _ = time.LoadLocation("America/New_York")
+	}
+	today := time.Now().In(loc).Format("2006-01-02")
+	configKey := "last_daily_battery_report"
+
+	// Idempotency check
+	skipDedup := len(force) > 0 && force[0]
+	if !skipDedup {
+		var lastSent string
+		dedupErr := s.db.QueryRow(`SELECT value->>'date' FROM config WHERE key = $1`, configKey).Scan(&lastSent)
+		if dedupErr == nil && lastSent == today {
+			return &DigestResult{AlreadySent: true, Window: "daily_battery_report"}, nil
+		}
+	}
+
+	// Fetch AirTag locations from bridge
+	if s.bridgeURL == "" {
+		log.Println("⚠️  [DailyReport] FINDMY_BRIDGE_URL not set — skipping battery report")
+		return &DigestResult{Window: "daily_battery_report"}, nil
+	}
+
+	airtags, err := s.fetchBridgeAirtagLocations()
+	if err != nil {
+		return nil, fmt.Errorf("fetch airtag locations: %w", err)
+	}
+
+	// Filter low (2) and critical (3) battery
+	type batteryItem struct {
+		BinNumber     int    `json:"bin_number"`
+		Name          string `json:"name"`
+		Address       string `json:"address"`
+		BatteryStatus int    `json:"battery_status"`
+		LastSeen      string `json:"last_seen"`
+	}
+
+	var criticalItems, lowItems []batteryItem
+	criticalCount, lowCount := 0, 0
+
+	for _, at := range airtags {
+		if at.BatteryStatus == 3 {
+			criticalCount++
+			if len(criticalItems) < 15 {
+				addr := formatAddress(at.Address, at.City)
+				criticalItems = append(criticalItems, batteryItem{
+					BinNumber:     at.BinNumber,
+					Name:          at.Name,
+					Address:       addr,
+					BatteryStatus: at.BatteryStatus,
+					LastSeen:      at.LastSeen,
+				})
+			}
+		} else if at.BatteryStatus == 2 {
+			lowCount++
+			if len(lowItems) < 15 {
+				addr := formatAddress(at.Address, at.City)
+				lowItems = append(lowItems, batteryItem{
+					BinNumber:     at.BinNumber,
+					Name:          at.Name,
+					Address:       addr,
+					BatteryStatus: at.BatteryStatus,
+					LastSeen:      at.LastSeen,
+				})
+			}
+		}
+	}
+
+	totalBad := criticalCount + lowCount
+	if totalBad == 0 {
+		if !skipDedup {
+			s.updateConfigTimestamp(configKey, today)
+		}
+		return &DigestResult{Window: "daily_battery_report"}, nil
+	}
+
+	// Build title/body
+	title := fmt.Sprintf("Battery Alert: %d Tag%s Need Attention", totalBad, plural(totalBad))
+	parts := []string{}
+	if criticalCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d tag%s with critical battery", criticalCount, plural(criticalCount)))
+	}
+	if lowCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d tag%s with low battery", lowCount, plural(lowCount)))
+	}
+	parts = append(parts, "Replace batteries soon.")
+	body := joinParts(parts)
+
+	// Rich payload for DB (JSONB)
+	richData := map[string]interface{}{
+		"type":           "daily_battery_report",
+		"critical_count": criticalCount,
+		"low_count":      lowCount,
+		"critical_items": criticalItems,
+		"low_items":      lowItems,
+		"report_date":    today,
+		"deep_link":      "/operations/airtag-tracker",
+		"subtitle":       "Daily Battery Report",
+	}
+
+	// Flat payload for FCM
+	fcmData := map[string]string{
+		"type":           "daily_battery_report",
+		"critical_count": strconv.Itoa(criticalCount),
+		"low_count":      strconv.Itoa(lowCount),
+		"deep_link":      "/operations/airtag-tracker",
+		"subtitle":       "Daily Battery Report",
+	}
+
+	// Get admin tokens
+	var tokens []string
+	s.db.Select(&tokens, `
+		SELECT ft.token FROM fcm_tokens ft
+		JOIN users u ON ft.user_id = u.id
+		WHERE u.role = 'admin'
+	`)
+
+	// Send FCM
+	if s.fcmService != nil && len(tokens) > 0 {
+		if err := s.fcmService.SendMulticast(tokens, title, body, fcmData); err != nil {
+			log.Printf("⚠️  [DailyReport] Failed to send battery report FCM: %v", err)
+		}
+	}
+
+	// Store in DB
+	adminIDs, _ := GetAdminUserIDs(s.db)
+	CreateNotificationForUsers(s.db, adminIDs, "daily_battery_report", title, body, richData)
+
+	// Centrifugo
+	if s.centrifugoClient != nil {
+		_ = s.centrifugoClient.PublishCompanyEvent(ctx, "daily_battery_report", map[string]interface{}{
+			"critical_count": criticalCount,
+			"low_count":      lowCount,
+			"critical_items": criticalItems,
+			"low_items":      lowItems,
+		})
+	}
+
+	if !skipDedup {
+		s.updateConfigTimestamp(configKey, today)
+	}
+
+	return &DigestResult{
+		Window:       "daily_battery_report",
+		CriticalBins: criticalCount,
+		OverdueBins:  lowCount,
+		TokensSent:   len(tokens),
+	}, nil
+}
+
+// fetchBridgeAirtagLocations fetches AirTag locations from the FindMy bridge service.
+func (s *DigestScheduler) fetchBridgeAirtagLocations() ([]airtagEntry, error) {
+	url := s.bridgeURL + "/api/airtag-locations"
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("bridge returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var apiResp airtagAPIResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return apiResp.Data, nil
 }
 
 // updateConfigTimestamp upserts the config key with today's date.
