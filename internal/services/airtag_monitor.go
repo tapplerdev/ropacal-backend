@@ -285,26 +285,27 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 		binStatus := alert["bin_status"].(string)
 		distMeters := alert["distance_meters"].(int)
 		actualAddr := alert["actual_address"].(string)
+		distStr := formatDistance(distMeters)
 
 		// Build alert message based on bin status
 		var title, body string
 		switch binStatus {
 		case "active":
 			title = fmt.Sprintf("Bin %d Moved!", binNumber)
-			body = fmt.Sprintf("Detected %dm from assigned location", distMeters)
+			body = fmt.Sprintf("Detected %s from assigned location", distStr)
 		case "in_storage":
 			title = fmt.Sprintf("Bin %d Left Warehouse!", binNumber)
-			body = fmt.Sprintf("Moved %dm from storage", distMeters)
+			body = fmt.Sprintf("Moved %s from storage", distStr)
 		case "missing":
 			title = fmt.Sprintf("Bin %d (MISSING) Detected!", binNumber)
 			if actualAddr != "" {
-				body = fmt.Sprintf("Found at %s (%dm away)", actualAddr, distMeters)
+				body = fmt.Sprintf("Found at %s (%s away)", actualAddr, distStr)
 			} else {
-				body = fmt.Sprintf("Detected %dm from last known location", distMeters)
+				body = fmt.Sprintf("Detected %s from last known location", distStr)
 			}
 		default:
 			title = fmt.Sprintf("Bin %d Drift Alert", binNumber)
-			body = fmt.Sprintf("Moved %dm from expected location", distMeters)
+			body = fmt.Sprintf("Moved %s from expected location", distStr)
 		}
 
 		// Publish to Centrifugo for dashboard
@@ -352,6 +353,16 @@ func haversineMeters(lat1, lng1, lat2, lng2 float64) float64 {
 	a := math.Sin(dlat/2)*math.Sin(dlat/2) +
 		math.Cos(rlat1)*math.Cos(rlat2)*math.Sin(dlng/2)*math.Sin(dlng/2)
 	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+}
+
+// formatDistance renders meters as miles if >= 1 mile, otherwise as meters.
+func formatDistance(meters int) string {
+	const metersPerMile = 1609.34
+	if float64(meters) >= metersPerMile {
+		miles := float64(meters) / metersPerMile
+		return fmt.Sprintf("%.1f mi", miles)
+	}
+	return fmt.Sprintf("%dm", meters)
 }
 
 func formatAddress(street, city string) string {
