@@ -21,8 +21,10 @@ type notificationSettings struct {
 	DriftThresholdMeters      int    `json:"drift_threshold_meters"`
 	MorningDigestEnabled      bool   `json:"morning_digest_enabled"`
 	MorningDigestHour         int    `json:"morning_digest_hour"`
+	MorningDigestMinute       int    `json:"morning_digest_minute"`
 	AfternoonDigestEnabled    bool   `json:"afternoon_digest_enabled"`
 	AfternoonDigestHour       int    `json:"afternoon_digest_hour"`
+	AfternoonDigestMinute     int    `json:"afternoon_digest_minute"`
 	ShiftNotificationsEnabled bool   `json:"shift_notifications_enabled"`
 	MoveRequestNotifEnabled   bool   `json:"move_request_notifications_enabled"`
 	Timezone                  string `json:"timezone"`
@@ -39,8 +41,10 @@ func defaultNotificationSettings() notificationSettings {
 		DriftThresholdMeters:        500,
 		MorningDigestEnabled:        true,
 		MorningDigestHour:           8,
+		MorningDigestMinute:         0,
 		AfternoonDigestEnabled:      true,
 		AfternoonDigestHour:         14,
+		AfternoonDigestMinute:       0,
 		ShiftNotificationsEnabled:   true,
 		MoveRequestNotifEnabled:     true,
 		Timezone:                    "America/New_York",

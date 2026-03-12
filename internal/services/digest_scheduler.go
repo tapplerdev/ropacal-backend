@@ -34,20 +34,20 @@ type DigestResult struct {
 	TokensSent     int    `json:"tokens_sent"`
 }
 
-// NewDigestScheduler creates a new digest scheduler that checks hourly.
+// NewDigestScheduler creates a new digest scheduler that checks every minute.
 func NewDigestScheduler(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *DigestScheduler {
 	return &DigestScheduler{
 		db:               db,
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
-		ticker:           time.NewTicker(1 * time.Hour),
+		ticker:           time.NewTicker(1 * time.Minute),
 		stopChan:         make(chan bool),
 	}
 }
 
 // Start begins the background scheduler goroutine.
 func (s *DigestScheduler) Start() {
-	log.Println("📬 [Digest] Starting daily digest scheduler (hourly check, sends at 8 AM & 2 PM)")
+	log.Println("📬 [Digest] Starting daily digest scheduler (minute-level check)")
 
 	go func() {
 		// Check immediately on startup
@@ -84,18 +84,20 @@ func (s *DigestScheduler) checkAndSend() {
 
 	now := time.Now().In(loc)
 	hour := now.Hour()
+	minute := now.Minute()
 
-	log.Printf("🕐 [Digest] Hour check: current=%d:00 (%s), morning=%d:00 (enabled=%v), afternoon=%d:00 (enabled=%v)",
-		hour, settings.Timezone, settings.MorningDigestHour, settings.MorningDigestEnabled,
-		settings.AfternoonDigestHour, settings.AfternoonDigestEnabled)
+	log.Printf("🕐 [Digest] Time check: current=%d:%02d (%s), morning=%d:%02d (enabled=%v), afternoon=%d:%02d (enabled=%v)",
+		hour, minute, settings.Timezone,
+		settings.MorningDigestHour, settings.MorningDigestMinute, settings.MorningDigestEnabled,
+		settings.AfternoonDigestHour, settings.AfternoonDigestMinute, settings.AfternoonDigestEnabled)
 
 	var window string
-	if hour == settings.MorningDigestHour && settings.MorningDigestEnabled {
+	if hour == settings.MorningDigestHour && minute == settings.MorningDigestMinute && settings.MorningDigestEnabled {
 		window = "morning"
-	} else if hour == settings.AfternoonDigestHour && settings.AfternoonDigestEnabled {
+	} else if hour == settings.AfternoonDigestHour && minute == settings.AfternoonDigestMinute && settings.AfternoonDigestEnabled {
 		window = "afternoon"
 	} else {
-		log.Printf("🕐 [Digest] No match — skipping this hour")
+		log.Printf("🕐 [Digest] No match — skipping")
 		return
 	}
 
