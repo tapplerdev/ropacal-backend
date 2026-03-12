@@ -37,6 +37,7 @@ type AirtagAPIResponse struct {
 
 // AirtagEntry represents a single AirTag location from the FindMy bridge.
 type AirtagEntry struct {
+	ID            string  `json:"id"`
 	BinNumber     int     `json:"bin_number"`
 	Name          string  `json:"name"`
 	Latitude      float64 `json:"latitude"`
