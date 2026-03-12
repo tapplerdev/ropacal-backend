@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/services/centrifugo"
@@ -263,18 +264,21 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 	title := fmt.Sprintf("Daily Move Report: %d Active Request%s", totalMoves, plural(totalMoves))
 	parts := []string{}
 	if overdueCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d overdue", overdueCount))
+		parts = append(parts, fmt.Sprintf("%d move%s overdue and need attention", overdueCount, plural(overdueCount)))
 	}
 	if urgentCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d urgent", urgentCount))
+		parts = append(parts, fmt.Sprintf("%d move%s due within 24 hours", urgentCount, plural(urgentCount)))
 	}
 	if soonCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d due soon", soonCount))
+		parts = append(parts, fmt.Sprintf("%d move%s coming up in the next few days", soonCount, plural(soonCount)))
 	}
 	if warehouseCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d in warehouse", warehouseCount))
+		parts = append(parts, fmt.Sprintf("%d bin%s sitting in warehouse awaiting redeployment", warehouseCount, plural(warehouseCount)))
 	}
 	body := joinParts(parts)
+	if totalMoves == 0 && warehouseCount == 0 {
+		body = "All clear — no pending move requests today."
+	}
 
 	// Build warehouse snapshot items
 	type warehouseSnapshotItem struct {
@@ -461,13 +465,13 @@ func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, 
 	}
 
 	// Build title/body
-	title := fmt.Sprintf("%d Bin%s Need Checking", totalBins, plural(totalBins))
+	title := fmt.Sprintf("Bin Check Report: %d Bin%s Need Checking", totalBins, plural(totalBins))
 	parts := []string{}
 	if criticalCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d critical (14+ days)", criticalCount))
+		parts = append(parts, fmt.Sprintf("%d bin%s haven't been checked in over 2 weeks", criticalCount, plural(criticalCount)))
 	}
 	if overdueCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d overdue (7-13 days)", overdueCount))
+		parts = append(parts, fmt.Sprintf("%d bin%s are overdue for a check (7–13 days)", overdueCount, plural(overdueCount)))
 	}
 	body := joinParts(parts)
 
@@ -571,9 +575,13 @@ func joinParts(parts []string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	result := parts[0]
-	for i := 1; i < len(parts); i++ {
-		result += ", " + parts[i]
+	result := strings.Join(parts, ". ")
+	// Capitalize first letter and ensure trailing period
+	if len(result) > 0 {
+		result = strings.ToUpper(result[:1]) + result[1:]
+		if !strings.HasSuffix(result, ".") {
+			result += "."
+		}
 	}
 	return result
 }
