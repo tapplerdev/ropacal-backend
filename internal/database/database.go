@@ -760,6 +760,23 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_airtag_keys_account_id ON airtag_keys(account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_airtag_keys_tag_uuid ON airtag_keys(tag_uuid)`,
 
+		// Config table — stores key-value configuration data (notification settings, warehouse location, etc.)
+		`CREATE TABLE IF NOT EXISTS config (
+			id         SERIAL PRIMARY KEY,
+			key        VARCHAR(255) UNIQUE NOT NULL,
+			value      JSONB NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_by VARCHAR(255),
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_config_key ON config(key)`,
+		`INSERT INTO config (key, value, updated_by)
+		VALUES (
+			'warehouse_location',
+			'{"latitude": 37.3009357, "longitude": -121.9493848, "address": "1185 Campbell Ave, San Jose, CA 95126, United States"}'::jsonb,
+			'system'
+		) ON CONFLICT (key) DO NOTHING`,
+
 		// Notification log table — records every sent notification for audit trail
 		`CREATE TABLE IF NOT EXISTS notification_log (
 			id               TEXT PRIMARY KEY,
@@ -801,6 +818,10 @@ func Migrate(db *sqlx.DB) error {
 			created_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
 			updated_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 		)`,
+
+		// Add new notification preference columns for real-time move request alerts
+		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS overdue_move_alerts BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS due_soon_alerts BOOLEAN NOT NULL DEFAULT TRUE`,
 	}
 
 	for _, migration := range migrations {

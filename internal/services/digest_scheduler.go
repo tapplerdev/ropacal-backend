@@ -73,10 +73,21 @@ func (s *DigestScheduler) Stop() {
 
 // checkAndSend checks the current hour and sends if it's a digest window.
 func (s *DigestScheduler) checkAndSend() {
-	now := time.Now()
+	settings := loadNotificationSettings(s.db)
+
+	// Load timezone from settings (default: America/New_York)
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		log.Printf("❌ [Digest] Invalid timezone %q, falling back to America/New_York: %v", settings.Timezone, err)
+		loc, _ = time.LoadLocation("America/New_York")
+	}
+
+	now := time.Now().In(loc)
 	hour := now.Hour()
 
-	settings := loadNotificationSettings(s.db)
+	log.Printf("🕐 [Digest] Hour check: current=%d:00 (%s), morning=%d:00 (enabled=%v), afternoon=%d:00 (enabled=%v)",
+		hour, settings.Timezone, settings.MorningDigestHour, settings.MorningDigestEnabled,
+		settings.AfternoonDigestHour, settings.AfternoonDigestEnabled)
 
 	var window string
 	if hour == settings.MorningDigestHour && settings.MorningDigestEnabled {
@@ -84,6 +95,7 @@ func (s *DigestScheduler) checkAndSend() {
 	} else if hour == settings.AfternoonDigestHour && settings.AfternoonDigestEnabled {
 		window = "afternoon"
 	} else {
+		log.Printf("🕐 [Digest] No match — skipping this hour")
 		return
 	}
 
@@ -106,7 +118,14 @@ func (s *DigestScheduler) checkAndSend() {
 // If force is true, the idempotency check is skipped (useful for testing).
 func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult, error) {
 	ctx := context.Background()
-	today := time.Now().Format("2006-01-02")
+
+	// Use timezone-aware date for idempotency
+	settings := loadNotificationSettings(s.db)
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		loc, _ = time.LoadLocation("America/New_York")
+	}
+	today := time.Now().In(loc).Format("2006-01-02")
 	configKey := fmt.Sprintf("last_%s_digest", window)
 
 	// Step 0: Idempotency check — has this window already been sent today?
@@ -125,7 +144,7 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 		ScheduledDate int64  `db:"scheduled_date"`
 	}
 	var moves []moveRow
-	err := s.db.Select(&moves, `
+	err = s.db.Select(&moves, `
 		SELECT status, scheduled_date FROM bin_move_requests
 		WHERE status IN ('pending', 'in_progress')
 	`)
@@ -183,6 +202,9 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 	}
 
 	// Step 5: Send FCM notifications (only for non-zero counts)
+	if s.fcmService == nil {
+		log.Println("⚠️  [Digest] FCM service is nil — push notifications will NOT be sent. Notifications still saved to DB.")
+	}
 	if s.fcmService != nil {
 		if overdueCount > 0 {
 			title := fmt.Sprintf("%d Overdue Move Request%s", overdueCount, plural(overdueCount))

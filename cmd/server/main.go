@@ -167,6 +167,11 @@ func main() {
 	airtagMonitor.Start()
 	log.Println("✅ AirTag drift monitor started (5-minute intervals)")
 
+	// Start move request monitor (checks for overdue/due-soon moves)
+	moveRequestMonitor := services.NewMoveRequestMonitor(db, fcmService, centrifugoClient)
+	moveRequestMonitor.Start()
+	log.Println("✅ Move request monitor started (15-minute intervals)")
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()

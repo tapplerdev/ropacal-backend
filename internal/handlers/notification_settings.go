@@ -14,15 +14,20 @@ import (
 
 // NotificationSettings holds all configurable notification preferences
 type NotificationSettings struct {
-	DriftAlertsEnabled          bool `json:"drift_alerts_enabled"`
-	DriftCheckIntervalMinutes   int  `json:"drift_check_interval_minutes"`
-	DriftThresholdMeters        int  `json:"drift_threshold_meters"`
-	MorningDigestEnabled        bool `json:"morning_digest_enabled"`
-	MorningDigestHour           int  `json:"morning_digest_hour"`
-	AfternoonDigestEnabled      bool `json:"afternoon_digest_enabled"`
-	AfternoonDigestHour         int  `json:"afternoon_digest_hour"`
-	ShiftNotificationsEnabled   bool `json:"shift_notifications_enabled"`
-	MoveRequestNotifEnabled     bool `json:"move_request_notifications_enabled"`
+	DriftAlertsEnabled          bool   `json:"drift_alerts_enabled"`
+	DriftCheckIntervalMinutes   int    `json:"drift_check_interval_minutes"`
+	DriftThresholdMeters        int    `json:"drift_threshold_meters"`
+	MorningDigestEnabled        bool   `json:"morning_digest_enabled"`
+	MorningDigestHour           int    `json:"morning_digest_hour"`
+	AfternoonDigestEnabled      bool   `json:"afternoon_digest_enabled"`
+	AfternoonDigestHour         int    `json:"afternoon_digest_hour"`
+	ShiftNotificationsEnabled   bool   `json:"shift_notifications_enabled"`
+	MoveRequestNotifEnabled     bool   `json:"move_request_notifications_enabled"`
+	Timezone                    string `json:"timezone"`
+	OverdueMoveAlertsEnabled    bool   `json:"overdue_move_alerts_enabled"`
+	OverdueMoveCheckIntervalMin int    `json:"overdue_move_check_interval_minutes"`
+	DueSoonAlertsEnabled        bool   `json:"due_soon_alerts_enabled"`
+	DueSoonHoursBefore          int    `json:"due_soon_hours_before"`
 }
 
 // DefaultNotificationSettings returns the default settings
@@ -37,6 +42,11 @@ func DefaultNotificationSettings() NotificationSettings {
 		AfternoonDigestHour:         14,
 		ShiftNotificationsEnabled:   true,
 		MoveRequestNotifEnabled:     true,
+		Timezone:                    "America/New_York",
+		OverdueMoveAlertsEnabled:    true,
+		OverdueMoveCheckIntervalMin: 15,
+		DueSoonAlertsEnabled:        true,
+		DueSoonHoursBefore:          24,
 	}
 }
 
@@ -100,6 +110,22 @@ func UpdateNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 		}
 		if settings.AfternoonDigestHour < 0 || settings.AfternoonDigestHour > 23 {
 			http.Error(w, `{"error":"Afternoon digest hour must be 0-23"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.Timezone != "" {
+			if _, tzErr := time.LoadLocation(settings.Timezone); tzErr != nil {
+				http.Error(w, `{"error":"Invalid timezone"}`, http.StatusBadRequest)
+				return
+			}
+		} else {
+			settings.Timezone = "America/New_York"
+		}
+		if settings.OverdueMoveCheckIntervalMin < 5 {
+			http.Error(w, `{"error":"Overdue move check interval must be at least 5 minutes"}`, http.StatusBadRequest)
+			return
+		}
+		if settings.DueSoonHoursBefore < 1 || settings.DueSoonHoursBefore > 168 {
+			http.Error(w, `{"error":"Due soon hours must be between 1 and 168 (7 days)"}`, http.StatusBadRequest)
 			return
 		}
 

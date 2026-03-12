@@ -16,42 +16,72 @@ import (
 
 // notificationSettings holds all configurable notification preferences.
 type notificationSettings struct {
-	DriftAlertsEnabled        bool `json:"drift_alerts_enabled"`
-	DriftCheckIntervalMinutes int  `json:"drift_check_interval_minutes"`
-	DriftThresholdMeters      int  `json:"drift_threshold_meters"`
-	MorningDigestEnabled      bool `json:"morning_digest_enabled"`
-	MorningDigestHour         int  `json:"morning_digest_hour"`
-	AfternoonDigestEnabled    bool `json:"afternoon_digest_enabled"`
-	AfternoonDigestHour       int  `json:"afternoon_digest_hour"`
-	ShiftNotificationsEnabled bool `json:"shift_notifications_enabled"`
-	MoveRequestNotifEnabled   bool `json:"move_request_notifications_enabled"`
+	DriftAlertsEnabled        bool   `json:"drift_alerts_enabled"`
+	DriftCheckIntervalMinutes int    `json:"drift_check_interval_minutes"`
+	DriftThresholdMeters      int    `json:"drift_threshold_meters"`
+	MorningDigestEnabled      bool   `json:"morning_digest_enabled"`
+	MorningDigestHour         int    `json:"morning_digest_hour"`
+	AfternoonDigestEnabled    bool   `json:"afternoon_digest_enabled"`
+	AfternoonDigestHour       int    `json:"afternoon_digest_hour"`
+	ShiftNotificationsEnabled bool   `json:"shift_notifications_enabled"`
+	MoveRequestNotifEnabled   bool   `json:"move_request_notifications_enabled"`
+	Timezone                  string `json:"timezone"`
+	OverdueMoveAlertsEnabled    bool `json:"overdue_move_alerts_enabled"`
+	OverdueMoveCheckIntervalMin int  `json:"overdue_move_check_interval_minutes"`
+	DueSoonAlertsEnabled        bool `json:"due_soon_alerts_enabled"`
+	DueSoonHoursBefore          int  `json:"due_soon_hours_before"`
 }
 
 func defaultNotificationSettings() notificationSettings {
 	return notificationSettings{
-		DriftAlertsEnabled:        true,
-		DriftCheckIntervalMinutes: 5,
-		DriftThresholdMeters:      500,
-		MorningDigestEnabled:      true,
-		MorningDigestHour:         8,
-		AfternoonDigestEnabled:    true,
-		AfternoonDigestHour:       14,
-		ShiftNotificationsEnabled: true,
-		MoveRequestNotifEnabled:   true,
+		DriftAlertsEnabled:          true,
+		DriftCheckIntervalMinutes:   5,
+		DriftThresholdMeters:        500,
+		MorningDigestEnabled:        true,
+		MorningDigestHour:           8,
+		AfternoonDigestEnabled:      true,
+		AfternoonDigestHour:         14,
+		ShiftNotificationsEnabled:   true,
+		MoveRequestNotifEnabled:     true,
+		Timezone:                    "America/New_York",
+		OverdueMoveAlertsEnabled:    true,
+		OverdueMoveCheckIntervalMin: 15,
+		DueSoonAlertsEnabled:        true,
+		DueSoonHoursBefore:          24,
 	}
 }
 
 func loadNotificationSettings(db *sqlx.DB) notificationSettings {
 	var configValue []byte
 	err := db.QueryRow(`SELECT value FROM config WHERE key = 'notification_settings'`).Scan(&configValue)
-	if err == sql.ErrNoRows || err != nil {
+	if err == sql.ErrNoRows {
+		log.Println("ℹ️  [Settings] No notification_settings in config table — using defaults (first run?)")
+		return defaultNotificationSettings()
+	}
+	if err != nil {
+		log.Printf("❌ [Settings] ERROR: Failed to load notification_settings from config table: %v", err)
+		log.Printf("❌ [Settings] This likely means the config table does not exist! Check your migrations.")
 		return defaultNotificationSettings()
 	}
 
 	var settings notificationSettings
 	if err := json.Unmarshal(configValue, &settings); err != nil {
+		log.Printf("❌ [Settings] ERROR: Failed to parse notification_settings JSON: %v", err)
+		log.Printf("❌ [Settings] Raw value: %s", string(configValue))
 		return defaultNotificationSettings()
 	}
+
+	// Apply defaults for new fields that may not exist in stored JSON
+	if settings.Timezone == "" {
+		settings.Timezone = "America/New_York"
+	}
+	if settings.OverdueMoveCheckIntervalMin == 0 {
+		settings.OverdueMoveCheckIntervalMin = 15
+	}
+	if settings.DueSoonHoursBefore == 0 {
+		settings.DueSoonHoursBefore = 24
+	}
+
 	return settings
 }
 
@@ -78,6 +108,10 @@ func preferenceCategory(notifType string) string {
 		return "digests"
 	case strings.Contains(notifType, "shift") || notifType == "route_assigned":
 		return "shift_events"
+	case notifType == "move_request_overdue":
+		return "overdue_move_alerts"
+	case notifType == "move_request_due_soon":
+		return "due_soon_alerts"
 	case strings.Contains(notifType, "move_request"):
 		return "move_requests"
 	case strings.Contains(notifType, "potential_location"):
