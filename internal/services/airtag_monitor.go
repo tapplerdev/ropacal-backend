@@ -36,13 +36,14 @@ type airtagAPIResponse struct {
 }
 
 type airtagEntry struct {
-	BinNumber int     `json:"bin_number"`
-	Name      string  `json:"name"`
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-	Address   string  `json:"address"`
-	City      string  `json:"city"`
-	LastSeen  string  `json:"last_seen"`
+	BinNumber     int     `json:"bin_number"`
+	Name          string  `json:"name"`
+	Latitude      float64 `json:"latitude"`
+	Longitude     float64 `json:"longitude"`
+	Address       string  `json:"address"`
+	City          string  `json:"city"`
+	LastSeen      string  `json:"last_seen"`
+	BatteryStatus int     `json:"battery_status"` // 0=Full, 1=Medium, 2=Low, 3=Critical
 }
 
 type binRow struct {
