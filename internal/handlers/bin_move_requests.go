@@ -955,7 +955,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		tokenErr := db.Get(&fcmToken, `
 			SELECT * FROM fcm_tokens
 			WHERE user_id = $1
-			ORDER BY created_at DESC
+			ORDER BY updated_at DESC
 			LIMIT 1
 		`, activeShift.DriverID)
 

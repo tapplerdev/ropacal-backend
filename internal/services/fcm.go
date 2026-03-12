@@ -14,8 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/oauth2/google"
+	"github.com/jmoiron/sqlx"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 const (
@@ -29,6 +30,13 @@ type FCMService struct {
 	tokenSource oauth2.TokenSource
 	projectID   string
 	httpClient  *http.Client
+	db          *sqlx.DB // for cleaning up invalid tokens
+}
+
+// SetDB provides a database handle for automatic dead-token cleanup.
+// Call this after construction in main.go.
+func (s *FCMService) SetDB(db *sqlx.DB) {
+	s.db = db
 }
 
 // ── FCM v1 API request/response types ──────────────────────────────────────
@@ -399,9 +407,20 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 
 		_, err := s.send(ctx, msg)
 		if err != nil {
+			errStr := err.Error()
 			log.Printf("❌ [FCM-SEND] Multicast token %s...%s failed: %v",
 				token[:min(10, len(token))], token[max(0, len(token)-6):], err)
 			failureCount++
+
+			// Auto-cleanup: delete tokens that FCM says are invalid/unregistered
+			if s.db != nil && isTokenInvalidError(errStr) {
+				log.Printf("🗑️  [FCM-SEND] Removing dead token %s...%s from database",
+					token[:min(10, len(token))], token[max(0, len(token)-6):])
+				_, delErr := s.db.Exec(`DELETE FROM fcm_tokens WHERE token = $1`, token)
+				if delErr != nil {
+					log.Printf("⚠️  [FCM-SEND] Failed to delete dead token: %v", delErr)
+				}
+			}
 		} else {
 			successCount++
 		}
@@ -413,4 +432,13 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 		return fmt.Errorf("all %d multicast messages failed", failureCount)
 	}
 	return nil
+}
+
+// isTokenInvalidError returns true if the FCM error indicates
+// the token is permanently invalid (unregistered, not found, etc.).
+func isTokenInvalidError(errMsg string) bool {
+	upper := strings.ToUpper(errMsg)
+	return strings.Contains(upper, "NOT_FOUND") ||
+		strings.Contains(upper, "UNREGISTERED") ||
+		strings.Contains(upper, "INVALID_ARGUMENT")
 }

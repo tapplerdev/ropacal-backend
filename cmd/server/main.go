@@ -125,6 +125,11 @@ func main() {
 		}
 	}
 
+	// Give FCM service a DB handle for automatic dead-token cleanup
+	if fcmService != nil {
+		fcmService.SetDB(db)
+	}
+
 	// Initialize Centrifugo client
 	log.Println("🔌 Initializing Centrifugo client...")
 	centrifugoClient, err := centrifugo.NewClient()
