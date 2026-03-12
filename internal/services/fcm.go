@@ -286,7 +286,7 @@ func (s *FCMService) SendRouteAssignedNotification(token, routeID string, totalB
 			},
 			Payload: &fcmAPNSPayload{
 				Aps: &fcmAps{
-					Alert:          &fcmApsAlert{Title: title, Subtitle: "Route Update", Body: body},
+					Alert:          &fcmApsAlert{Title: "Binly", Subtitle: title, Body: body},
 					MutableContent: 1,
 					Sound:          "default",
 				},
@@ -318,7 +318,6 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 	}
 
 	title, body := ShiftNotificationText(eventType, extraData)
-	subtitle := data["subtitle"] // optional — shows between title and body on iOS
 
 	msg := fcmMessage{
 		Token:   token,
@@ -331,7 +330,7 @@ func (s *FCMService) SendShiftUpdateNotification(token, shiftID, eventType strin
 			},
 			Payload: &fcmAPNSPayload{
 				Aps: &fcmAps{
-					Alert:          &fcmApsAlert{Title: title, Subtitle: subtitle, Body: body},
+					Alert:          &fcmApsAlert{Title: "Binly", Subtitle: title, Body: body},
 					MutableContent: 1,
 					Sound:          "default",
 				},
@@ -388,8 +387,6 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 	successCount := 0
 	failureCount := 0
 
-	subtitle := data["subtitle"] // optional — shows between title and body on iOS
-
 	for _, token := range tokens {
 		msg := fcmMessage{
 			Token: token,
@@ -402,7 +399,7 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 				},
 				Payload: &fcmAPNSPayload{
 					Aps: &fcmAps{
-						Alert:          &fcmApsAlert{Title: title, Subtitle: subtitle, Body: body},
+						Alert:          &fcmApsAlert{Title: "Binly", Subtitle: title, Body: body},
 						MutableContent: 1,
 						Sound:          "default",
 					},
