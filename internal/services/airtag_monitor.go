@@ -98,7 +98,7 @@ func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *cen
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
 		bridgeURL:        bridgeURL,
-		ticker:           time.NewTicker(5 * time.Minute),
+		ticker:           time.NewTicker(3 * time.Minute),
 		stopChan:         make(chan bool),
 	}
 }
@@ -110,7 +110,7 @@ func (m *AirtagMonitor) Start() {
 		return
 	}
 
-	log.Printf("📡 [AirtagMonitor] Starting drift monitor (5-minute intervals, settings loaded from DB)")
+	log.Printf("📡 [AirtagMonitor] Starting drift monitor (3-minute intervals, settings loaded from DB)")
 
 	go func() {
 		// Check immediately on startup

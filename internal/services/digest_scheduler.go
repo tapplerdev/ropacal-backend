@@ -610,6 +610,19 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 		}
 	}
 
+	// Build a bin address lookup from DB so we can fall back when bridge has no address
+	type binAddr struct {
+		BinNumber     int    `db:"bin_number"`
+		CurrentStreet string `db:"current_street"`
+		City          string `db:"city"`
+	}
+	var dbBins []binAddr
+	s.db.Select(&dbBins, `SELECT bin_number, COALESCE(current_street, '') as current_street, COALESCE(city, '') as city FROM bins`)
+	binAddrMap := make(map[int]binAddr, len(dbBins))
+	for _, b := range dbBins {
+		binAddrMap[b.BinNumber] = b
+	}
+
 	// Filter low (2) and critical (3) battery
 	type batteryItem struct {
 		BinNumber     int    `json:"bin_number"`
@@ -627,6 +640,11 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 			criticalCount++
 			if len(criticalItems) < 15 {
 				addr := formatAddress(at.Address, at.City)
+				if addr == "" {
+					if b, ok := binAddrMap[at.BinNumber]; ok {
+						addr = formatAddress(b.CurrentStreet, b.City)
+					}
+				}
 				criticalItems = append(criticalItems, batteryItem{
 					BinNumber:     at.BinNumber,
 					Name:          at.Name,
@@ -639,6 +657,11 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 			lowCount++
 			if len(lowItems) < 15 {
 				addr := formatAddress(at.Address, at.City)
+				if addr == "" {
+					if b, ok := binAddrMap[at.BinNumber]; ok {
+						addr = formatAddress(b.CurrentStreet, b.City)
+					}
+				}
 				lowItems = append(lowItems, batteryItem{
 					BinNumber:     at.BinNumber,
 					Name:          at.Name,
