@@ -176,7 +176,9 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 
 	// Step 3: Nothing to report?
 	if overdueCount == 0 && urgentCount == 0 && soonCount == 0 && warehouseCount == 0 {
-		s.updateConfigTimestamp(configKey, today)
+		if !skipDedup {
+			s.updateConfigTimestamp(configKey, today)
+		}
 		return &DigestResult{Window: window}, nil
 	}
 
@@ -193,7 +195,9 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 
 	if len(tokens) == 0 {
 		log.Println("⚠️  [Digest] No admin FCM tokens found, skipping push")
-		s.updateConfigTimestamp(configKey, today)
+		if !skipDedup {
+			s.updateConfigTimestamp(configKey, today)
+		}
 		return &DigestResult{
 			Window:         window,
 			OverdueCount:   overdueCount,
@@ -284,8 +288,10 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 		}
 	}
 
-	// Step 7: Mark as sent
-	s.updateConfigTimestamp(configKey, today)
+	// Step 7: Mark as sent (skip if force/test so the real scheduled run still fires)
+	if !skipDedup {
+		s.updateConfigTimestamp(configKey, today)
+	}
 
 	return &DigestResult{
 		Window:         window,
