@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/services/centrifugo"
@@ -219,6 +220,7 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 				"type":           "digest_overdue_moves",
 				"overdue_count":  strconv.Itoa(overdueCount),
 				"deep_link":      "/manager/move-requests",
+				"subtitle":       fmt.Sprintf("%s Digest", strings.ToUpper(window[:1])+window[1:]),
 			}
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send overdue notification: %v", err)
@@ -243,6 +245,7 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 				"urgent_count":  strconv.Itoa(urgentCount),
 				"soon_count":    strconv.Itoa(soonCount),
 				"deep_link":     "/manager/move-requests",
+				"subtitle":      fmt.Sprintf("%s Digest", strings.ToUpper(window[:1])+window[1:]),
 			}
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send upcoming notification: %v", err)
@@ -258,6 +261,7 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 				"type":             "digest_warehouse_bins",
 				"warehouse_count":  strconv.Itoa(warehouseCount),
 				"deep_link":        "/manager/move-requests",
+				"subtitle":         fmt.Sprintf("%s Digest", strings.ToUpper(window[:1])+window[1:]),
 			}
 			if err := s.fcmService.SendMulticast(tokens, title, body, data); err != nil {
 				log.Printf("⚠️  [Digest] Failed to send warehouse notification: %v", err)

@@ -126,6 +126,7 @@ func (m *MoveRequestMonitor) checkMoveRequests() {
 			"bin_number":      strconv.Itoa(move.BinNumber),
 			"hours_overdue":   fmt.Sprintf("%.0f", hoursOverdue),
 			"deep_link":       "/manager/move-requests",
+			"subtitle":        "Overdue Alert",
 		}
 
 		m.sendAlert(ctx, "move_request_overdue", title, body, data)
@@ -148,6 +149,7 @@ func (m *MoveRequestMonitor) checkMoveRequests() {
 			"bin_number":      strconv.Itoa(move.BinNumber),
 			"hours_until":     fmt.Sprintf("%.0f", hoursUntil),
 			"deep_link":       "/manager/move-requests",
+			"subtitle":        "Upcoming Alert",
 		}
 
 		m.sendAlert(ctx, "move_request_due_soon", title, body, data)
