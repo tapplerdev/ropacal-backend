@@ -344,10 +344,11 @@ func main() {
 			// Per-user notification inbox
 			r.Get("/notifications", handlers.GetUserNotifications(db))
 			r.Get("/notifications/unread-count", handlers.GetUnreadCount(db))
-			r.Patch("/notifications/{id}/read", handlers.MarkNotificationRead(db))
-			r.Patch("/notifications/read-all", handlers.MarkAllNotificationsRead(db))
 			r.Get("/notifications/preferences", handlers.GetNotificationPreferences(db))
 			r.Put("/notifications/preferences", handlers.UpdateNotificationPreferences(db))
+			r.Patch("/notifications/read-all", handlers.MarkAllNotificationsRead(db))
+			r.Get("/notifications/{id}", handlers.GetNotificationByID(db))
+			r.Patch("/notifications/{id}/read", handlers.MarkNotificationRead(db))
 		})
 
 		// Diagnostic logging endpoint (no auth required for easier debugging)

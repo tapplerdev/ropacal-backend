@@ -308,6 +308,10 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 			body = fmt.Sprintf("Moved %s from expected location", distStr)
 		}
 
+		// Create per-user notifications first so we have the log ID for FCM deep links
+		adminIDs, _ := GetAdminUserIDs(m.db)
+		logID, _ := CreateNotificationForUsers(m.db, adminIDs, "bin_drift_alert", title, body, alert)
+
 		// Publish to Centrifugo for dashboard
 		if m.centrifugoClient != nil {
 			payload := map[string]interface{}{
@@ -323,21 +327,17 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 		// Send FCM push to admins
 		if m.fcmService != nil && len(tokens) > 0 {
 			data := map[string]string{
-				"type":            "bin_drift_alert",
-				"bin_number":      strconv.Itoa(binNumber),
-				"bin_id":          alert["bin_id"].(string),
-				"bin_status":      binStatus,
-				"distance_meters": strconv.Itoa(distMeters),
-				"deep_link":       "/home",
+				"type":                "bin_drift_alert",
+				"bin_number":          strconv.Itoa(binNumber),
+				"bin_id":              alert["bin_id"].(string),
+				"bin_status":          binStatus,
+				"distance_meters":     strconv.Itoa(distMeters),
+				"notification_log_id": logID,
 			}
 			if sendErr := m.fcmService.SendMulticast(tokens, title, body, data); sendErr != nil {
 				log.Printf("⚠️  [AirtagMonitor] Failed to send FCM drift alert: %v", sendErr)
 			}
 		}
-
-		// Create per-user notifications for admins
-		adminIDs, _ := GetAdminUserIDs(m.db)
-		CreateNotificationForUsers(m.db, adminIDs, "bin_drift_alert", title, body, alert)
 
 		log.Printf("📢 [AirtagMonitor] Alert sent: %s — %s", title, body)
 	}

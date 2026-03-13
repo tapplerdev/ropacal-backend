@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/middleware"
@@ -68,6 +69,47 @@ func GetUserNotifications(db *sqlx.DB) http.HandlerFunc {
 			"page":          page,
 			"limit":         limit,
 		})
+	}
+}
+
+// GetNotificationByID returns a single notification for the current user.
+// Accepts both user_notification IDs (un_*) and notification_log IDs (notif_*).
+func GetNotificationByID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+
+		id := chi.URLParam(r, "id")
+
+		var notif UserNotification
+		var err error
+
+		if strings.HasPrefix(id, "notif_") {
+			// Look up by notification_log_id
+			err = db.Get(&notif, `
+				SELECT id, user_id, notification_log_id, type, title, body, data, delivery_status, read_at, created_at
+				FROM user_notifications
+				WHERE notification_log_id = $1 AND user_id = $2
+				LIMIT 1
+			`, id, user.UserID)
+		} else {
+			// Look up by user_notification ID directly
+			err = db.Get(&notif, `
+				SELECT id, user_id, notification_log_id, type, title, body, data, delivery_status, read_at, created_at
+				FROM user_notifications
+				WHERE id = $1 AND user_id = $2
+			`, id, user.UserID)
+		}
+
+		if err != nil {
+			utils.RespondError(w, http.StatusNotFound, "Notification not found")
+			return
+		}
+
+		utils.RespondJSON(w, http.StatusOK, notif)
 	}
 }
 

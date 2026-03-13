@@ -338,6 +338,11 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 		"subtitle":        "Daily Report",
 	}
 
+	// Store in DB first so we have the log ID for FCM deep links
+	adminIDs, _ := GetAdminUserIDs(s.db)
+	logID, _ := CreateNotificationForUsers(s.db, adminIDs, "daily_move_report", title, body, richData)
+	fcmData["notification_log_id"] = logID
+
 	// Get admin tokens
 	var tokens []string
 	s.db.Select(&tokens, `
@@ -354,10 +359,6 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 	} else if s.fcmService == nil {
 		log.Println("⚠️  [DailyReport] FCM service is nil — push notifications will NOT be sent")
 	}
-
-	// Store in DB (one notification per admin with rich snapshot)
-	adminIDs, _ := GetAdminUserIDs(s.db)
-	CreateNotificationForUsers(s.db, adminIDs, "daily_move_report", title, body, richData)
 
 	// Publish to Centrifugo for real-time dashboard
 	if s.centrifugoClient != nil {
@@ -513,6 +514,11 @@ func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, 
 		"subtitle":       "Daily Check Report",
 	}
 
+	// Store in DB first so we have the log ID for FCM deep links
+	adminIDs, _ := GetAdminUserIDs(s.db)
+	logID, _ := CreateNotificationForUsers(s.db, adminIDs, "daily_bin_check_report", title, body, richData)
+	fcmData["notification_log_id"] = logID
+
 	// Get admin tokens
 	var tokens []string
 	s.db.Select(&tokens, `
@@ -527,10 +533,6 @@ func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, 
 			log.Printf("⚠️  [DailyReport] Failed to send bin check report FCM: %v", err)
 		}
 	}
-
-	// Store in DB
-	adminIDs, _ := GetAdminUserIDs(s.db)
-	CreateNotificationForUsers(s.db, adminIDs, "daily_bin_check_report", title, body, richData)
 
 	// Centrifugo
 	if s.centrifugoClient != nil {
@@ -714,6 +716,11 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 		"subtitle":       "Daily Battery Report",
 	}
 
+	// Store in DB first so we have the log ID for FCM deep links
+	adminIDs, _ := GetAdminUserIDs(s.db)
+	logID, _ := CreateNotificationForUsers(s.db, adminIDs, "daily_battery_report", title, body, richData)
+	fcmData["notification_log_id"] = logID
+
 	// Get admin tokens
 	var tokens []string
 	s.db.Select(&tokens, `
@@ -728,10 +735,6 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 			log.Printf("⚠️  [DailyReport] Failed to send battery report FCM: %v", err)
 		}
 	}
-
-	// Store in DB
-	adminIDs, _ := GetAdminUserIDs(s.db)
-	CreateNotificationForUsers(s.db, adminIDs, "daily_battery_report", title, body, richData)
 
 	// Centrifugo
 	if s.centrifugoClient != nil {
