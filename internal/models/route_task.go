@@ -117,6 +117,8 @@ type CreateShiftWithTasksRequest struct {
 	EndLatitude    *float64 `json:"end_latitude,omitempty"` // Custom vehicle end location
 	EndLongitude   *float64 `json:"end_longitude,omitempty"`
 	EndAddress     *string  `json:"end_address,omitempty"`
+	ScheduledStart *string  `json:"scheduled_start,omitempty"` // ISO 8601 — vehicle earliest_start
+	ScheduledEnd   *string  `json:"scheduled_end,omitempty"`   // ISO 8601 — vehicle latest_end
 }
 
 // CompleteTaskRequest represents the request to complete a task

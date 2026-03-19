@@ -2535,7 +2535,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		log.Printf("🏁 [REOPTIMIZE] Using custom end location: (%.6f, %.6f)", *shift.EndLatitude, *shift.EndLongitude)
 	}
 
-	req.Vehicles[0] = optimization.Vehicle{
+	vehicle := optimization.Vehicle{
 		ID:             fmt.Sprintf("truck-%s", shift.DriverID[:8]),
 		Name:           fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
 		StartLocation:  driverStartLocation,
@@ -2546,6 +2546,22 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		},
 		StartupBins: 0, // Will be set below based on bins currently on truck
 	}
+
+	// Apply shift schedule as vehicle time constraints
+	if shift.ScheduledStart != nil && *shift.ScheduledStart != "" {
+		if t, err := time.Parse(time.RFC3339, *shift.ScheduledStart); err == nil {
+			vehicle.EarliestStart = &t
+			log.Printf("⏰ [REOPTIMIZE] Vehicle earliest_start: %s", t.Format(time.RFC3339))
+		}
+	}
+	if shift.ScheduledEnd != nil && *shift.ScheduledEnd != "" {
+		if t, err := time.Parse(time.RFC3339, *shift.ScheduledEnd); err == nil {
+			vehicle.LatestEnd = &t
+			log.Printf("⏰ [REOPTIMIZE] Vehicle latest_end: %s", t.Format(time.RFC3339))
+		}
+	}
+
+	req.Vehicles[0] = vehicle
 
 	// Helper functions for nil-safe value extraction
 	getIntValue := func(ptr *int) int {
@@ -6658,11 +6674,13 @@ func optimizeRouteWithMapbox(
 
 	// Step 1: Fetch shift details
 	var shift struct {
-		ID            string  `db:"id"`
-		DriverID      string  `db:"driver_id"`
-		WarehouseAddr *string `db:"warehouse_address"`
+		ID             string  `db:"id"`
+		DriverID       string  `db:"driver_id"`
+		WarehouseAddr  *string `db:"warehouse_address"`
+		ScheduledStart *string `db:"scheduled_start"`
+		ScheduledEnd   *string `db:"scheduled_end"`
 	}
-	err := db.Get(&shift, `SELECT id, driver_id, warehouse_address FROM shifts WHERE id = $1`, shiftID)
+	err := db.Get(&shift, `SELECT id, driver_id, warehouse_address, scheduled_start, scheduled_end FROM shifts WHERE id = $1`, shiftID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch shift: %w", err)
 	}
@@ -6778,7 +6796,7 @@ func optimizeRouteWithMapbox(
 	// startupBins is ALWAYS 0 (no bins preloaded)
 	startupBins := 0
 
-	req.Vehicles[0] = optimization.Vehicle{
+	vehicle := optimization.Vehicle{
 		ID:            shift.DriverID,
 		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
 		StartLocation: vehicleStartLocation,
@@ -6788,6 +6806,22 @@ func optimizeRouteWithMapbox(
 		},
 		StartupBins: startupBins, // Always 0
 	}
+
+	// Apply shift schedule as vehicle time constraints
+	if shift.ScheduledStart != nil && *shift.ScheduledStart != "" {
+		if t, err := time.Parse(time.RFC3339, *shift.ScheduledStart); err == nil {
+			vehicle.EarliestStart = &t
+			log.Printf("⏰ [MAPBOX OPTIMIZER] Vehicle earliest_start: %s", t.Format(time.RFC3339))
+		}
+	}
+	if shift.ScheduledEnd != nil && *shift.ScheduledEnd != "" {
+		if t, err := time.Parse(time.RFC3339, *shift.ScheduledEnd); err == nil {
+			vehicle.LatestEnd = &t
+			log.Printf("⏰ [MAPBOX OPTIMIZER] Vehicle latest_end: %s", t.Format(time.RFC3339))
+		}
+	}
+
+	req.Vehicles[0] = vehicle
 
 	// BinsPreloaded is ALWAYS false - no fake warehouse trick
 	req.BinsPreloaded = false

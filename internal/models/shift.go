@@ -55,6 +55,8 @@ type Shift struct {
 	EndLatitude    *float64 `json:"end_latitude,omitempty" db:"end_latitude"`
 	EndLongitude   *float64 `json:"end_longitude,omitempty" db:"end_longitude"`
 	EndAddress     *string  `json:"end_address,omitempty" db:"end_address"`
+	ScheduledStart *string  `json:"scheduled_start,omitempty" db:"scheduled_start"`
+	ScheduledEnd   *string  `json:"scheduled_end,omitempty" db:"scheduled_end"`
 
 	CreatedAt int64 `json:"created_at" db:"created_at"`
 	UpdatedAt int64 `json:"updated_at" db:"updated_at"`

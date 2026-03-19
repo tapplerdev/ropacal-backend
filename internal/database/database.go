@@ -839,6 +839,10 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS end_address TEXT`,
 		`CREATE INDEX IF NOT EXISTS idx_shifts_shift_type ON shifts(shift_type)`,
 
+		// Shift schedule: vehicle-level time constraints for Mapbox optimizer
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMPTZ`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS scheduled_end TIMESTAMPTZ`,
+
 		// Custom shift support: service task type and time window fields
 		`ALTER TABLE route_tasks DROP CONSTRAINT IF EXISTS route_tasks_task_type_check`,
 		`ALTER TABLE route_tasks ADD CONSTRAINT route_tasks_task_type_check CHECK (task_type IN ('collection', 'placement', 'pickup', 'dropoff', 'warehouse_stop', 'service'))`,

@@ -198,6 +198,9 @@ func CreateShiftWithTasks(
 	startAddr *string,
 	endLat, endLon *float64,
 	endAddr *string,
+	// Schedule fields (vehicle time constraints)
+	scheduledStart *string,
+	scheduledEnd *string,
 ) (string, int, error) {
 	tx, err := db.Beginx()
 	if err != nil {
@@ -221,8 +224,9 @@ func CreateShiftWithTasks(
 			lock_route_order, shift_type, shift_label,
 			start_latitude, start_longitude, start_address,
 			end_latitude, end_longitude, end_address,
+			scheduled_start, scheduled_end,
 			created_at, updated_at
-		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 	`
 
 	// Count only bin-related tasks (exclude warehouse_stop) for total_bins
@@ -242,6 +246,7 @@ func CreateShiftWithTasks(
 		lockRouteOrder, shiftType, shiftLabel,
 		startLat, startLon, startAddr,
 		endLat, endLon, endAddr,
+		scheduledStart, scheduledEnd,
 		now, now,
 	)
 	if err != nil {

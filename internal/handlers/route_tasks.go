@@ -177,6 +177,8 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			req.EndLatitude,
 			req.EndLongitude,
 			req.EndAddress,
+			req.ScheduledStart,
+			req.ScheduledEnd,
 		)
 		if err != nil {
 			log.Printf("❌ Error: %v", err)
