@@ -824,6 +824,34 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS due_soon_alerts BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS bin_check_reports BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE user_notification_preferences ADD COLUMN IF NOT EXISTS battery_alerts BOOLEAN NOT NULL DEFAULT TRUE`,
+
+		// Custom shift support: shift type, label, and custom start/end locations
+		// NOTE: Column must be added before constraint that references it
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS shift_type TEXT DEFAULT 'standard' NOT NULL`,
+		`ALTER TABLE shifts DROP CONSTRAINT IF EXISTS shifts_shift_type_check`,
+		`ALTER TABLE shifts ADD CONSTRAINT shifts_shift_type_check CHECK (shift_type IN ('standard', 'custom'))`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS shift_label TEXT`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS start_latitude DOUBLE PRECISION`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS start_longitude DOUBLE PRECISION`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS start_address TEXT`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS end_latitude DOUBLE PRECISION`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS end_longitude DOUBLE PRECISION`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS end_address TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_shifts_shift_type ON shifts(shift_type)`,
+
+		// Custom shift support: service task type and time window fields
+		`ALTER TABLE route_tasks DROP CONSTRAINT IF EXISTS route_tasks_task_type_check`,
+		`ALTER TABLE route_tasks ADD CONSTRAINT route_tasks_task_type_check CHECK (task_type IN ('collection', 'placement', 'pickup', 'dropoff', 'warehouse_stop', 'service'))`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS earliest_arrival TIMESTAMPTZ`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS latest_arrival TIMESTAMPTZ`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS time_window_type TEXT DEFAULT 'soft'`,
+		`ALTER TABLE route_tasks DROP CONSTRAINT IF EXISTS route_tasks_time_window_type_check`,
+		`ALTER TABLE route_tasks ADD CONSTRAINT route_tasks_time_window_type_check CHECK (time_window_type IN ('strict', 'soft', 'soft_start', 'soft_end'))`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS service_duration_seconds INT DEFAULT 300`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS task_label TEXT`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS task_description TEXT`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS photo_required BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS completion_notes TEXT`,
 	}
 
 	for _, migration := range migrations {

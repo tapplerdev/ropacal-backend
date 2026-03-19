@@ -1,6 +1,9 @@
 package models
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // TaskType represents the type of task in a route
 type TaskType string
@@ -11,6 +14,7 @@ const (
 	TaskTypePickup        TaskType = "pickup"
 	TaskTypeDropoff       TaskType = "dropoff"
 	TaskTypeWarehouseStop TaskType = "warehouse_stop"
+	TaskTypeService       TaskType = "service"
 )
 
 // RouteTask represents a single task in a driver's shift route
@@ -66,6 +70,18 @@ type RouteTask struct {
 	DeletedBy      *string `json:"deleted_by,omitempty" db:"deleted_by"`       // User ID who deleted the task
 	DeletionReason *string `json:"deletion_reason,omitempty" db:"deletion_reason"`
 
+	// Time window fields (for Mapbox v2 service_times)
+	EarliestArrival        *time.Time `json:"earliest_arrival,omitempty" db:"earliest_arrival"`
+	LatestArrival          *time.Time `json:"latest_arrival,omitempty" db:"latest_arrival"`
+	TimeWindowType         *string    `json:"time_window_type,omitempty" db:"time_window_type"`
+	ServiceDurationSeconds *int       `json:"service_duration_seconds,omitempty" db:"service_duration_seconds"`
+
+	// Service task fields
+	TaskLabel       *string `json:"task_label,omitempty" db:"task_label"`
+	TaskDescription *string `json:"task_description,omitempty" db:"task_description"`
+	PhotoRequired   bool    `json:"photo_required" db:"photo_required"`
+	CompletionNotes *string `json:"completion_notes,omitempty" db:"completion_notes"`
+
 	// Metadata
 	TaskData  *json.RawMessage `json:"task_data,omitempty" db:"task_data"`
 	CreatedAt int64            `json:"created_at" db:"created_at"`
@@ -83,14 +99,24 @@ type WarehouseDeploymentTask struct {
 
 // CreateShiftWithTasksRequest represents the request to create a shift with tasks
 type CreateShiftWithTasksRequest struct {
-	DriverID               string                    `json:"driver_id"`
-	TruckBinCapacity       int                       `json:"truck_bin_capacity"`
-	WarehouseLatitude      float64                   `json:"warehouse_latitude"`
-	WarehouseLongitude     float64                   `json:"warehouse_longitude"`
-	WarehouseAddress       string                    `json:"warehouse_address"`
-	LockRouteOrder         bool                      `json:"lock_route_order"` // If true, skip optimization on shift start
-	Tasks                  []map[string]interface{}  `json:"tasks"`            // Raw task data
-	WarehouseDeployments   []WarehouseDeploymentTask `json:"warehouse_deployments,omitempty"` // Bins to deploy from warehouse
+	DriverID             string                   `json:"driver_id"`
+	TruckBinCapacity     int                      `json:"truck_bin_capacity"`
+	WarehouseLatitude    *float64                 `json:"warehouse_latitude,omitempty"`
+	WarehouseLongitude   *float64                 `json:"warehouse_longitude,omitempty"`
+	WarehouseAddress     *string                  `json:"warehouse_address,omitempty"`
+	LockRouteOrder       bool                     `json:"lock_route_order"`                        // If true, skip optimization on shift start
+	Tasks                []map[string]interface{} `json:"tasks"`                                   // Raw task data
+	WarehouseDeployments []WarehouseDeploymentTask `json:"warehouse_deployments,omitempty"`         // Bins to deploy from warehouse
+
+	// Custom shift fields
+	ShiftType      string   `json:"shift_type,omitempty"`      // "standard" (default) or "custom"
+	ShiftLabel     *string  `json:"shift_label,omitempty"`     // Display name for custom shifts
+	StartLatitude  *float64 `json:"start_latitude,omitempty"`  // Custom vehicle start location
+	StartLongitude *float64 `json:"start_longitude,omitempty"`
+	StartAddress   *string  `json:"start_address,omitempty"`
+	EndLatitude    *float64 `json:"end_latitude,omitempty"` // Custom vehicle end location
+	EndLongitude   *float64 `json:"end_longitude,omitempty"`
+	EndAddress     *string  `json:"end_address,omitempty"`
 }
 
 // CompleteTaskRequest represents the request to complete a task
@@ -103,6 +129,7 @@ type CompleteTaskRequest struct {
 	IncidentType          *string `json:"incident_type,omitempty"`
 	IncidentPhotoURL      *string `json:"incident_photo_url,omitempty"`
 	IncidentDescription   *string `json:"incident_description,omitempty"`
+	CompletionNotes       *string `json:"completion_notes,omitempty"` // Driver notes for service tasks
 }
 
 // CreateShiftWithTasksResponse represents the response after creating a shift

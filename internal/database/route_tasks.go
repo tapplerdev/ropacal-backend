@@ -186,17 +186,29 @@ func CreateShiftWithTasks(
 	db *sqlx.DB,
 	driverID string,
 	truckBinCapacity int,
-	warehouseLat, warehouseLon float64,
-	warehouseAddr string,
+	warehouseLat, warehouseLon *float64,
+	warehouseAddr *string,
 	tasks []map[string]interface{},
 	lockRouteOrder bool,
 	warehouseDeployments []models.WarehouseDeploymentTask,
+	// Custom shift fields
+	shiftType string,
+	shiftLabel *string,
+	startLat, startLon *float64,
+	startAddr *string,
+	endLat, endLon *float64,
+	endAddr *string,
 ) (string, int, error) {
 	tx, err := db.Beginx()
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Default shift_type to "standard"
+	if shiftType == "" {
+		shiftType = "standard"
+	}
 
 	// Create shift
 	shiftID := uuid.New().String()
@@ -206,8 +218,11 @@ func CreateShiftWithTasks(
 		INSERT INTO shifts (
 			id, driver_id, status, total_bins, completed_bins,
 			truck_bin_capacity, warehouse_latitude, warehouse_longitude, warehouse_address,
-			lock_route_order, created_at, updated_at
-		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10)
+			lock_route_order, shift_type, shift_label,
+			start_latitude, start_longitude, start_address,
+			end_latitude, end_longitude, end_address,
+			created_at, updated_at
+		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 	`
 
 	// Count only bin-related tasks (exclude warehouse_stop) for total_bins
@@ -224,7 +239,10 @@ func CreateShiftWithTasks(
 		shiftQuery,
 		shiftID, driverID, totalBins, truckBinCapacity,
 		warehouseLat, warehouseLon, warehouseAddr,
-		lockRouteOrder, now, now,
+		lockRouteOrder, shiftType, shiftLabel,
+		startLat, startLon, startAddr,
+		endLat, endLon, endAddr,
+		now, now,
 	)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create shift: %w", err)
@@ -238,14 +256,20 @@ func CreateShiftWithTasks(
 			potential_location_id, new_bin_number, placement_source,
 			move_request_id, destination_latitude, destination_longitude, destination_address, move_type,
 			warehouse_action, bins_to_load,
-			route_id, task_data, created_at
+			route_id, task_data, created_at,
+			task_label, task_description, photo_required,
+			earliest_arrival, latest_arrival, time_window_type,
+			service_duration_seconds
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10,
 			$11, $12, $13,
 			$14, $15, $16, $17, $18,
 			$19, $20,
-			$21, $22, $23
+			$21, $22, $23,
+			$24, $25, $26,
+			$27, $28, $29,
+			$30
 		)
 	`
 
@@ -293,16 +317,18 @@ func CreateShiftWithTasks(
 
 		// For warehouse_stop tasks, ALWAYS use shift's warehouse coordinates
 		// This ensures consistency - shift warehouse is single source of truth
-		if taskType == "warehouse_stop" {
+		if taskType == "warehouse_stop" && warehouseLat != nil && warehouseLon != nil {
 			log.Printf("   🏭 Task #%d: Warehouse stop detected - overriding with shift warehouse coordinates", i+1)
-			lat = warehouseLat
-			lon = warehouseLon
+			lat = *warehouseLat
+			lon = *warehouseLon
 			log.Printf("   ✅ Task #%d: Using shift warehouse: %.6f, %.6f", i+1, lat, lon)
 
 			// Also override address if not provided or empty
 			if addr, ok := taskData["address"]; !ok || addr == nil || addr == "" {
-				taskData["address"] = warehouseAddr
-				log.Printf("   ✅ Task #%d: Set warehouse address: %s", i+1, warehouseAddr)
+				if warehouseAddr != nil {
+					taskData["address"] = *warehouseAddr
+					log.Printf("   ✅ Task #%d: Set warehouse address: %s", i+1, *warehouseAddr)
+				}
 			}
 		}
 
@@ -386,6 +412,27 @@ func CreateShiftWithTasks(
 			placementSource = s
 		}
 
+		// Parse time window fields for service tasks
+		var earliestArrival, latestArrival interface{}
+		if ea, ok := taskData["earliest_arrival"].(string); ok && ea != "" {
+			if t, err := time.Parse(time.RFC3339, ea); err == nil {
+				earliestArrival = t
+			}
+		}
+		if la, ok := taskData["latest_arrival"].(string); ok && la != "" {
+			if t, err := time.Parse(time.RFC3339, la); err == nil {
+				latestArrival = t
+			}
+		}
+
+		// Photo required defaults to true for service tasks
+		photoRequired := false
+		if pr, ok := taskData["photo_required"].(bool); ok {
+			photoRequired = pr
+		} else if taskType == "service" {
+			photoRequired = true
+		}
+
 		_, err = tx.Exec(
 			taskQuery,
 			taskID, shiftID, i+1, taskType, lat, lon,
@@ -396,6 +443,9 @@ func CreateShiftWithTasks(
 			getFloat("destination_longitude"), getString("destination_address"), getString("move_type"),
 			getString("warehouse_action"), getInt("bins_to_load"),
 			getString("route_id"), taskDataJSON, now,
+			getString("task_label"), getString("task_description"), photoRequired,
+			earliestArrival, latestArrival, getString("time_window_type"),
+			getInt("service_duration_seconds"),
 		)
 		if err != nil {
 			return "", 0, fmt.Errorf("failed to create task %d: %w", i+1, err)
@@ -425,6 +475,9 @@ func CreateShiftWithTasks(
 				nil, nil, nil, nil, nil,   // move_request fields
 				nil, nil,                  // warehouse_action, bins_to_load
 				nil, []byte("{}"), now,
+				nil, nil, false,           // task_label, task_description, photo_required
+				nil, nil, nil,             // earliest_arrival, latest_arrival, time_window_type
+				nil,                       // service_duration_seconds
 			)
 			if err != nil {
 				return "", 0, fmt.Errorf("failed to create warehouse deployment placement task: %w", err)
@@ -456,6 +509,7 @@ func CompleteTask(
 	db *sqlx.DB,
 	taskID string,
 	updatedFillPercentage *int,
+	completionNotes *string,
 ) error {
 	now := time.Now().Unix()
 
@@ -464,11 +518,12 @@ func CompleteTask(
 		SET is_completed = 1,
 		    completed_at = $1,
 		    updated_fill_percentage = $2,
-		    updated_at = $3
-		WHERE id = $4
+		    updated_at = $3,
+		    completion_notes = $4
+		WHERE id = $5
 	`
 
-	result, err := db.Exec(query, now, updatedFillPercentage, now, taskID)
+	result, err := db.Exec(query, now, updatedFillPercentage, now, completionNotes, taskID)
 	if err != nil {
 		return fmt.Errorf("failed to complete task: %w", err)
 	}

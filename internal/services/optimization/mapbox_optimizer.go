@@ -137,6 +137,9 @@ func (m *MapboxOptimizer) buildMapboxProblem(req *RouteRequest) map[string]inter
 	for _, warehouse := range req.WarehouseStops {
 		addLocation(warehouse.Location)
 	}
+	for _, svcTask := range req.ServiceTasks {
+		addLocation(svcTask.Location)
+	}
 
 	// Build vehicles
 	vehicles := make([]map[string]interface{}, len(req.Vehicles))
@@ -198,6 +201,32 @@ func (m *MapboxOptimizer) buildMapboxProblem(req *RouteRequest) map[string]inter
 		}
 		if w.Duration > 0 {
 			service["duration"] = w.Duration
+		}
+		services = append(services, service)
+	}
+
+	// Add service tasks as services (with optional time windows)
+	for _, st := range req.ServiceTasks {
+		service := map[string]interface{}{
+			"name":     fmt.Sprintf("service-%s", st.ID),
+			"location": st.Location.ID,
+		}
+		if st.Duration > 0 {
+			service["duration"] = st.Duration
+		}
+		// Add Mapbox v2 service_times for time window constraints
+		if st.EarliestArrival != nil && st.LatestArrival != nil {
+			twType := "soft"
+			if st.TimeWindowType != "" {
+				twType = st.TimeWindowType
+			}
+			service["service_times"] = []map[string]interface{}{
+				{
+					"earliest": st.EarliestArrival.Format(time.RFC3339),
+					"latest":   st.LatestArrival.Format(time.RFC3339),
+					"type":     twType,
+				},
+			}
 		}
 		services = append(services, service)
 	}
@@ -665,6 +694,13 @@ func findLocationInRequest(locationID string, req *RouteRequest) *Location {
 	for _, w := range req.WarehouseStops {
 		if w.Location.ID == locationID {
 			return &w.Location
+		}
+	}
+
+	// Check service tasks
+	for _, st := range req.ServiceTasks {
+		if st.Location.ID == locationID {
+			return &st.Location
 		}
 	}
 

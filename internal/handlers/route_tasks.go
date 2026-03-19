@@ -127,8 +127,8 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 		}
 
 		log.Printf("   Driver ID: %s", req.DriverID)
+		log.Printf("   Shift Type: %s", req.ShiftType)
 		log.Printf("   Truck Capacity: %d bins", req.TruckBinCapacity)
-		log.Printf("   Warehouse: %.6f, %.6f", req.WarehouseLatitude, req.WarehouseLongitude)
 		log.Printf("   Tasks: %d", len(req.Tasks))
 
 		// Validate required fields
@@ -136,13 +136,27 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			utils.RespondError(w, http.StatusBadRequest, "driver_id is required")
 			return
 		}
-		if req.TruckBinCapacity <= 0 {
-			utils.RespondError(w, http.StatusBadRequest, "truck_bin_capacity must be greater than 0")
-			return
-		}
 		if len(req.Tasks) == 0 {
 			utils.RespondError(w, http.StatusBadRequest, "tasks array cannot be empty")
 			return
+		}
+
+		// Default shift_type
+		if req.ShiftType == "" {
+			req.ShiftType = "standard"
+		}
+
+		// Validate based on shift type
+		isCustom := req.ShiftType == "custom"
+		if !isCustom {
+			// Standard shifts require warehouse and truck capacity
+			if req.TruckBinCapacity <= 0 {
+				utils.RespondError(w, http.StatusBadRequest, "truck_bin_capacity must be greater than 0")
+				return
+			}
+		} else {
+			// Custom shifts always use Mapbox optimization
+			req.LockRouteOrder = false
 		}
 
 		shiftID, taskCount, err := database.CreateShiftWithTasks(
@@ -155,6 +169,14 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			req.Tasks,
 			req.LockRouteOrder,
 			req.WarehouseDeployments,
+			req.ShiftType,
+			req.ShiftLabel,
+			req.StartLatitude,
+			req.StartLongitude,
+			req.StartAddress,
+			req.EndLatitude,
+			req.EndLongitude,
+			req.EndAddress,
 		)
 		if err != nil {
 			log.Printf("❌ Error: %v", err)
@@ -355,7 +377,7 @@ func CompleteRouteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centri
 		}
 
 		// Complete task
-		err = database.CompleteTask(db, taskID, req.UpdatedFillPercentage)
+		err = database.CompleteTask(db, taskID, req.UpdatedFillPercentage, nil)
 		if err != nil {
 			log.Printf("❌ Error completing task: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")

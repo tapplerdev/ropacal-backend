@@ -1012,8 +1012,8 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 
 		log.Printf("✅ Got driver location from Redis: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
 
-		// Validate warehouse coordinates
-		if shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil {
+		// Validate warehouse coordinates (required for standard shifts, optional for custom)
+		if shift.ShiftType != "custom" && (shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil) {
 			log.Printf("❌ Warehouse coordinates not set for shift")
 			utils.RespondError(w, http.StatusInternalServerError, "Warehouse location not configured")
 			return
@@ -1025,7 +1025,16 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			capacity = *shift.TruckBinCapacity
 		}
 
+		// For custom shifts with no warehouse, use 0 capacity (no bin constraints)
+		warehouseLat := 0.0
+		warehouseLon := 0.0
 		warehouseAddr := ""
+		if shift.WarehouseLatitude != nil {
+			warehouseLat = *shift.WarehouseLatitude
+		}
+		if shift.WarehouseLongitude != nil {
+			warehouseLon = *shift.WarehouseLongitude
+		}
 		if shift.WarehouseAddress != nil {
 			warehouseAddr = *shift.WarehouseAddress
 		}
@@ -1036,11 +1045,14 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			capacity,
 			driverLocation.Latitude,
 			driverLocation.Longitude,
-			*shift.WarehouseLatitude,
-			*shift.WarehouseLongitude,
+			warehouseLat,
+			warehouseLon,
 			warehouseAddr,
 			req.BinsPreloaded,
 			true, // isFirstOptimization = true (shift starting)
+			shift.EndLatitude,   // Custom end location (nil for standard shifts)
+			shift.EndLongitude,
+			shift.EndAddress,
 		)
 
 		if err != nil {
@@ -1686,6 +1698,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			PhotoUrl              *string `json:"photo_url,omitempty"`
 			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
 			NewBinNumber          int     `json:"new_bin_number"`                // REQUIRED: Driver-provided bin number for placements
+			CompletionNotes       *string `json:"completion_notes,omitempty"`     // Driver notes for service tasks
 
 			// Incident reporting fields (all optional)
 			HasIncident         bool    `json:"has_incident"`
@@ -1803,21 +1816,33 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 		log.Printf("[DIAGNOSTIC] ✅ Found task: ID=%s, Type=%s", taskID, taskType)
 
-		// Validate: at least photo OR fill percentage required (unless incident or warehouse)
-		if !req.HasIncident && taskType != "warehouse_stop" && req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
+		// Validate: at least photo OR fill percentage required (unless incident, warehouse, or service)
+		if !req.HasIncident && taskType != "warehouse_stop" && taskType != "service" && req.PhotoUrl == nil && req.UpdatedFillPercentage == nil {
 			log.Printf("[DIAGNOSTIC] ⚠️  Validation failed: task_type=%s, photo=%v, fill=%v",
 				taskType, req.PhotoUrl != nil, req.UpdatedFillPercentage != nil)
 			utils.RespondError(w, http.StatusBadRequest, "At least photo or fill percentage is required")
 			return
+		}
+
+		// Service task validation: check photo if photo_required
+		if taskType == "service" {
+			var photoRequired bool
+			db.QueryRow(`SELECT photo_required FROM route_tasks WHERE id = $1`, taskID).Scan(&photoRequired)
+			if photoRequired && req.PhotoUrl == nil {
+				log.Printf("[DIAGNOSTIC] ⚠️  Service task requires photo but none provided")
+				utils.RespondError(w, http.StatusBadRequest, "Photo is required for this service task")
+				return
+			}
 		}
 		// Update the task as completed
 		updateQuery := `UPDATE route_tasks
 						SET is_completed = 1,
 							completed_at = $1,
 							updated_fill_percentage = $2,
-							updated_at = $3
-						WHERE id = $4`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, now, taskID)
+							completion_notes = $3,
+							updated_at = $4
+						WHERE id = $5`
+		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, req.CompletionNotes, now, taskID)
 		if err != nil {
 			log.Printf("❌ Error marking task as completed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
@@ -2147,7 +2172,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			log.Printf("[DIAGNOSTIC] 📦 Using newly created bin ID for placement check record: %s", binIDForCheck)
 		}
 
-		if binIDForCheck != "" && taskType != "warehouse_stop" {
+		if binIDForCheck != "" && taskType != "warehouse_stop" && taskType != "service" {
 			log.Printf("[DIAGNOSTIC] 📝 Inserting check record into checks table...")
 			log.Printf("[DIAGNOSTIC] 💾 CHECKS TABLE INSERT - fill_percentage value:")
 			if req.UpdatedFillPercentage != nil {
@@ -2426,13 +2451,17 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		log.Printf("⏭️  [REOPTIMIZE] Skipping time gates (manager-initiated)")
 	}
 
-	// Step 3: Get warehouse location
+	// Step 3: Get warehouse location (may be nil for custom shifts)
 	warehouseLocation := optimization.Location{
-		ID:        "warehouse",
-		Name:      "Warehouse",
-		Latitude:  *shift.WarehouseLatitude,
-		Longitude: *shift.WarehouseLongitude,
-		Address:   *shift.WarehouseAddress,
+		ID:   "warehouse",
+		Name: "Warehouse",
+	}
+	if shift.WarehouseLatitude != nil && shift.WarehouseLongitude != nil {
+		warehouseLocation.Latitude = *shift.WarehouseLatitude
+		warehouseLocation.Longitude = *shift.WarehouseLongitude
+		if shift.WarehouseAddress != nil {
+			warehouseLocation.Address = *shift.WarehouseAddress
+		}
 	}
 
 	// Step 4: Get driver's current location from Redis (real-time GPS)
@@ -2489,11 +2518,28 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		capacity = *shift.TruckBinCapacity
 	}
 
+	// Determine end location: custom end or warehouse
+	vehicleEndLocation := warehouseLocation
+	if shift.EndLatitude != nil && shift.EndLongitude != nil {
+		endAddr := ""
+		if shift.EndAddress != nil {
+			endAddr = *shift.EndAddress
+		}
+		vehicleEndLocation = optimization.Location{
+			ID:        "custom-end",
+			Name:      "Custom End Location",
+			Latitude:  *shift.EndLatitude,
+			Longitude: *shift.EndLongitude,
+			Address:   endAddr,
+		}
+		log.Printf("🏁 [REOPTIMIZE] Using custom end location: (%.6f, %.6f)", *shift.EndLatitude, *shift.EndLongitude)
+	}
+
 	req.Vehicles[0] = optimization.Vehicle{
 		ID:             fmt.Sprintf("truck-%s", shift.DriverID[:8]),
 		Name:           fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
 		StartLocation:  driverStartLocation,
-		EndLocation:    warehouseLocation,
+		EndLocation:    vehicleEndLocation,
 		RoutingProfile: "mapbox/driving-traffic",
 		Capacities: map[string]int{
 			"bins": capacity,
@@ -2653,11 +2699,36 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 				}
 				req.MoveRequests = append(req.MoveRequests, moveRequest)
 			}
+
+		case "service":
+			if task.Latitude != 0 && task.Longitude != 0 {
+				svcTask := optimization.ServiceTask{
+					ID: task.ID,
+					Location: optimization.Location{
+						ID:        fmt.Sprintf("service-%s", task.ID),
+						Name:      getStringValue(task.TaskLabel),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					Duration: func() int {
+						if task.ServiceDurationSeconds != nil {
+							return *task.ServiceDurationSeconds
+						}
+						return 300
+					}(),
+					Label:           getStringValue(task.TaskLabel),
+					EarliestArrival: task.EarliestArrival,
+					LatestArrival:   task.LatestArrival,
+					TimeWindowType:  getStringValue(task.TimeWindowType),
+				}
+				req.ServiceTasks = append(req.ServiceTasks, svcTask)
+			}
 		}
 	}
 
-	log.Printf("📊 [REOPTIMIZE] Request: %d collections, %d placements, %d moves",
-		len(req.Collections), len(req.Placements), len(req.MoveRequests))
+	log.Printf("📊 [REOPTIMIZE] Request: %d collections, %d placements, %d moves, %d service tasks",
+		len(req.Collections), len(req.Placements), len(req.MoveRequests), len(req.ServiceTasks))
 
 	// Step 6: Call optimizer (configured via OPTIMIZER_TYPE env var)
 	log.Printf("🚀 [REOPTIMIZE] Calling route optimizer...")
@@ -5548,6 +5619,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 	PhotoUrl              *string `json:"photo_url,omitempty"`
 	MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
 	NewBinNumber          int     `json:"new_bin_number"`            // Required for placements (not used for moves)
+	CompletionNotes       *string `json:"completion_notes,omitempty"`
 	HasIncident           bool    `json:"has_incident"`
 	IncidentType          *string `json:"incident_type,omitempty"`
 	IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
@@ -6578,6 +6650,8 @@ func optimizeRouteWithMapbox(
 	warehouseAddr string,
 	binsPreloaded bool,
 	isFirstOptimization bool,
+	customEndLat, customEndLon *float64, // Custom end location (overrides warehouse as end)
+	customEndAddr *string,
 ) error {
 	log.Printf("🚀 [MAPBOX OPTIMIZER] Starting Mapbox v2 route optimization (first_optimization=%v)", isFirstOptimization)
 	log.Printf("   🚚 Bins preloaded: %v", binsPreloaded)
@@ -6681,7 +6755,24 @@ func optimizeRouteWithMapbox(
 	log.Printf("🚚 [MAPBOX OPTIMIZER] Starting from DRIVER GPS (%.6f, %.6f)", driverLat, driverLon)
 	log.Printf("   🏭 Will route to warehouse to pickup bins: (%.6f, %.6f)", warehouseLat, warehouseLon)
 	log.Printf("   ℹ️  No fake warehouse trick - better routing to nearby stops")
-	log.Printf("🏁 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
+	// Determine end location: custom end location or warehouse
+	vehicleEndLocation := warehouseLocation
+	if customEndLat != nil && customEndLon != nil {
+		endAddr := ""
+		if customEndAddr != nil {
+			endAddr = *customEndAddr
+		}
+		vehicleEndLocation = optimization.Location{
+			ID:        "custom-end",
+			Name:      "Custom End Location",
+			Latitude:  *customEndLat,
+			Longitude: *customEndLon,
+			Address:   endAddr,
+		}
+		log.Printf("🏁 [MAPBOX OPTIMIZER] End: Custom location (%.6f, %.6f) %s", *customEndLat, *customEndLon, endAddr)
+	} else {
+		log.Printf("🏁 [MAPBOX OPTIMIZER] End: Warehouse location (%.6f, %.6f)", warehouseLat, warehouseLon)
+	}
 
 	// Define vehicle with capacity
 	// startupBins is ALWAYS 0 (no bins preloaded)
@@ -6691,7 +6782,7 @@ func optimizeRouteWithMapbox(
 		ID:            shift.DriverID,
 		Name:          fmt.Sprintf("Truck-%s", shift.DriverID[:8]),
 		StartLocation: vehicleStartLocation,
-		EndLocation:   warehouseLocation,
+		EndLocation:   vehicleEndLocation,
 		Capacities: map[string]int{
 			"bins": capacity,
 		},
@@ -6812,14 +6903,48 @@ func optimizeRouteWithMapbox(
 				log.Printf("⚠️  Skipping move request task %s: missing required fields", task.ID)
 			}
 
+		case "service":
+			// Service tasks are location visits with optional time windows
+			if task.Latitude != 0 && task.Longitude != 0 {
+				svcTask := optimization.ServiceTask{
+					ID: task.ID,
+					Location: optimization.Location{
+						ID:        fmt.Sprintf("service-%s", task.ID),
+						Name:      getStringValue(task.TaskLabel),
+						Latitude:  task.Latitude,
+						Longitude: task.Longitude,
+						Address:   getStringValue(task.Address),
+					},
+					Duration: func() int {
+						if task.ServiceDurationSeconds != nil {
+							return *task.ServiceDurationSeconds
+						}
+						return 300 // Default 5 minutes
+					}(),
+					Label:           getStringValue(task.TaskLabel),
+					EarliestArrival: task.EarliestArrival,
+					LatestArrival:   task.LatestArrival,
+					TimeWindowType:  getStringValue(task.TimeWindowType),
+				}
+				req.ServiceTasks = append(req.ServiceTasks, svcTask)
+
+				if task.EarliestArrival != nil && task.LatestArrival != nil {
+					log.Printf("⏰ [SERVICE] Task %s has time window: %s - %s (type: %s)",
+						task.ID, task.EarliestArrival.Format("15:04"), task.LatestArrival.Format("15:04"),
+						getStringValue(task.TimeWindowType))
+				}
+			} else {
+				log.Printf("⚠️  Skipping service task %s: missing coordinates", task.ID)
+			}
+
 		case "warehouse_stop":
 			// Skip warehouse stops - Mapbox handles them automatically
 			log.Printf("⏭️  Skipping warehouse_stop task %s (handled implicitly by Mapbox)", task.ID)
 		}
 	}
 
-	log.Printf("📊 [MAPBOX OPTIMIZER] Request: %d collections, %d placements, %d moves",
-		len(req.Collections), len(req.Placements), len(req.MoveRequests))
+	log.Printf("📊 [MAPBOX OPTIMIZER] Request: %d collections, %d placements, %d moves, %d service tasks",
+		len(req.Collections), len(req.Placements), len(req.MoveRequests), len(req.ServiceTasks))
 
 	// Step 4: Call optimizer (configured via OPTIMIZER_TYPE env var)
 	log.Printf("🚀 [OPTIMIZER] Calling route optimizer...")

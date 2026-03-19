@@ -78,6 +78,17 @@ type WarehouseStop struct {
 	BinsToLoad  int
 }
 
+// ServiceTask represents a custom service task with optional time windows
+type ServiceTask struct {
+	ID               string
+	Location         Location
+	Duration         int        // seconds
+	Label            string
+	EarliestArrival  *time.Time // Time window start
+	LatestArrival    *time.Time // Time window end
+	TimeWindowType   string     // "soft", "strict", "soft_start", "soft_end"
+}
+
 // RouteRequest is the input to the optimizer
 type RouteRequest struct {
 	Vehicles       []Vehicle
@@ -85,6 +96,7 @@ type RouteRequest struct {
 	Placements     []Placement
 	MoveRequests   []MoveRequest
 	WarehouseStops []WarehouseStop
+	ServiceTasks   []ServiceTask // Custom service tasks with optional time windows
 	BinsPreloaded  bool // True if driver already loaded bins at warehouse before starting shift
 }
 

@@ -45,8 +45,19 @@ type Shift struct {
 	WarehouseAddress     *string               `json:"warehouse_address" db:"warehouse_address"`
 	LockRouteOrder       bool                  `json:"lock_route_order" db:"lock_route_order"`
 	OptimizationMetadata *OptimizationMetadata `json:"optimization_metadata,omitempty" db:"optimization_metadata"`
-	CreatedAt            int64                 `json:"created_at" db:"created_at"`
-	UpdatedAt            int64                 `json:"updated_at" db:"updated_at"`
+
+	// Custom shift fields
+	ShiftType      string   `json:"shift_type" db:"shift_type"`
+	ShiftLabel     *string  `json:"shift_label,omitempty" db:"shift_label"`
+	StartLatitude  *float64 `json:"start_latitude,omitempty" db:"start_latitude"`
+	StartLongitude *float64 `json:"start_longitude,omitempty" db:"start_longitude"`
+	StartAddress   *string  `json:"start_address,omitempty" db:"start_address"`
+	EndLatitude    *float64 `json:"end_latitude,omitempty" db:"end_latitude"`
+	EndLongitude   *float64 `json:"end_longitude,omitempty" db:"end_longitude"`
+	EndAddress     *string  `json:"end_address,omitempty" db:"end_address"`
+
+	CreatedAt int64 `json:"created_at" db:"created_at"`
+	UpdatedAt int64 `json:"updated_at" db:"updated_at"`
 }
 
 // FCMToken represents a Firebase Cloud Messaging token for a user
