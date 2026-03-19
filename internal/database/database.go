@@ -858,6 +858,9 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS task_description TEXT`,
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS photo_required BOOLEAN DEFAULT FALSE`,
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS completion_notes TEXT`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS photo_url TEXT`,
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS optimization_metadata JSONB`,
+		`ALTER TABLE shift_history ADD COLUMN IF NOT EXISTS optimization_metadata JSONB`,
 	}
 
 	for _, migration := range migrations {

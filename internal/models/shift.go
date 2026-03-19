@@ -18,9 +18,9 @@ const (
 	ShiftStatusCancelled ShiftStatus = "cancelled" // Cancelled by manager
 )
 
-// OptimizationMetadata contains HERE Maps route optimization data
+// OptimizationMetadata contains route optimization data
 type OptimizationMetadata struct {
-	TotalDistanceKm        float64 `json:"total_distance_km"`
+	TotalDistanceMiles     float64 `json:"total_distance_miles"`
 	TotalDurationSeconds   int     `json:"total_duration_seconds"`
 	TotalDurationFormatted string  `json:"total_duration_formatted"` // Human-readable format: "2h 30m"
 	OptimizedAt            string  `json:"optimized_at"`             // ISO 8601 timestamp

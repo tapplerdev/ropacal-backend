@@ -337,8 +337,7 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 
 			// Add computed fields if optimization metadata exists
 			if shift.OptimizationMetadata != nil {
-				// Convert distance from km to miles
-				distanceMiles := shift.OptimizationMetadata.TotalDistanceKm * 0.621371
+				distanceMiles := shift.OptimizationMetadata.TotalDistanceMiles
 				shiftResp.TotalDistanceMiles = &distanceMiles
 
 				// Calculate estimated completion time (start_time + duration)
@@ -457,12 +456,13 @@ func GetManagerShiftHistory(db *sqlx.DB) http.HandlerFunc {
 				COALESCE(COUNT(CASE WHEN rt.task_type = 'placement' AND rt.skipped = TRUE THEN 1 END), 0) AS placements_skipped,
 				COALESCE(COUNT(DISTINCT CASE WHEN rt.task_type = 'pickup' AND rt.is_completed = 1 AND rt.move_request_id IS NOT NULL THEN rt.move_request_id END), 0) AS move_requests_completed,
 				COALESCE(COUNT(CASE WHEN rt.skipped = TRUE THEN 1 END), 0) AS total_skipped,
-				COALESCE(COUNT(CASE WHEN rt.task_type = 'warehouse_stop' AND rt.is_completed = 1 THEN 1 END), 0) AS warehouse_stops
+				COALESCE(COUNT(CASE WHEN rt.task_type = 'warehouse_stop' AND rt.is_completed = 1 THEN 1 END), 0) AS warehouse_stops,
+				sh.optimization_metadata
 			FROM shift_history sh
 			LEFT JOIN users u ON sh.driver_id = u.id
 			LEFT JOIN route_tasks rt ON sh.id = rt.shift_id
 			%s
-			GROUP BY sh.id, u.name, u.email
+			GROUP BY sh.id, u.name, u.email, sh.optimization_metadata
 			ORDER BY sh.ended_at DESC
 			LIMIT $%d OFFSET $%d
 		`, where, argIndex, argIndex+1)
@@ -490,8 +490,9 @@ func GetManagerShiftHistory(db *sqlx.DB) http.HandlerFunc {
 			PlacementsCompleted   int64    `db:"placements_completed" json:"placements_completed"`
 			PlacementsSkipped     int64    `db:"placements_skipped" json:"placements_skipped"`
 			MoveRequestsCompleted int64    `db:"move_requests_completed" json:"move_requests_completed"`
-			TotalSkipped          int64    `db:"total_skipped" json:"total_skipped"`
-			WarehouseStops        int64    `db:"warehouse_stops" json:"warehouse_stops"`
+			TotalSkipped          int64                      `db:"total_skipped" json:"total_skipped"`
+			WarehouseStops        int64                      `db:"warehouse_stops" json:"warehouse_stops"`
+			OptimizationMetadata  *models.OptimizationMetadata `db:"optimization_metadata" json:"optimization_metadata,omitempty"`
 		}
 
 		rows, err := db.Queryx(query, args...)
@@ -584,6 +585,11 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 			// Warehouse fields
 			WarehouseAction     *string  `db:"warehouse_action"      json:"warehouse_action"`
 			BinsToLoad          *int     `db:"bins_to_load"          json:"bins_to_load"`
+			// Service fields
+			TaskLabel           *string  `db:"task_label"            json:"task_label"`
+			TaskDescription     *string  `db:"task_description"      json:"task_description"`
+			CompletionNotes     *string  `db:"completion_notes"      json:"completion_notes"`
+			PhotoRequired       bool     `db:"photo_required"        json:"photo_required"`
 		}
 
 		query := `
@@ -603,7 +609,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				rt.updated_fill_percentage,
 				b.current_street    AS bin_street,
 				b.city              AS bin_city,
-				bc.photo_url,
+				COALESCE(bc.photo_url, rt.photo_url) AS photo_url,
 				rt.potential_location_id,
 				rt.new_bin_number,
 				pl.address          AS placement_address,
@@ -613,7 +619,11 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				bmr.move_type,
 				bmr.new_address       AS destination_address,
 				rt.warehouse_action,
-				rt.bins_to_load
+				rt.bins_to_load,
+				rt.task_label,
+				rt.task_description,
+				rt.completion_notes,
+				rt.photo_required
 			FROM route_tasks rt
 			LEFT JOIN bins b   ON b.id  = rt.bin_id
 			LEFT JOIN LATERAL (
@@ -907,8 +917,14 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			historyQuery := `INSERT INTO shift_history (
 			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 			total_pause_seconds, total_bins, completed_bins, completion_rate,
-			end_reason, ended_by_user_id, end_reason_metadata
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+			end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+
+			// Get optimization metadata JSON from the shift
+			var optMetaJSON []byte
+			if existingShift.OptimizationMetadata != nil {
+				optMetaJSON, _ = json.Marshal(existingShift.OptimizationMetadata)
+			}
 
 			_, histErr := db.Exec(
 				historyQuery,
@@ -926,6 +942,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 				endReason,
 				nil, // Driver action
 				nil, // No metadata
+				optMetaJSON,
 			)
 			if histErr != nil {
 				log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
@@ -1474,12 +1491,17 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 		}
 
 		// Insert into shift_history BEFORE updating shift status
+		var optMetaJSON []byte
+		if shift.OptimizationMetadata != nil {
+			optMetaJSON, _ = json.Marshal(shift.OptimizationMetadata)
+		}
+
 		historyQuery := `INSERT INTO shift_history (
 			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 			total_pause_seconds, total_bins, completed_bins, completion_rate,
 			incidents_reported, field_observations,
-			end_reason, ended_by_user_id, end_reason_metadata
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
+			end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
 
 		_, err = db.Exec(
 			historyQuery,
@@ -1499,6 +1521,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 			endReason,
 			nil, // ended_by_user_id (NULL - driver action)
 			nil, // end_reason_metadata (NULL for basic driver ends)
+			optMetaJSON,
 		)
 		if err != nil {
 			log.Printf("❌ Error inserting shift history: %v", err)
@@ -1840,9 +1863,10 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 							completed_at = $1,
 							updated_fill_percentage = $2,
 							completion_notes = $3,
-							updated_at = $4
+							updated_at = $4,
+							photo_url = $6
 						WHERE id = $5`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, req.CompletionNotes, now, taskID)
+		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, req.CompletionNotes, now, taskID, req.PhotoUrl)
 		if err != nil {
 			log.Printf("❌ Error marking task as completed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
@@ -6011,13 +6035,17 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		if shift.TotalBins > 0 {
 			completionRate = float64(shift.CompletedBins) / float64(shift.TotalBins) * 100
 		}
+		var cancelOptMetaJSON []byte
+		if shift.OptimizationMetadata != nil {
+			cancelOptMetaJSON, _ = json.Marshal(shift.OptimizationMetadata)
+		}
 		_, err = tx.Exec(`
 			INSERT INTO shift_history (
 				id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 				total_pause_seconds, total_bins, completed_bins, completion_rate,
 				incidents_reported, field_observations,
-				end_reason, ended_by_user_id, end_reason_metadata
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+				end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 			ON CONFLICT (id) DO NOTHING
 		`,
 			shift.ID, shift.DriverID, shift.RouteID,
@@ -6025,6 +6053,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
 			0, 0,
 			"manager_cancelled", userClaims.UserID, nil,
+			cancelOptMetaJSON,
 		)
 		if err != nil {
 			log.Printf("⚠️  Error inserting shift history on cancel: %v", err)
@@ -6251,13 +6280,17 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			if s.TotalBins > 0 {
 				cr = float64(s.CompletedBins) / float64(s.TotalBins) * 100
 			}
+			var bulkOptMetaJSON []byte
+			if s.OptimizationMetadata != nil {
+				bulkOptMetaJSON, _ = json.Marshal(s.OptimizationMetadata)
+			}
 			_, histErr := tx.Exec(`
 				INSERT INTO shift_history (
 					id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 					total_pause_seconds, total_bins, completed_bins, completion_rate,
 					incidents_reported, field_observations,
-					end_reason, ended_by_user_id, end_reason_metadata
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+					end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 				ON CONFLICT (id) DO NOTHING
 			`,
 				s.ID, s.DriverID, s.RouteID,
@@ -6265,6 +6298,7 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 				s.TotalPauseSeconds, s.TotalBins, s.CompletedBins, cr,
 				0, 0,
 				"manager_cancelled", userClaims.UserID, nil,
+				bulkOptMetaJSON,
 			)
 			if histErr != nil {
 				log.Printf("⚠️  Error inserting history for shift %s: %v", s.ID, histErr)
@@ -6615,8 +6649,9 @@ func optimizeRouteInSegments(
 		durationFormatted = fmt.Sprintf("%dm", minutes)
 	}
 
+	totalDistanceMiles := totalDistanceKm * 0.621371
 	optimizationMetadata := models.OptimizationMetadata{
-		TotalDistanceKm:        totalDistanceKm,
+		TotalDistanceMiles:     totalDistanceMiles,
 		TotalDurationSeconds:   totalDurationSeconds,
 		TotalDurationFormatted: durationFormatted,
 		OptimizedAt:            time.Now().Format(time.RFC3339),
@@ -6634,8 +6669,8 @@ func optimizeRouteInSegments(
 			log.Printf("⚠️  Error saving optimization metadata: %v", err)
 			// Continue anyway - this is not critical
 		} else {
-			log.Printf("✅ Saved optimization metadata: %.2f km, %s, ETA: %s",
-				optimizationMetadata.TotalDistanceKm,
+			log.Printf("✅ Saved optimization metadata: %.2f miles, %s, ETA: %s",
+				optimizationMetadata.TotalDistanceMiles,
 				optimizationMetadata.TotalDurationFormatted,
 				optimizationMetadata.EstimatedCompletion)
 		}
@@ -7337,11 +7372,23 @@ func optimizeRouteWithMapbox(
 	}
 
 	// Step 7: Save optimization metadata to shifts table
-	optimizationMetadata := map[string]interface{}{
-		"optimizer":       "mapbox-v2",
-		"distance_meters": route.TotalDistance,
-		"duration_seconds": route.TotalDuration,
-		"optimized_at":    time.Now().Format(time.RFC3339),
+	totalMiles := float64(route.TotalDistance) / 1609.34
+	totalDuration := route.TotalDuration
+	durationHours := totalDuration / 3600
+	durationMins := (totalDuration % 3600) / 60
+	var durationFmt string
+	if durationHours > 0 {
+		durationFmt = fmt.Sprintf("%dh %dm", durationHours, durationMins)
+	} else {
+		durationFmt = fmt.Sprintf("%dm", durationMins)
+	}
+
+	optimizationMetadata := models.OptimizationMetadata{
+		TotalDistanceMiles:     totalMiles,
+		TotalDurationSeconds:   totalDuration,
+		TotalDurationFormatted: durationFmt,
+		OptimizedAt:            time.Now().Format(time.RFC3339),
+		EstimatedCompletion:    time.Now().Add(time.Duration(totalDuration) * time.Second).Format(time.RFC3339),
 	}
 
 	metadataJSON, err := json.Marshal(optimizationMetadata)

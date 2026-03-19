@@ -19,7 +19,7 @@ func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 	query := `
 		SELECT
 			rt.*,
-			c.photo_url
+			COALESCE(c.photo_url, rt.photo_url) AS photo_url
 		FROM route_tasks rt
 		LEFT JOIN LATERAL (
 			SELECT photo_url
@@ -79,7 +79,11 @@ func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, 
 			rt.task_data,
 			rt.created_at,
 			rt.updated_at,
-			c.photo_url
+			COALESCE(c.photo_url, rt.photo_url) AS photo_url,
+			rt.task_label,
+			rt.task_description,
+			rt.photo_required,
+			rt.completion_notes
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
 		LEFT JOIN LATERAL (
@@ -136,7 +140,11 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 			rt.skipped,
 			rt.created_at,
 			rt.updated_at,
-			c.photo_url
+			COALESCE(c.photo_url, rt.photo_url) AS photo_url,
+			rt.task_label,
+			rt.task_description,
+			rt.photo_required,
+			rt.completion_notes
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
 		LEFT JOIN LATERAL (
