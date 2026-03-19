@@ -7080,6 +7080,10 @@ func optimizeRouteWithMapbox(
 			if task.MoveRequestID != nil {
 				existingTasksMap[*task.MoveRequestID] = task
 			}
+			// Service tasks: match by task ID
+			if task.TaskType == "service" {
+				existingTasksMap[task.ID] = task
+			}
 		}
 		log.Printf("📋 Loaded %d existing tasks for matching", len(existingTasks))
 	}
@@ -7118,17 +7122,33 @@ func optimizeRouteWithMapbox(
 			log.Printf("   ✅ Mapped end stop to warehouse_stop (return to warehouse)")
 
 		case "service":
-			// Mapbox returns "service" type for collections (not "collection")
+			// Mapbox returns "service" type for both collections and service tasks
 			// Match by CollectionID which we extracted from the services array
 			if stop.CollectionID != "" {
-				for _, collection := range req.Collections {
-					if stop.CollectionID == fmt.Sprintf("collection-%s", collection.ID) {
-						task.TaskType = "collection"
-						task.BinID = &collection.BinID
-						task.BinNumber = &collection.BinNumber
-						task.FillPercentage = &collection.FillPercentage
-						log.Printf("   ✅ Matched service to collection (Bin #%d)", collection.BinNumber)
+				// Check if it's a service task (custom shift stop)
+				matched := false
+				for _, svcTask := range req.ServiceTasks {
+					if stop.CollectionID == fmt.Sprintf("service-%s", svcTask.ID) {
+						task.TaskType = "service"
+						label := svcTask.Label
+						task.TaskLabel = &label
+						log.Printf("   ✅ Matched service to service task: %s", svcTask.Label)
+						matched = true
 						break
+					}
+				}
+
+				// If not a service task, try matching to a collection
+				if !matched {
+					for _, collection := range req.Collections {
+						if stop.CollectionID == fmt.Sprintf("collection-%s", collection.ID) {
+							task.TaskType = "collection"
+							task.BinID = &collection.BinID
+							task.BinNumber = &collection.BinNumber
+							task.FillPercentage = &collection.FillPercentage
+							log.Printf("   ✅ Matched service to collection (Bin #%d)", collection.BinNumber)
+							break
+						}
 					}
 				}
 			}
@@ -7207,13 +7227,17 @@ func optimizeRouteWithMapbox(
 		// Find existing task if first optimization
 		var existingTask *models.RouteTask
 		if isFirstOptimization {
-			// Try to match by bin_id, potential_location_id, or move_request_id
+			// Try to match by bin_id, potential_location_id, move_request_id, or service task ID
 			if task.BinID != nil {
 				existingTask = existingTasksMap[*task.BinID]
 			} else if task.PotentialLocationID != nil {
 				existingTask = existingTasksMap[*task.PotentialLocationID]
 			} else if task.MoveRequestID != nil {
 				existingTask = existingTasksMap[*task.MoveRequestID]
+			} else if task.TaskType == "service" && stop.CollectionID != "" {
+				// Service tasks: extract original task ID from "service-{uuid}"
+				svcID := strings.TrimPrefix(stop.CollectionID, "service-")
+				existingTask = existingTasksMap[svcID]
 			}
 		}
 
