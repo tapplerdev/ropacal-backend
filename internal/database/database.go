@@ -844,6 +844,8 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS scheduled_end TIMESTAMPTZ`,
 
 		// Custom shift support: service task type and time window fields
+		// Drop ALL old task_type constraints (valid_task_type was the original name)
+		`ALTER TABLE route_tasks DROP CONSTRAINT IF EXISTS valid_task_type`,
 		`ALTER TABLE route_tasks DROP CONSTRAINT IF EXISTS route_tasks_task_type_check`,
 		`ALTER TABLE route_tasks ADD CONSTRAINT route_tasks_task_type_check CHECK (task_type IN ('collection', 'placement', 'pickup', 'dropoff', 'warehouse_stop', 'service'))`,
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS earliest_arrival TIMESTAMPTZ`,
