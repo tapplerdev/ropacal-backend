@@ -921,9 +921,11 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
 
 			// Get optimization metadata JSON from the shift
-			var optMetaJSON []byte
+			var optMeta interface{}
 			if existingShift.OptimizationMetadata != nil {
-				optMetaJSON, _ = json.Marshal(existingShift.OptimizationMetadata)
+				if b, e := json.Marshal(existingShift.OptimizationMetadata); e == nil {
+					optMeta = b
+				}
 			}
 
 			_, histErr := db.Exec(
@@ -942,7 +944,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 				endReason,
 				nil, // Driver action
 				nil, // No metadata
-				optMetaJSON,
+				optMeta,
 			)
 			if histErr != nil {
 				log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
@@ -1491,9 +1493,11 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 		}
 
 		// Insert into shift_history BEFORE updating shift status
-		var optMetaJSON []byte
+		var optMeta interface{}
 		if shift.OptimizationMetadata != nil {
-			optMetaJSON, _ = json.Marshal(shift.OptimizationMetadata)
+			if b, e := json.Marshal(shift.OptimizationMetadata); e == nil {
+				optMeta = b
+			}
 		}
 
 		historyQuery := `INSERT INTO shift_history (
@@ -1521,7 +1525,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 			endReason,
 			nil, // ended_by_user_id (NULL - driver action)
 			nil, // end_reason_metadata (NULL for basic driver ends)
-			optMetaJSON,
+			optMeta,
 		)
 		if err != nil {
 			log.Printf("❌ Error inserting shift history: %v", err)
@@ -6035,9 +6039,11 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		if shift.TotalBins > 0 {
 			completionRate = float64(shift.CompletedBins) / float64(shift.TotalBins) * 100
 		}
-		var cancelOptMetaJSON []byte
+		var cancelOptMeta interface{}
 		if shift.OptimizationMetadata != nil {
-			cancelOptMetaJSON, _ = json.Marshal(shift.OptimizationMetadata)
+			if b, e := json.Marshal(shift.OptimizationMetadata); e == nil {
+				cancelOptMeta = b
+			}
 		}
 		_, err = tx.Exec(`
 			INSERT INTO shift_history (
@@ -6053,7 +6059,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
 			0, 0,
 			"manager_cancelled", userClaims.UserID, nil,
-			cancelOptMetaJSON,
+			cancelOptMeta,
 		)
 		if err != nil {
 			log.Printf("⚠️  Error inserting shift history on cancel: %v", err)
@@ -6280,9 +6286,11 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			if s.TotalBins > 0 {
 				cr = float64(s.CompletedBins) / float64(s.TotalBins) * 100
 			}
-			var bulkOptMetaJSON []byte
+			var bulkOptMeta interface{}
 			if s.OptimizationMetadata != nil {
-				bulkOptMetaJSON, _ = json.Marshal(s.OptimizationMetadata)
+				if b, e := json.Marshal(s.OptimizationMetadata); e == nil {
+					bulkOptMeta = b
+				}
 			}
 			_, histErr := tx.Exec(`
 				INSERT INTO shift_history (
@@ -6298,7 +6306,7 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 				s.TotalPauseSeconds, s.TotalBins, s.CompletedBins, cr,
 				0, 0,
 				"manager_cancelled", userClaims.UserID, nil,
-				bulkOptMetaJSON,
+				bulkOptMeta,
 			)
 			if histErr != nil {
 				log.Printf("⚠️  Error inserting history for shift %s: %v", s.ID, histErr)
