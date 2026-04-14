@@ -30,9 +30,11 @@ type AirtagMonitor struct {
 
 // AirtagAPIResponse is the response from the FindMy bridge /api/airtag-locations endpoint.
 type AirtagAPIResponse struct {
-	Data     []AirtagEntry `json:"data"`
-	Count    int           `json:"count"`
-	LastSync *string       `json:"last_sync_at"`
+	Data           []AirtagEntry `json:"data"`
+	Count          int           `json:"count"`
+	Unmatched      []AirtagEntry `json:"unmatched"`
+	UnmatchedCount int           `json:"unmatched_count"`
+	LastSync       *string       `json:"last_sync_at"`
 }
 
 // AirtagEntry represents a single AirTag location from the FindMy bridge.
@@ -268,6 +270,47 @@ func GetAirtagLocationsFromDB(db *sqlx.DB) ([]AirtagEntry, error) {
 		entries[i] = AirtagEntry{
 			ID:            row.ID,
 			BinNumber:     binNum,
+			Name:          row.Name,
+			Latitude:      row.Latitude,
+			Longitude:     row.Longitude,
+			Address:       row.Address,
+			City:          row.City,
+			LastSeen:      row.LastSeen,
+			BatteryStatus: row.BatteryStatus,
+		}
+	}
+	return entries, nil
+}
+
+// GetUnmatchedAirtagLocationsFromDB reads unmatched AirTag locations from the database.
+func GetUnmatchedAirtagLocationsFromDB(db *sqlx.DB) ([]AirtagEntry, error) {
+	var rows []struct {
+		ID            string  `db:"id"`
+		Name          string  `db:"name"`
+		Latitude      float64 `db:"latitude"`
+		Longitude     float64 `db:"longitude"`
+		Address       string  `db:"address"`
+		City          string  `db:"city"`
+		LastSeen      string  `db:"last_seen"`
+		BatteryStatus int     `db:"battery_status"`
+	}
+
+	err := db.Select(&rows, `
+		SELECT id, name, latitude, longitude, address, city,
+		       TO_CHAR(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_seen,
+		       battery_status
+		FROM airtag_locations
+		WHERE is_matched = FALSE
+		ORDER BY name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query unmatched airtag_locations: %w", err)
+	}
+
+	entries := make([]AirtagEntry, len(rows))
+	for i, row := range rows {
+		entries[i] = AirtagEntry{
+			ID:            row.ID,
 			Name:          row.Name,
 			Latitude:      row.Latitude,
 			Longitude:     row.Longitude,

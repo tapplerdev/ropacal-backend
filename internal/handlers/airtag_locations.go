@@ -20,6 +20,12 @@ func GetAirtagLocations(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		unmatched, err := services.GetUnmatchedAirtagLocationsFromDB(db)
+		if err != nil {
+			log.Printf("⚠️ [AirtagLocations] Unmatched query failed: %v", err)
+			unmatched = []services.AirtagEntry{}
+		}
+
 		// Get last_sync_at from config table
 		var lastSync *string
 		var syncVal string
@@ -29,9 +35,11 @@ func GetAirtagLocations(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		resp := services.AirtagAPIResponse{
-			Data:     entries,
-			Count:    len(entries),
-			LastSync: lastSync,
+			Data:           entries,
+			Count:          len(entries),
+			Unmatched:      unmatched,
+			UnmatchedCount: len(unmatched),
+			LastSync:       lastSync,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
