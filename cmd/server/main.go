@@ -449,6 +449,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 
 			// AirTag locations (proxied from FindMy bridge)
 			r.Get("/manager/airtag-locations", handlers.GetAirtagLocations())
+			r.Post("/manager/airtag-sync", handlers.SyncAirtagLocations())
 		})
 	})
 

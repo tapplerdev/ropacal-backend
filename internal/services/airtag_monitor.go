@@ -365,6 +365,49 @@ func formatDistance(meters int) string {
 	return fmt.Sprintf("%dm", meters)
 }
 
+// SyncResponse is the response from the FindMy bridge POST /api/sync endpoint.
+type SyncResponse struct {
+	Status   string `json:"status"`
+	Fetched  int    `json:"fetched"`
+	Total    int    `json:"total"`
+	Duration string `json:"duration,omitempty"`
+}
+
+// TriggerAirtagSync triggers an immediate location sync on the FindMy bridge.
+func TriggerAirtagSync(bridgeURL, apiKey string) (*SyncResponse, error) {
+	url := bridgeURL + "/api/sync"
+
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("X-Internal-API-Key", apiKey)
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("bridge returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var syncResp SyncResponse
+	if err := json.Unmarshal(body, &syncResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &syncResp, nil
+}
+
 func formatAddress(street, city string) string {
 	if street != "" && city != "" {
 		return street + ", " + city
