@@ -861,6 +861,23 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS photo_url TEXT`,
 		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS optimization_metadata JSONB`,
 		`ALTER TABLE shift_history ADD COLUMN IF NOT EXISTS optimization_metadata JSONB`,
+
+		// AirTag locations — stores latest position per tag, written by FindMy bridge
+		`CREATE TABLE IF NOT EXISTS airtag_locations (
+			id              TEXT PRIMARY KEY,
+			bin_number      INT,
+			name            TEXT NOT NULL,
+			latitude        DOUBLE PRECISION NOT NULL,
+			longitude       DOUBLE PRECISION NOT NULL,
+			address         TEXT NOT NULL DEFAULT '',
+			city            TEXT NOT NULL DEFAULT '',
+			last_seen       TIMESTAMPTZ NOT NULL,
+			battery_status  INT NOT NULL DEFAULT 0,
+			is_matched      BOOLEAN NOT NULL DEFAULT TRUE,
+			updated_at      BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_airtag_locations_name ON airtag_locations(name)`,
+		`CREATE INDEX IF NOT EXISTS idx_airtag_locations_last_seen ON airtag_locations(last_seen)`,
 	}
 
 	for _, migration := range migrations {

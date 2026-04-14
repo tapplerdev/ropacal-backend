@@ -224,6 +224,7 @@ func main() {
 		r.Use(handlers.InternalAPIKey)
 		r.Get("/airtag-accounts", handlers.GetAirtagAccounts(db))
 		r.Put("/airtag-accounts/{id}/state", handlers.UpdateAirtagAccountState(db))
+		r.Post("/airtag-locations", handlers.UpsertAirtagLocations(db))
 	})
 
 	// API routes
@@ -447,8 +448,8 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Get("/manager/notification-log", handlers.GetNotificationLog(db))
 			r.Get("/manager/notification-log/{id}/recipients", handlers.GetNotificationRecipients(db))
 
-			// AirTag locations (proxied from FindMy bridge)
-			r.Get("/manager/airtag-locations", handlers.GetAirtagLocations())
+			// AirTag locations (read from DB, written by FindMy bridge)
+			r.Get("/manager/airtag-locations", handlers.GetAirtagLocations(db))
 			r.Post("/manager/airtag-sync", handlers.SyncAirtagLocations())
 		})
 	})

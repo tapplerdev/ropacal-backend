@@ -105,12 +105,7 @@ func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *cen
 
 // Start begins the background monitoring goroutine.
 func (m *AirtagMonitor) Start() {
-	if m.bridgeURL == "" {
-		log.Println("⚠️  [AirtagMonitor] FINDMY_BRIDGE_URL not set — monitor disabled")
-		return
-	}
-
-	log.Printf("📡 [AirtagMonitor] Starting drift monitor (3-minute intervals, settings loaded from DB)")
+	log.Printf("📡 [AirtagMonitor] Starting drift monitor (3-minute intervals, reads from DB)")
 
 	go func() {
 		// Check immediately on startup
@@ -237,7 +232,68 @@ func (m *AirtagMonitor) checkDrift() {
 	m.sendAlerts(ctx, alerts)
 }
 
+// GetAirtagLocationsFromDB reads matched AirTag locations from the database.
+// Shared by AirtagMonitor, DigestScheduler, and the GetAirtagLocations handler.
+func GetAirtagLocationsFromDB(db *sqlx.DB) ([]AirtagEntry, error) {
+	var rows []struct {
+		ID            string  `db:"id"`
+		BinNumber     *int    `db:"bin_number"`
+		Name          string  `db:"name"`
+		Latitude      float64 `db:"latitude"`
+		Longitude     float64 `db:"longitude"`
+		Address       string  `db:"address"`
+		City          string  `db:"city"`
+		LastSeen      string  `db:"last_seen"`
+		BatteryStatus int     `db:"battery_status"`
+	}
+
+	err := db.Select(&rows, `
+		SELECT id, bin_number, name, latitude, longitude, address, city,
+		       TO_CHAR(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_seen,
+		       battery_status
+		FROM airtag_locations
+		WHERE is_matched = TRUE
+		ORDER BY bin_number ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query airtag_locations: %w", err)
+	}
+
+	entries := make([]AirtagEntry, len(rows))
+	for i, row := range rows {
+		binNum := 0
+		if row.BinNumber != nil {
+			binNum = *row.BinNumber
+		}
+		entries[i] = AirtagEntry{
+			ID:            row.ID,
+			BinNumber:     binNum,
+			Name:          row.Name,
+			Latitude:      row.Latitude,
+			Longitude:     row.Longitude,
+			Address:       row.Address,
+			City:          row.City,
+			LastSeen:      row.LastSeen,
+			BatteryStatus: row.BatteryStatus,
+		}
+	}
+	return entries, nil
+}
+
 func (m *AirtagMonitor) fetchAirtagLocations() ([]AirtagEntry, error) {
+	// Read from DB (single source of truth)
+	entries, err := GetAirtagLocationsFromDB(m.db)
+	if err == nil && len(entries) > 0 {
+		return entries, nil
+	}
+	if err != nil {
+		log.Printf("⚠️  [AirtagMonitor] DB read failed, falling back to bridge: %v", err)
+	}
+
+	// Fallback: fetch from bridge directly
+	if m.bridgeURL == "" {
+		return nil, fmt.Errorf("no airtag data in DB and FINDMY_BRIDGE_URL not set")
+	}
 	resp, err := FetchAirtagLocations(m.bridgeURL)
 	if err != nil {
 		return nil, err

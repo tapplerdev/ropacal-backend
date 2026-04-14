@@ -758,8 +758,18 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 	}, nil
 }
 
-// fetchBridgeAirtagLocations fetches AirTag locations from the FindMy bridge service.
+// fetchBridgeAirtagLocations reads AirTag locations from DB, falling back to bridge.
 func (s *DigestScheduler) fetchBridgeAirtagLocations() ([]AirtagEntry, error) {
+	entries, err := GetAirtagLocationsFromDB(s.db)
+	if err == nil && len(entries) > 0 {
+		return entries, nil
+	}
+	if err != nil {
+		log.Printf("⚠️  [DigestScheduler] DB read failed, falling back to bridge: %v", err)
+	}
+	if s.bridgeURL == "" {
+		return nil, fmt.Errorf("no airtag data in DB and bridge URL not set")
+	}
 	resp, err := FetchAirtagLocations(s.bridgeURL)
 	if err != nil {
 		return nil, err
