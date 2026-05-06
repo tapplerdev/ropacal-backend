@@ -1069,6 +1069,9 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			warehouseAddr,
 			req.BinsPreloaded,
 			true, // isFirstOptimization = true (shift starting)
+			shift.StartLatitude, // Custom start location (nil for standard shifts)
+			shift.StartLongitude,
+			shift.StartAddress,
 			shift.EndLatitude,   // Custom end location (nil for standard shifts)
 			shift.EndLongitude,
 			shift.EndAddress,
@@ -6709,6 +6712,8 @@ func optimizeRouteWithMapbox(
 	warehouseAddr string,
 	binsPreloaded bool,
 	isFirstOptimization bool,
+	customStartLat, customStartLon *float64, // Custom start location (overrides driver GPS)
+	customStartAddr *string,
 	customEndLat, customEndLon *float64, // Custom end location (overrides warehouse as end)
 	customEndAddr *string,
 ) error {
@@ -6807,13 +6812,24 @@ func optimizeRouteWithMapbox(
 	}
 
 	// Smart Start Location Logic:
-	// ALWAYS start from driver's current GPS location
-	// NO two-warehouse trick - always route to real warehouse when needed
+	// Use custom start location if set, otherwise use driver's current GPS
 	vehicleStartLocation := driverGPSLocation
-
-	// binsPreloaded is ALWAYS false now for optimal routing
-	// Driver starts with empty truck, Mapbox routes to warehouse naturally
-	log.Printf("🚚 [MAPBOX OPTIMIZER] Starting from DRIVER GPS (%.6f, %.6f)", driverLat, driverLon)
+	if customStartLat != nil && customStartLon != nil {
+		startAddr := ""
+		if customStartAddr != nil {
+			startAddr = *customStartAddr
+		}
+		vehicleStartLocation = optimization.Location{
+			ID:        "custom-start",
+			Name:      "Custom Start Location",
+			Latitude:  *customStartLat,
+			Longitude: *customStartLon,
+			Address:   startAddr,
+		}
+		log.Printf("🚚 [MAPBOX OPTIMIZER] Starting from CUSTOM location (%.6f, %.6f) %s", *customStartLat, *customStartLon, startAddr)
+	} else {
+		log.Printf("🚚 [MAPBOX OPTIMIZER] Starting from DRIVER GPS (%.6f, %.6f)", driverLat, driverLon)
+	}
 	log.Printf("   🏭 Will route to warehouse to pickup bins: (%.6f, %.6f)", warehouseLat, warehouseLon)
 	log.Printf("   ℹ️  No fake warehouse trick - better routing to nearby stops")
 	// Determine end location: custom end location or warehouse
