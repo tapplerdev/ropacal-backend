@@ -44,6 +44,7 @@ type Shift struct {
 	WarehouseLongitude   *float64              `json:"warehouse_longitude" db:"warehouse_longitude"`
 	WarehouseAddress     *string               `json:"warehouse_address" db:"warehouse_address"`
 	LockRouteOrder       bool                  `json:"lock_route_order" db:"lock_route_order"`
+	PreloadedBins        int                   `json:"preloaded_bins" db:"preloaded_bins"`
 	OptimizationMetadata *OptimizationMetadata `json:"optimization_metadata,omitempty" db:"optimization_metadata"`
 
 	// Custom shift fields

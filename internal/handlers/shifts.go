@@ -1080,15 +1080,27 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 		log.Printf("✅ Mapbox v2 route optimization complete")
 	}
 
+	// Calculate preloaded bins count
+	preloadedBins := 0
+	if req.BinsPreloaded {
+		var count int
+		err = db.Get(&count, `SELECT COUNT(*) FROM route_tasks WHERE shift_id = $1 AND task_type = 'placement' AND is_deleted = false`, shift.ID)
+		if err == nil {
+			preloadedBins = count
+		}
+		log.Printf("📦 Preloaded bins saved: %d", preloadedBins)
+	}
+
 	// Update shift to active
 	now := time.Now().Unix()
 	updateQuery := `UPDATE shifts
 					SET status = 'active',
 						start_time = $1,
-						updated_at = $2
-					WHERE id = $3`
+						updated_at = $2,
+						preloaded_bins = $3
+					WHERE id = $4`
 
-	_, err = db.Exec(updateQuery, now, now, shift.ID)
+	_, err = db.Exec(updateQuery, now, now, preloadedBins, shift.ID)
 	if err != nil {
 		log.Printf("❌ Error starting shift: %v", err)
 		utils.RespondError(w, http.StatusInternalServerError, "Failed to start shift")
@@ -2628,8 +2640,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	}
 
 	// Calculate bins on truck
-	// Each warehouse stop loads 'capacity' bins, each placement uses 1 bin
-	binsLoaded := warehouseStopsCompleted * capacity
+	// Bins come from: preloaded at shift start + warehouse stops during shift
+	// Bins used by: completed placements
+	binsLoaded := shift.PreloadedBins + (warehouseStopsCompleted * capacity)
 	binsUsed := placementsCompleted
 	binsOnTruck := binsLoaded - binsUsed
 
@@ -2652,15 +2665,6 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	req.Vehicles[0].StartupBins = binsOnTruck
 	req.BinsPreloaded = (binsOnTruck > 0)
 	log.Printf("📦 [REOPTIMIZE] BinsPreloaded=%v, StartupBins=%d/%d", req.BinsPreloaded, binsOnTruck, capacity)
-
-	// Create fake warehouse at driver's current location for bins already on truck
-	driverWarehouseLocation := optimization.Location{
-		ID:        "driver-current-warehouse",
-		Name:      "Driver Current Location (has bins)",
-		Latitude:  driverLocation.Latitude,
-		Longitude: driverLocation.Longitude,
-		Address:   "Current GPS Position",
-	}
 
 	// Convert tasks to optimization format
 	placementIndex := 0
@@ -2687,30 +2691,41 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 
 		case "placement":
 			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
-				// Two-warehouse trick: Use driver location for bins already on truck
-				warehouseLoc := warehouseLocation
 				if placementIndex < binsOnTruck {
-					warehouseLoc = driverWarehouseLocation
-					log.Printf("   📦 Placement %d/%d uses driver warehouse (has bin on truck)", placementIndex+1, len(tasks))
+					// Bin already on truck — model as service task (just a dropoff)
+					log.Printf("   📦 Placement %d: bin on truck — modeled as dropoff", placementIndex+1)
+					svcTask := optimization.ServiceTask{
+						ID: *task.PotentialLocationID,
+						Location: optimization.Location{
+							ID:        *task.PotentialLocationID,
+							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
+							Latitude:  task.Latitude,
+							Longitude: task.Longitude,
+							Address:   getStringValue(task.Address),
+						},
+						Duration: 120,
+						Label:    fmt.Sprintf("Place Bin #%d", getIntValue(task.NewBinNumber)),
+					}
+					req.ServiceTasks = append(req.ServiceTasks, svcTask)
 				} else {
-					log.Printf("   🏭 Placement %d/%d uses real warehouse (needs reload)", placementIndex+1, len(tasks))
+					// Need warehouse reload — model as shipment
+					log.Printf("   🏭 Placement %d: needs warehouse — modeled as shipment", placementIndex+1)
+					placement := optimization.Placement{
+						ID:                *task.PotentialLocationID,
+						NewBinNumber:      getIntValue(task.NewBinNumber),
+						WarehouseLocation: warehouseLocation,
+						PlacementLocation: optimization.Location{
+							ID:        *task.PotentialLocationID,
+							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
+							Latitude:  task.Latitude,
+							Longitude: task.Longitude,
+							Address:   getStringValue(task.Address),
+						},
+						PickupDuration:  60,
+						DropoffDuration: 120,
+					}
+					req.Placements = append(req.Placements, placement)
 				}
-
-				placement := optimization.Placement{
-					ID:                *task.PotentialLocationID,
-					NewBinNumber:      getIntValue(task.NewBinNumber),
-					WarehouseLocation: warehouseLoc,
-					PlacementLocation: optimization.Location{
-						ID:        *task.PotentialLocationID,
-						Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
-						Latitude:  task.Latitude,
-						Longitude: task.Longitude,
-						Address:   getStringValue(task.Address),
-					},
-					PickupDuration:  60,
-					DropoffDuration: 120,
-				}
-				req.Placements = append(req.Placements, placement)
 				placementIndex++
 			}
 

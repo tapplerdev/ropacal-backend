@@ -862,6 +862,9 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS optimization_metadata JSONB`,
 		`ALTER TABLE shift_history ADD COLUMN IF NOT EXISTS optimization_metadata JSONB`,
 
+		// Track how many bins were preloaded at shift start (for mid-shift re-optimization)
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS preloaded_bins INT DEFAULT 0`,
+
 		// AirTag locations — stores latest position per tag, written by FindMy bridge
 		`CREATE TABLE IF NOT EXISTS airtag_locations (
 			id              TEXT PRIMARY KEY,
