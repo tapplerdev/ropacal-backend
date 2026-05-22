@@ -2829,7 +2829,8 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	tasksUpdated := 0
 
 	for i, stop := range route.Stops {
-		log.Printf("   Stop #%d: Type=%s, Location=%s", i+1, stop.Type, stop.LocationID)
+		log.Printf("   Stop #%d/%d: Type=%s, Location=%s, CollectionID=%s, PlacementID=%s, MoveRequestID=%s, Odometer=%.0f",
+			i+1, len(route.Stops), stop.Type, stop.LocationID, stop.CollectionID, stop.PlacementID, stop.MoveRequestID, stop.Odometer)
 
 		// Skip start stops
 		if stop.Type == optimization.StopTypeStart {
@@ -2935,13 +2936,31 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 
 		// Find the corresponding existing task (collection, placement, move)
 		var taskID string
+		log.Printf("      🔍 Matching: CollectionID=%q PlacementID=%q MoveRequestID=%q StopType=%s",
+			stop.CollectionID, stop.PlacementID, stop.MoveRequestID, stop.Type)
 		if stop.CollectionID != "" {
-			// It's a collection
+			// It's a collection — match by task ID
 			for _, origTask := range tasks {
 				if origTask.TaskType == "collection" && origTask.ID == stop.CollectionID {
 					taskID = origTask.ID
+					log.Printf("      ✅ Matched collection by ID: %s", taskID[:8])
 					break
 				}
+			}
+			if taskID == "" {
+				// Try matching service tasks (placement modeled as service when preloaded)
+				for _, origTask := range tasks {
+					if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil {
+						if stop.CollectionID == fmt.Sprintf("service-%s", *origTask.PotentialLocationID) {
+							taskID = origTask.ID
+							log.Printf("      ✅ Matched service→placement by PotentialLocationID: %s", taskID[:8])
+							break
+						}
+					}
+				}
+			}
+			if taskID == "" {
+				log.Printf("      ❌ No match found for CollectionID=%s (checked %d tasks)", stop.CollectionID, len(tasks))
 			}
 		} else if stop.PlacementID != "" {
 			// It's a placement dropoff
@@ -2949,9 +2968,13 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 				if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil {
 					if stop.PlacementID == "placement-"+*origTask.PotentialLocationID {
 						taskID = origTask.ID
+						log.Printf("      ✅ Matched placement by PotentialLocationID: %s", taskID[:8])
 						break
 					}
 				}
+			}
+			if taskID == "" {
+				log.Printf("      ❌ No match found for PlacementID=%s", stop.PlacementID)
 			}
 		} else if stop.MoveRequestID != "" {
 			// It's a pickup or dropoff
@@ -2996,18 +3019,21 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	// Clean up sequence numbers: renumber all active tasks 1, 2, 3, ...
 	// This prevents duplicate/out-of-order sequences from the stop processing
 	var activeTasks []struct {
-		ID string `db:"id"`
+		ID            string `db:"id"`
+		TaskType      string `db:"task_type"`
+		SequenceOrder int    `db:"sequence_order"`
 	}
 	err = tx.Select(&activeTasks, `
-		SELECT id FROM route_tasks
+		SELECT id, task_type, sequence_order FROM route_tasks
 		WHERE shift_id = $1 AND is_deleted = false AND is_completed = 0
 		ORDER BY sequence_order ASC, created_at ASC
 	`, shiftID)
 	if err == nil {
+		log.Printf("🔢 [REOPTIMIZE] Renumbering %d tasks:", len(activeTasks))
 		for i, t := range activeTasks {
+			log.Printf("   [%d] %s (old seq=%d) → new seq=%d", i, t.TaskType, t.SequenceOrder, i+1)
 			tx.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID)
 		}
-		log.Printf("🔢 [REOPTIMIZE] Renumbered %d tasks (1-%d)", len(activeTasks), len(activeTasks))
 	}
 
 	err = tx.Commit()
