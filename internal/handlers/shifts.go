@@ -7180,8 +7180,8 @@ func optimizeRouteWithMapbox(
 			task.TaskType = "warehouse_stop"
 			log.Printf("   ✅ Mapped end stop to warehouse_stop (return to warehouse)")
 
-		case "service":
-			// Mapbox returns "service" type for both collections and service tasks
+		case "service", optimization.StopTypeCollection:
+			// Mapbox returns "service" type, OR-Tools returns "collection" type
 			// Match by CollectionID which we extracted from the services array
 			if stop.CollectionID != "" {
 				// Check if it's a service task (custom shift stop)
@@ -7242,7 +7242,7 @@ func optimizeRouteWithMapbox(
 				}
 			}
 
-		case optimization.StopTypeDropoff:
+		case optimization.StopTypeDropoff, optimization.StopTypePlacement:
 			// Dropoff for placement or move request
 			// Match by PlacementID or MoveRequestID (extracted from dropoffs array)
 			if stop.PlacementID != "" {
