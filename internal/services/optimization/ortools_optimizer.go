@@ -147,13 +147,25 @@ func (o *ORToolsOptimizer) OptimizeRoute(req *RouteRequest) (*RouteResponse, err
 		}
 	}
 
+	// Scale solver time based on task count
+	taskCount := len(tasks)
+	maxRuntime := 3 // default for small problems
+	if taskCount > 50 {
+		maxRuntime = 15
+	} else if taskCount > 30 {
+		maxRuntime = 10
+	} else if taskCount > 15 {
+		maxRuntime = 5
+	}
+	log.Printf("⏱️  [OR-Tools] Solver time: %ds for %d tasks", maxRuntime, taskCount)
+
 	ortoolsReq := ortoolsRequest{
 		Locations:         ortoolsLocs,
 		Vehicle:           vehicle,
 		Tasks:             tasks,
 		DistanceMatrix:    distMatrix,
 		DurationMatrix:    durMatrix,
-		MaxRuntimeSeconds: 10,
+		MaxRuntimeSeconds: maxRuntime,
 	}
 
 	// Step 6: Call OR-Tools service
