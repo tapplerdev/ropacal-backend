@@ -417,10 +417,18 @@ func (o *ORToolsOptimizer) buildRouteResponse(ortoolsResp *ortoolsResponse, req 
 		for _, stop := range route.Stops {
 			stopType := o.mapStopType(stop.Type)
 
+			// Map duplicate warehouse location IDs back to the real warehouse
+			locationID := stop.LocationID
+			if strings.Contains(locationID, "__dup_") {
+				// Strip __dup_N suffix to get original warehouse ID
+				parts := strings.Split(locationID, "__dup_")
+				locationID = parts[0]
+			}
+
 			optimizedStop := OptimizedStop{
 				Type:         stopType,
-				LocationID:   stop.LocationID,
-				LocationName: stop.LocationID,
+				LocationID:   locationID,
+				LocationName: locationID,
 				Latitude:     stop.Lat,
 				Longitude:    stop.Lon,
 				ETA:          baseTime.Add(time.Duration(stop.ArrivalTime) * time.Second),
@@ -429,7 +437,7 @@ func (o *ORToolsOptimizer) buildRouteResponse(ortoolsResp *ortoolsResponse, req 
 			}
 
 			// Look up full location details from request
-			if loc := findLocationInRequest(stop.LocationID, req); loc != nil {
+			if loc := findLocationInRequest(locationID, req); loc != nil {
 				optimizedStop.Latitude = loc.Latitude
 				optimizedStop.Longitude = loc.Longitude
 				optimizedStop.Address = loc.Address
@@ -441,11 +449,13 @@ func (o *ORToolsOptimizer) buildRouteResponse(ortoolsResp *ortoolsResponse, req 
 			if strings.HasPrefix(taskID, "collection-") {
 				optimizedStop.CollectionID = taskID
 			} else if strings.HasPrefix(taskID, "placement-") {
+				// Warehouse pickup stops for placements have task_id like "placement-XXX-warehouse"
+				// These should be mapped as PlacementID for shifts.go to recognize them
 				optimizedStop.PlacementID = taskID
 			} else if strings.HasPrefix(taskID, "move-") {
 				optimizedStop.MoveRequestID = taskID
 			} else if strings.HasPrefix(taskID, "service-") {
-				optimizedStop.CollectionID = taskID // service tasks use CollectionID slot
+				optimizedStop.CollectionID = taskID
 			}
 
 			// Look up bin details for collections
