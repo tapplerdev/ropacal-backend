@@ -3975,16 +3975,16 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					}
 					// Fetch move request details
 					var moveReq struct {
-						ID         string  `db:"id"`
-						BinID      string  `db:"bin_id"`
-						Latitude   *float64 `db:"latitude"`
-						Longitude  *float64 `db:"longitude"`
-						Address    *string  `db:"address"`
-						DestLatitude  *float64 `db:"destination_latitude"`
-						DestLongitude *float64 `db:"destination_longitude"`
-						DestAddress   *string  `db:"destination_address"`
+						ID         string   `db:"id"`
+						BinID      string   `db:"bin_id"`
+						Latitude   *float64 `db:"original_latitude"`
+						Longitude  *float64 `db:"original_longitude"`
+						Address    *string  `db:"original_address"`
+						DestLatitude  *float64 `db:"new_latitude"`
+						DestLongitude *float64 `db:"new_longitude"`
+						DestAddress   *string  `db:"new_address"`
 					}
-					err = tx.Get(&moveReq, `SELECT id, bin_id, latitude, longitude, address, destination_latitude, destination_longitude, destination_address FROM bin_move_requests WHERE id = $1`, *addReq.MoveRequestID)
+					err = tx.Get(&moveReq, `SELECT id, bin_id, original_latitude, original_longitude, original_address, new_latitude, new_longitude, new_address FROM bin_move_requests WHERE id = $1`, *addReq.MoveRequestID)
 					if err != nil {
 						log.Printf("❌ Error fetching move request: %v", err)
 						utils.RespondError(w, http.StatusBadRequest, "Move request not found")
