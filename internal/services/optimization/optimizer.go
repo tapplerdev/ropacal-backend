@@ -29,6 +29,9 @@ func NewOptimizer() Optimizer {
 	case "mapbox":
 		log.Printf("✅ Using Mapbox Optimization v2")
 		return NewMapboxOptimizer()
+	case "ortools":
+		log.Printf("✅ Using OR-Tools Optimizer")
+		return NewORToolsOptimizer()
 	// case "here":
 	// 	log.Printf("✅ Using HERE Maps Optimization")
 	// 	return NewHereOptimizer()
