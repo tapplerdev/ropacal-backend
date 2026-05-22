@@ -7430,6 +7430,23 @@ func optimizeRouteWithMapbox(
 		log.Printf("✅ [MAPBOX OPTIMIZER] Created %d new optimized route tasks", len(route.Stops)-2) // -2 for start/end
 	}
 
+	// Clean up sequence numbers: renumber all tasks 1, 2, 3, ...
+	// Prevents duplicate sequences from pickup/dropoff or warehouse/placement sharing sequence counters
+	var allActiveTasks []struct {
+		ID string `db:"id"`
+	}
+	err = db.Select(&allActiveTasks, `
+		SELECT id FROM route_tasks
+		WHERE shift_id = $1 AND is_deleted = false
+		ORDER BY sequence_order ASC, created_at ASC
+	`, shiftID)
+	if err == nil {
+		for i, t := range allActiveTasks {
+			db.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID)
+		}
+		log.Printf("🔢 Renumbered %d tasks (1-%d)", len(allActiveTasks), len(allActiveTasks))
+	}
+
 	// 🔍 DEBUG: Verify what was ACTUALLY saved to database
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("💾 [DEBUG] FINAL DATABASE STATE - Tasks saved with their sequence_order:")
