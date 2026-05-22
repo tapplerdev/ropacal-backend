@@ -449,11 +449,17 @@ func (o *ORToolsOptimizer) buildRouteResponse(ortoolsResp *ortoolsResponse, req 
 			if strings.HasPrefix(taskID, "collection-") {
 				optimizedStop.CollectionID = taskID
 			} else if strings.HasPrefix(taskID, "placement-") {
-				// Warehouse pickup stops for placements have task_id like "placement-XXX-warehouse"
-				// These should be mapped as PlacementID for shifts.go to recognize them
-				optimizedStop.PlacementID = taskID
+				// Strip "-warehouse" suffix from warehouse pickup stops
+				// OR-Tools returns "placement-XXX-warehouse" for warehouse pickups
+				// but shifts.go expects "placement-XXX" to match against req.Placements
+				cleanID := strings.TrimSuffix(taskID, "-warehouse")
+				optimizedStop.PlacementID = cleanID
 			} else if strings.HasPrefix(taskID, "move-") {
-				optimizedStop.MoveRequestID = taskID
+				// Strip "-pickup" or "-dropoff" suffix
+				// OR-Tools returns "move-XXX-pickup" and "move-XXX-dropoff"
+				// but shifts.go expects "move-XXX" to match against req.MoveRequests
+				cleanID := strings.TrimSuffix(strings.TrimSuffix(taskID, "-pickup"), "-dropoff")
+				optimizedStop.MoveRequestID = cleanID
 			} else if strings.HasPrefix(taskID, "service-") {
 				optimizedStop.CollectionID = taskID
 			}
