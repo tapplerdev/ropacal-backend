@@ -494,7 +494,9 @@ func (o *ORToolsOptimizer) mapStopType(t string) StopType {
 	case "dropoff":
 		return StopTypeDropoff
 	case "warehouse":
-		return StopTypeWarehouse
+		// Map warehouse stops to Pickup type — shifts.go handles warehouse
+		// pickups as StopTypePickup with a PlacementID set, not StopTypeWarehouse
+		return StopTypePickup
 	case "service":
 		return StopTypeCollection // service tasks treated as collections
 	default:
