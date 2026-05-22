@@ -4123,18 +4123,15 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 				shift.DriverID = *req.DriverID
 			}
 
-			// DISABLED: Re-optimize the shift after driver/time change
-			// Reason: Two-warehouse trick causes suboptimal routes (35min penalty)
-			// Accepting current Mapbox Optimization v2 API limitations
-			// err = ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true)
-			// if err != nil {
-			// 	log.Printf("⚠️  Failed to re-optimize: %v", err)
-			// 	// Don't fail the request
-			// } else {
-			// 	changes["route_reoptimized"] = true
-			// 	log.Printf("✅ Route re-optimized")
-			// }
-			log.Printf("ℹ️  Re-optimization disabled - driver continues with current route order")
+			// Re-optimize the shift after task changes
+			err = ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true)
+			if err != nil {
+				log.Printf("⚠️  Failed to re-optimize: %v", err)
+				// Don't fail the request — driver keeps current route order
+			} else {
+				changes["route_reoptimized"] = true
+				log.Printf("✅ Route re-optimized")
+			}
 		}
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
