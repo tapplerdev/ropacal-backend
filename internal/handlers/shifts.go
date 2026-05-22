@@ -7196,7 +7196,9 @@ func optimizeRouteWithMapbox(
 				existingTasksMap[*task.BinID] = task
 			}
 			if task.PotentialLocationID != nil {
-				existingTasksMap[*task.PotentialLocationID] = task
+				// Use composite key for placements so warehouse pickup and
+				// placement dropoff don't overwrite each other in the map
+				existingTasksMap[*task.PotentialLocationID+":"+string(task.TaskType)] = task
 			}
 			if task.MoveRequestID != nil {
 				// Use composite key for move requests so pickup and dropoff
@@ -7354,7 +7356,8 @@ func optimizeRouteWithMapbox(
 			if task.BinID != nil {
 				existingTask = existingTasksMap[*task.BinID]
 			} else if task.PotentialLocationID != nil {
-				existingTask = existingTasksMap[*task.PotentialLocationID]
+				// Use composite key to match placement vs warehouse_stop correctly
+				existingTask = existingTasksMap[*task.PotentialLocationID+":"+string(task.TaskType)]
 			} else if task.MoveRequestID != nil {
 				// Use composite key to match pickup vs dropoff correctly
 				existingTask = existingTasksMap[*task.MoveRequestID+":"+string(task.TaskType)]
