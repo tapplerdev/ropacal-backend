@@ -858,19 +858,13 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
-		// DISABLED: bins_preloaded flag - always assume bins NOT preloaded for better route optimization
-		// Reason: Fake warehouse trick causes poor routing (routes driver 40km away instead of nearby stops)
-		// Now: Driver always starts at current GPS, Mapbox routes to warehouse naturally when needed
 		var req struct {
-			BinsPreloaded bool `json:"bins_preloaded"` // Still accept in API for backward compatibility
+			BinsPreloaded bool `json:"bins_preloaded"`
 		}
-		// Ignore bins_preloaded from request - always use false
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			// Body parsing error or missing - that's fine
 			log.Printf("   ℹ️  No request body or parse error (ignored): %v", err)
 		}
-		req.BinsPreloaded = false // ALWAYS false - no fake warehouse trick
-		log.Printf("   🚚 Bins preloaded flag: DISABLED (always false for optimal routing)")
+		log.Printf("   🚚 Bins preloaded: %v", req.BinsPreloaded)
 
 		// Check if driver has any existing active or paused shift
 		var existingShift models.Shift
@@ -6879,9 +6873,7 @@ func optimizeRouteWithMapbox(
 
 	req.Vehicles[0] = vehicle
 
-	// BinsPreloaded is ALWAYS false - no fake warehouse trick
-	req.BinsPreloaded = false
-	log.Printf("📦 [OPTIMIZER] BinsPreloaded=false (DISABLED), StartupBins=0/%d", capacity)
+	req.BinsPreloaded = binsPreloaded
 
 	// Helper functions for nil-safe value extraction
 	getIntValue := func(ptr *int) int {
@@ -6898,13 +6890,19 @@ func optimizeRouteWithMapbox(
 		return ""
 	}
 
-	// NO two-warehouse trick - binsPreloaded is always false
-	// All placements will use real warehouse location
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Printf("🏭 [NO FAKE WAREHOUSE] All placements use REAL warehouse")
-	log.Printf("   Real warehouse location: (%.6f, %.6f)", warehouseLat, warehouseLon)
-	log.Printf("   Better routing - no 40km detours to distant locations")
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	// Count placements for initial_load when bins are preloaded
+	if binsPreloaded {
+		placementCount := 0
+		for _, task := range tasks {
+			if task.TaskType == "placement" {
+				placementCount++
+			}
+		}
+		req.Vehicles[0].StartupBins = placementCount
+		log.Printf("📦 [OPTIMIZER] BinsPreloaded=true, StartupBins=%d/%d (driver loaded bins at warehouse)", placementCount, capacity)
+	} else {
+		log.Printf("📦 [OPTIMIZER] BinsPreloaded=false, StartupBins=0/%d (will route to warehouse for pickups)", capacity)
+	}
 
 	// Convert tasks to optimization format
 	for _, task := range tasks {
@@ -6931,37 +6929,42 @@ func optimizeRouteWithMapbox(
 			}
 
 		case "placement":
-			log.Printf("🔍 [PLACEMENT] Processing placement task: ID=%s", task.ID)
-			log.Printf("   PotentialLocationID: %v", task.PotentialLocationID)
-			log.Printf("   NewBinNumber: %v", task.NewBinNumber)
-			log.Printf("   Latitude: %.6f, Longitude: %.6f", task.Latitude, task.Longitude)
-			log.Printf("   Address: %v", task.Address)
-
 			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
-				// All placements use real warehouse (no fake warehouse trick)
-				log.Printf("   🏭 Placement uses REAL warehouse")
-
-				placement := optimization.Placement{
-					ID:                *task.PotentialLocationID,
-					NewBinNumber:      getIntValue(task.NewBinNumber),
-					WarehouseLocation: warehouseLocation, // Always real warehouse
-					PlacementLocation: optimization.Location{
-						ID:        *task.PotentialLocationID,
-						Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
-						Latitude:  task.Latitude,
-						Longitude: task.Longitude,
-						Address:   getStringValue(task.Address),
-					},
-					PickupDuration:  60,  // 1 minute pickup
-					DropoffDuration: 120, // 2 minutes dropoff
+				if binsPreloaded {
+					// Bins already on truck — model as a service task (just a dropoff, no warehouse pickup)
+					log.Printf("📦 [PLACEMENT] Bin already on truck — modeled as dropoff service")
+					svcTask := optimization.ServiceTask{
+						ID: *task.PotentialLocationID,
+						Location: optimization.Location{
+							ID:        *task.PotentialLocationID,
+							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
+							Latitude:  task.Latitude,
+							Longitude: task.Longitude,
+							Address:   getStringValue(task.Address),
+						},
+						Duration: 120,
+						Label:    fmt.Sprintf("Place Bin #%d", getIntValue(task.NewBinNumber)),
+					}
+					req.ServiceTasks = append(req.ServiceTasks, svcTask)
+				} else {
+					// Bins not loaded — model as shipment (warehouse pickup → site dropoff)
+					log.Printf("🏭 [PLACEMENT] Needs warehouse pickup — modeled as shipment")
+					placement := optimization.Placement{
+						ID:                *task.PotentialLocationID,
+						NewBinNumber:      getIntValue(task.NewBinNumber),
+						WarehouseLocation: warehouseLocation,
+						PlacementLocation: optimization.Location{
+							ID:        *task.PotentialLocationID,
+							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
+							Latitude:  task.Latitude,
+							Longitude: task.Longitude,
+							Address:   getStringValue(task.Address),
+						},
+						PickupDuration:  60,
+						DropoffDuration: 120,
+					}
+					req.Placements = append(req.Placements, placement)
 				}
-				req.Placements = append(req.Placements, placement)
-				log.Printf("✅ [PLACEMENT] Added placement task to optimization request")
-			} else {
-				log.Printf("❌ [PLACEMENT] Skipping placement task %s: MISSING REQUIRED FIELDS", task.ID)
-				log.Printf("   ❌ PotentialLocationID is nil: %v", task.PotentialLocationID == nil)
-				log.Printf("   ❌ Latitude is zero: %v", task.Latitude == 0)
-				log.Printf("   ❌ Longitude is zero: %v", task.Longitude == 0)
 			}
 
 		case "pickup":
