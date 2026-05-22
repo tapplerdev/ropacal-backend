@@ -2939,53 +2939,57 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		log.Printf("      🔍 Matching: CollectionID=%q PlacementID=%q MoveRequestID=%q StopType=%s",
 			stop.CollectionID, stop.PlacementID, stop.MoveRequestID, stop.Type)
 		if stop.CollectionID != "" {
-			// It's a collection — match by task ID
+			// Strip prefix: OR-Tools returns "collection-{id}" or "service-{id}"
+			cleanID := strings.TrimPrefix(stop.CollectionID, "collection-")
+			cleanID = strings.TrimPrefix(cleanID, "service-")
+
+			// Try matching collection by task ID
 			for _, origTask := range tasks {
-				if origTask.TaskType == "collection" && origTask.ID == stop.CollectionID {
+				if origTask.TaskType == "collection" && origTask.ID == cleanID {
 					taskID = origTask.ID
-					log.Printf("      ✅ Matched collection by ID: %s", taskID[:8])
+					log.Printf("      ✅ Matched collection: %s", taskID[:8])
+					break
+				}
+			}
+			// Try matching placement modeled as service (preloaded bins)
+			if taskID == "" {
+				for _, origTask := range tasks {
+					if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == cleanID {
+						taskID = origTask.ID
+						log.Printf("      ✅ Matched service→placement: %s", taskID[:8])
+						break
+					}
+				}
+			}
+			if taskID == "" {
+				log.Printf("      ❌ No match for CollectionID=%s (cleanID=%s)", stop.CollectionID, cleanID)
+			}
+		} else if stop.PlacementID != "" {
+			cleanID := strings.TrimPrefix(stop.PlacementID, "placement-")
+			for _, origTask := range tasks {
+				if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == cleanID {
+					taskID = origTask.ID
+					log.Printf("      ✅ Matched placement: %s", taskID[:8])
 					break
 				}
 			}
 			if taskID == "" {
-				// Try matching service tasks (placement modeled as service when preloaded)
-				for _, origTask := range tasks {
-					if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil {
-						if stop.CollectionID == fmt.Sprintf("service-%s", *origTask.PotentialLocationID) {
-							taskID = origTask.ID
-							log.Printf("      ✅ Matched service→placement by PotentialLocationID: %s", taskID[:8])
-							break
-						}
-					}
-				}
-			}
-			if taskID == "" {
-				log.Printf("      ❌ No match found for CollectionID=%s (checked %d tasks)", stop.CollectionID, len(tasks))
-			}
-		} else if stop.PlacementID != "" {
-			// It's a placement dropoff
-			for _, origTask := range tasks {
-				if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil {
-					if stop.PlacementID == "placement-"+*origTask.PotentialLocationID {
-						taskID = origTask.ID
-						log.Printf("      ✅ Matched placement by PotentialLocationID: %s", taskID[:8])
-						break
-					}
-				}
-			}
-			if taskID == "" {
-				log.Printf("      ❌ No match found for PlacementID=%s", stop.PlacementID)
+				log.Printf("      ❌ No match for PlacementID=%s (cleanID=%s)", stop.PlacementID, cleanID)
 			}
 		} else if stop.MoveRequestID != "" {
-			// It's a pickup or dropoff
+			cleanID := strings.TrimPrefix(stop.MoveRequestID, "move-")
 			for _, origTask := range tasks {
-				if origTask.MoveRequestID != nil && stop.MoveRequestID == "move-"+*origTask.MoveRequestID {
+				if origTask.MoveRequestID != nil && *origTask.MoveRequestID == cleanID {
 					if (stop.Type == optimization.StopTypePickup && origTask.TaskType == "pickup") ||
 						(stop.Type == optimization.StopTypeDropoff && origTask.TaskType == "dropoff") {
 						taskID = origTask.ID
+						log.Printf("      ✅ Matched move %s: %s", origTask.TaskType, taskID[:8])
 						break
 					}
 				}
+			}
+			if taskID == "" {
+				log.Printf("      ❌ No match for MoveRequestID=%s (cleanID=%s)", stop.MoveRequestID, cleanID)
 			}
 		}
 
