@@ -2993,6 +2993,23 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	log.Printf("   🔄 Updated %d existing tasks", tasksUpdated)
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+	// Clean up sequence numbers: renumber all active tasks 1, 2, 3, ...
+	// This prevents duplicate/out-of-order sequences from the stop processing
+	var activeTasks []struct {
+		ID string `db:"id"`
+	}
+	err = tx.Select(&activeTasks, `
+		SELECT id FROM route_tasks
+		WHERE shift_id = $1 AND is_deleted = false AND is_completed = 0
+		ORDER BY sequence_order ASC, created_at ASC
+	`, shiftID)
+	if err == nil {
+		for i, t := range activeTasks {
+			tx.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID)
+		}
+		log.Printf("🔢 [REOPTIMIZE] Renumbered %d tasks (1-%d)", len(activeTasks), len(activeTasks))
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
