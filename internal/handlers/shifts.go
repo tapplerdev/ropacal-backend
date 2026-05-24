@@ -630,7 +630,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				SELECT photo_url
 				FROM checks
 				WHERE bin_id = rt.bin_id
-				AND checked_by IN (SELECT driver_id FROM shifts WHERE id = rt.shift_id)
+				AND shift_id = rt.shift_id
 				ORDER BY checked_on DESC
 				LIMIT 1
 			) bc ON true
