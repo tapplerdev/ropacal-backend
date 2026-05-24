@@ -16,12 +16,10 @@ import (
 
 const (
 	// StaleThreshold is how long without GPS before auto-ending a shift
-	// Set to 5 minutes for testing, change to 2 hours for production
-	StaleThreshold = 5 * time.Minute // TODO: change to 2 * time.Hour for production
+	StaleThreshold = 2 * time.Hour
 
 	// CheckInterval is how often the monitor runs
-	// Set to 1 minute for testing, change to 30 minutes for production
-	StaleCheckInterval = 1 * time.Minute // TODO: change to 30 * time.Minute for production
+	StaleCheckInterval = 30 * time.Minute
 )
 
 // StaleShiftMonitor periodically checks for active shifts with no GPS updates
