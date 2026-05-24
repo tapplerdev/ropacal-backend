@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
+	"time"
 
+	"ropacal-backend/internal/services"
+	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/services/roads"
 
@@ -39,7 +43,7 @@ type LocationData struct {
 // CentrifugoLocationPublishProxy handles location publish requests from drivers
 // This is called by Centrifugo BEFORE broadcasting the message
 // We process the GPS data (save to Redis, snap to roads) and return modified data
-func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrmClient *roads.OSRMClient) http.HandlerFunc {
+func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrmClient *roads.OSRMClient, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req LocationPublishProxyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -114,6 +118,11 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 					// log.Printf("✅ [LocationProxy] Saved to Redis: driver:%s", driverID)
 				}
 			}()
+		}
+
+		// 4.5 Check warehouse proximity for auto-end (non-blocking)
+		if locationData.ShiftID != nil && centrifugoClient != nil {
+			go checkWarehouseProximity(db, centrifugoClient, fcmService, driverID, *locationData.ShiftID, locationData.Latitude, locationData.Longitude)
 		}
 
 		// 5. OSRM road snapping (if accuracy > 15m)
@@ -219,4 +228,175 @@ func parseLocationData(data map[string]interface{}) (*LocationData, error) {
 	}
 
 	return location, nil
+}
+
+const warehouseProximityMeters = 300.0
+const autoEndTimeoutMinutes = 5
+
+// checkWarehouseProximity checks if a driver is near the warehouse with all tasks done.
+// If so, prompts the driver to end the shift. If ignored for 5 minutes, auto-ends.
+func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService, driverID string, shiftID string, driverLat, driverLon float64) {
+	// 1. Get shift status and ready_to_end_at
+	var shift struct {
+		Status             string   `db:"status"`
+		ReadyToEndAt       *int64   `db:"ready_to_end_at"`
+		WarehouseLatitude  *float64 `db:"warehouse_latitude"`
+		WarehouseLongitude *float64 `db:"warehouse_longitude"`
+		CompletedBins      int      `db:"completed_bins"`
+		TotalBins          int      `db:"total_bins"`
+		StartTime          *int64   `db:"start_time"`
+		TotalPauseSeconds  int      `db:"total_pause_seconds"`
+		RouteID            *string  `db:"route_id"`
+		CreatedAt          int64    `db:"created_at"`
+		DriverID           string   `db:"driver_id"`
+	}
+	err := db.Get(&shift, `SELECT status, ready_to_end_at, warehouse_latitude, warehouse_longitude, completed_bins, total_bins, start_time, total_pause_seconds, route_id, created_at, driver_id FROM shifts WHERE id = $1`, shiftID)
+	if err != nil || shift.Status != "active" {
+		return
+	}
+
+	// 2. If ready_to_end_at is already set, check for 5-minute timeout
+	if shift.ReadyToEndAt != nil {
+		readyAt := time.Unix(*shift.ReadyToEndAt, 0)
+		if time.Since(readyAt) >= time.Duration(autoEndTimeoutMinutes)*time.Minute {
+			log.Printf("⏰ [PROXIMITY] Auto-ending shift %s — driver ignored prompt for %d minutes", shiftID[:12], autoEndTimeoutMinutes)
+			proximityAutoEndShift(db, centrifugoClient, fcmService, shiftID, shift.DriverID)
+		}
+		return // Already prompted, waiting for response or timeout
+	}
+
+	// 3. Check if warehouse coordinates exist
+	if shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil {
+		return
+	}
+
+	// 4. Check all non-warehouse tasks are done
+	var incompleteCount int
+	err = db.Get(&incompleteCount, `
+		SELECT COUNT(*) FROM route_tasks
+		WHERE shift_id = $1 AND is_deleted = false
+		AND task_type != 'warehouse_stop' AND is_completed = 0
+	`, shiftID)
+	if err != nil || incompleteCount > 0 {
+		return // Still has incomplete tasks
+	}
+
+	// 5. Calculate distance to warehouse
+	distance := haversineMetersProxy(driverLat, driverLon, *shift.WarehouseLatitude, *shift.WarehouseLongitude)
+	if distance > warehouseProximityMeters {
+		return // Not close enough
+	}
+
+	// 6. All conditions met — driver near warehouse with all tasks done
+	log.Printf("📍 [PROXIMITY] Driver near warehouse (%.0fm), all tasks done — prompting to end shift %s", distance, shiftID[:12])
+
+	// Set ready_to_end_at timestamp
+	now := time.Now().Unix()
+	db.Exec(`UPDATE shifts SET ready_to_end_at = $1 WHERE id = $2`, now, shiftID)
+
+	// Auto-complete warehouse_stop tasks
+	db.Exec(`
+		UPDATE route_tasks SET is_completed = 1, completed_at = $1, updated_at = $1
+		WHERE shift_id = $2 AND task_type = 'warehouse_stop' AND is_completed = 0 AND is_deleted = false
+	`, now, shiftID)
+
+	// Send Centrifugo event to driver
+	ctx := context.Background()
+	centrifugoClient.PublishDriverEvent(ctx, driverID, "shift_ready_to_end", map[string]interface{}{
+		"shift_id":         shiftID,
+		"distance_meters":  int(distance),
+		"completed_bins":   shift.CompletedBins,
+		"total_bins":       shift.TotalBins,
+	})
+
+	// Send FCM push notification
+	if fcmService != nil {
+		var tokens []string
+		db.Select(&tokens, `SELECT token FROM fcm_tokens WHERE user_id = $1`, driverID)
+		if len(tokens) > 0 {
+			fcmService.SendMulticast(
+				tokens,
+				"All Tasks Complete!",
+				"You've arrived at the warehouse. Tap to end your shift.",
+				map[string]string{
+					"type":     "shift_ready_to_end",
+					"shift_id": shiftID,
+				},
+			)
+		}
+	}
+}
+
+// proximityAutoEndShift auto-ends a shift after the driver ignored the proximity prompt.
+func proximityAutoEndShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService, shiftID string, driverID string) {
+	now := time.Now().Unix()
+
+	// Get full shift for archiving
+	var shift struct {
+		StartTime         *int64  `db:"start_time"`
+		TotalBins         int     `db:"total_bins"`
+		CompletedBins     int     `db:"completed_bins"`
+		TotalPauseSeconds int     `db:"total_pause_seconds"`
+		RouteID           *string `db:"route_id"`
+		CreatedAt         int64   `db:"created_at"`
+	}
+	err := db.Get(&shift, `SELECT start_time, total_bins, completed_bins, total_pause_seconds, route_id, created_at FROM shifts WHERE id = $1`, shiftID)
+	if err != nil {
+		log.Printf("❌ [PROXIMITY] Failed to get shift %s for auto-end: %v", shiftID[:12], err)
+		return
+	}
+
+	completionRate := 0.0
+	if shift.TotalBins > 0 {
+		completionRate = (float64(shift.CompletedBins) / float64(shift.TotalBins)) * 100
+	}
+
+	// Archive to shift_history
+	db.Exec(`
+		INSERT INTO shift_history (
+			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+			total_pause_seconds, total_bins, completed_bins, completion_rate,
+			incidents_reported, field_observations,
+			end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		ON CONFLICT (id) DO NOTHING
+	`, shiftID, driverID, shift.RouteID, shift.StartTime, now, shift.CreatedAt, now,
+		shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
+		0, 0, "completed", nil, nil, nil)
+
+	// Update shift status
+	db.Exec(`UPDATE shifts SET status = 'ended', end_time = $1, pause_start_time = NULL, ready_to_end_at = NULL, updated_at = $2 WHERE id = $3`, now, now, shiftID)
+
+	// Return incomplete move requests to pending
+	db.Exec(`UPDATE bin_move_requests SET status = 'pending', assigned_shift_id = NULL, updated_at = $1 WHERE assigned_shift_id = $2 AND status = 'in_progress'`, now, shiftID)
+
+	log.Printf("✅ [PROXIMITY] Shift %s auto-ended — driver near warehouse, all tasks done", shiftID[:12])
+
+	// Notify driver
+	ctx := context.Background()
+	centrifugoClient.PublishDriverEvent(ctx, driverID, "shift_auto_ended", map[string]interface{}{
+		"shift_id": shiftID,
+		"reason":   "proximity_timeout",
+	})
+
+	if fcmService != nil {
+		var tokens []string
+		db.Select(&tokens, `SELECT token FROM fcm_tokens WHERE user_id = $1`, driverID)
+		if len(tokens) > 0 {
+			fcmService.SendMulticast(tokens, "Shift Ended", "Your shift has ended. Great work!", map[string]string{
+				"type": "shift_auto_ended", "shift_id": shiftID,
+			})
+		}
+	}
+}
+
+// haversineMetersProxy calculates distance between two GPS coordinates in meters.
+func haversineMetersProxy(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6_371_000.0
+	rlat1 := lat1 * math.Pi / 180
+	rlat2 := lat2 * math.Pi / 180
+	dlat := (lat2 - lat1) * math.Pi / 180
+	dlon := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dlat/2)*math.Sin(dlat/2) + math.Cos(rlat1)*math.Cos(rlat2)*math.Sin(dlon/2)*math.Sin(dlon/2)
+	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }

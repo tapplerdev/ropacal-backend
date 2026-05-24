@@ -865,6 +865,9 @@ func Migrate(db *sqlx.DB) error {
 		// Track how many bins were preloaded at shift start (for mid-shift re-optimization)
 		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS preloaded_bins INT DEFAULT 0`,
 
+		// Track when driver first entered warehouse proximity with all tasks done (for auto-end)
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS ready_to_end_at BIGINT`,
+
 		// AirTag locations — stores latest position per tag, written by FindMy bridge
 		`CREATE TABLE IF NOT EXISTS airtag_locations (
 			id              TEXT PRIMARY KEY,

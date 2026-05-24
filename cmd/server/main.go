@@ -224,7 +224,7 @@ func main() {
 	r.Post("/api/centrifugo/publish", handlers.CentrifugoPublishProxy(db))
 
 	// Centrifugo location publish proxy (processes GPS data before broadcast)
-	r.Post("/api/centrifugo/publish-location", handlers.CentrifugoLocationPublishProxy(db, redisClient, osrmClient))
+	r.Post("/api/centrifugo/publish-location", handlers.CentrifugoLocationPublishProxy(db, redisClient, osrmClient, centrifugoClient, fcmService))
 
 	// Internal API routes (secured with INTERNAL_API_KEY, used by FindMy bridge)
 	r.Route("/api/internal", func(r chi.Router) {
