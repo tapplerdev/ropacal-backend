@@ -177,6 +177,13 @@ func main() {
 	moveRequestMonitor.Start()
 	log.Println("✅ Move request monitor started (15-minute intervals)")
 
+	// Start stale shift monitor (auto-ends shifts with no GPS updates)
+	if redisClient != nil {
+		staleShiftMonitor := services.NewStaleShiftMonitor(db, redisClient, fcmService, centrifugoClient)
+		staleShiftMonitor.Start()
+		log.Println("✅ Stale shift monitor started (checks for disconnected drivers)")
+	}
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()
