@@ -599,6 +599,28 @@ func GetBinIncidents(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+// formatIncidentTypeLabel converts raw incident type to human-readable label
+func formatIncidentTypeLabel(t string) string {
+	switch t {
+	case "vandalism", "vandalized":
+		return "Vandalism"
+	case "theft":
+		return "Theft"
+	case "landlord_complaint":
+		return "Landlord Complaint"
+	case "relocation_request":
+		return "Relocation Request"
+	case "missing":
+		return "Missing Bin"
+	case "damaged":
+		return "Damaged"
+	case "inaccessible":
+		return "Inaccessible"
+	default:
+		return strings.ReplaceAll(t, "_", " ")
+	}
+}
+
 // createZoneAndIncident creates a new zone + incident for each report.
 // Each incident gets its own zone (1:1). No clustering or merging.
 func createZoneAndIncident(

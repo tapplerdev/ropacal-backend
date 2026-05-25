@@ -589,7 +589,7 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				existing.Latitude != nil && existing.Longitude != nil {
 				zoneName := fmt.Sprintf("%s, %s", existing.CurrentStreet, existing.City)
 				adminBinChangeSource := "admin_bin_change"
-				incidentDesc := fmt.Sprintf("No-go zone created from admin bin relocation. Reason: %s", *req.ReasonCategory)
+				incidentDesc := fmt.Sprintf("Incident created from admin bin relocation. Reason: %s", formatIncidentTypeLabel(*req.ReasonCategory))
 				binIDCopy := id
 				_, zoneErr := createZoneAndIncident(
 					db,
