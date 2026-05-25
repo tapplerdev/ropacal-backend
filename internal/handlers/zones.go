@@ -1015,6 +1015,7 @@ func GetNearbyIncidents(db *sqlx.DB) http.HandlerFunc {
 
 		type IncidentRow struct {
 			ID              string   `db:"id" json:"id"`
+			ZoneID          string   `db:"zone_id" json:"zone_id"`
 			IncidentType    string   `db:"incident_type" json:"incident_type"`
 			Description     *string  `db:"description" json:"description"`
 			ReportedAt      int64    `db:"reported_at" json:"reported_at"`
@@ -1026,7 +1027,7 @@ func GetNearbyIncidents(db *sqlx.DB) http.HandlerFunc {
 
 		var rows []IncidentRow
 		err = db.Select(&rows, `
-			SELECT zi.id, zi.incident_type, zi.description, zi.reported_at,
+			SELECT zi.id, zi.zone_id, zi.incident_type, zi.description, zi.reported_at,
 			       b.bin_number, z.center_latitude, z.center_longitude, z.name AS zone_name
 			FROM zone_incidents zi
 			JOIN no_go_zones z ON zi.zone_id = z.id
@@ -1042,6 +1043,7 @@ func GetNearbyIncidents(db *sqlx.DB) http.HandlerFunc {
 
 		type NearbyIncident struct {
 			ID             string  `json:"id"`
+			ZoneID         string  `json:"zone_id"`
 			IncidentType   string  `json:"incident_type"`
 			Description    *string `json:"description"`
 			DistanceMeters float64 `json:"distance_meters"`
@@ -1056,6 +1058,7 @@ func GetNearbyIncidents(db *sqlx.DB) http.HandlerFunc {
 			if dist <= radius {
 				nearby = append(nearby, NearbyIncident{
 					ID:             row.ID,
+					ZoneID:         row.ZoneID,
 					IncidentType:   row.IncidentType,
 					Description:    row.Description,
 					DistanceMeters: math.Round(dist),
