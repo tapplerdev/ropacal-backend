@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -614,17 +616,8 @@ func GetBinIncidents(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// createZoneAndIncident is a shared helper that finds or creates a no-go zone
-// at the given coordinates, inserts a zone_incident, and runs merge detection.
-//
-// Used by both the driver CompleteTask flow and the manager incident report flow.
-//
-// Parameters:
-//   - binID: nil for address-only manager reports (no bin involved)
-//   - shiftID / checkID: nil for manager reports
-//   - isFieldObservation: true for manager-logged reports
-//
-// Returns the created incidentID or an error.
+// createZoneAndIncident creates a new zone + incident for each report.
+// Each incident gets its own zone (1:1). No clustering or merging.
 func createZoneAndIncident(
 	db *sqlx.DB,
 	centrifugoClient *centrifugo.Client,
@@ -641,64 +634,20 @@ func createZoneAndIncident(
 	reporterLng *float64,
 	isFieldObservation bool,
 	now int64,
-	// source identifies how this zone/incident was created:
-	// 'driver_shift' | 'manager_report' | 'admin_bin_change' | 'move_request'
 	source *string,
-	// moveRequestID links the incident back to the move request that triggered it (nullable)
 	moveRequestID *string,
 ) (string, error) {
-	// 1. Find existing active zone within 100m
-	var existingZone *models.NoGoZone
-	var zones []models.NoGoZone
-	if err := db.Select(&zones, "SELECT * FROM no_go_zones WHERE status = 'active'"); err != nil {
-		log.Printf("⚠️  [createZoneAndIncident] Error fetching zones: %v", err)
-		// Non-fatal — continue to create new zone
-	} else {
-		var minDist float64 = -1
-		for _, z := range zones {
-			dist := calculateZoneDistance(lat, lng, z.CenterLatitude, z.CenterLongitude)
-			if dist < 100 && (minDist < 0 || dist < minDist) {
-				zCopy := z
-				existingZone = &zCopy
-				minDist = dist
-			}
-		}
-		if existingZone != nil {
-			log.Printf("📍 [createZoneAndIncident] Found nearest existing zone within 100m (%.2fm)", minDist)
-		}
+	// 1. Always create a new zone for this incident
+	zoneID := uuid.New().String()
+	if _, err := db.Exec(`
+		INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 0, 0, 'active', $5, $6, $6)
+	`, zoneID, zoneName, lat, lng, reportedByUserID, now); err != nil {
+		return "", fmt.Errorf("failed to create zone: %w", err)
 	}
+	log.Printf("✅ [createZoneAndIncident] Created zone %s (%s)", zoneID, zoneName)
 
-	// 2. Create or update zone
-	var zoneID string
-	if existingZone != nil {
-		zoneID = existingZone.ID
-		newScore := existingZone.ConflictScore + getIncidentScore(incidentType)
-		if _, err := db.Exec(
-			`UPDATE no_go_zones SET conflict_score = $1, updated_at = $2 WHERE id = $3`,
-			newScore, now, zoneID,
-		); err != nil {
-			return "", fmt.Errorf("failed to update zone score: %w", err)
-		}
-		log.Printf("✅ [createZoneAndIncident] Updated zone %s (new score: %d)", zoneID, newScore)
-	} else {
-		zoneID = uuid.New().String()
-		radius := getZoneRadius(incidentType)
-		score := getIncidentScore(incidentType)
-		if _, err := db.Exec(`
-			INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $8)
-		`, zoneID, zoneName, lat, lng, radius, score, reportedByUserID, now); err != nil {
-			return "", fmt.Errorf("failed to create zone: %w", err)
-		}
-		log.Printf("✅ [createZoneAndIncident] Created new zone %s (%s, radius %dm, score %d)", zoneID, zoneName, radius, score)
-	}
-
-	// 3. Run merge detection (non-fatal if it fails)
-	if mergeErr := detectAndMergeZones(db, centrifugoClient, zoneID, now); mergeErr != nil {
-		log.Printf("⚠️  [createZoneAndIncident] Zone merge check failed: %v", mergeErr)
-	}
-
-	// 4. Insert incident record
+	// 2. Insert incident record
 	incidentID := uuid.New().String()
 	if _, err := db.Exec(`
 		INSERT INTO zone_incidents (
@@ -1033,5 +982,93 @@ func UpdateNoGoZone(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.Handl
 		// Return updated zone
 		response := updatedZone.ToResponse()
 		utils.RespondJSON(w, http.StatusOK, response)
+	}
+}
+
+// GetNearbyIncidents returns active incidents within a radius of a given point.
+// Used by the frontend to show proximity warnings when placing bins or move destinations.
+//
+// Query params: lat, lng, radius (meters, default 800)
+func GetNearbyIncidents(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		latStr := r.URL.Query().Get("lat")
+		lngStr := r.URL.Query().Get("lng")
+		radiusStr := r.URL.Query().Get("radius")
+
+		lat, err := strconv.ParseFloat(latStr, 64)
+		if err != nil || lat == 0 {
+			utils.RespondError(w, http.StatusBadRequest, "invalid lat parameter")
+			return
+		}
+		lng, err := strconv.ParseFloat(lngStr, 64)
+		if err != nil || lng == 0 {
+			utils.RespondError(w, http.StatusBadRequest, "invalid lng parameter")
+			return
+		}
+
+		radius := 800.0 // default 800m
+		if radiusStr != "" {
+			if parsed, err := strconv.ParseFloat(radiusStr, 64); err == nil && parsed > 0 {
+				radius = parsed
+			}
+		}
+
+		type IncidentRow struct {
+			ID              string   `db:"id" json:"id"`
+			IncidentType    string   `db:"incident_type" json:"incident_type"`
+			Description     *string  `db:"description" json:"description"`
+			ReportedAt      int64    `db:"reported_at" json:"reported_at"`
+			BinNumber       *int     `db:"bin_number" json:"bin_number"`
+			CenterLatitude  float64  `db:"center_latitude" json:"-"`
+			CenterLongitude float64  `db:"center_longitude" json:"-"`
+			Address         *string  `db:"zone_name" json:"address"`
+		}
+
+		var rows []IncidentRow
+		err = db.Select(&rows, `
+			SELECT zi.id, zi.incident_type, zi.description, zi.reported_at,
+			       b.bin_number, z.center_latitude, z.center_longitude, z.name AS zone_name
+			FROM zone_incidents zi
+			JOIN no_go_zones z ON zi.zone_id = z.id
+			LEFT JOIN bins b ON zi.bin_id = b.id
+			WHERE z.status = 'active'
+			ORDER BY zi.reported_at DESC
+		`)
+		if err != nil {
+			log.Printf("❌ [GetNearbyIncidents] Query failed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "failed to fetch incidents")
+			return
+		}
+
+		type NearbyIncident struct {
+			ID             string  `json:"id"`
+			IncidentType   string  `json:"incident_type"`
+			Description    *string `json:"description"`
+			DistanceMeters float64 `json:"distance_meters"`
+			ReportedAt     int64   `json:"reported_at"`
+			BinNumber      *int    `json:"bin_number"`
+			Address        *string `json:"address"`
+		}
+
+		var nearby []NearbyIncident
+		for _, row := range rows {
+			dist := calculateZoneDistance(lat, lng, row.CenterLatitude, row.CenterLongitude)
+			if dist <= radius {
+				nearby = append(nearby, NearbyIncident{
+					ID:             row.ID,
+					IncidentType:   row.IncidentType,
+					Description:    row.Description,
+					DistanceMeters: math.Round(dist),
+					ReportedAt:     row.ReportedAt,
+					BinNumber:      row.BinNumber,
+					Address:        row.Address,
+				})
+			}
+		}
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"incidents": nearby,
+			"count":     len(nearby),
+		})
 	}
 }

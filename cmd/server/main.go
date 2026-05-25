@@ -291,6 +291,7 @@ func main() {
 		r.Get("/no-go-zones", handlers.GetNoGoZones(db))
 		r.Get("/no-go-zones/{id}", handlers.GetNoGoZone(db))
 		r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
+		r.Get("/incidents/nearby", handlers.GetNearbyIncidents(db))
 
 		// Shift-related incident queries
 		r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
