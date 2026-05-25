@@ -2470,7 +2470,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	// Gate 1: Minimum tasks check
 	minTasks := 5
 	if skipGates {
-		minTasks = 3 // More lenient for manager edits
+		minTasks = 1 // Manager-initiated: optimize even with 1 task
 	}
 
 	if remainingTasks < minTasks {
