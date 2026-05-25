@@ -304,12 +304,18 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			// Use bin address for zone name (matches manual zone creation UX)
 			zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
 			binIDCopy := req.BinID
+			// Use manager notes as description, or generate a fallback
+			incidentNotes := req.Notes
+			if incidentNotes == nil || *incidentNotes == "" {
+				fallback := fmt.Sprintf("Bin #%d move request created — %s", bin.BinNumber, formatIncidentTypeLabel(incidentType))
+				incidentNotes = &fallback
+			}
 			_, zoneErr := createZoneAndIncident(
 				db, centrifugoClient,
 				*bin.Latitude, *bin.Longitude,
 				zoneName, incidentType,
 				&binIDCopy, userID,
-				req.Notes, nil,
+				incidentNotes, nil,
 				nil, nil,
 				nil, nil,
 				false, now,
