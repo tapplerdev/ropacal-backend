@@ -235,10 +235,11 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 		var incidents []struct {
 			ID                 string   `db:"id"`
 			ZoneID             string   `db:"zone_id"`
-			BinID              *string  `db:"bin_id"` // nil for address-only manager reports
+			BinID              *string  `db:"bin_id"`
 			BinNumber          *int     `db:"bin_number"`
 			IncidentType       string   `db:"incident_type"`
 			ReportedByUserID   *string  `db:"reported_by_user_id"`
+			ReportedByName     *string  `db:"reported_by_name"`
 			ReportedAt         int64    `db:"reported_at"`
 			Description        *string  `db:"description"`
 			PhotoURL           *string  `db:"photo_url"`
@@ -249,52 +250,32 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 			ReporterLongitude  *float64 `db:"reporter_longitude"`
 			IsFieldObservation bool     `db:"is_field_observation"`
 			VerifiedByUserID   *string  `db:"verified_by_user_id"`
+			VerifiedByName     *string  `db:"verified_by_name"`
 			VerifiedAt         *int64   `db:"verified_at"`
 			Status             string   `db:"status"`
 			Source             *string  `db:"source"`
 			MoveRequestID      *string  `db:"move_request_id"`
 		}
 
-		var query string
-		if includeMerged {
-			// Include incidents from zones that were merged into this zone
-			query = `
-				SELECT zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
-				       zi.reported_by_user_id, zi.reported_at,
-				       zi.description, zi.photo_url,
-				       zi.check_id, zi.move_id, zi.shift_id,
-				       zi.reporter_latitude, zi.reporter_longitude,
-				       zi.is_field_observation,
-				       zi.verified_by_user_id, zi.verified_at,
-				       zi.status,
-				       zi.source, zi.move_request_id,
-				       b.bin_number
-				FROM zone_incidents zi
-				LEFT JOIN bins b ON zi.bin_id = b.id
-				WHERE zi.zone_id = $1 OR zi.zone_id IN (
-					SELECT id FROM no_go_zones WHERE merged_into_zone_id = $1
-				)
-				ORDER BY zi.reported_at DESC
-			`
-		} else {
-			// Only incidents directly associated with this zone
-			query = `
-				SELECT zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
-				       zi.reported_by_user_id, zi.reported_at,
-				       zi.description, zi.photo_url,
-				       zi.check_id, zi.move_id, zi.shift_id,
-				       zi.reporter_latitude, zi.reporter_longitude,
-				       zi.is_field_observation,
-				       zi.verified_by_user_id, zi.verified_at,
-				       zi.status,
-				       zi.source, zi.move_request_id,
-				       b.bin_number
-				FROM zone_incidents zi
-				LEFT JOIN bins b ON zi.bin_id = b.id
-				WHERE zi.zone_id = $1
-				ORDER BY zi.reported_at DESC
-			`
-		}
+		query := `
+			SELECT zi.id, zi.zone_id, zi.bin_id, zi.incident_type,
+			       zi.reported_by_user_id, zi.reported_at,
+			       zi.description, zi.photo_url,
+			       zi.check_id, zi.move_id, zi.shift_id,
+			       zi.reporter_latitude, zi.reporter_longitude,
+			       zi.is_field_observation,
+			       zi.verified_by_user_id, zi.verified_at,
+			       zi.status, zi.source, zi.move_request_id,
+			       b.bin_number,
+			       u1.name AS reported_by_name,
+			       u2.name AS verified_by_name
+			FROM zone_incidents zi
+			LEFT JOIN bins b ON zi.bin_id = b.id
+			LEFT JOIN users u1 ON zi.reported_by_user_id = u1.id
+			LEFT JOIN users u2 ON zi.verified_by_user_id = u2.id
+			WHERE zi.zone_id = $1
+			ORDER BY zi.reported_at DESC
+		`
 
 		if err := db.Select(&incidents, query, zoneID); err != nil {
 			log.Printf("❌ Error fetching incidents: %v", err)
@@ -303,16 +284,17 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Convert to response format with ISO timestamps
-		response := make([]ZoneIncidentResponse, len(incidents))
+		response := make([]models.ZoneIncidentResponse, len(incidents))
 		for i, incident := range incidents {
-			response[i] = ZoneIncidentResponse{
+			response[i] = models.ZoneIncidentResponse{
 				ID:                 incident.ID,
 				ZoneID:             incident.ZoneID,
 				BinID:              incident.BinID,
 				BinNumber:          incident.BinNumber,
 				IncidentType:       incident.IncidentType,
 				ReportedByUserID:   incident.ReportedByUserID,
-				ReportedAtISO:      time.Unix(incident.ReportedAt, 0).Format(time.RFC3339),
+				ReportedByName:     incident.ReportedByName,
+				ReportedAtIso:      time.Unix(incident.ReportedAt, 0).Format(time.RFC3339),
 				Description:        incident.Description,
 				PhotoURL:           incident.PhotoURL,
 				CheckID:            incident.CheckID,
@@ -322,6 +304,7 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 				ReporterLongitude:  incident.ReporterLongitude,
 				IsFieldObservation: incident.IsFieldObservation,
 				VerifiedByUserID:   incident.VerifiedByUserID,
+				VerifiedByName:     incident.VerifiedByName,
 				Status:             incident.Status,
 				Source:             incident.Source,
 				MoveRequestID:      incident.MoveRequestID,
@@ -329,11 +312,11 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 
 			if incident.VerifiedAt != nil {
 				verifiedISO := time.Unix(*incident.VerifiedAt, 0).Format(time.RFC3339)
-				response[i].VerifiedAtISO = &verifiedISO
+				response[i].VerifiedAtIso = &verifiedISO
 			}
 		}
 
-		log.Printf("✅ Found %d incidents for zone %s (include_merged: %v)", len(response), zoneID, includeMerged)
+		log.Printf("✅ Found %d incidents for zone %s", len(response), zoneID)
 		utils.RespondJSON(w, http.StatusOK, response)
 	}
 }
