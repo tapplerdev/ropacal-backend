@@ -209,6 +209,8 @@ func CreateShiftWithTasks(
 	// Schedule fields (vehicle time constraints)
 	scheduledStart *string,
 	scheduledEnd *string,
+	// Date this shift is scheduled for
+	scheduledDate *string,
 ) (string, int, error) {
 	tx, err := db.Beginx()
 	if err != nil {
@@ -225,6 +227,12 @@ func CreateShiftWithTasks(
 	shiftID := uuid.New().String()
 	now := time.Now().Unix()
 
+	// Default scheduled_date to today if not provided
+	if scheduledDate == nil {
+		today := time.Now().Format("2006-01-02")
+		scheduledDate = &today
+	}
+
 	shiftQuery := `
 		INSERT INTO shifts (
 			id, driver_id, status, total_bins, completed_bins,
@@ -232,9 +240,9 @@ func CreateShiftWithTasks(
 			lock_route_order, shift_type, shift_label,
 			start_latitude, start_longitude, start_address,
 			end_latitude, end_longitude, end_address,
-			scheduled_start, scheduled_end,
+			scheduled_start, scheduled_end, scheduled_date,
 			created_at, updated_at
-		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 	`
 
 	// Count only bin-related tasks (exclude warehouse_stop) for total_bins
@@ -254,7 +262,7 @@ func CreateShiftWithTasks(
 		lockRouteOrder, shiftType, shiftLabel,
 		startLat, startLon, startAddr,
 		endLat, endLon, endAddr,
-		scheduledStart, scheduledEnd,
+		scheduledStart, scheduledEnd, scheduledDate,
 		now, now,
 	)
 	if err != nil {

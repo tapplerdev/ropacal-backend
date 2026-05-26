@@ -868,6 +868,11 @@ func Migrate(db *sqlx.DB) error {
 		// Track when driver first entered warehouse proximity with all tasks done (for auto-end)
 		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS ready_to_end_at BIGINT`,
 
+		// Scheduled date: which date this shift is for (enables future scheduling + auto-cancel)
+		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS scheduled_date DATE`,
+		`UPDATE shifts SET scheduled_date = DATE(TO_TIMESTAMP(COALESCE(start_time, created_at))) WHERE scheduled_date IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_shifts_scheduled_date ON shifts(scheduled_date)`,
+
 		// AirTag locations — stores latest position per tag, written by FindMy bridge
 		`CREATE TABLE IF NOT EXISTS airtag_locations (
 			id              TEXT PRIMARY KEY,

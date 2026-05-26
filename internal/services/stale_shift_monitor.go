@@ -121,6 +121,27 @@ func (m *StaleShiftMonitor) checkStaleShifts() {
 		})
 	}
 
+	// Auto-cancel ready shifts that are past their scheduled date by 24hr
+	var expiredReadyShifts []activeShiftRow
+	m.db.Select(&expiredReadyShifts, `
+		SELECT s.id, s.driver_id, s.start_time, s.total_bins, s.completed_bins,
+		       s.total_pause_seconds, s.route_id, s.created_at,
+		       u.name as driver_name, u.email as driver_email
+		FROM shifts s
+		JOIN users u ON s.driver_id = u.id
+		WHERE s.status = 'ready'
+		  AND s.scheduled_date IS NOT NULL
+		  AND s.scheduled_date < (CURRENT_DATE - INTERVAL '1 day')
+	`)
+	for _, s := range expiredReadyShifts {
+		log.Printf("⏰ [StaleShiftMonitor] Auto-cancelling expired ready shift %s for %s — scheduled for past date",
+			s.ID[:12], s.DriverName)
+		m.autoEndShift(s)
+	}
+	if len(expiredReadyShifts) > 0 {
+		log.Printf("📋 [StaleShiftMonitor] Cancelled %d expired ready shifts", len(expiredReadyShifts))
+	}
+
 	// Then: check for stale GPS on remaining active shifts
 	var shifts []activeShiftRow
 	err := m.db.Select(&shifts, `

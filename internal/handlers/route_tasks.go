@@ -146,7 +146,13 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			req.ShiftType = "standard"
 		}
 
-		// Check if driver already has an active/ready shift
+		// Check if driver already has an active/ready shift for the same date
+		scheduledDate := req.ScheduledDate
+		if scheduledDate == nil {
+			today := time.Now().Format("2006-01-02")
+			scheduledDate = &today
+		}
+
 		var existingShift struct {
 			ID          string `db:"id" json:"id"`
 			Status      string `db:"status" json:"status"`
@@ -159,8 +165,9 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			       (SELECT COUNT(*) FROM route_tasks rt WHERE rt.shift_id = s.id AND rt.is_deleted = false) as active_tasks
 			FROM shifts s
 			WHERE s.driver_id = $1 AND s.status IN ('active', 'ready')
+			  AND (s.scheduled_date = $2 OR s.scheduled_date IS NULL)
 			LIMIT 1
-		`, req.DriverID)
+		`, req.DriverID, *scheduledDate)
 		if existingErr == nil {
 			log.Printf("⚠️  Driver %s already has a %s shift: %s", req.DriverID, existingShift.Status, existingShift.ID)
 			w.Header().Set("Content-Type", "application/json")
@@ -205,6 +212,7 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			req.EndAddress,
 			req.ScheduledStart,
 			req.ScheduledEnd,
+			scheduledDate,
 		)
 		if err != nil {
 			log.Printf("❌ Error: %v", err)

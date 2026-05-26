@@ -46,6 +46,7 @@ type Shift struct {
 	LockRouteOrder       bool                  `json:"lock_route_order" db:"lock_route_order"`
 	PreloadedBins        int                   `json:"preloaded_bins" db:"preloaded_bins"`
 	ReadyToEndAt         *int64                `json:"ready_to_end_at,omitempty" db:"ready_to_end_at"`
+	ScheduledDate        *string               `json:"scheduled_date,omitempty" db:"scheduled_date"`
 	OptimizationMetadata *OptimizationMetadata `json:"optimization_metadata,omitempty" db:"optimization_metadata"`
 
 	// Custom shift fields
