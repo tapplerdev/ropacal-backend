@@ -446,6 +446,60 @@ func CreateShiftWithTasks(
 			}
 		}
 
+		// Auto-populate move request addresses if missing
+		if moveReqIDInterface, ok := taskData["move_request_id"]; ok && moveReqIDInterface != nil {
+			moveReqID, _ := moveReqIDInterface.(string)
+			if moveReqID != "" {
+				_, hasLat := taskData["latitude"]
+				_, hasLng := taskData["longitude"]
+				_, hasAddr := taskData["address"]
+				_, hasDestAddr := taskData["destination_address"]
+				_, hasDestLat := taskData["destination_latitude"]
+				_, hasDestLng := taskData["destination_longitude"]
+
+				if !hasLat || !hasLng || !hasAddr || !hasDestAddr || !hasDestLat || !hasDestLng {
+					var mrData struct {
+						OriginalLatitude  *float64 `db:"original_latitude"`
+						OriginalLongitude *float64 `db:"original_longitude"`
+						OriginalAddress   *string  `db:"original_address"`
+						NewLatitude       *float64 `db:"new_latitude"`
+						NewLongitude      *float64 `db:"new_longitude"`
+						NewAddress        *string  `db:"new_address"`
+						BinID             string   `db:"bin_id"`
+					}
+					err := tx.Get(&mrData, "SELECT original_latitude, original_longitude, original_address, new_latitude, new_longitude, new_address, bin_id FROM bin_move_requests WHERE id = $1", moveReqID)
+					if err == nil {
+						// Also get bin_number
+						var binNum int
+						tx.Get(&binNum, "SELECT bin_number FROM bins WHERE id = $1", mrData.BinID)
+						if binNum > 0 {
+							taskData["bin_number"] = binNum
+							taskData["bin_id"] = mrData.BinID
+						}
+
+						if taskType == "pickup" {
+							if !hasLat && mrData.OriginalLatitude != nil { taskData["latitude"] = *mrData.OriginalLatitude }
+							if !hasLng && mrData.OriginalLongitude != nil { taskData["longitude"] = *mrData.OriginalLongitude }
+							if !hasAddr && mrData.OriginalAddress != nil { taskData["address"] = *mrData.OriginalAddress }
+							if !hasDestLat && mrData.NewLatitude != nil { taskData["destination_latitude"] = *mrData.NewLatitude }
+							if !hasDestLng && mrData.NewLongitude != nil { taskData["destination_longitude"] = *mrData.NewLongitude }
+							if !hasDestAddr && mrData.NewAddress != nil { taskData["destination_address"] = *mrData.NewAddress }
+						} else if taskType == "dropoff" {
+							if !hasLat && mrData.NewLatitude != nil { taskData["latitude"] = *mrData.NewLatitude }
+							if !hasLng && mrData.NewLongitude != nil { taskData["longitude"] = *mrData.NewLongitude }
+							if !hasAddr && mrData.NewAddress != nil { taskData["address"] = *mrData.NewAddress }
+							if !hasDestLat && mrData.NewLatitude != nil { taskData["destination_latitude"] = *mrData.NewLatitude }
+							if !hasDestLng && mrData.NewLongitude != nil { taskData["destination_longitude"] = *mrData.NewLongitude }
+							if !hasDestAddr && mrData.NewAddress != nil { taskData["destination_address"] = *mrData.NewAddress }
+						}
+						log.Printf("   ✅ Task #%d: Auto-populated move request addresses from bin_move_requests", i+1)
+					} else {
+						log.Printf("   ⚠️  Task #%d: Failed to lookup move request %s: %v", i+1, moveReqID, err)
+					}
+				}
+			}
+		}
+
 		// Determine placement_source: default to "potential_location" for placement tasks
 		placementSource := getString("placement_source")
 		if taskType == "placement" && placementSource == nil {
