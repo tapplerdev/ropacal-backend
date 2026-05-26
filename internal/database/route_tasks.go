@@ -528,6 +528,10 @@ func CreateShiftWithTasks(
 			photoRequired = true
 		}
 
+		// Re-extract lat/lon after auto-populate (may have been updated from bins/move_requests)
+		lat, _ = taskData["latitude"].(float64)
+		lon, _ = taskData["longitude"].(float64)
+
 		_, err = tx.Exec(
 			taskQuery,
 			taskID, shiftID, i+1, taskType, lat, lon,
