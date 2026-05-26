@@ -86,6 +86,42 @@ func (m *StaleShiftMonitor) Stop() {
 
 func (m *StaleShiftMonitor) checkStaleShifts() {
 	// Only check active shifts (not paused — driver intentionally paused)
+	// First: auto-end any shifts where ready_to_end_at expired (driver was at warehouse, GPS stopped)
+	var readyToEndShifts []struct {
+		ID             string `db:"id"`
+		DriverID       string `db:"driver_id"`
+		DriverName     string `db:"driver_name"`
+		ReadyToEndAt   int64  `db:"ready_to_end_at"`
+		StartTime      *int64 `db:"start_time"`
+		TotalBins      int    `db:"total_bins"`
+		CompletedBins  int    `db:"completed_bins"`
+		TotalPauseSeconds int `db:"total_pause_seconds"`
+		RouteID        *string `db:"route_id"`
+		CreatedAt      int64  `db:"created_at"`
+		DriverEmail    string `db:"driver_email"`
+	}
+	m.db.Select(&readyToEndShifts, `
+		SELECT s.id, s.driver_id, s.ready_to_end_at, s.start_time, s.total_bins, s.completed_bins,
+		       s.total_pause_seconds, s.route_id, s.created_at,
+		       u.name as driver_name, u.email as driver_email
+		FROM shifts s
+		JOIN users u ON s.driver_id = u.id
+		WHERE s.status = 'active' AND s.ready_to_end_at IS NOT NULL
+		  AND s.ready_to_end_at < $1
+	`, time.Now().Unix()-300) // 5 minutes ago
+
+	for _, s := range readyToEndShifts {
+		log.Printf("⏰ [StaleShiftMonitor] Auto-ending shift %s for %s — ready_to_end expired %s ago",
+			s.ID[:12], s.DriverName, time.Since(time.Unix(s.ReadyToEndAt, 0)).Round(time.Second))
+		m.autoEndShift(activeShiftRow{
+			ID: s.ID, DriverID: s.DriverID, StartTime: s.StartTime,
+			TotalBins: s.TotalBins, CompletedBins: s.CompletedBins,
+			TotalPauseSeconds: s.TotalPauseSeconds, RouteID: s.RouteID,
+			CreatedAt: s.CreatedAt, DriverName: s.DriverName, DriverEmail: s.DriverEmail,
+		})
+	}
+
+	// Then: check for stale GPS on remaining active shifts
 	var shifts []activeShiftRow
 	err := m.db.Select(&shifts, `
 		SELECT s.id, s.driver_id, s.start_time, s.total_bins, s.completed_bins,
