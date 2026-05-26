@@ -2813,7 +2813,10 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	}
 
 	route := response.Routes[0]
-	log.Printf("✅ [REOPTIMIZE] Optimization complete: %d stops", len(route.Stops))
+	log.Printf("✅ [REOPTIMIZE] Optimization complete: %d stops, %d dropped tasks", len(route.Stops), len(response.DroppedTasks))
+	if len(response.DroppedTasks) > 0 {
+		log.Printf("⚠️  [REOPTIMIZE] DROPPED TASKS: %v", response.DroppedTasks)
+	}
 	for si, s := range route.Stops {
 		log.Printf("   🔍 [REOPTIMIZE] Raw stop %d: Type=%s LocationID=%s CollectionID=%s PlacementID=%s MoveRequestID=%s Lat=%.6f Lng=%.6f",
 			si, s.Type, s.LocationID, s.CollectionID, s.PlacementID, s.MoveRequestID, s.Latitude, s.Longitude)
@@ -3038,7 +3041,7 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// Clean up sequence numbers: renumber all active tasks 1, 2, 3, ...
-	// This prevents duplicate/out-of-order sequences from the stop processing
+	// Non-warehouse tasks first, then warehouse_stop tasks at the end
 	var activeTasks []struct {
 		ID            string `db:"id"`
 		TaskType      string `db:"task_type"`
@@ -3047,7 +3050,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	err = tx.Select(&activeTasks, `
 		SELECT id, task_type, sequence_order FROM route_tasks
 		WHERE shift_id = $1 AND is_deleted = false AND is_completed = 0
-		ORDER BY sequence_order ASC, created_at ASC
+		ORDER BY
+			CASE WHEN task_type = 'warehouse_stop' THEN 1 ELSE 0 END ASC,
+			sequence_order ASC, created_at ASC
 	`, shiftID)
 	if err == nil {
 		log.Printf("🔢 [REOPTIMIZE] Renumbering %d tasks:", len(activeTasks))
