@@ -392,16 +392,24 @@ func CreateShiftWithTasks(
 		if binIDInterface, ok := taskData["bin_id"]; ok && binIDInterface != nil {
 			binID, _ := binIDInterface.(string)
 			if binID != "" {
-				// Check if bin_number or fill_percentage is missing
+				// Auto-populate bin details from bins table if missing
 				_, hasBinNumber := taskData["bin_number"]
 				_, hasFillPercentage := taskData["fill_percentage"]
+				_, hasLatitude := taskData["latitude"]
+				_, hasLongitude := taskData["longitude"]
+				_, hasAddress := taskData["address"]
 
-				if !hasBinNumber || !hasFillPercentage {
+				if !hasBinNumber || !hasFillPercentage || !hasLatitude || !hasLongitude || !hasAddress {
 					var binData struct {
-						BinNumber      int `db:"bin_number"`
-						FillPercentage int `db:"fill_percentage"`
+						BinNumber      int     `db:"bin_number"`
+						FillPercentage int     `db:"fill_percentage"`
+						Latitude       float64 `db:"latitude"`
+						Longitude      float64 `db:"longitude"`
+						CurrentStreet  string  `db:"current_street"`
+						City           string  `db:"city"`
+						Zip            string  `db:"zip"`
 					}
-					err := tx.Get(&binData, "SELECT bin_number, fill_percentage FROM bins WHERE id = $1", binID)
+					err := tx.Get(&binData, "SELECT bin_number, fill_percentage, latitude, longitude, current_street, city, zip FROM bins WHERE id = $1", binID)
 					if err == nil {
 						if !hasBinNumber {
 							taskData["bin_number"] = binData.BinNumber
@@ -411,7 +419,19 @@ func CreateShiftWithTasks(
 							taskData["fill_percentage"] = binData.FillPercentage
 							log.Printf("   ✅ Task #%d: Auto-populated fill_percentage=%d from bins table", i+1, binData.FillPercentage)
 						}
-					} else if err != nil {
+						if !hasLatitude {
+							taskData["latitude"] = binData.Latitude
+						}
+						if !hasLongitude {
+							taskData["longitude"] = binData.Longitude
+						}
+						if !hasAddress {
+							taskData["address"] = fmt.Sprintf("%s, %s %s", binData.CurrentStreet, binData.City, binData.Zip)
+						}
+						if !hasLatitude || !hasLongitude || !hasAddress {
+							log.Printf("   ✅ Task #%d: Auto-populated location (%.6f, %.6f) %s", i+1, binData.Latitude, binData.Longitude, binData.CurrentStreet)
+						}
+					} else {
 						log.Printf("   ⚠️  Task #%d: Failed to lookup bin data for %s: %v", i+1, binID, err)
 					}
 				}
