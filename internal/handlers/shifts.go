@@ -2791,6 +2791,13 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 
 	log.Printf("📊 [REOPTIMIZE] Request: %d collections, %d placements, %d moves, %d service tasks",
 		len(req.Collections), len(req.Placements), len(req.MoveRequests), len(req.ServiceTasks))
+	log.Printf("🔍 [REOPTIMIZE] Vehicle: start=%s (%.6f,%.6f) end=%s (%.6f,%.6f) capacity=%d startupBins=%d",
+		req.Vehicles[0].StartLocation.ID, req.Vehicles[0].StartLocation.Latitude, req.Vehicles[0].StartLocation.Longitude,
+		req.Vehicles[0].EndLocation.ID, req.Vehicles[0].EndLocation.Latitude, req.Vehicles[0].EndLocation.Longitude,
+		req.Vehicles[0].Capacities["bins"], req.Vehicles[0].StartupBins)
+	for ci, c := range req.Collections {
+		log.Printf("🔍 [REOPTIMIZE] Collection[%d]: ID=%s Bin#%d at (%.6f,%.6f)", ci, c.ID, c.BinNumber, c.Location.Latitude, c.Location.Longitude)
+	}
 
 	// Step 6: Call optimizer (configured via OPTIMIZER_TYPE env var)
 	log.Printf("🚀 [REOPTIMIZE] Calling route optimizer...")
@@ -2807,6 +2814,10 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 
 	route := response.Routes[0]
 	log.Printf("✅ [REOPTIMIZE] Optimization complete: %d stops", len(route.Stops))
+	for si, s := range route.Stops {
+		log.Printf("   🔍 [REOPTIMIZE] Raw stop %d: Type=%s LocationID=%s CollectionID=%s PlacementID=%s MoveRequestID=%s Lat=%.6f Lng=%.6f",
+			si, s.Type, s.LocationID, s.CollectionID, s.PlacementID, s.MoveRequestID, s.Latitude, s.Longitude)
+	}
 
 	// Step 7: Calculate old vs new completion time (time savings check)
 	if !skipGates && len(tasks) > 0 {
