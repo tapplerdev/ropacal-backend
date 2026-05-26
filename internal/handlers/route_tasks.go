@@ -146,6 +146,32 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			req.ShiftType = "standard"
 		}
 
+		// Check if driver already has an active/ready shift
+		var existingShift struct {
+			ID          string `db:"id" json:"id"`
+			Status      string `db:"status" json:"status"`
+			CreatedAt   int64  `db:"created_at" json:"created_at"`
+			TotalBins   int    `db:"total_bins" json:"total_bins"`
+			ActiveTasks int    `db:"active_tasks" json:"active_tasks"`
+		}
+		existingErr := db.Get(&existingShift, `
+			SELECT s.id, s.status, s.created_at, s.total_bins,
+			       (SELECT COUNT(*) FROM route_tasks rt WHERE rt.shift_id = s.id AND rt.is_deleted = false) as active_tasks
+			FROM shifts s
+			WHERE s.driver_id = $1 AND s.status IN ('active', 'ready')
+			LIMIT 1
+		`, req.DriverID)
+		if existingErr == nil {
+			log.Printf("⚠️  Driver %s already has a %s shift: %s", req.DriverID, existingShift.Status, existingShift.ID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          "Driver already has an active shift",
+				"existing_shift": existingShift,
+			})
+			return
+		}
+
 		// Validate based on shift type
 		isCustom := req.ShiftType == "custom"
 		if !isCustom {
