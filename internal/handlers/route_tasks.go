@@ -192,6 +192,26 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			req.LockRouteOrder = false
 		}
 
+		// Auto-populate warehouse coordinates from config if not provided
+		if req.WarehouseLatitude == nil || req.WarehouseLongitude == nil || (*req.WarehouseLatitude == 0 && *req.WarehouseLongitude == 0) {
+			var whConfig struct {
+				Latitude  float64 `db:"latitude"`
+				Longitude float64 `db:"longitude"`
+				Address   string  `db:"address"`
+			}
+			cfgErr := db.Get(&whConfig, `SELECT
+				COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_latitude'), 0) as latitude,
+				COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_longitude'), 0) as longitude,
+				COALESCE((SELECT value FROM config WHERE key = 'warehouse_address'), '') as address
+			`)
+			if cfgErr == nil && whConfig.Latitude != 0 {
+				req.WarehouseLatitude = &whConfig.Latitude
+				req.WarehouseLongitude = &whConfig.Longitude
+				req.WarehouseAddress = &whConfig.Address
+				log.Printf("📍 Auto-populated warehouse from config: (%.6f, %.6f) %s", whConfig.Latitude, whConfig.Longitude, whConfig.Address)
+			}
+		}
+
 		shiftID, taskCount, err := database.CreateShiftWithTasks(
 			db,
 			req.DriverID,
