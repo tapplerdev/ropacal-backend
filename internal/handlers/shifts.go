@@ -3513,6 +3513,27 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 			tasks = []models.RouteTask{}
 		}
 
+		// Auto-cancel shift if no active tasks remain
+		activeTasks := 0
+		for _, t := range tasks {
+			if !t.IsDeleted {
+				activeTasks++
+			}
+		}
+		if activeTasks == 0 {
+			log.Printf("🚫 All tasks removed from shift %s — auto-cancelling", shiftID)
+			_, cancelErr := db.Exec(`
+				UPDATE shifts SET status = 'cancelled', end_time = $1, updated_at = $1, end_reason = 'manager_cancelled'
+				WHERE id = $2
+			`, time.Now().Unix(), shiftID)
+			if cancelErr != nil {
+				log.Printf("⚠️  Failed to auto-cancel empty shift: %v", cancelErr)
+			} else {
+				shift.Status = "cancelled"
+				log.Printf("✅ Shift %s auto-cancelled (0 active tasks)", shiftID)
+			}
+		}
+
 		// Publish Centrifugo event to driver's shift channel
 		if centrifugoClient != nil {
 			eventData := map[string]interface{}{
