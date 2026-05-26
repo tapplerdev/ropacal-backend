@@ -121,7 +121,9 @@ func (m *StaleShiftMonitor) checkStaleShifts() {
 		})
 	}
 
-	// Auto-cancel ready shifts that are past their scheduled date by 24hr
+	// Auto-cancel ready shifts past their availability window:
+	// - If scheduled_start is set: cancel 24hr after scheduled_start
+	// - Else if scheduled_date is set: cancel if scheduled_date < yesterday
 	var expiredReadyShifts []activeShiftRow
 	m.db.Select(&expiredReadyShifts, `
 		SELECT s.id, s.driver_id, s.start_time, s.total_bins, s.completed_bins,
@@ -130,8 +132,10 @@ func (m *StaleShiftMonitor) checkStaleShifts() {
 		FROM shifts s
 		JOIN users u ON s.driver_id = u.id
 		WHERE s.status = 'ready'
-		  AND s.scheduled_date IS NOT NULL
-		  AND s.scheduled_date < (CURRENT_DATE - INTERVAL '1 day')
+		  AND (
+		    (s.scheduled_start IS NOT NULL AND s.scheduled_start < NOW() - INTERVAL '24 hours')
+		    OR (s.scheduled_start IS NULL AND s.scheduled_date IS NOT NULL AND s.scheduled_date < CURRENT_DATE - INTERVAL '1 day')
+		  )
 	`)
 	for _, s := range expiredReadyShifts {
 		log.Printf("⏰ [StaleShiftMonitor] Auto-cancelling expired ready shift %s for %s — scheduled for past date",
