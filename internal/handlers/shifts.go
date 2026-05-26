@@ -3551,15 +3551,50 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 		}
 		if activeTasks == 0 {
 			log.Printf("🚫 All tasks removed from shift %s — auto-cancelling", shiftID)
+			cancelNow := time.Now().Unix()
+
+			// Archive to shift_history first
+			completionRate := 0.0
+			if shift.TotalBins > 0 {
+				completionRate = (float64(shift.CompletedBins) / float64(shift.TotalBins)) * 100
+			}
+			var optMetaBytes []byte
+			db.Get(&optMetaBytes, `SELECT optimization_metadata FROM shifts WHERE id = $1`, shiftID)
+			var optMeta interface{}
+			if len(optMetaBytes) > 0 {
+				raw := json.RawMessage(optMetaBytes)
+				optMeta = &raw
+			}
+
+			_, histErr := db.Exec(`
+				INSERT INTO shift_history (
+					id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+					total_pause_seconds, total_bins, completed_bins, completion_rate,
+					incidents_reported, field_observations,
+					end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+				ON CONFLICT (id) DO NOTHING
+			`,
+				shift.ID, shift.DriverID, shift.RouteID,
+				shift.StartTime, cancelNow, shift.CreatedAt, cancelNow,
+				shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
+				0, 0, // incidents, field observations
+				"manager_cancelled", userClaims.UserID, nil, optMeta,
+			)
+			if histErr != nil {
+				log.Printf("⚠️  Failed to archive cancelled shift: %v", histErr)
+			}
+
+			// Update shift status (no end_reason on shifts table)
 			_, cancelErr := db.Exec(`
-				UPDATE shifts SET status = 'cancelled', end_time = $1, updated_at = $1, end_reason = 'manager_cancelled'
+				UPDATE shifts SET status = 'cancelled', end_time = $1, pause_start_time = NULL, updated_at = $1
 				WHERE id = $2
-			`, time.Now().Unix(), shiftID)
+			`, cancelNow, shiftID)
 			if cancelErr != nil {
 				log.Printf("⚠️  Failed to auto-cancel empty shift: %v", cancelErr)
 			} else {
 				shift.Status = "cancelled"
-				log.Printf("✅ Shift %s auto-cancelled (0 active tasks)", shiftID)
+				log.Printf("✅ Shift %s auto-cancelled and archived to history (0 active tasks)", shiftID)
 			}
 		}
 
@@ -4219,6 +4254,46 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		}
 
 		log.Printf("✅ Transaction committed")
+
+		// Auto-cancel shift if all tasks were removed
+		if removedCount > 0 {
+			var remainingTasks int
+			db.Get(&remainingTasks, `SELECT COUNT(*) FROM route_tasks WHERE shift_id = $1 AND is_deleted = false AND task_type != 'warehouse_stop'`, shiftID)
+			if remainingTasks == 0 {
+				log.Printf("🚫 All tasks removed from shift %s via PATCH — auto-cancelling", shiftID)
+				cancelNow := time.Now().Unix()
+
+				completionRate := 0.0
+				if shift.TotalBins > 0 {
+					completionRate = (float64(shift.CompletedBins) / float64(shift.TotalBins)) * 100
+				}
+				var optMetaBytes []byte
+				db.Get(&optMetaBytes, `SELECT optimization_metadata FROM shifts WHERE id = $1`, shiftID)
+				var optMeta interface{}
+				if len(optMetaBytes) > 0 {
+					raw := json.RawMessage(optMetaBytes)
+					optMeta = &raw
+				}
+
+				db.Exec(`
+					INSERT INTO shift_history (
+						id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+						total_pause_seconds, total_bins, completed_bins, completion_rate,
+						incidents_reported, field_observations,
+						end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+					ON CONFLICT (id) DO NOTHING
+				`,
+					shift.ID, shift.DriverID, shift.RouteID,
+					shift.StartTime, cancelNow, shift.CreatedAt, cancelNow,
+					shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
+					0, 0, "manager_cancelled", userClaims.UserID, nil, optMeta,
+				)
+				db.Exec(`UPDATE shifts SET status = 'cancelled', end_time = $1, pause_start_time = NULL, updated_at = $1 WHERE id = $2`, cancelNow, shiftID)
+				shift.Status = "cancelled"
+				log.Printf("✅ Shift %s auto-cancelled and archived (0 tasks remain)", shiftID)
+			}
+		}
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// STEP 4: Re-optimize if tasks changed or driver changed
