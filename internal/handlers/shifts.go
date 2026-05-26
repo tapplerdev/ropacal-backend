@@ -3415,6 +3415,19 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 				continue
 			}
 
+			// Block removing a dropoff if its paired pickup is completed (bin is on the truck)
+			if task.TaskType == "dropoff" && task.MoveRequestID != nil {
+				var pickupCompleted int
+				pickupErr := tx.Get(&pickupCompleted, `
+					SELECT COALESCE(MAX(is_completed), 0) FROM route_tasks
+					WHERE shift_id = $1 AND move_request_id = $2 AND task_type = 'pickup' AND is_deleted = false
+				`, shiftID, *task.MoveRequestID)
+				if pickupErr == nil && pickupCompleted == 1 {
+					log.Printf("⚠️  Cannot remove dropoff %s — paired pickup is completed (bin on truck)", taskID)
+					continue
+				}
+			}
+
 			log.Printf("🗑️  Removing task: ID=%s, Type=%s, Seq=%d", task.ID, task.TaskType, task.SequenceOrder)
 
 			// Mark task as deleted (soft delete for audit trail)
@@ -3552,16 +3565,14 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 			}
 		}
 
-		// DISABLED: Re-optimize the shift after removing tasks (skip gates since manager-initiated)
-		// Reason: Two-warehouse trick causes suboptimal routes (35min penalty)
-		// Accepting current Mapbox Optimization v2 API limitations
-		// if err := ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true); err != nil {
-		// 	log.Printf("⚠️  Failed to re-optimize shift after task removal: %v", err)
-		// 	// Don't fail the request if re-optimization fails
-		// } else {
-		// 	log.Printf("✅ Successfully re-optimized shift %s after removing %d tasks", shiftID, removedCount)
-		// }
-		log.Printf("ℹ️  Re-optimization disabled - driver continues with current route order")
+		// Re-optimize the shift after removing tasks (only if shift is active and has remaining tasks)
+		if shift.Status == "active" && activeTasks > 0 {
+			if err := ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true); err != nil {
+				log.Printf("⚠️  Failed to re-optimize shift after task removal: %v", err)
+			} else {
+				log.Printf("✅ Successfully re-optimized shift %s after removing %d tasks", shiftID, removedCount)
+			}
+		}
 
 		// Return success response
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
