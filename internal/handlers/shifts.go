@@ -2738,6 +2738,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		case "pickup":
 			if task.MoveRequestID != nil && task.Latitude != 0 && task.Longitude != 0 &&
 				task.DestinationLatitude != nil && task.DestinationLongitude != nil {
+				log.Printf("🔍 [OPTIMIZER] Move request %s: pickup=(%.6f,%.6f) '%s' → dropoff=(%.6f,%.6f) '%s'",
+					*task.MoveRequestID, task.Latitude, task.Longitude, getStringValue(task.Address),
+					*task.DestinationLatitude, *task.DestinationLongitude, getStringValue(task.DestinationAddress))
 				moveRequest := optimization.MoveRequest{
 					ID:        *task.MoveRequestID,
 					BinID:     getStringValue(task.BinID),
@@ -6951,6 +6954,9 @@ func optimizeRouteWithMapbox(
 		case "pickup":
 			if task.MoveRequestID != nil && task.Latitude != 0 && task.Longitude != 0 &&
 				task.DestinationLatitude != nil && task.DestinationLongitude != nil {
+				log.Printf("🔍 [OPTIMIZER] Move request %s: pickup=(%.6f,%.6f) '%s' → dropoff=(%.6f,%.6f) '%s'",
+					*task.MoveRequestID, task.Latitude, task.Longitude, getStringValue(task.Address),
+					*task.DestinationLatitude, *task.DestinationLongitude, getStringValue(task.DestinationAddress))
 				moveRequest := optimization.MoveRequest{
 					ID:        *task.MoveRequestID,
 					BinID:     getStringValue(task.BinID),
