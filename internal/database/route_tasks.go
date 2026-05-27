@@ -466,10 +466,31 @@ func CreateShiftWithTasks(
 						NewLongitude      *float64 `db:"new_longitude"`
 						NewAddress        *string  `db:"new_address"`
 						BinID             string   `db:"bin_id"`
+						MoveType          string   `db:"move_type"`
 					}
-					err := tx.Get(&mrData, "SELECT original_latitude, original_longitude, original_address, new_latitude, new_longitude, new_address, bin_id FROM bin_move_requests WHERE id = $1", moveReqID)
+					err := tx.Get(&mrData, "SELECT original_latitude, original_longitude, original_address, new_latitude, new_longitude, new_address, bin_id, move_type FROM bin_move_requests WHERE id = $1", moveReqID)
 					if err == nil {
-						// Also get bin_number
+
+						// For "store" type: destination is the warehouse — fill from config if missing
+						if mrData.MoveType == "store" && (mrData.NewLatitude == nil || mrData.NewAddress == nil || *mrData.NewAddress == "") {
+							var whCfg struct {
+								Lat  float64 `db:"lat"`
+								Lng  float64 `db:"lng"`
+								Addr string  `db:"addr"`
+							}
+							cfgErr := tx.Get(&whCfg, `SELECT
+								COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_latitude'), 0) as lat,
+								COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_longitude'), 0) as lng,
+								COALESCE((SELECT value FROM config WHERE key = 'warehouse_address'), '') as addr`)
+							if cfgErr == nil && whCfg.Lat != 0 {
+								mrData.NewLatitude = &whCfg.Lat
+								mrData.NewLongitude = &whCfg.Lng
+								mrData.NewAddress = &whCfg.Addr
+								log.Printf("   📍 Task #%d: Store move — destination set to warehouse (%s)", i+1, whCfg.Addr)
+							}
+						}
+
+						// Get bin_number
 						var binNum int
 						tx.Get(&binNum, "SELECT bin_number FROM bins WHERE id = $1", mrData.BinID)
 						if binNum > 0 {
