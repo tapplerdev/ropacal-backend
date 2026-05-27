@@ -3052,8 +3052,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	}
 	err = tx.Select(&activeTasks, `
 		SELECT id, task_type, sequence_order FROM route_tasks
-		WHERE shift_id = $1 AND is_deleted = false AND is_completed = 0
+		WHERE shift_id = $1 AND is_deleted = false
 		ORDER BY
+			is_completed DESC,
 			CASE WHEN task_type = 'warehouse_stop' THEN 1 ELSE 0 END ASC,
 			sequence_order ASC, created_at ASC
 	`, shiftID)
