@@ -200,9 +200,9 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 				Address   string  `db:"address"`
 			}
 			cfgErr := db.Get(&whConfig, `SELECT
-				COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_latitude'), 0) as latitude,
-				COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_longitude'), 0) as longitude,
-				COALESCE((SELECT value FROM config WHERE key = 'warehouse_address'), '') as address
+				COALESCE((SELECT (value::jsonb->>'latitude')::float8 FROM config WHERE key = 'warehouse_location'), 0) as latitude,
+				COALESCE((SELECT (value::jsonb->>'longitude')::float8 FROM config WHERE key = 'warehouse_location'), 0) as longitude,
+				COALESCE((SELECT value::jsonb->>'address' FROM config WHERE key = 'warehouse_location'), '') as address
 			`)
 			if cfgErr == nil && whConfig.Latitude != 0 {
 				req.WarehouseLatitude = &whConfig.Latitude

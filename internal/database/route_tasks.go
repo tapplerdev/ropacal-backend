@@ -480,9 +480,9 @@ func CreateShiftWithTasks(
 								Addr string  `db:"addr"`
 							}
 							cfgErr := tx.Get(&whCfg, `SELECT
-								COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_latitude'), 0) as lat,
-								COALESCE((SELECT value::float8 FROM config WHERE key = 'warehouse_longitude'), 0) as lng,
-								COALESCE((SELECT value FROM config WHERE key = 'warehouse_address'), '') as addr`)
+								COALESCE((SELECT (value::jsonb->>'latitude')::float8 FROM config WHERE key = 'warehouse_location'), 0) as lat,
+								COALESCE((SELECT (value::jsonb->>'longitude')::float8 FROM config WHERE key = 'warehouse_location'), 0) as lng,
+								COALESCE((SELECT value::jsonb->>'address' FROM config WHERE key = 'warehouse_location'), '') as addr`)
 							if cfgErr == nil && whCfg.Lat != 0 {
 								mrData.NewLatitude = &whCfg.Lat
 								mrData.NewLongitude = &whCfg.Lng
