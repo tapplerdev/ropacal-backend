@@ -471,8 +471,9 @@ func CreateShiftWithTasks(
 					err := tx.Get(&mrData, "SELECT original_latitude, original_longitude, original_address, new_latitude, new_longitude, new_address, bin_id, move_type FROM bin_move_requests WHERE id = $1", moveReqID)
 					if err == nil {
 
-						// For "store" type: destination is the warehouse — fill from config if missing
-						if mrData.MoveType == "store" && (mrData.NewLatitude == nil || mrData.NewAddress == nil || *mrData.NewAddress == "") {
+						// For "store" type: destination is ALWAYS the current warehouse
+						// (move request may have stale warehouse address from when it was created)
+						if mrData.MoveType == "store" {
 							var whCfg struct {
 								Lat  float64 `db:"lat"`
 								Lng  float64 `db:"lng"`
@@ -486,7 +487,7 @@ func CreateShiftWithTasks(
 								mrData.NewLatitude = &whCfg.Lat
 								mrData.NewLongitude = &whCfg.Lng
 								mrData.NewAddress = &whCfg.Addr
-								log.Printf("   📍 Task #%d: Store move — destination set to warehouse (%s)", i+1, whCfg.Addr)
+								log.Printf("   📍 Task #%d: Store move — destination set to current warehouse (%s)", i+1, whCfg.Addr)
 							}
 						}
 
