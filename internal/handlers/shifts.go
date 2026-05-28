@@ -72,9 +72,14 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var shift models.Shift
+		// Prioritize active/paused shifts (any date), then ready shifts for today or earlier.
+		// Future-scheduled ready shifts only show on or after their scheduled_date.
+		pacific, _ := time.LoadLocation("America/Los_Angeles")
+		todayStr := time.Now().In(pacific).Format("2006-01-02")
 		query := `SELECT * FROM shifts
 				  WHERE driver_id = $1
 				  AND status IN ('active', 'paused', 'ready')
+				  AND (status IN ('active', 'paused') OR scheduled_date IS NULL OR scheduled_date <= $2)
 				  ORDER BY
 			    CASE status
 			      WHEN 'active' THEN 1
@@ -84,7 +89,7 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 			    created_at DESC
 				  LIMIT 1`
 
-		err := db.Get(&shift, query, userClaims.UserID)
+		err := db.Get(&shift, query, userClaims.UserID, todayStr)
 		if err == sql.ErrNoRows {
 			log.Printf("📤 RESPONSE: 200 - No active shift found")
 			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
@@ -3334,7 +3339,7 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centri
 
 // RemoveTasksFromShift removes one or more tasks from an active shift (manager-initiated)
 // This unassigns tasks without deleting the underlying resources
-func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/manager/shifts/:shift_id/tasks/remove")
 
@@ -3620,6 +3625,22 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 			}
 		}
 
+		// Send FCM push notification to driver (in case WebSocket isn't connected)
+		if fcmService != nil && shift.Status == "active" {
+			fcmData := map[string]string{
+				"tasks_removed": fmt.Sprintf("%d", removedCount),
+			}
+			title, body := services.ShiftNotificationText("task_removed", fcmData)
+			_, notifIDs := services.CreateNotificationForUsers(db, []string{shift.DriverID}, "task_removed", title, body, map[string]string{"shift_id": shiftID})
+			if len(notifIDs) > 0 {
+				var driverToken models.FCMToken
+				if tokenErr := db.Get(&driverToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, shift.DriverID); tokenErr == nil {
+					go fcmService.SendShiftUpdateNotification(driverToken.Token, shiftID, "task_removed", fcmData)
+					log.Printf("📱 Sent FCM task_removed notification to driver %s", shift.DriverID)
+				}
+			}
+		}
+
 		// Re-optimize the shift after removing tasks (only if shift is active and has remaining tasks)
 		if shift.Status == "active" && activeTasks > 0 {
 			if err := ReoptimizeActiveShift(db, redisClient, shiftID, centrifugoClient, true); err != nil {
@@ -3783,6 +3804,36 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			argIndex++
 			changes["driver_changed"] = true
 			log.Printf("🔄 Driver reassignment: %s → %s", oldDriverID, *req.DriverID)
+
+			// If active shift is being reassigned, reset to ready + remove completed tasks
+			if shift.Status == "active" || shift.Status == "paused" {
+				log.Printf("🔄 Active shift reassignment — resetting to 'ready', removing completed tasks")
+				updateFields = append(updateFields, fmt.Sprintf("status = $%d", argIndex))
+				updateArgs = append(updateArgs, "ready")
+				argIndex++
+				updateFields = append(updateFields, fmt.Sprintf("start_time = $%d", argIndex))
+				updateArgs = append(updateArgs, nil)
+				argIndex++
+				updateFields = append(updateFields, fmt.Sprintf("pause_start_time = $%d", argIndex))
+				updateArgs = append(updateArgs, nil)
+				argIndex++
+				updateFields = append(updateFields, fmt.Sprintf("ready_to_end_at = $%d", argIndex))
+				updateArgs = append(updateArgs, nil)
+				argIndex++
+
+				// Soft-delete completed and skipped tasks — new driver only gets remaining work
+				completedRemoved, delErr := tx.Exec(`
+					UPDATE route_tasks
+					SET is_deleted = true, deleted_at = $1, deletion_reason = 'completed_before_reassign'
+					WHERE shift_id = $2 AND is_deleted = false AND (is_completed = 1 OR skipped = true)
+				`, now, shiftID)
+				if delErr != nil {
+					log.Printf("⚠️  Failed to remove completed tasks on reassign: %v", delErr)
+				} else if rows, _ := completedRemoved.RowsAffected(); rows > 0 {
+					log.Printf("🗑️  Removed %d completed/skipped tasks for reassignment", rows)
+					changes["completed_tasks_removed"] = rows
+				}
+			}
 		}
 
 		if req.RouteID != nil {
@@ -4012,7 +4063,41 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		if len(req.AddTasks) > 0 {
 			log.Printf("➕ Adding %d tasks...", len(req.AddTasks))
 
+			// Build dedup sets from existing tasks to prevent duplicates on merge
+			existingBinIDs := make(map[string]bool)
+			existingMoveRequestIDs := make(map[string]bool)
+			existingPotentialLocationIDs := make(map[string]bool)
+			var existingTasks []struct {
+				BinID               *string `db:"bin_id"`
+				MoveRequestID       *string `db:"move_request_id"`
+				PotentialLocationID *string `db:"potential_location_id"`
+			}
+			tx.Select(&existingTasks, `SELECT bin_id, move_request_id, potential_location_id FROM route_tasks WHERE shift_id = $1 AND is_deleted = false`, shiftID)
+			for _, et := range existingTasks {
+				if et.BinID != nil { existingBinIDs[*et.BinID] = true }
+				if et.MoveRequestID != nil { existingMoveRequestIDs[*et.MoveRequestID] = true }
+				if et.PotentialLocationID != nil { existingPotentialLocationIDs[*et.PotentialLocationID] = true }
+			}
+
+			skippedCount := 0
 			for _, addReq := range req.AddTasks {
+				// Dedup check: skip if this task already exists on the shift
+				if addReq.TaskType == "collection" && addReq.BinID != nil && existingBinIDs[*addReq.BinID] {
+					log.Printf("   ⏭️  Skipping duplicate collection for bin %s", *addReq.BinID)
+					skippedCount++
+					continue
+				}
+				if (addReq.TaskType == "pickup" || addReq.TaskType == "dropoff") && addReq.MoveRequestID != nil && existingMoveRequestIDs[*addReq.MoveRequestID] {
+					log.Printf("   ⏭️  Skipping duplicate %s for move request %s", addReq.TaskType, *addReq.MoveRequestID)
+					skippedCount++
+					continue
+				}
+				if addReq.TaskType == "placement" && addReq.PotentialLocationID != nil && existingPotentialLocationIDs[*addReq.PotentialLocationID] {
+					log.Printf("   ⏭️  Skipping duplicate placement for location %s", *addReq.PotentialLocationID)
+					skippedCount++
+					continue
+				}
+
 				newTaskID := uuid.New().String()
 				log.Printf("   Creating task: type=%s, id=%s", addReq.TaskType, newTaskID)
 
@@ -4211,6 +4296,9 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			}
 
 			changes["tasks_added"] = addedCount
+			if skippedCount > 0 {
+				log.Printf("⏭️  Skipped %d duplicate tasks", skippedCount)
+			}
 			log.Printf("✅ Added %d tasks", addedCount)
 		}
 
@@ -4302,6 +4390,8 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// STEP 4: Re-optimize if tasks changed or driver changed
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// Refresh shift status from DB in case it was changed (e.g., active→ready on reassign)
+		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
 		shouldReoptimize := req.Reoptimize || addedCount > 0 || removedCount > 0 || changes["driver_changed"].(bool)
 
 		if shouldReoptimize && shift.Status == "active" {

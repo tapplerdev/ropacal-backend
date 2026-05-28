@@ -134,7 +134,7 @@ func (m *StaleShiftMonitor) checkStaleShifts() {
 		WHERE s.status = 'ready'
 		  AND (
 		    (s.scheduled_start IS NOT NULL AND s.scheduled_start < NOW() - INTERVAL '24 hours')
-		    OR (s.scheduled_start IS NULL AND s.scheduled_date IS NOT NULL AND s.scheduled_date < CURRENT_DATE - INTERVAL '1 day')
+		    OR (s.scheduled_start IS NULL AND s.scheduled_date IS NOT NULL AND s.scheduled_date < (NOW() AT TIME ZONE 'America/Los_Angeles')::date - INTERVAL '1 day')
 		  )
 	`)
 	for _, s := range expiredReadyShifts {

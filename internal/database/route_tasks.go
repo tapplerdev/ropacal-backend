@@ -227,9 +227,10 @@ func CreateShiftWithTasks(
 	shiftID := uuid.New().String()
 	now := time.Now().Unix()
 
-	// Default scheduled_date to today if not provided
+	// Default scheduled_date to today if not provided (use Pacific time, not UTC)
 	if scheduledDate == nil {
-		today := time.Now().Format("2006-01-02")
+		pacific, _ := time.LoadLocation("America/Los_Angeles")
+		today := time.Now().In(pacific).Format("2006-01-02")
 		scheduledDate = &today
 	}
 

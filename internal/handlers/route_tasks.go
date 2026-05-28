@@ -149,7 +149,8 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 		// Check if driver already has an active/ready shift for the same date
 		scheduledDate := req.ScheduledDate
 		if scheduledDate == nil {
-			today := time.Now().Format("2006-01-02")
+			pacific, _ := time.LoadLocation("America/Los_Angeles")
+			today := time.Now().In(pacific).Format("2006-01-02")
 			scheduledDate = &today
 		}
 

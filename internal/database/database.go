@@ -870,7 +870,7 @@ func Migrate(db *sqlx.DB) error {
 
 		// Scheduled date: which date this shift is for (enables future scheduling + auto-cancel)
 		`ALTER TABLE shifts ADD COLUMN IF NOT EXISTS scheduled_date DATE`,
-		`UPDATE shifts SET scheduled_date = DATE(TO_TIMESTAMP(COALESCE(start_time, created_at))) WHERE scheduled_date IS NULL`,
+		`UPDATE shifts SET scheduled_date = DATE(TO_TIMESTAMP(COALESCE(start_time, created_at)) AT TIME ZONE 'America/Los_Angeles') WHERE scheduled_date IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_shifts_scheduled_date ON shifts(scheduled_date)`,
 
 		// AirTag locations — stores latest position per tag, written by FindMy bridge
