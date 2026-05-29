@@ -7266,20 +7266,38 @@ func optimizeRouteWithMapbox(
 			// Mapbox returns "service" type, OR-Tools returns "collection" type
 			// Match by CollectionID which we extracted from the services array
 			if stop.CollectionID != "" {
-				// Check if it's a service task (custom shift stop)
 				matched := false
-				for _, svcTask := range req.ServiceTasks {
-					if stop.CollectionID == fmt.Sprintf("service-%s", svcTask.ID) {
-						task.TaskType = "service"
-						label := svcTask.Label
-						task.TaskLabel = &label
-						log.Printf("   ✅ Matched service to service task: %s", svcTask.Label)
+
+				// First: check if this is a placement modeled as service (binsPreloaded).
+				// The CollectionID will be "service-{potentialLocationId}".
+				// Map it back to the original placement task, NOT a new service task.
+				svcID := strings.TrimPrefix(stop.CollectionID, "service-")
+				for _, origTask := range existingTasks {
+					if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == svcID {
+						task.TaskType = "placement"
+						task.PotentialLocationID = origTask.PotentialLocationID
+						task.NewBinNumber = origTask.NewBinNumber
+						log.Printf("   ✅ Matched service→placement (preloaded bins): %s", svcID[:8])
 						matched = true
 						break
 					}
 				}
 
-				// If not a service task, try matching to a collection
+				// Then: check if it's a real service task (custom shift stop)
+				if !matched {
+					for _, svcTask := range req.ServiceTasks {
+						if stop.CollectionID == fmt.Sprintf("service-%s", svcTask.ID) {
+							task.TaskType = "service"
+							label := svcTask.Label
+							task.TaskLabel = &label
+							log.Printf("   ✅ Matched service to service task: %s", svcTask.Label)
+							matched = true
+							break
+						}
+					}
+				}
+
+				// Finally: try matching to a collection
 				if !matched {
 					for _, collection := range req.Collections {
 						if stop.CollectionID == fmt.Sprintf("collection-%s", collection.ID) {
