@@ -1904,6 +1904,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 		var placementBinID *string
 
 		// Check if this bin is part of a move request
+		// First try by bin_id, then fall back to looking up via route_tasks.move_request_id
 		var moveRequest models.BinMoveRequest
 		moveErr := db.Get(&moveRequest, `
 			SELECT * FROM bin_move_requests
@@ -1911,6 +1912,17 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			AND assigned_shift_id = $2
 			AND status IN ('assigned', 'in_progress')
 		`, req.BinID, shift.ID)
+		if moveErr != nil {
+			// Fallback: look up move_request_id from the route_task itself
+			var moveReqID *string
+			db.QueryRow(`SELECT move_request_id FROM route_tasks WHERE id = $1`, taskID).Scan(&moveReqID)
+			if moveReqID != nil {
+				moveErr = db.Get(&moveRequest, `
+					SELECT * FROM bin_move_requests
+					WHERE id = $1 AND status IN ('assigned', 'in_progress')
+				`, *moveReqID)
+			}
+		}
 
 		if moveErr == nil {
 			// This is a MOVE REQUEST bin!
@@ -5805,18 +5817,20 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 		}
 	}
 
-	if moveRequest.MoveType == "pickup_only" {
-		// Pickup for retirement or storage
-		newStatus := "active" // Fallback
+	if moveRequest.MoveType == "store" || moveRequest.MoveType == "pickup_only" {
+		// Store move: bin goes to warehouse → in_storage
+		// Also check disposal_action for explicit retire/store override
+		newStatus := "in_storage" // Default for store moves
 		if moveRequest.DisposalAction != nil {
 			if *moveRequest.DisposalAction == "retire" {
 				newStatus = "retired"
-				log.Printf("[MOVE]    → Bin will be RETIRED")
+				log.Printf("[MOVE]    → Bin will be RETIRED (disposal_action override)")
 			} else if *moveRequest.DisposalAction == "store" {
 				newStatus = "in_storage"
-				log.Printf("[MOVE]    → Bin will be IN STORAGE")
+				log.Printf("[MOVE]    → Bin will be IN STORAGE (disposal_action)")
 			}
 		}
+		log.Printf("[MOVE]    → move_type=%s, disposal_action=%v → status=%s", moveRequest.MoveType, moveRequest.DisposalAction, newStatus)
 
 		_, err = db.Exec(`
 			UPDATE bins
