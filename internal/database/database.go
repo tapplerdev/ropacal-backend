@@ -613,7 +613,7 @@ func Migrate(db *sqlx.DB) error {
 
 		// Migration: Update bin_move_requests move_type constraint to include 'store'
 		`ALTER TABLE bin_move_requests DROP CONSTRAINT IF EXISTS bin_move_requests_move_type_check`,
-		`ALTER TABLE bin_move_requests ADD CONSTRAINT bin_move_requests_move_type_check CHECK(move_type IN ('store', 'pickup_only', 'relocation'))`,
+		`ALTER TABLE bin_move_requests ADD CONSTRAINT bin_move_requests_move_type_check CHECK(move_type IN ('store', 'pickup_only', 'relocation', 'redeployment'))`,
 
 		// Migration: Add missing columns to checks table for enhanced check tracking
 		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS checked_by TEXT`,
