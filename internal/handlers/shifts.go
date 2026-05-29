@@ -3799,6 +3799,19 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		}
 
 		if req.DriverID != nil && *req.DriverID != shift.DriverID {
+			// Block reassignment if no real incomplete tasks remain
+			var realIncompleteTasks int
+			tx.Get(&realIncompleteTasks, `
+				SELECT COUNT(*) FROM route_tasks
+				WHERE shift_id = $1 AND is_deleted = false AND is_completed = 0
+				  AND COALESCE(skipped, false) = false AND task_type != 'warehouse_stop'
+			`, shiftID)
+			if realIncompleteTasks == 0 {
+				log.Printf("⚠️  No real incomplete tasks to reassign — blocking driver change")
+				utils.RespondError(w, http.StatusBadRequest, "No tasks to reassign — all tasks are completed or only a warehouse stop remains")
+				return
+			}
+
 			updateFields = append(updateFields, fmt.Sprintf("driver_id = $%d", argIndex))
 			updateArgs = append(updateArgs, *req.DriverID)
 			argIndex++
