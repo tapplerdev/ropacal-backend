@@ -6991,6 +6991,17 @@ func optimizeRouteWithMapbox(
 
 	req.BinsPreloaded = binsPreloaded
 
+	// Build lookup: move_request_id → actual move_type from bin_move_requests
+	moveRequestTypes := make(map[string]string)
+	var mrRows []struct {
+		ID       string `db:"id"`
+		MoveType string `db:"move_type"`
+	}
+	db.Select(&mrRows, `SELECT id, move_type FROM bin_move_requests WHERE id IN (SELECT DISTINCT move_request_id FROM route_tasks WHERE shift_id = $1 AND move_request_id IS NOT NULL AND is_deleted = false)`, shiftID)
+	for _, mr := range mrRows {
+		moveRequestTypes[mr.ID] = mr.MoveType
+	}
+
 	// Helper functions for nil-safe value extraction
 	getIntValue := func(ptr *int) int {
 		if ptr != nil {
@@ -7012,7 +7023,7 @@ func optimizeRouteWithMapbox(
 		for _, task := range tasks {
 			if task.TaskType == "placement" {
 				preloadCount++
-			} else if task.TaskType == "pickup" && task.MoveType != nil && *task.MoveType == "redeployment" {
+			} else if task.TaskType == "pickup" && task.MoveRequestID != nil && moveRequestTypes[*task.MoveRequestID] == "redeployment" {
 				preloadCount++
 			}
 		}
@@ -7093,7 +7104,7 @@ func optimizeRouteWithMapbox(
 					*task.DestinationLatitude, *task.DestinationLongitude, getStringValue(task.DestinationAddress))
 
 				// Redeployment with bins preloaded: skip warehouse pickup, just dropoff
-				isRedeployment := task.MoveType != nil && *task.MoveType == "redeployment"
+				isRedeployment := task.MoveRequestID != nil && moveRequestTypes[*task.MoveRequestID] == "redeployment"
 				if binsPreloaded && isRedeployment {
 					log.Printf("📦 [REDEPLOYMENT] Bins preloaded — modeled as service task (dropoff only)")
 					svcTask := optimization.ServiceTask{
@@ -7242,7 +7253,8 @@ func optimizeRouteWithMapbox(
 		if binsPreloaded {
 			res, pickupErr := db.Exec(`
 				UPDATE route_tasks SET is_completed = 1, completed_at = $1, updated_at = $1
-				WHERE shift_id = $2 AND task_type = 'pickup' AND move_type = 'redeployment' AND is_deleted = false AND is_completed = 0
+				WHERE shift_id = $2 AND task_type = 'pickup' AND is_deleted = false AND is_completed = 0
+				  AND move_request_id IN (SELECT id FROM bin_move_requests WHERE move_type = 'redeployment')
 			`, now, shiftID)
 			if pickupErr == nil {
 				if rows, _ := res.RowsAffected(); rows > 0 {
