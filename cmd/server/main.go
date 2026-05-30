@@ -415,6 +415,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 
 			// Smart routes & daily priorities
 			r.Get("/manager/bins/daily-priorities", handlers.GetDailyPriorities(db))
+			r.Post("/manager/routes/generate-smart", handlers.GenerateSmartRoutes(db))
 
 			// Potential Locations management (managers can delete and convert)
 			r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
