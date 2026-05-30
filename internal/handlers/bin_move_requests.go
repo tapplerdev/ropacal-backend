@@ -121,44 +121,42 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			}
 		}
 
-		// Auto-fill warehouse destination for "store" moves
-		if req.MoveType == "store" {
-			log.Printf("🏭 [STORE MOVE] Auto-filling warehouse destination for move request")
-
-			// Fetch warehouse location from config (no fallback - must be configured)
+		// Fetch warehouse location for store/redeployment moves
+		var warehouseForMove *models.WarehouseLocation
+		if req.MoveType == "store" || req.MoveType == "redeployment" {
 			var warehouseJSON []byte
-			err := db.QueryRow(`
-				SELECT value
-				FROM config
-				WHERE key = 'warehouse_location'
-			`).Scan(&warehouseJSON)
+			err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&warehouseJSON)
 
 			if err == sql.ErrNoRows {
-				log.Printf("❌ [STORE MOVE] Warehouse location not configured in database")
-				http.Error(w, "Warehouse location must be configured before creating store moves. Please contact your administrator.", http.StatusPreconditionFailed)
+				log.Printf("❌ Warehouse location not configured in database")
+				http.Error(w, "Warehouse location must be configured before creating store/redeployment moves.", http.StatusPreconditionFailed)
 				return
 			}
-
 			if err != nil {
-				log.Printf("❌ [STORE MOVE] Failed to fetch warehouse location: %v", err)
+				log.Printf("❌ Failed to fetch warehouse location: %v", err)
 				http.Error(w, "Failed to fetch warehouse location", http.StatusInternalServerError)
 				return
 			}
 
 			var warehouse models.WarehouseLocation
 			if err := json.Unmarshal(warehouseJSON, &warehouse); err != nil {
-				log.Printf("❌ [STORE MOVE] Failed to parse warehouse location: %v", err)
+				log.Printf("❌ Failed to parse warehouse location: %v", err)
 				http.Error(w, "Failed to parse warehouse location", http.StatusInternalServerError)
 				return
 			}
+			warehouseForMove = &warehouse
 
-			// Auto-set destination to warehouse
-			req.NewLatitude = &warehouse.Latitude
-			req.NewLongitude = &warehouse.Longitude
-			newAddress = &warehouse.Address
-
-			log.Printf("✅ [STORE MOVE] Warehouse destination set: %s (%.6f, %.6f)",
-				warehouse.Address, warehouse.Latitude, warehouse.Longitude)
+			if req.MoveType == "store" {
+				// Store: auto-set destination to warehouse
+				log.Printf("🏭 [STORE MOVE] Auto-filling warehouse destination")
+				req.NewLatitude = &warehouse.Latitude
+				req.NewLongitude = &warehouse.Longitude
+				newAddress = &warehouse.Address
+				log.Printf("✅ [STORE MOVE] Warehouse destination set: %s (%.6f, %.6f)",
+					warehouse.Address, warehouse.Latitude, warehouse.Longitude)
+			} else if req.MoveType == "redeployment" {
+				log.Printf("🏭 [REDEPLOYMENT] Will use warehouse as pickup location (bin is in_storage)")
+			}
 		}
 
 		// Get requesting user ID from context (set by Auth middleware)
@@ -198,8 +196,13 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			return
 		}
 
-		// Build original address
-		originalAddress := fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.Zip)
+		// Build original address (for redeployment, use warehouse since bin is in_storage there)
+		var originalAddress string
+		if req.MoveType == "redeployment" && warehouseForMove != nil {
+			originalAddress = warehouseForMove.Address
+		} else {
+			originalAddress = fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.Zip)
+		}
 
 		// Generate ID (now already declared above for urgency calculation)
 		id := uuid.New().String()
@@ -222,8 +225,18 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			Urgency:                   urgency, // Auto-calculated urgency
 			RequestedBy:               userID,
 			Status:                    status,
-			OriginalLatitude:          *bin.Latitude,  // For redeployment: warehouse pickup location
-			OriginalLongitude:         *bin.Longitude, // For redeployment: warehouse pickup location
+			OriginalLatitude: func() float64 {
+				if req.MoveType == "redeployment" && warehouseForMove != nil {
+					return warehouseForMove.Latitude
+				}
+				return *bin.Latitude
+			}(),
+			OriginalLongitude: func() float64 {
+				if req.MoveType == "redeployment" && warehouseForMove != nil {
+					return warehouseForMove.Longitude
+				}
+				return *bin.Longitude
+			}(),
 			OriginalAddress:           originalAddress,
 			NewLatitude:               req.NewLatitude,
 			NewLongitude:              req.NewLongitude,

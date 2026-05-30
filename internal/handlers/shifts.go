@@ -5832,15 +5832,29 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 		}
 		log.Printf("[MOVE]    → move_type=%s, disposal_action=%v → status=%s", moveRequest.MoveType, moveRequest.DisposalAction, newStatus)
 
-		_, err = db.Exec(`
-			UPDATE bins
-			SET status = $1, updated_at = $2
-			WHERE id = $3
-		`, newStatus, now, moveRequest.BinID)
-		if err != nil {
-			return fmt.Errorf("failed to update bin status: %w", err)
+		// Update bin status AND coordinates to warehouse (bin is physically at warehouse now)
+		var warehouseJSON []byte
+		whErr := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&warehouseJSON)
+		if whErr == nil {
+			var warehouse models.WarehouseLocation
+			if json.Unmarshal(warehouseJSON, &warehouse) == nil {
+				_, err = db.Exec(`
+					UPDATE bins
+					SET status = $1, latitude = $2, longitude = $3, current_street = $4, city = '', zip = '', updated_at = $5
+					WHERE id = $6
+				`, newStatus, warehouse.Latitude, warehouse.Longitude, warehouse.Address, now, moveRequest.BinID)
+				if err != nil {
+					return fmt.Errorf("failed to update bin status: %w", err)
+				}
+				log.Printf("[MOVE] ✅ Bin status updated to %s, coordinates updated to warehouse (%.6f, %.6f)", newStatus, warehouse.Latitude, warehouse.Longitude)
+			} else {
+				log.Printf("[MOVE] ⚠️  Failed to parse warehouse config, updating status only")
+				db.Exec(`UPDATE bins SET status = $1, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
+			}
+		} else {
+			log.Printf("[MOVE] ⚠️  Warehouse config not found, updating status only")
+			db.Exec(`UPDATE bins SET status = $1, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
 		}
-		log.Printf("[MOVE] ✅ Bin status updated to %s", newStatus)
 
 	} else if moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment" {
 		// Update bin location to new coordinates with reverse-geocoded address from HERE Maps
