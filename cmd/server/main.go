@@ -413,6 +413,9 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			// Bin retirement
 			r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
 
+			// Smart routes & daily priorities
+			r.Get("/manager/bins/daily-priorities", handlers.GetDailyPriorities(db))
+
 			// Potential Locations management (managers can delete and convert)
 			r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
 			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, redisClient, wsHub, centrifugoClient))
