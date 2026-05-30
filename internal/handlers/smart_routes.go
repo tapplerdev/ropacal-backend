@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -195,135 +196,193 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("📊 Tiers: %d high, %d medium, %d low", tierCounts["high"], tierCounts["medium"], tierCounts["low"])
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		// Step 4: Geographic clustering within each tier
+		// Step 4: Geographic clustering (tier-independent)
+		// Cluster ALL bins by proximity first, then assign tier within each cluster
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		const maxClusterDiameter = 8.0 // miles — prevents sprawling clusters
+
+		// Sort all bins by latitude for spatial sweep
+		sort.Slice(bins, func(i, j int) bool {
+			return bins[i].Latitude < bins[j].Latitude
+		})
+
+		// Centroid-based greedy clustering
+		type cluster struct {
+			bins    []smartBin
+			centerLat float64
+			centerLng float64
+		}
+		assigned := make(map[string]bool)
+		var clusters []cluster
+
+		for i := range bins {
+			if assigned[bins[i].ID] {
+				continue
+			}
+			c := cluster{
+				bins:      []smartBin{bins[i]},
+				centerLat: bins[i].Latitude,
+				centerLng: bins[i].Longitude,
+			}
+			assigned[bins[i].ID] = true
+
+			// Keep scanning for nearby bins, checking distance from cluster CENTER
+			changed := true
+			for changed {
+				changed = false
+				for j := range bins {
+					if assigned[bins[j].ID] {
+						continue
+					}
+					dist := haversineDistanceMiles(c.centerLat, c.centerLng, bins[j].Latitude, bins[j].Longitude)
+					if dist <= maxClusterDiameter/2 {
+						c.bins = append(c.bins, bins[j])
+						assigned[bins[j].ID] = true
+						// Recalculate center
+						c.centerLat = 0
+						c.centerLng = 0
+						for _, b := range c.bins {
+							c.centerLat += b.Latitude
+							c.centerLng += b.Longitude
+						}
+						c.centerLat /= float64(len(c.bins))
+						c.centerLng /= float64(len(c.bins))
+						changed = true
+					}
+				}
+			}
+
+			// Split oversized clusters by latitude
+			if len(c.bins) > params.MaxBinsPerRoute {
+				sort.Slice(c.bins, func(a, b int) bool { return c.bins[a].Latitude < c.bins[b].Latitude })
+				for k := 0; k < len(c.bins); k += params.MaxBinsPerRoute {
+					end := k + params.MaxBinsPerRoute
+					if end > len(c.bins) { end = len(c.bins) }
+					sub := c.bins[k:end]
+					sLat, sLng := 0.0, 0.0
+					for _, b := range sub { sLat += b.Latitude; sLng += b.Longitude }
+					clusters = append(clusters, cluster{bins: sub, centerLat: sLat / float64(len(sub)), centerLng: sLng / float64(len(sub))})
+				}
+			} else {
+				clusters = append(clusters, c)
+			}
+		}
+
+		log.Printf("📊 Created %d geographic clusters", len(clusters))
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// Step 5: Build route recommendations from clusters
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		var allRoutes []recommendedRoute
 
-		for _, tier := range []string{"high", "medium", "low"} {
-			// Collect bins for this tier
-			var tierBins []smartBin
-			for _, b := range bins {
-				if b.Tier == tier {
-					tierBins = append(tierBins, b)
-				}
-			}
-			if len(tierBins) == 0 {
+		// Track city occurrence for sub-naming (e.g., "San Jose North", "San Jose South")
+		cityClusterCount := make(map[string]int)
+		for _, c := range clusters {
+			cities := make(map[string]int)
+			for _, b := range c.bins { cities[b.City]++ }
+			dominant := ""
+			maxC := 0
+			for city, cnt := range cities { if cnt > maxC { dominant = city; maxC = cnt } }
+			cityClusterCount[dominant]++
+		}
+
+		cityClusterIndex := make(map[string]int)
+
+		for _, c := range clusters {
+			if len(c.bins) == 0 {
 				continue
 			}
 
-			// Sort by latitude for spatial sweep
-			sort.Slice(tierBins, func(i, j int) bool {
-				return tierBins[i].Latitude < tierBins[j].Latitude
+			// Determine dominant city and tier
+			cityCounts := make(map[string]int)
+			var totalFillRate float64
+			var binIDs []string
+			tierBuckets := map[string]int{"high": 0, "medium": 0, "low": 0}
+			for _, b := range c.bins {
+				cityCounts[b.City]++
+				totalFillRate += b.AvgDailyFillRate
+				binIDs = append(binIDs, b.ID)
+				tierBuckets[b.Tier]++
+			}
+			dominantCity := ""
+			maxCount := 0
+			for city, count := range cityCounts {
+				if count > maxCount { dominantCity = city; maxCount = count }
+			}
+
+			// Cluster tier = majority tier of its bins
+			clusterTier := "low"
+			if tierBuckets["high"] >= tierBuckets["medium"] && tierBuckets["high"] >= tierBuckets["low"] {
+				clusterTier = "high"
+			} else if tierBuckets["medium"] >= tierBuckets["low"] {
+				clusterTier = "medium"
+			}
+
+			// Estimate route distance
+			sorted := make([]smartBin, len(c.bins))
+			copy(sorted, c.bins)
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i].Latitude < sorted[j].Latitude })
+			totalDist := 0.0
+			for k := 1; k < len(sorted); k++ {
+				totalDist += haversineDistanceMiles(sorted[k-1].Latitude, sorted[k-1].Longitude, sorted[k].Latitude, sorted[k].Longitude)
+			}
+
+			// Estimate duration: 5 min/bin service + driving at 25 mph avg
+			serviceMins := float64(len(c.bins)) * 5
+			drivingMins := (totalDist / 25.0) * 60
+			totalHours := (serviceMins + drivingMins) / 60.0
+
+			// Schedule pattern based on tier
+			schedule := "Weekly"
+			if clusterTier == "high" {
+				schedule = "Every 3 days"
+			} else if clusterTier == "medium" {
+				schedule = "Every 5-7 days"
+			} else {
+				schedule = "Every 10-14 days"
+			}
+
+			// Name — add directional suffix if city has multiple clusters
+			tierLabel := strings.ToUpper(clusterTier[:1]) + clusterTier[1:]
+			name := dominantCity
+			if cityClusterCount[dominantCity] > 1 {
+				cityClusterIndex[dominantCity]++
+				idx := cityClusterIndex[dominantCity]
+				// Use directional label based on latitude relative to city's other clusters
+				dirLabels := []string{"South", "Central", "North", "East", "West"}
+				if idx <= len(dirLabels) {
+					name = dominantCity + " " + dirLabels[idx-1]
+				} else {
+					name = fmt.Sprintf("%s %d", dominantCity, idx)
+				}
+			}
+			if len(cityCounts) > 1 {
+				// Multi-city cluster — list secondary cities
+				var others []string
+				for city := range cityCounts {
+					if city != dominantCity { others = append(others, city) }
+				}
+				sort.Strings(others)
+				if len(others) <= 2 {
+					name += " / " + strings.Join(others, " / ")
+				}
+			}
+			name += " — " + tierLabel + " Priority"
+
+			allRoutes = append(allRoutes, recommendedRoute{
+				SuggestedName:   name,
+				GeographicArea:  dominantCity,
+				SchedulePattern: schedule,
+				Tier:            clusterTier,
+				BinIDs:          binIDs,
+				Bins:            c.bins,
+				Stats: routeStats{
+					BinCount:               len(c.bins),
+					AvgFillRate:            math.Round(totalFillRate/float64(len(c.bins))*10) / 10,
+					EstimatedDurationHours: math.Round(totalHours*10) / 10,
+					EstimatedDistanceMiles: math.Round(totalDist*10) / 10,
+				},
 			})
-
-			// Greedy clustering
-			assigned := make(map[string]bool)
-			var clusters [][]smartBin
-
-			for i := range tierBins {
-				if assigned[tierBins[i].ID] {
-					continue
-				}
-				cluster := []smartBin{tierBins[i]}
-				assigned[tierBins[i].ID] = true
-
-				for j := range tierBins {
-					if assigned[tierBins[j].ID] {
-						continue
-					}
-					dist := haversineDistanceMiles(tierBins[i].Latitude, tierBins[i].Longitude, tierBins[j].Latitude, tierBins[j].Longitude)
-					if dist <= params.RadiusMiles {
-						cluster = append(cluster, tierBins[j])
-						assigned[tierBins[j].ID] = true
-					}
-				}
-				clusters = append(clusters, cluster)
-			}
-
-			// Split oversized clusters
-			var finalClusters [][]smartBin
-			for _, c := range clusters {
-				if len(c) <= params.MaxBinsPerRoute {
-					finalClusters = append(finalClusters, c)
-				} else {
-					for k := 0; k < len(c); k += params.MaxBinsPerRoute {
-						end := k + params.MaxBinsPerRoute
-						if end > len(c) { end = len(c) }
-						finalClusters = append(finalClusters, c[k:end])
-					}
-				}
-			}
-
-			// Build route recommendations from clusters
-			for _, cluster := range finalClusters {
-				if len(cluster) == 0 {
-					continue
-				}
-
-				// Determine dominant city
-				cityCounts := make(map[string]int)
-				var totalFillRate float64
-				var binIDs []string
-				for _, b := range cluster {
-					cityCounts[b.City]++
-					totalFillRate += b.AvgDailyFillRate
-					binIDs = append(binIDs, b.ID)
-				}
-				dominantCity := ""
-				maxCount := 0
-				for city, count := range cityCounts {
-					if count > maxCount {
-						dominantCity = city
-						maxCount = count
-					}
-				}
-
-				// Estimate route distance (sum of haversine between consecutive sorted bins)
-				sorted := make([]smartBin, len(cluster))
-				copy(sorted, cluster)
-				sort.Slice(sorted, func(i, j int) bool { return sorted[i].Latitude < sorted[j].Latitude })
-				totalDist := 0.0
-				for k := 1; k < len(sorted); k++ {
-					totalDist += haversineDistanceMiles(sorted[k-1].Latitude, sorted[k-1].Longitude, sorted[k].Latitude, sorted[k].Longitude)
-				}
-
-				// Estimate duration: 5 min/bin service + driving at 25 mph avg
-				serviceMins := float64(len(cluster)) * 5
-				drivingMins := (totalDist / 25.0) * 60
-				totalHours := (serviceMins + drivingMins) / 60.0
-
-				// Schedule pattern based on tier
-				schedule := "Weekly"
-				if tier == "high" {
-					schedule = "Every 3 days"
-				} else if tier == "medium" {
-					schedule = "Every 5-7 days"
-				} else {
-					schedule = "Every 10-14 days"
-				}
-
-				// Name
-				tierLabel := strings.ToUpper(tier[:1]) + tier[1:]
-				name := dominantCity + " — " + tierLabel + " Priority"
-				if len(cityCounts) > 1 {
-					name = dominantCity + " Area — " + tierLabel + " Priority"
-				}
-
-				allRoutes = append(allRoutes, recommendedRoute{
-					SuggestedName:   name,
-					GeographicArea:  dominantCity,
-					SchedulePattern: schedule,
-					Tier:            tier,
-					BinIDs:          binIDs,
-					Bins:            cluster,
-					Stats: routeStats{
-						BinCount:              len(cluster),
-						AvgFillRate:           math.Round(totalFillRate/float64(len(cluster))*10) / 10,
-						EstimatedDurationHours: math.Round(totalHours*10) / 10,
-						EstimatedDistanceMiles: math.Round(totalDist*10) / 10,
-					},
-				})
-			}
 		}
 
 		// Sort routes: high tier first, then by bin count descending
