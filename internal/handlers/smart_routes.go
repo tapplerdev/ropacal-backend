@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,19 +35,19 @@ func haversineDistanceMiles(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 type smartBin struct {
-	ID               string  `db:"id" json:"id"`
-	BinNumber        int     `db:"bin_number" json:"bin_number"`
-	CurrentStreet    string  `db:"current_street" json:"current_street"`
-	City             string  `db:"city" json:"city"`
-	Zip              string  `db:"zip" json:"zip"`
-	Latitude         float64 `db:"latitude" json:"latitude"`
-	Longitude        float64 `db:"longitude" json:"longitude"`
-	FillPercentage   int     `db:"fill_percentage" json:"fill_percentage"`
-	LastCheckedAt    *int64  `db:"last_checked_at" json:"-"`
-	AvgDailyFillRate float64 `json:"avg_daily_fill_rate"`
+	ID                string  `db:"id" json:"id"`
+	BinNumber         int     `db:"bin_number" json:"bin_number"`
+	CurrentStreet     string  `db:"current_street" json:"current_street"`
+	City              string  `db:"city" json:"city"`
+	Zip               string  `db:"zip" json:"zip"`
+	Latitude          float64 `db:"latitude" json:"latitude"`
+	Longitude         float64 `db:"longitude" json:"longitude"`
+	FillPercentage    int     `db:"fill_percentage" json:"fill_percentage"`
+	LastCheckedAt     *int64  `db:"last_checked_at" json:"-"`
+	AvgDailyFillRate  float64 `json:"avg_daily_fill_rate"`
 	PredictedDaysTo80 float64 `json:"predicted_days_to_80"`
-	Tier             string  `json:"tier"` // high, medium, low
-	CheckCount       int     `json:"check_count"`
+	Tier              string  `json:"tier"`
+	CheckCount        int     `json:"check_count"`
 }
 
 type recommendedRoute struct {
@@ -58,8 +61,8 @@ type recommendedRoute struct {
 }
 
 type routeStats struct {
-	BinCount              int     `json:"bin_count"`
-	AvgFillRate           float64 `json:"avg_fill_rate"`
+	BinCount               int     `json:"bin_count"`
+	AvgFillRate            float64 `json:"avg_fill_rate"`
 	EstimatedDurationHours float64 `json:"estimated_duration_hours"`
 	EstimatedDistanceMiles float64 `json:"estimated_distance_miles"`
 }
@@ -75,24 +78,20 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Parse optional params
+		// Parse params
 		var params struct {
-			RadiusMiles    float64 `json:"radius_miles"`
-			MaxBinsPerRoute int    `json:"max_bins_per_route"`
+			MaxBinsPerRoute int `json:"max_bins_per_route"`
 		}
-		params.RadiusMiles = 5.0
-		params.MaxBinsPerRoute = 35
+		params.MaxBinsPerRoute = 30
 		if r.Body != nil {
 			json.NewDecoder(r.Body).Decode(&params)
 		}
-		if q := r.URL.Query().Get("radius_miles"); q != "" {
-			if v, err := strconv.ParseFloat(q, 64); err == nil { params.RadiusMiles = v }
-		}
 		if q := r.URL.Query().Get("max_bins_per_route"); q != "" {
-			if v, err := strconv.Atoi(q); err == nil { params.MaxBinsPerRoute = v }
+			if v, err := strconv.Atoi(q); err == nil {
+				params.MaxBinsPerRoute = v
+			}
 		}
-
-		log.Printf("   Params: radius=%.1f mi, max_bins=%d", params.RadiusMiles, params.MaxBinsPerRoute)
+		log.Printf("   Max bins per route: %d", params.MaxBinsPerRoute)
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// Step 1: Fetch all active bins
@@ -108,8 +107,18 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch bins")
 			return
 		}
-
 		log.Printf("📊 Fetched %d active bins", len(bins))
+
+		if len(bins) < 2 {
+			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+				"success": true,
+				"data": map[string]interface{}{
+					"analysis":           map[string]interface{}{"total_active_bins": len(bins)},
+					"recommended_routes": []recommendedRoute{},
+				},
+			})
+			return
+		}
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// Step 2: Calculate fill rates from check history
@@ -135,8 +144,10 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 				AND (fill_percentage - prev_fill)::float / GREATEST(1, (checked_on - prev_checked_on)::float / 86400) < 50
 		`)
 
-		// Aggregate per bin
-		type rateAccum struct { sum float64; count int }
+		type rateAccum struct {
+			sum   float64
+			count int
+		}
 		rateMap := make(map[string]*rateAccum)
 		for _, p := range pairs {
 			if _, ok := rateMap[p.BinID]; !ok {
@@ -151,7 +162,6 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		defaultRate := 5.0
 		nowUnix := float64(time.Now().Unix())
-
 		tierCounts := map[string]int{"high": 0, "medium": 0, "low": 0}
 
 		for i := range bins {
@@ -166,12 +176,13 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 				}
 			}
 
-			// Predict days until 80%
 			currentFill := float64(b.FillPercentage)
 			if b.LastCheckedAt != nil && *b.LastCheckedAt > 0 {
 				daysSince := (nowUnix - float64(*b.LastCheckedAt)) / 86400.0
 				currentFill += daysSince * b.AvgDailyFillRate
-				if currentFill > 100 { currentFill = 100 }
+				if currentFill > 100 {
+					currentFill = 100
+				}
 			}
 
 			if b.AvgDailyFillRate > 0 && currentFill < 80 {
@@ -182,7 +193,6 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 				b.PredictedDaysTo80 = 99
 			}
 
-			// Tier assignment
 			if b.PredictedDaysTo80 <= 4 {
 				b.Tier = "high"
 			} else if b.PredictedDaysTo80 <= 9 {
@@ -192,125 +202,235 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 			}
 			tierCounts[b.Tier]++
 		}
-
 		log.Printf("📊 Tiers: %d high, %d medium, %d low", tierCounts["high"], tierCounts["medium"], tierCounts["low"])
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		// Step 4: Geographic clustering (tier-independent)
-		// Cluster ALL bins by proximity first, then assign tier within each cluster
+		// Step 4: Fetch warehouse location
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		const maxClusterDiameter = 8.0 // miles — prevents sprawling clusters
-
-		// Sort all bins by latitude for spatial sweep
-		sort.Slice(bins, func(i, j int) bool {
-			return bins[i].Latitude < bins[j].Latitude
-		})
-
-		// Centroid-based greedy clustering
-		type cluster struct {
-			bins    []smartBin
-			centerLat float64
-			centerLng float64
+		var warehouseLat, warehouseLng float64
+		var warehouseJSON []byte
+		whErr := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&warehouseJSON)
+		if whErr == nil {
+			var wh struct {
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			}
+			json.Unmarshal(warehouseJSON, &wh)
+			warehouseLat = wh.Latitude
+			warehouseLng = wh.Longitude
 		}
-		assigned := make(map[string]bool)
-		var clusters []cluster
-
-		for i := range bins {
-			if assigned[bins[i].ID] {
-				continue
-			}
-			c := cluster{
-				bins:      []smartBin{bins[i]},
-				centerLat: bins[i].Latitude,
-				centerLng: bins[i].Longitude,
-			}
-			assigned[bins[i].ID] = true
-
-			// Keep scanning for nearby bins, checking distance from cluster CENTER
-			changed := true
-			for changed {
-				changed = false
-				for j := range bins {
-					if assigned[bins[j].ID] {
-						continue
-					}
-					dist := haversineDistanceMiles(c.centerLat, c.centerLng, bins[j].Latitude, bins[j].Longitude)
-					if dist <= maxClusterDiameter/2 {
-						c.bins = append(c.bins, bins[j])
-						assigned[bins[j].ID] = true
-						// Recalculate center
-						c.centerLat = 0
-						c.centerLng = 0
-						for _, b := range c.bins {
-							c.centerLat += b.Latitude
-							c.centerLng += b.Longitude
-						}
-						c.centerLat /= float64(len(c.bins))
-						c.centerLng /= float64(len(c.bins))
-						changed = true
-					}
-				}
-			}
-
-			// Split oversized clusters by latitude
-			if len(c.bins) > params.MaxBinsPerRoute {
-				sort.Slice(c.bins, func(a, b int) bool { return c.bins[a].Latitude < c.bins[b].Latitude })
-				for k := 0; k < len(c.bins); k += params.MaxBinsPerRoute {
-					end := k + params.MaxBinsPerRoute
-					if end > len(c.bins) { end = len(c.bins) }
-					sub := c.bins[k:end]
-					sLat, sLng := 0.0, 0.0
-					for _, b := range sub { sLat += b.Latitude; sLng += b.Longitude }
-					clusters = append(clusters, cluster{bins: sub, centerLat: sLat / float64(len(sub)), centerLng: sLng / float64(len(sub))})
-				}
-			} else {
-				clusters = append(clusters, c)
-			}
+		if warehouseLat == 0 {
+			warehouseLat = 37.6368013
+			warehouseLng = -122.1269379
 		}
-
-		log.Printf("📊 Created %d geographic clusters", len(clusters))
+		log.Printf("🏭 Warehouse: (%.6f, %.6f)", warehouseLat, warehouseLng)
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		// Step 5: Build route recommendations from clusters
+		// Step 5: Build OSRM distance/duration matrix
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// Index 0 = warehouse, indices 1..N = bins
+		n := len(bins) + 1
+		numVehicles := int(math.Ceil(float64(len(bins)) / float64(params.MaxBinsPerRoute)))
+		if numVehicles < 1 {
+			numVehicles = 1
+		}
+
+		// Build coordinate string for OSRM
+		coords := make([]string, n)
+		coords[0] = fmt.Sprintf("%.6f,%.6f", warehouseLng, warehouseLat) // OSRM uses lon,lat
+		for i, b := range bins {
+			coords[i+1] = fmt.Sprintf("%.6f,%.6f", b.Longitude, b.Latitude)
+		}
+
+		osrmURL := os.Getenv("OSRM_SERVER_URL")
+		if osrmURL == "" {
+			osrmURL = "http://router.project-osrm.org"
+		}
+		tableURL := fmt.Sprintf("%s/table/v1/driving/%s?annotations=duration,distance", osrmURL, strings.Join(coords, ";"))
+
+		log.Printf("🗺️  Calling OSRM Table API (%d locations)...", n)
+		osrmClient := &http.Client{Timeout: 30 * time.Second}
+		osrmResp, err := osrmClient.Get(tableURL)
+		if err != nil {
+			log.Printf("❌ OSRM request failed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch distance matrix from OSRM")
+			return
+		}
+		defer osrmResp.Body.Close()
+
+		osrmBody, _ := io.ReadAll(osrmResp.Body)
+		var osrmData struct {
+			Code      string      `json:"code"`
+			Durations [][]float64 `json:"durations"`
+			Distances [][]float64 `json:"distances"`
+		}
+		if err := json.Unmarshal(osrmBody, &osrmData); err != nil || osrmData.Code != "Ok" {
+			log.Printf("❌ OSRM response error: code=%s, err=%v", osrmData.Code, err)
+			utils.RespondError(w, http.StatusInternalServerError, "OSRM returned an error")
+			return
+		}
+
+		// Convert to int matrices
+		distMatrix := make([][]int, n)
+		durMatrix := make([][]int, n)
+		for i := 0; i < n; i++ {
+			distMatrix[i] = make([]int, n)
+			durMatrix[i] = make([]int, n)
+			for j := 0; j < n; j++ {
+				distMatrix[i][j] = int(osrmData.Distances[i][j])
+				durMatrix[i][j] = int(osrmData.Durations[i][j])
+			}
+		}
+		log.Printf("✅ OSRM matrix: %dx%d", n, n)
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// Step 6: Call OR-Tools multi-vehicle CVRP
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		type ortoolsLocation struct {
+			ID   string  `json:"id"`
+			Lat  float64 `json:"lat"`
+			Lon  float64 `json:"lon"`
+			Name string  `json:"name"`
+		}
+
+		ortoolsLocs := make([]ortoolsLocation, n)
+		ortoolsLocs[0] = ortoolsLocation{ID: "warehouse", Lat: warehouseLat, Lon: warehouseLng, Name: "Warehouse"}
+		for i, b := range bins {
+			ortoolsLocs[i+1] = ortoolsLocation{ID: b.ID, Lat: b.Latitude, Lon: b.Longitude, Name: fmt.Sprintf("Bin #%d", b.BinNumber)}
+		}
+
+		ortoolsReq := map[string]interface{}{
+			"locations":           ortoolsLocs,
+			"distance_matrix":    distMatrix,
+			"duration_matrix":    durMatrix,
+			"num_vehicles":       numVehicles,
+			"vehicle_capacity":   params.MaxBinsPerRoute,
+			"depot_index":        0,
+			"max_runtime_seconds": 30,
+		}
+
+		ortoolsServiceURL := os.Getenv("ORTOOLS_SERVICE_URL")
+		if ortoolsServiceURL == "" {
+			ortoolsServiceURL = "http://localhost:8000"
+		}
+
+		reqBody, _ := json.Marshal(ortoolsReq)
+		log.Printf("🚀 Calling OR-Tools CVRP: %d locations, %d vehicles, capacity %d", n, numVehicles, params.MaxBinsPerRoute)
+
+		ortoolsClient := &http.Client{Timeout: 60 * time.Second}
+		ortoolsHTTPResp, err := ortoolsClient.Post(ortoolsServiceURL+"/generate-templates", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			log.Printf("❌ OR-Tools request failed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to call route optimizer")
+			return
+		}
+		defer ortoolsHTTPResp.Body.Close()
+
+		ortoolsBody, _ := io.ReadAll(ortoolsHTTPResp.Body)
+		var ortoolsResult struct {
+			Routes []struct {
+				VehicleID     int   `json:"vehicle_id"`
+				StopIndices   []int `json:"stop_indices"`
+				TotalDistance  int   `json:"total_distance"`
+				TotalDuration int   `json:"total_duration"`
+			} `json:"routes"`
+			Unassigned     []int `json:"unassigned"`
+			Feasible       bool  `json:"feasible"`
+			SolverRuntimeMs int  `json:"solver_runtime_ms"`
+		}
+		if err := json.Unmarshal(ortoolsBody, &ortoolsResult); err != nil {
+			log.Printf("❌ OR-Tools response parse error: %v", err)
+			log.Printf("   Response body: %s", string(ortoolsBody))
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to parse optimizer response")
+			return
+		}
+		log.Printf("✅ OR-Tools returned %d routes in %dms (feasible=%v, unassigned=%d)",
+			len(ortoolsResult.Routes), ortoolsResult.SolverRuntimeMs, ortoolsResult.Feasible, len(ortoolsResult.Unassigned))
+
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// Step 7: Build route recommendations from OR-Tools results
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		var allRoutes []recommendedRoute
 
-		// Track city occurrence for sub-naming (e.g., "San Jose North", "San Jose South")
-		cityClusterCount := make(map[string]int)
-		for _, c := range clusters {
-			cities := make(map[string]int)
-			for _, b := range c.bins { cities[b.City]++ }
+		// Track how many routes each city appears in (for directional naming)
+		cityRouteCount := make(map[string]int)
+		type routeCityInfo struct {
+			dominantCity string
+			avgLat       float64
+		}
+		var routeCityInfos []routeCityInfo
+
+		// First pass: determine dominant city per route
+		for _, ortRoute := range ortoolsResult.Routes {
+			if len(ortRoute.StopIndices) == 0 {
+				continue
+			}
+			cityCounts := make(map[string]int)
+			totalLat := 0.0
+			for _, nodeIdx := range ortRoute.StopIndices {
+				binIdx := nodeIdx - 1 // offset by 1 (index 0 = warehouse)
+				if binIdx >= 0 && binIdx < len(bins) {
+					cityCounts[bins[binIdx].City]++
+					totalLat += bins[binIdx].Latitude
+				}
+			}
 			dominant := ""
-			maxC := 0
-			for city, cnt := range cities { if cnt > maxC { dominant = city; maxC = cnt } }
-			cityClusterCount[dominant]++
+			maxCount := 0
+			for city, count := range cityCounts {
+				if count > maxCount {
+					dominant = city
+					maxCount = count
+				}
+			}
+			cityRouteCount[dominant]++
+			routeCityInfos = append(routeCityInfos, routeCityInfo{
+				dominantCity: dominant,
+				avgLat:       totalLat / float64(len(ortRoute.StopIndices)),
+			})
 		}
 
-		cityClusterIndex := make(map[string]int)
+		// Second pass: build routes with proper names
+		cityLatitudes := make(map[string][]float64) // city → list of avg lats per route
+		for _, info := range routeCityInfos {
+			cityLatitudes[info.dominantCity] = append(cityLatitudes[info.dominantCity], info.avgLat)
+		}
+		// Sort latitudes per city for directional assignment
+		for city := range cityLatitudes {
+			sort.Float64s(cityLatitudes[city])
+		}
+		cityDirIndex := make(map[string]int)
 
-		for _, c := range clusters {
-			if len(c.bins) == 0 {
+		routeInfoIdx := 0
+		for _, ortRoute := range ortoolsResult.Routes {
+			if len(ortRoute.StopIndices) == 0 {
 				continue
 			}
 
-			// Determine dominant city and tier
-			cityCounts := make(map[string]int)
-			var totalFillRate float64
+			// Collect bins for this route (in OR-Tools optimized order)
+			var routeBins []smartBin
 			var binIDs []string
+			var totalFillRate float64
+			cityCounts := make(map[string]int)
 			tierBuckets := map[string]int{"high": 0, "medium": 0, "low": 0}
-			for _, b := range c.bins {
-				cityCounts[b.City]++
-				totalFillRate += b.AvgDailyFillRate
-				binIDs = append(binIDs, b.ID)
-				tierBuckets[b.Tier]++
-			}
-			dominantCity := ""
-			maxCount := 0
-			for city, count := range cityCounts {
-				if count > maxCount { dominantCity = city; maxCount = count }
+
+			for _, nodeIdx := range ortRoute.StopIndices {
+				binIdx := nodeIdx - 1
+				if binIdx >= 0 && binIdx < len(bins) {
+					b := bins[binIdx]
+					routeBins = append(routeBins, b)
+					binIDs = append(binIDs, b.ID)
+					totalFillRate += b.AvgDailyFillRate
+					cityCounts[b.City]++
+					tierBuckets[b.Tier]++
+				}
 			}
 
-			// Cluster tier = majority tier of its bins
+			if len(routeBins) == 0 {
+				routeInfoIdx++
+				continue
+			}
+
+			// Cluster tier = majority
 			clusterTier := "low"
 			if tierBuckets["high"] >= tierBuckets["medium"] && tierBuckets["high"] >= tierBuckets["low"] {
 				clusterTier = "high"
@@ -318,74 +438,82 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 				clusterTier = "medium"
 			}
 
-			// Estimate route distance
-			sorted := make([]smartBin, len(c.bins))
-			copy(sorted, c.bins)
-			sort.Slice(sorted, func(i, j int) bool { return sorted[i].Latitude < sorted[j].Latitude })
-			totalDist := 0.0
-			for k := 1; k < len(sorted); k++ {
-				totalDist += haversineDistanceMiles(sorted[k-1].Latitude, sorted[k-1].Longitude, sorted[k].Latitude, sorted[k].Longitude)
-			}
-
-			// Estimate duration: 5 min/bin service + driving at 25 mph avg
-			serviceMins := float64(len(c.bins)) * 5
-			drivingMins := (totalDist / 25.0) * 60
-			totalHours := (serviceMins + drivingMins) / 60.0
-
-			// Schedule pattern based on tier
-			schedule := "Weekly"
+			// Schedule pattern
+			schedule := "Every 10-14 days"
 			if clusterTier == "high" {
 				schedule = "Every 3 days"
 			} else if clusterTier == "medium" {
 				schedule = "Every 5-7 days"
-			} else {
-				schedule = "Every 10-14 days"
 			}
 
-			// Name — add directional suffix if city has multiple clusters
+			// Build name
+			info := routeCityInfos[routeInfoIdx]
+			dominant := info.dominantCity
 			tierLabel := strings.ToUpper(clusterTier[:1]) + clusterTier[1:]
-			name := dominantCity
-			if cityClusterCount[dominantCity] > 1 {
-				cityClusterIndex[dominantCity]++
-				idx := cityClusterIndex[dominantCity]
-				// Use directional label based on latitude relative to city's other clusters
-				dirLabels := []string{"South", "Central", "North", "East", "West"}
-				if idx <= len(dirLabels) {
-					name = dominantCity + " " + dirLabels[idx-1]
-				} else {
-					name = fmt.Sprintf("%s %d", dominantCity, idx)
+
+			name := dominant
+			if cityRouteCount[dominant] > 1 {
+				// Assign directional label based on latitude rank
+				lats := cityLatitudes[dominant]
+				latIdx := 0
+				for i, l := range lats {
+					if math.Abs(l-info.avgLat) < 0.001 {
+						latIdx = i
+						break
+					}
+				}
+				dirLabels := []string{"South", "Central", "North"}
+				if len(lats) == 2 {
+					dirLabels = []string{"South", "North"}
+				} else if len(lats) > 3 {
+					dirLabels = nil
+					for k := 0; k < len(lats); k++ {
+						dirLabels = append(dirLabels, fmt.Sprintf("Area %d", k+1))
+					}
+				}
+				if latIdx < len(dirLabels) {
+					name += " " + dirLabels[latIdx]
+				}
+				cityDirIndex[dominant]++
+			}
+
+			// Add secondary cities
+			var others []string
+			for city := range cityCounts {
+				if city != dominant {
+					others = append(others, city)
 				}
 			}
-			if len(cityCounts) > 1 {
-				// Multi-city cluster — list secondary cities
-				var others []string
-				for city := range cityCounts {
-					if city != dominantCity { others = append(others, city) }
-				}
-				sort.Strings(others)
-				if len(others) <= 2 {
-					name += " / " + strings.Join(others, " / ")
-				}
+			sort.Strings(others)
+			if len(others) > 0 && len(others) <= 2 {
+				name += " / " + strings.Join(others, " / ")
+			} else if len(others) > 2 {
+				name += fmt.Sprintf(" + %d areas", len(others))
 			}
 			name += " — " + tierLabel + " Priority"
 
+			// Distance/duration from OR-Tools (convert meters → miles, seconds → hours)
+			distMiles := float64(ortRoute.TotalDistance) / 1609.34
+			durHours := float64(ortRoute.TotalDuration) / 3600.0
+
 			allRoutes = append(allRoutes, recommendedRoute{
 				SuggestedName:   name,
-				GeographicArea:  dominantCity,
+				GeographicArea:  dominant,
 				SchedulePattern: schedule,
 				Tier:            clusterTier,
 				BinIDs:          binIDs,
-				Bins:            c.bins,
+				Bins:            routeBins,
 				Stats: routeStats{
-					BinCount:               len(c.bins),
-					AvgFillRate:            math.Round(totalFillRate/float64(len(c.bins))*10) / 10,
-					EstimatedDurationHours: math.Round(totalHours*10) / 10,
-					EstimatedDistanceMiles: math.Round(totalDist*10) / 10,
+					BinCount:               len(routeBins),
+					AvgFillRate:            math.Round(totalFillRate/float64(len(routeBins))*10) / 10,
+					EstimatedDurationHours: math.Round(durHours*10) / 10,
+					EstimatedDistanceMiles: math.Round(distMiles*10) / 10,
 				},
 			})
+			routeInfoIdx++
 		}
 
-		// Sort routes: high tier first, then by bin count descending
+		// Sort: high first, then by bin count
 		tierOrder := map[string]int{"high": 0, "medium": 1, "low": 2}
 		sort.Slice(allRoutes, func(i, j int) bool {
 			if tierOrder[allRoutes[i].Tier] != tierOrder[allRoutes[j].Tier] {
@@ -400,13 +528,18 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 			"success": true,
 			"data": map[string]interface{}{
 				"analysis": map[string]interface{}{
-					"total_active_bins":     len(bins),
-					"bins_with_check_data":  len(rateMap),
-					"tiers":                tierCounts,
+					"total_active_bins":    len(bins),
+					"bins_with_check_data": len(rateMap),
+					"tiers":               tierCounts,
+					"optimizer": map[string]interface{}{
+						"solver_runtime_ms": ortoolsResult.SolverRuntimeMs,
+						"num_vehicles":      numVehicles,
+						"feasible":          ortoolsResult.Feasible,
+						"unassigned":        len(ortoolsResult.Unassigned),
+					},
 				},
 				"recommended_routes": allRoutes,
 			},
 		})
 	}
 }
-
