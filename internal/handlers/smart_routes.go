@@ -524,6 +524,28 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ Generated %d route recommendations", len(allRoutes))
 
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// Debug: Log each route for analysis
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Printf("📊 SMART ROUTE GENERATION RESULTS")
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		for i, route := range allRoutes {
+			log.Printf("")
+			log.Printf("  Route %d: %s", i+1, route.SuggestedName)
+			log.Printf("    Tier: %s | Schedule: %s", route.Tier, route.SchedulePattern)
+			log.Printf("    Bins: %d | Distance: %.1f mi | Duration: %.1f hrs",
+				route.Stats.BinCount, route.Stats.EstimatedDistanceMiles, route.Stats.EstimatedDurationHours)
+			log.Printf("    Avg fill rate: %.1f%%/day", route.Stats.AvgFillRate)
+			log.Printf("    Cities: %s", route.GeographicArea)
+			log.Printf("    Bin order:")
+			for j, b := range route.Bins {
+				log.Printf("      %d. Bin #%d — %s, %s (%.1f%%/day, tier=%s)",
+					j+1, b.BinNumber, b.CurrentStreet, b.City, b.AvgDailyFillRate, b.Tier)
+			}
+		}
+		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
