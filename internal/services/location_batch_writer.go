@@ -71,11 +71,21 @@ func (w *LocationBatchWriter) writeBatch() {
 
 	log.Printf("📊 [BatchWriter] Writing %d location points to PostgreSQL...", len(locations))
 
-	// Prepare batch insert
+	// Upsert into driver_current_location (one row per driver)
 	query := `
-		INSERT INTO driver_location_history
-		(driver_id, latitude, longitude, heading, speed, accuracy, shift_id, recorded_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, TO_TIMESTAMP($8))
+		INSERT INTO driver_current_location
+		(driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+		ON CONFLICT (driver_id) DO UPDATE SET
+			latitude = EXCLUDED.latitude,
+			longitude = EXCLUDED.longitude,
+			heading = EXCLUDED.heading,
+			speed = EXCLUDED.speed,
+			accuracy = EXCLUDED.accuracy,
+			shift_id = EXCLUDED.shift_id,
+			timestamp = EXCLUDED.timestamp,
+			updated_at = EXCLUDED.updated_at,
+			is_connected = true
 	`
 
 	successCount := 0
@@ -98,7 +108,8 @@ func (w *LocationBatchWriter) writeBatch() {
 			continue
 		}
 
-		// Insert to PostgreSQL
+		// Upsert to PostgreSQL
+		timestampSec := location.Timestamp / 1000 // Convert milliseconds to seconds
 		_, err := w.db.Exec(query,
 			driverID,
 			location.Latitude,
@@ -107,7 +118,7 @@ func (w *LocationBatchWriter) writeBatch() {
 			location.Speed,
 			location.Accuracy,
 			location.ShiftID,
-			float64(location.Timestamp)/1000.0, // Convert milliseconds to seconds
+			timestampSec,
 		)
 
 		if err != nil {
