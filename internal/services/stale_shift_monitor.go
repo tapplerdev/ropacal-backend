@@ -281,27 +281,39 @@ func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
 		}
 
 		// Get last task completion time
-		var lastTaskTime *int64
-		m.db.Get(&lastTaskTime, `
-			SELECT MAX(completed_at) FROM route_tasks
+		var lastTaskResult struct {
+			LastTask *int64 `db:"last_task"`
+		}
+		taskErr := m.db.Get(&lastTaskResult, `
+			SELECT MAX(completed_at) as last_task FROM route_tasks
 			WHERE shift_id = $1 AND is_completed = 1
 		`, shift.ID)
+		if taskErr != nil {
+			log.Printf("   ⚠️  %s (%s): failed to query last task time: %v", shift.ID[:12], shift.DriverName, taskErr)
+		}
 
 		lastActivity := int64(0)
 		if shift.StartTime != nil {
 			lastActivity = *shift.StartTime
 		}
-		if lastTaskTime != nil && *lastTaskTime > lastActivity {
-			lastActivity = *lastTaskTime
+		if lastTaskResult.LastTask != nil && *lastTaskResult.LastTask > lastActivity {
+			lastActivity = *lastTaskResult.LastTask
 		}
 		hoursSinceTask := time.Since(time.Unix(lastActivity, 0)).Hours()
 
 		// Check remaining tasks (exclude warehouse_stop)
-		var remaining int
-		m.db.Get(&remaining, `
-			SELECT COUNT(*) FROM route_tasks
+		var remainingResult struct {
+			Count int `db:"count"`
+		}
+		remErr := m.db.Get(&remainingResult, `
+			SELECT COUNT(*) as count FROM route_tasks
 			WHERE shift_id = $1 AND is_completed = 0 AND is_deleted = false AND task_type != 'warehouse_stop'
 		`, shift.ID)
+		remaining := remainingResult.Count
+		if remErr != nil {
+			log.Printf("   ⚠️  %s (%s): failed to query remaining tasks: %v", shift.ID[:12], shift.DriverName, remErr)
+			remaining = 0
+		}
 
 		log.Printf("   📊 %s (%s): snapshots=%d, maxDist=%.0fm, hoursSinceTask=%.1f, remaining=%d",
 			shift.ID[:12], shift.DriverName, len(snapshots), maxDist, hoursSinceTask, remaining)
