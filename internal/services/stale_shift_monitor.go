@@ -240,9 +240,11 @@ func atan2(y, x float64) float64 { return math.Atan2(y, x) }
 
 // checkInactiveShifts detects drivers who are stationary with no task activity for 2+ hours.
 func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
+	log.Printf("🔍 [InactiveCheck] Checking %d shifts for inactivity", len(shifts))
 	for _, shift := range shifts {
 		// Skip shifts less than 2 hours old
 		if shift.StartTime != nil && time.Since(time.Unix(*shift.StartTime, 0)) < 2*time.Hour {
+			log.Printf("   ⏭️  %s (%s): shift too new, skipping", shift.ID[:12], shift.DriverName)
 			continue
 		}
 
@@ -251,13 +253,18 @@ func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
 			Latitude  float64 `db:"latitude"`
 			Longitude float64 `db:"longitude"`
 		}
-		m.db.Select(&snapshots, `
+		err := m.db.Select(&snapshots, `
 			SELECT latitude, longitude FROM driver_location_snapshots
 			WHERE driver_id = $1 AND recorded_at > $2
 			ORDER BY recorded_at DESC
 		`, shift.DriverID, time.Now().Unix()-7200)
+		if err != nil {
+			log.Printf("   ❌ %s (%s): failed to query snapshots: %v", shift.ID[:12], shift.DriverName, err)
+			continue
+		}
 
 		if len(snapshots) < 3 {
+			log.Printf("   ⏭️  %s (%s): only %d snapshots (need 3+), skipping", shift.ID[:12], shift.DriverName, len(snapshots))
 			continue // Not enough data yet
 		}
 
@@ -295,6 +302,9 @@ func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
 			SELECT COUNT(*) FROM route_tasks
 			WHERE shift_id = $1 AND is_completed = 0 AND is_deleted = false AND task_type != 'warehouse_stop'
 		`, shift.ID)
+
+		log.Printf("   📊 %s (%s): snapshots=%d, maxDist=%.0fm, hoursSinceTask=%.1f, remaining=%d",
+			shift.ID[:12], shift.DriverName, len(snapshots), maxDist, hoursSinceTask, remaining)
 
 		// Trigger: stationary (<300m) + no task activity (2h) + has remaining work
 		if maxDist < 300 && hoursSinceTask >= 2 && remaining > 0 {
