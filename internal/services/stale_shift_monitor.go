@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"ropacal-backend/internal/helpers"
@@ -196,12 +197,111 @@ func (m *StaleShiftMonitor) checkStaleShifts() {
 			staleCount++
 		} else {
 			healthyCount++
+
+			// Write GPS snapshot for stationary detection
+			var currentLoc struct {
+				Latitude  float64 `db:"latitude"`
+				Longitude float64 `db:"longitude"`
+			}
+			if err := m.db.Get(&currentLoc, `SELECT latitude, longitude FROM driver_current_location WHERE driver_id = $1`, shift.DriverID); err == nil {
+				m.db.Exec(`INSERT INTO driver_location_snapshots (driver_id, shift_id, latitude, longitude, recorded_at) VALUES ($1, $2, $3, $4, $5)`,
+					shift.DriverID, shift.ID, currentLoc.Latitude, currentLoc.Longitude, time.Now().Unix())
+			}
 		}
 	}
+
+	// Clean up old snapshots (keep last 3 hours)
+	m.db.Exec(`DELETE FROM driver_location_snapshots WHERE recorded_at < $1`, time.Now().Unix()-10800)
+
+	// Check for inactive shifts (stationary + no task activity)
+	m.checkInactiveShifts(shifts)
 
 	if staleCount > 0 || len(shifts) > 0 {
 		log.Printf("📋 [StaleShiftMonitor] Checked %d active shifts: %d stale (auto-ended), %d healthy",
 			len(shifts), staleCount, healthyCount)
+	}
+}
+
+// haversineMeters returns distance in meters between two lat/lng points.
+func haversineMetersMonitor(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadius = 6371000.0 // meters
+	dLat := (lat2 - lat1) * 3.141592653589793 / 180
+	dLon := (lon2 - lon1) * 3.141592653589793 / 180
+	lat1r := lat1 * 3.141592653589793 / 180
+	lat2r := lat2 * 3.141592653589793 / 180
+	a := sin(dLat/2)*sin(dLat/2) + cos(lat1r)*cos(lat2r)*sin(dLon/2)*sin(dLon/2)
+	return earthRadius * 2 * atan2(sqrt(a), sqrt(1-a))
+}
+
+func sin(x float64) float64  { return math.Sin(x) }
+func cos(x float64) float64  { return math.Cos(x) }
+func sqrt(x float64) float64 { return math.Sqrt(x) }
+func atan2(y, x float64) float64 { return math.Atan2(y, x) }
+
+// checkInactiveShifts detects drivers who are stationary with no task activity for 2+ hours.
+func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
+	for _, shift := range shifts {
+		// Skip shifts less than 2 hours old
+		if shift.StartTime != nil && time.Since(time.Unix(*shift.StartTime, 0)) < 2*time.Hour {
+			continue
+		}
+
+		// Get snapshots from last 2 hours
+		var snapshots []struct {
+			Latitude  float64 `db:"latitude"`
+			Longitude float64 `db:"longitude"`
+		}
+		m.db.Select(&snapshots, `
+			SELECT latitude, longitude FROM driver_location_snapshots
+			WHERE driver_id = $1 AND recorded_at > $2
+			ORDER BY recorded_at DESC
+		`, shift.DriverID, time.Now().Unix()-7200)
+
+		if len(snapshots) < 3 {
+			continue // Not enough data yet
+		}
+
+		// Calculate max distance between any two snapshots
+		maxDist := 0.0
+		for i := range snapshots {
+			for j := i + 1; j < len(snapshots); j++ {
+				d := haversineMetersMonitor(snapshots[i].Latitude, snapshots[i].Longitude,
+					snapshots[j].Latitude, snapshots[j].Longitude)
+				if d > maxDist {
+					maxDist = d
+				}
+			}
+		}
+
+		// Get last task completion time
+		var lastTaskTime *int64
+		m.db.Get(&lastTaskTime, `
+			SELECT MAX(completed_at) FROM route_tasks
+			WHERE shift_id = $1 AND is_completed = 1
+		`, shift.ID)
+
+		lastActivity := int64(0)
+		if shift.StartTime != nil {
+			lastActivity = *shift.StartTime
+		}
+		if lastTaskTime != nil && *lastTaskTime > lastActivity {
+			lastActivity = *lastTaskTime
+		}
+		hoursSinceTask := time.Since(time.Unix(lastActivity, 0)).Hours()
+
+		// Check remaining tasks (exclude warehouse_stop)
+		var remaining int
+		m.db.Get(&remaining, `
+			SELECT COUNT(*) FROM route_tasks
+			WHERE shift_id = $1 AND is_completed = 0 AND is_deleted = false AND task_type != 'warehouse_stop'
+		`, shift.ID)
+
+		// Trigger: stationary (<300m) + no task activity (2h) + has remaining work
+		if maxDist < 300 && hoursSinceTask >= 2 && remaining > 0 {
+			log.Printf("⚠️  [StaleShiftMonitor] Auto-ending INACTIVE shift %s for %s — stationary %.0fm, no task in %.1fh, %d tasks remaining",
+				shift.ID[:12], shift.DriverName, maxDist, hoursSinceTask, remaining)
+			m.autoEndShift(shift, "auto_ended_inactive")
+		}
 	}
 }
 
@@ -230,8 +330,12 @@ func (m *StaleShiftMonitor) getLastGPSTime(ctx context.Context, driverID string)
 	return time.Time{}, "none"
 }
 
-// autoEndShift ends a stale shift with end_reason "driver_disconnected".
-func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow) {
+// autoEndShift ends a shift with the given end_reason and archives to shift_history.
+func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...string) {
+	endReason := "driver_disconnected"
+	if len(endReasons) > 0 {
+		endReason = endReasons[0]
+	}
 	now := time.Now().Unix()
 
 	// Calculate durations
@@ -288,7 +392,7 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow) {
 		completionRate,
 		incidentStats.TotalIncidents,
 		incidentStats.FieldObservations,
-		"driver_disconnected", // end_reason
+		endReason, // end_reason
 		nil,                   // ended_by_user_id (system action)
 		nil,                   // end_reason_metadata
 		optMetaRaw,

@@ -873,6 +873,17 @@ func Migrate(db *sqlx.DB) error {
 		`UPDATE shifts SET scheduled_date = DATE(TO_TIMESTAMP(COALESCE(start_time, created_at)) AT TIME ZONE 'America/Los_Angeles') WHERE scheduled_date IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_shifts_scheduled_date ON shifts(scheduled_date)`,
 
+		// Driver location snapshots — ring buffer for stationary detection (stale monitor)
+		`CREATE TABLE IF NOT EXISTS driver_location_snapshots (
+			id SERIAL PRIMARY KEY,
+			driver_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			shift_id TEXT REFERENCES shifts(id) ON DELETE SET NULL,
+			latitude DOUBLE PRECISION NOT NULL,
+			longitude DOUBLE PRECISION NOT NULL,
+			recorded_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_driver_snapshots_driver ON driver_location_snapshots(driver_id, recorded_at DESC)`,
+
 		// AirTag locations — stores latest position per tag, written by FindMy bridge
 		`CREATE TABLE IF NOT EXISTS airtag_locations (
 			id              TEXT PRIMARY KEY,
