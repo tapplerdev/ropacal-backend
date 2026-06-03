@@ -90,7 +90,7 @@ type binRow struct {
 	City          string   `db:"city"`
 }
 
-const defaultDriftThresholdMeters = 805.0 // 0.5 miles — tightened after AirTag→bin coord sync
+const defaultDriftThresholdMeters = 1609.0 // 1 mile — conservative threshold to avoid GPS jitter false alarms
 
 // NewAirtagMonitor creates a new monitor that checks every 5 minutes.
 func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *AirtagMonitor {
