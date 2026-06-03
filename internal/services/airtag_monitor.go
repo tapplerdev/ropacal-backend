@@ -18,7 +18,7 @@ import (
 )
 
 // AirtagMonitor periodically checks AirTag positions against stored bin locations.
-// If a bin has drifted >500m and is NOT in transit, it alerts admins via Centrifugo + FCM.
+// If a bin has drifted >0.5mi (~805m) and is NOT in transit, it alerts admins via Centrifugo + FCM.
 type AirtagMonitor struct {
 	db               *sqlx.DB
 	fcmService       *FCMService
@@ -90,7 +90,7 @@ type binRow struct {
 	City          string   `db:"city"`
 }
 
-const defaultDriftThresholdMeters = 500.0
+const defaultDriftThresholdMeters = 805.0 // 0.5 miles — tightened after AirTag→bin coord sync
 
 // NewAirtagMonitor creates a new monitor that checks every 5 minutes.
 func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *AirtagMonitor {
