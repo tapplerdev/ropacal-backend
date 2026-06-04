@@ -410,8 +410,9 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Get("/manager/bins/check-recommendations", handlers.GetBinCheckRecommendations(db))
 			r.Put("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db))
 
-			// Bin retirement
+			// Bin retirement & reactivation
 			r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
+			r.Post("/manager/bins/{id}/reactivate", handlers.ReactivateBin(db))
 
 			// Smart routes & daily priorities
 			r.Get("/manager/bins/daily-priorities", handlers.GetDailyPriorities(db))

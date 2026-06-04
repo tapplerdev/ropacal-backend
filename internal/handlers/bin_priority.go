@@ -2,14 +2,17 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
 
+	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -329,10 +332,159 @@ func RetireBin(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ [RETIRE-BIN] Bin %s retired by user %s (action: %s)", binID, userID, req.DisposalAction)
 
+		// Write to bin_change_log for audit trail
+		oldJSON := `{"status":"active"}`
+		newJSON := fmt.Sprintf(`{"status":"%s"}`, newStatus)
+		var reasonNotes *string
+		if req.Reason != nil {
+			reasonNotes = req.Reason
+		}
+		db.Exec(`INSERT INTO bin_change_log (id, bin_id, changed_by_user_id, created_at, change_type, old_values, new_values, reason_category, reason_notes, no_go_zone_created, no_go_zone_id)
+			VALUES ($1, $2, $3, $4, 'status_change', $5, $6, NULL, $7, false, NULL)`,
+			uuid.New().String(), binID, userID, now, oldJSON, newJSON, reasonNotes)
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"message": "Bin retired successfully",
 			"status":  newStatus,
+		})
+	}
+}
+
+// ReactivateBin unretires a bin and sets its location
+// POST /api/manager/bins/{id}/reactivate
+func ReactivateBin(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "id")
+		if binID == "" {
+			http.Error(w, "Bin ID is required", http.StatusBadRequest)
+			return
+		}
+
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			Destination string   `json:"destination"` // "warehouse", "previous", "custom"
+			Latitude    *float64 `json:"latitude"`
+			Longitude   *float64 `json:"longitude"`
+			Street      *string  `json:"street"`
+			City        *string  `json:"city"`
+			Zip         *string  `json:"zip"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Destination != "warehouse" && req.Destination != "previous" && req.Destination != "custom" {
+			http.Error(w, "destination must be 'warehouse', 'previous', or 'custom'", http.StatusBadRequest)
+			return
+		}
+
+		if req.Destination == "custom" && (req.Latitude == nil || req.Longitude == nil || req.Street == nil) {
+			http.Error(w, "custom destination requires latitude, longitude, and street", http.StatusBadRequest)
+			return
+		}
+
+		// Get current bin state
+		var bin struct {
+			ID            string  `db:"id"`
+			BinNumber     int     `db:"bin_number"`
+			Status        string  `db:"status"`
+			CurrentStreet string  `db:"current_street"`
+			City          string  `db:"city"`
+			Zip           string  `db:"zip"`
+			Latitude      float64 `db:"latitude"`
+			Longitude     float64 `db:"longitude"`
+		}
+		err := db.Get(&bin, `SELECT id, bin_number, status, current_street, city, zip, COALESCE(latitude,0) as latitude, COALESCE(longitude,0) as longitude FROM bins WHERE id = $1`, binID)
+		if err != nil {
+			http.Error(w, "Bin not found", http.StatusNotFound)
+			return
+		}
+		if bin.Status != "retired" {
+			http.Error(w, fmt.Sprintf("Bin is not retired (current status: %s)", bin.Status), http.StatusBadRequest)
+			return
+		}
+
+		now := time.Now().Unix()
+		newStatus := "active"
+		newStreet := bin.CurrentStreet
+		newCity := bin.City
+		newZip := bin.Zip
+		newLat := bin.Latitude
+		newLng := bin.Longitude
+
+		switch req.Destination {
+		case "warehouse":
+			newStatus = "in_storage"
+			// Get warehouse coords from config
+			var warehouseJSON []byte
+			if whErr := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&warehouseJSON); whErr == nil {
+				var wh struct {
+					Latitude  float64 `json:"latitude"`
+					Longitude float64 `json:"longitude"`
+					Address   string  `json:"address"`
+				}
+				if json.Unmarshal(warehouseJSON, &wh) == nil {
+					newLat = wh.Latitude
+					newLng = wh.Longitude
+					newStreet = wh.Address
+					newCity = "Hayward"
+					newZip = ""
+				}
+			}
+		case "previous":
+			newStatus = "active"
+			// Keep existing coords
+		case "custom":
+			newStatus = "active"
+			newLat = *req.Latitude
+			newLng = *req.Longitude
+			newStreet = *req.Street
+			if req.City != nil {
+				newCity = *req.City
+			}
+			if req.Zip != nil {
+				newZip = *req.Zip
+			}
+		}
+
+		// Update bin
+		_, err = db.Exec(`
+			UPDATE bins SET
+				status = $1, latitude = $2, longitude = $3,
+				current_street = $4, city = $5, zip = $6,
+				fill_percentage = 0, last_checked_at = NULL,
+				retired_at = NULL, retired_by_user_id = NULL,
+				updated_at = $7
+			WHERE id = $8
+		`, newStatus, newLat, newLng, newStreet, newCity, newZip, now, binID)
+		if err != nil {
+			log.Printf("❌ [REACTIVATE-BIN] Failed to update bin: %v", err)
+			http.Error(w, "Failed to reactivate bin", http.StatusInternalServerError)
+			return
+		}
+
+		// Write to bin_change_log
+		oldJSON := fmt.Sprintf(`{"status":"retired","street":"%s","city":"%s"}`, bin.CurrentStreet, bin.City)
+		newJSON := fmt.Sprintf(`{"status":"%s","street":"%s","city":"%s","destination":"%s"}`, newStatus, newStreet, newCity, req.Destination)
+		db.Exec(`INSERT INTO bin_change_log (id, bin_id, changed_by_user_id, created_at, change_type, old_values, new_values, reason_category, reason_notes, no_go_zone_created, no_go_zone_id)
+			VALUES ($1, $2, $3, $4, 'status_change', $5, $6, NULL, NULL, false, NULL)`,
+			uuid.New().String(), binID, userClaims.UserID, now, oldJSON, newJSON)
+
+		log.Printf("✅ [REACTIVATE-BIN] Bin #%d reactivated by %s → %s at %s", bin.BinNumber, userClaims.Email, newStatus, newStreet)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "Bin reactivated successfully",
+			"status":  newStatus,
+			"street":  newStreet,
+			"city":    newCity,
 		})
 	}
 }
