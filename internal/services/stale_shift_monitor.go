@@ -318,8 +318,9 @@ func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
 		log.Printf("   📊 %s (%s): snapshots=%d, maxDist=%.0fm, hoursSinceTask=%.1f, remaining=%d",
 			shift.ID[:12], shift.DriverName, len(snapshots), maxDist, hoursSinceTask, remaining)
 
-		// Trigger: stationary (<300m) + no task activity (2h) + has remaining work
-		if maxDist < 300 && hoursSinceTask >= 2 && remaining > 0 {
+		// Trigger: stationary (<300m) + no task activity (2h)
+		// Covers both: driver stopped working with tasks left, AND driver finished all tasks but didn't end shift
+		if maxDist < 300 && hoursSinceTask >= 2 {
 			log.Printf("⚠️  [StaleShiftMonitor] Auto-ending INACTIVE shift %s for %s — stationary %.0fm, no task in %.1fh, %d tasks remaining",
 				shift.ID[:12], shift.DriverName, maxDist, hoursSinceTask, remaining)
 			m.autoEndShift(shift, "auto_ended_inactive")
