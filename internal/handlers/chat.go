@@ -271,9 +271,10 @@ type chatRequest struct {
 }
 
 type chatResponse struct {
-	Response       string   `json:"response"`
-	ToolCallsMade  []string `json:"tool_calls_made,omitempty"`
-	ConversationID string   `json:"conversation_id"`
+	Response        string           `json:"response"`
+	ToolCallsMade   []string         `json:"tool_calls_made,omitempty"`
+	ConversationID  string           `json:"conversation_id"`
+	Recommendations json.RawMessage  `json:"recommendations,omitempty"`
 }
 
 func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -335,6 +336,7 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var toolCallsMade []string
+	var rawRecommendations json.RawMessage
 	maxIterations := 7
 
 	for i := 0; i < maxIterations; i++ {
@@ -367,6 +369,10 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					toolCallsMade = append(toolCallsMade, variant.Name)
 
 					result, toolErr := h.executeTool(variant.Name, variant.Input)
+					// Capture structured recommendations for frontend
+					if variant.Name == "recommend_bin_locations" && toolErr == nil {
+						rawRecommendations = json.RawMessage(result)
+					}
 					if toolErr != nil {
 						log.Printf("❌ [Chat] Tool error (%s): %v", variant.Name, toolErr)
 						toolResults = append(toolResults, anthropic.NewToolResultBlock(
@@ -409,9 +415,10 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(chatResponse{
-			Response:       responseText,
-			ToolCallsMade:  toolCallsMade,
-			ConversationID: req.ConversationID,
+			Response:        responseText,
+			ToolCallsMade:   toolCallsMade,
+			ConversationID:  req.ConversationID,
+			Recommendations: rawRecommendations,
 		})
 		return
 	}
