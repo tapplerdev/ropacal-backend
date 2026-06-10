@@ -64,9 +64,9 @@ const minDedupeDistMiles = 0.15
 
 // Address keywords to filter out — not real bin placement spots
 var badAddressKeywords = []string{
-	"highway", "bikeway", "trail", "freeway", "expressway",
-	"interchange", "ramp", "overpass", "underpass", "bridge",
-	"railroad", "rail trail", "creek trail", "river trail",
+	"highway", "hwy", "bikeway", "trail", "trl", "freeway", "fwy",
+	"expressway", "expy", "interchange", "ramp", "overpass", "underpass",
+	"bridge", "railroad", "creek", "river trl", "river trail",
 }
 
 // HERE category IDs for location classification
