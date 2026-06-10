@@ -7,36 +7,68 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
-const systemPrompt = `You are Binly AI, an assistant for a Bay Area waste bin management company called Binly.
+const baseSystemPrompt = `You are Binly AI, an assistant for a Bay Area waste bin management company called Binly.
 You help managers understand bin performance, find locations for new bins, analyze area trends, and answer operational questions.
 
-Key concepts:
-- Bins are clothing donation bins placed at locations around the Bay Area
-- Bins have fill_percentage (0-100%), checked periodically by drivers on collection shifts
-- avg_daily_fill_rate = how fast a bin fills per day (higher = more demand/better location)
-- Urgency levels based on estimated current fill: critical (>=80%), high (>=60%), medium (>=40%), low (<40%)
-- No-go zones: areas flagged for incidents (vandalism, theft, landlord complaints). Each has a center point and radius in meters.
-- Bin statuses: active (in the field), retired (permanently removed), in_storage (at warehouse), pending_move (scheduled to be relocated), missing (lost/stolen)
-- Potential locations: spots suggested by drivers for placing new bins, awaiting manager review
-- Shifts: drivers run collection routes, checking and emptying bins. Shifts have tasks (collection, placement, pickup, dropoff)
-- Move requests: scheduled bin relocations with urgency levels
+## Domain Knowledge
 
-Always use the provided tools to query real data. Never guess or make up bin numbers, addresses, or statistics.
-When recommending locations, always check no-go zones to ensure you don't suggest spots in restricted areas.
-Use miles for all distances, not kilometers. All operations are in the San Francisco Bay Area, California.
-Format responses clearly with bullet points or numbered lists when presenting multiple items.`
+- Bins are clothing donation bins placed at locations around the Bay Area
+- fill_percentage (0-100%) — how full a bin is, checked by drivers during collection shifts
+- avg_daily_fill_rate — how fast a bin fills per day. Higher = more demand = better performing location
+- Urgency levels (based on estimated current fill): critical (≥80%), high (≥60%), medium (≥40%), low (<40%)
+- No-go zones: areas flagged for incidents (vandalism, theft, landlord complaints). Each has a center point and radius in meters
+- Bin statuses: active (in the field), retired (permanently removed), in_storage (at warehouse), pending_move (scheduled relocation), missing (lost/stolen)
+- Potential locations: spots suggested by drivers for placing new bins, awaiting manager review
+- Shifts: drivers run collection routes with tasks (collection, placement, pickup, dropoff)
+- Move requests: scheduled bin relocations with urgency levels (standard, urgent)
+
+## Rules
+
+1. ALWAYS use tools to query real data. NEVER guess or fabricate bin numbers, addresses, fill levels, or statistics.
+2. Use miles for all distances (never kilometers). All operations are in the San Francisco Bay Area, California.
+3. When the user refers to something from earlier in the conversation, use your conversation history — do NOT ask them to repeat information you already have.
+4. Format responses with bullet points or numbered lists when presenting multiple items.
+5. When a bin's last check is >14 days old, note it as "stale data — may need fresh check."
+
+## Tool Orchestration
+
+When recommending new bin locations:
+- The recommend_bin_locations tool ALREADY filters out no-go zones and malls/Safeway locations internally. You do NOT need to separately verify this — just tell the user all recommendations are clear of no-go zones.
+- Proactively mention the filtering: "All locations have been verified clear of no-go zones and filtered to avoid malls/supermarkets."
+
+When analyzing bin performance or area health:
+1. Use get_area_performance first for the big picture
+2. Then search_bins for specific bins if needed
+3. Use get_bin_check_history for individual bin trends
+
+When the user asks about incidents or safety:
+- Use get_no_go_zones to find problem areas
+- Cross-reference with get_area_performance for success rates
+
+When the user asks a follow-up about locations/bins you already discussed:
+- Reference your prior response data directly — do NOT ask the user to re-provide information you already gave them.`
 
 type ChatHandler struct {
-	db     *sqlx.DB
-	client anthropic.Client
-	tools  []anthropic.ToolUnionParam
+	db       *sqlx.DB
+	client   anthropic.Client
+	tools    []anthropic.ToolUnionParam
+	sessions map[string]*chatSession
+	mu       sync.RWMutex
+}
+
+type chatSession struct {
+	Messages  []anthropic.MessageParam
+	CreatedAt time.Time
+	LastUsed  time.Time
 }
 
 func NewChatHandler(db *sqlx.DB) *ChatHandler {
@@ -48,32 +80,109 @@ func NewChatHandler(db *sqlx.DB) *ChatHandler {
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	h := &ChatHandler{
-		db:     db,
-		client: client,
+		db:       db,
+		client:   client,
+		sessions: make(map[string]*chatSession),
 	}
 	h.tools = h.buildToolDefinitions()
+
+	// Clean up stale sessions every 10 minutes
+	go func() {
+		for {
+			time.Sleep(10 * time.Minute)
+			h.cleanStaleSessions()
+		}
+	}()
+
 	return h
+}
+
+func (h *ChatHandler) cleanStaleSessions() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cutoff := time.Now().Add(-30 * time.Minute)
+	for id, s := range h.sessions {
+		if s.LastUsed.Before(cutoff) {
+			delete(h.sessions, id)
+		}
+	}
+}
+
+// buildDynamicSystemPrompt adds real-time fleet stats to the base prompt
+func (h *ChatHandler) buildDynamicSystemPrompt() string {
+	type stats struct {
+		TotalBins     int      `db:"total_bins"`
+		ActiveBins    int      `db:"active_bins"`
+		InStorage     int      `db:"in_storage"`
+		Retired       int      `db:"retired"`
+		AvgFill       *float64 `db:"avg_fill"`
+		CriticalCount int      `db:"critical_count"`
+		ZoneCount     int      `db:"zone_count"`
+	}
+
+	var s stats
+	err := h.db.Get(&s, `
+		SELECT
+			COUNT(*) as total_bins,
+			COUNT(CASE WHEN status = 'active' THEN 1 END) as active_bins,
+			COUNT(CASE WHEN status = 'in_storage' THEN 1 END) as in_storage,
+			COUNT(CASE WHEN status = 'retired' THEN 1 END) as retired,
+			AVG(CASE WHEN status = 'active' THEN fill_percentage END) as avg_fill,
+			COUNT(CASE WHEN status = 'active' AND fill_percentage >= 80 THEN 1 END) as critical_count,
+			(SELECT COUNT(*) FROM no_go_zones WHERE status = 'active' AND merged_into_zone_id IS NULL) as zone_count
+		FROM bins
+	`)
+
+	if err != nil {
+		log.Printf("⚠️ [Chat] Failed to fetch fleet stats: %v", err)
+		return baseSystemPrompt
+	}
+
+	avgFill := 0.0
+	if s.AvgFill != nil {
+		avgFill = *s.AvgFill
+	}
+
+	return fmt.Sprintf(`%s
+
+## Current Fleet Status (live)
+- Total bins: %d (%d active, %d in storage, %d retired)
+- Average fleet fill: %.0f%%
+- Critical bins (≥80%% full): %d
+- Active no-go zones: %d`,
+		baseSystemPrompt, s.TotalBins, s.ActiveBins, s.InStorage, s.Retired,
+		avgFill, s.CriticalCount, s.ZoneCount)
 }
 
 func (h *ChatHandler) buildToolDefinitions() []anthropic.ToolUnionParam {
 	toolParams := []anthropic.ToolParam{
 		{
-			Name:        "search_bins",
-			Description: anthropic.String("Search bins by city, status, fill level, days since last check, etc. Returns bin number, address, fill percentage, and status."),
+			Name: "search_bins",
+			Description: anthropic.String(`Search or filter bins in the database. Use this to:
+- Find all bins in a city or with a specific status
+- Identify stale bins (not checked in N days) for maintenance planning
+- Find bins within a fill percentage range (e.g., ≥80% for urgent pickups)
+- Combine filters (e.g., "all active bins in San Jose not checked in 7+ days")
+Returns: bin number, address, city, fill %, status, days since last check, coordinates.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
-					"city":                map[string]any{"type": "string", "description": "Filter by city name (e.g. 'San Jose', 'Fremont')"},
-					"status":              map[string]any{"type": "string", "enum": []string{"active", "retired", "in_storage", "missing", "pending_move"}, "description": "Filter by bin status"},
-					"min_fill_percentage": map[string]any{"type": "integer", "description": "Minimum fill percentage (0-100)"},
-					"max_fill_percentage": map[string]any{"type": "integer", "description": "Maximum fill percentage (0-100)"},
+					"city":                 map[string]any{"type": "string", "description": "Filter by city name (e.g. 'San Jose', 'Fremont')"},
+					"status":               map[string]any{"type": "string", "enum": []string{"active", "retired", "in_storage", "missing", "pending_move"}, "description": "Filter by bin status"},
+					"min_fill_percentage":  map[string]any{"type": "integer", "description": "Minimum fill percentage (0-100)"},
+					"max_fill_percentage":  map[string]any{"type": "integer", "description": "Maximum fill percentage (0-100)"},
 					"days_since_check_min": map[string]any{"type": "integer", "description": "Only bins not checked in at least this many days"},
-					"limit":               map[string]any{"type": "integer", "description": "Max results to return (default 20)"},
+					"limit":                map[string]any{"type": "integer", "description": "Max results to return (default 20)"},
 				},
 			},
 		},
 		{
-			Name:        "get_area_performance",
-			Description: anthropic.String("Get performance metrics for geographic areas (cities or zip codes). Returns total bins, active bins, clean bins (no incidents), problematic bins (has incidents), avg fill percentage, total checks, total incidents, success rate (% clean), and composite area score."),
+			Name: "get_area_performance",
+			Description: anthropic.String(`Get performance metrics for geographic areas (cities or zip codes). Use this for:
+- Comparing cities/areas by performance, incidents, or demand
+- Finding the best areas for new bin placement (sort by fill_rate)
+- Identifying problem areas (sort by incident_rate)
+- Getting success rates (% of bins with zero incidents)
+Returns: total bins, active bins, clean bins, problematic bins, avg fill %, total checks, total incidents, success rate, composite area score.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"group_by": map[string]any{"type": "string", "enum": []string{"city", "zip"}, "description": "Group results by city or zip code (default: city)"},
@@ -83,8 +192,8 @@ func (h *ChatHandler) buildToolDefinitions() []anthropic.ToolUnionParam {
 			},
 		},
 		{
-			Name:        "get_bin_check_history",
-			Description: anthropic.String("Get the check history for a specific bin — shows fill percentages over time with dates. Use bin_number (the user-facing number like #34) or bin_id (internal UUID)."),
+			Name: "get_bin_check_history",
+			Description: anthropic.String(`Get the check history for a specific bin — shows fill percentages over time with dates and photos. Use bin_number (the user-facing number like #34) or bin_id (internal UUID). Use this to analyze fill rate trends for individual bins.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"bin_number": map[string]any{"type": "integer", "description": "The bin number (e.g. 34, 67)"},
@@ -94,8 +203,11 @@ func (h *ChatHandler) buildToolDefinitions() []anthropic.ToolUnionParam {
 			},
 		},
 		{
-			Name:        "get_no_go_zones",
-			Description: anthropic.String("Get no-go zones — areas flagged for incidents like vandalism, theft, or landlord complaints. Each zone has a center point, radius, and status. Use this to check if a location is near any restricted areas."),
+			Name: "get_no_go_zones",
+			Description: anthropic.String(`Get no-go zones — areas flagged for incidents (vandalism, theft, landlord complaints). Each zone has a center point, radius, status, and incident count. Use this to:
+- Check if a specific location is near any restricted areas
+- List all problem areas in a city
+- Verify that recommended bin locations are safe`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"status":             map[string]any{"type": "string", "enum": []string{"active", "monitoring", "resolved", "all"}, "description": "Filter by zone status (default: active)"},
@@ -106,8 +218,8 @@ func (h *ChatHandler) buildToolDefinitions() []anthropic.ToolUnionParam {
 			},
 		},
 		{
-			Name:        "get_shift_history",
-			Description: anthropic.String("Get completed shift history. Shows shift date, driver, duration, tasks completed, distance traveled, and completion rate."),
+			Name: "get_shift_history",
+			Description: anthropic.String(`Get completed shift history. Use this to analyze driver performance, shift frequency, and operational trends. Returns shift date, driver name, duration, tasks completed, distance traveled, completion rate, and end reason.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"driver_name": map[string]any{"type": "string", "description": "Filter by driver name (partial match)"},
@@ -117,8 +229,8 @@ func (h *ChatHandler) buildToolDefinitions() []anthropic.ToolUnionParam {
 			},
 		},
 		{
-			Name:        "get_potential_locations",
-			Description: anthropic.String("Get potential locations — spots suggested by drivers for placing new bins. Shows address, who suggested it, and whether it's been converted to a bin yet."),
+			Name: "get_potential_locations",
+			Description: anthropic.String(`Get potential locations — spots suggested by drivers for placing new bins. Shows address, who suggested it, date, and conversion status. Use this to review pending driver suggestions.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"status": map[string]any{"type": "string", "enum": []string{"active", "converted", "all"}, "description": "Filter by status (default: active)"},
@@ -127,8 +239,15 @@ func (h *ChatHandler) buildToolDefinitions() []anthropic.ToolUnionParam {
 			},
 		},
 		{
-			Name:        "recommend_bin_locations",
-			Description: anthropic.String("Generate data-driven location recommendations for placing new bins. Analyzes high-performing areas (high fill rates), finds geographic gaps between existing bins, filters out no-go zones and locations near malls/supermarkets, and scores by area demand and income level. Returns addresses with scores and reasoning."),
+			Name: "recommend_bin_locations",
+			Description: anthropic.String(`Generate data-driven location recommendations for placing new bins. This tool:
+1. Identifies high-performing areas (highest fill rates = most demand)
+2. Finds geographic gaps between existing bins (underserved spots)
+3. AUTOMATICALLY filters out all active no-go zones (you do NOT need to check separately)
+4. AUTOMATICALLY filters out locations near malls and Safeway stores
+5. Scores by area demand, gap distance, and neighborhood income level
+6. Reverse geocodes each recommendation to a real street address
+Always tell the user: "All locations have been verified clear of no-go zones and filtered to avoid malls/supermarkets."`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"count":         map[string]any{"type": "integer", "description": "Number of locations to recommend (default 10, max 30)"},
@@ -177,25 +296,53 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("💬 [Chat] Received: %s", req.Message)
 
-	// Build conversation messages
-	messages := []anthropic.MessageParam{
-		anthropic.NewUserMessage(
-			anthropic.NewTextBlock(req.Message),
-		),
+	// Load or create conversation session
+	if req.ConversationID == "" {
+		req.ConversationID = uuid.New().String()
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	h.mu.Lock()
+	session, exists := h.sessions[req.ConversationID]
+	if !exists {
+		session = &chatSession{
+			Messages:  []anthropic.MessageParam{},
+			CreatedAt: time.Now(),
+			LastUsed:  time.Now(),
+		}
+		h.sessions[req.ConversationID] = session
+	}
+	session.LastUsed = time.Now()
+
+	// Append new user message
+	session.Messages = append(session.Messages, anthropic.NewUserMessage(
+		anthropic.NewTextBlock(req.Message),
+	))
+
+	// Cap conversation history at last 20 messages to stay within context limits
+	if len(session.Messages) > 20 {
+		session.Messages = session.Messages[len(session.Messages)-20:]
+	}
+
+	// Copy messages for this request
+	messages := make([]anthropic.MessageParam, len(session.Messages))
+	copy(messages, session.Messages)
+	h.mu.Unlock()
+
+	// Build dynamic system prompt with live fleet stats
+	dynamicPrompt := h.buildDynamicSystemPrompt()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
 	var toolCallsMade []string
-	maxIterations := 5
+	maxIterations := 7
 
 	for i := 0; i < maxIterations; i++ {
 		response, err := h.client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeSonnet4_5,
-			MaxTokens: 2048,
+			MaxTokens: 4096,
 			System: []anthropic.TextBlockParam{
-				{Text: systemPrompt},
+				{Text: dynamicPrompt},
 			},
 			Messages: messages,
 			Tools:    h.tools,
@@ -219,7 +366,6 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					log.Printf("🔧 [Chat] Tool call: %s", variant.Name)
 					toolCallsMade = append(toolCallsMade, variant.Name)
 
-					// Execute the tool
 					result, toolErr := h.executeTool(variant.Name, variant.Input)
 					if toolErr != nil {
 						log.Printf("❌ [Chat] Tool error (%s): %v", variant.Name, toolErr)
@@ -248,7 +394,18 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		log.Printf("✅ [Chat] Response generated (%d tool calls)", len(toolCallsMade))
+		// Save assistant response to session history
+		h.mu.Lock()
+		if s, ok := h.sessions[req.ConversationID]; ok {
+			s.Messages = append(s.Messages, response.ToParam())
+			// Cap at 20
+			if len(s.Messages) > 20 {
+				s.Messages = s.Messages[len(s.Messages)-20:]
+			}
+		}
+		h.mu.Unlock()
+
+		log.Printf("✅ [Chat] Response generated (%d tool calls, session %s)", len(toolCallsMade), req.ConversationID[:8])
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(chatResponse{
@@ -259,7 +416,6 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Max iterations reached
 	http.Error(w, `{"error":"too many tool calls, please simplify your question"}`, http.StatusInternalServerError)
 }
 
