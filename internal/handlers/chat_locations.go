@@ -303,9 +303,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 	}
 
-	// Fallback: midpoint generation if GraphVenn unavailable or returned nothing
-	if len(gapCandidates) == 0 && len(bins) >= 3 {
-		log.Printf("📍 [Recommend] Using midpoint fallback (GraphVenn unavailable or empty)")
+	// ALWAYS run midpoint generation alongside GraphVenn — merge results
+	// GraphVenn finds optimal demand areas, midpoints find gaps between bins
+	// Together they cover both strategies
+	if len(bins) >= 3 {
+		log.Printf("📍 [Recommend] Running midpoint generation (alongside GraphVenn)")
 		allCityBins := map[string][]existingBin{}
 		for _, b := range bins {
 			allCityBins[b.City] = append(allCityBins[b.City], b)
