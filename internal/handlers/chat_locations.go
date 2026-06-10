@@ -25,6 +25,7 @@ type LocationRecommendation struct {
 	AreaAvgFillRate float64 `json:"area_avg_fill_rate"`
 	MedianIncome    int     `json:"median_income,omitempty"`
 	TrafficScore    float64 `json:"traffic_score,omitempty"`
+	LocationType    string  `json:"location_type,omitempty"` // "commercial", "community", "residential"
 }
 
 type existingBin struct {
@@ -48,18 +49,51 @@ type candidate struct {
 	Lng             float64
 	City            string
 	Zip             string
-	NearestFillRate float64 // per-bin fill rate of nearest bin
+	NearestFillRate float64
 	NearestBinNum   int
-	NearestBinDist  float64 // miles
+	NearestBinDist  float64
 	Score           float64
 	TrafficScore    float64
+	POIScore        float64
+	LocationType    string
 }
 
 const maxGapMiles = 2.0
 const minBinsPerCity = 3
 const minDedupeDistMiles = 0.15
 
-// stripZipPlus4 returns the 5-digit zip from a zip+4 like "95125-4500"
+// Address keywords to filter out — not real bin placement spots
+var badAddressKeywords = []string{
+	"highway", "bikeway", "trail", "freeway", "expressway",
+	"interchange", "ramp", "overpass", "underpass", "bridge",
+	"railroad", "rail trail", "creek trail", "river trail",
+}
+
+// HERE category IDs for location classification
+// Commercial indicators (great for bins — high visibility, parking)
+var commercialCategoryPrefixes = []string{
+	"700-7600", // Gas/Petrol Station
+	"600-6000", // Convenience Store
+	"600-6300", // Grocery (but we filter Safeway separately)
+	"600-6400", // Drug Store/Pharmacy
+	"600-6500", // Hardware/Home Improvement
+	"600-6900", // Consumer Goods
+	"100-1000", // Restaurant
+	"100-1100", // Coffee/Tea
+	"700-7850", // Car Wash
+	"700-7900", // Auto Dealer/Service
+}
+
+// Community indicators (moderate for bins — some foot traffic)
+var communityCategoryPrefixes = []string{
+	"300-3200", // Church/Place of Worship
+	"800-8200", // School
+	"800-8100", // University/College
+	"550-5510", // Park/Recreation
+	"700-7400", // Post Office
+	"700-7000", // Bank
+}
+
 func stripZipPlus4(zip string) string {
 	if idx := strings.Index(zip, "-"); idx > 0 {
 		return zip[:idx]
@@ -70,7 +104,6 @@ func stripZipPlus4(zip string) string {
 	return zip
 }
 
-// toolRecommendLocations generates AI-powered location recommendations
 func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, error) {
 	count := 10
 	if c, ok := params["count"].(float64); ok && c > 0 {
@@ -79,12 +112,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			count = 30
 		}
 	}
-
 	targetCity := ""
 	if tc, ok := params["target_city"].(string); ok {
 		targetCity = tc
 	}
-
 	minGapMiles := 0.3
 	if mg, ok := params["min_gap_miles"].(float64); ok && mg > 0 {
 		minGapMiles = mg
@@ -92,7 +123,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	log.Printf("📍 [Recommend] Starting: count=%d, city=%q, minGap=%.1f mi", count, targetCity, minGapMiles)
 
-	// Step 1: Get all active bins with coordinates
+	// Step 1: Get all active bins
 	var bins []existingBin
 	query := `SELECT id, bin_number, latitude, longitude, city, zip, fill_percentage
 		FROM bins WHERE status = 'active' AND latitude IS NOT NULL AND longitude IS NOT NULL`
@@ -104,13 +135,12 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	if err := h.db.Select(&bins, query, args...); err != nil {
 		return "", fmt.Errorf("failed to fetch bins: %w", err)
 	}
-	log.Printf("📍 [Recommend] Found %d active bins with coordinates", len(bins))
-
+	log.Printf("📍 [Recommend] Found %d active bins", len(bins))
 	if len(bins) < 3 {
-		return "", fmt.Errorf("need at least 3 active bins with coordinates to generate recommendations (found %d)", len(bins))
+		return "", fmt.Errorf("need at least 3 active bins with coordinates (found %d)", len(bins))
 	}
 
-	// Step 2: Calculate per-bin fill rates from check history
+	// Step 2: Per-bin fill rates
 	type binRate struct {
 		BinID   string  `db:"bin_id"`
 		AvgRate float64 `db:"avg_rate"`
@@ -121,34 +151,27 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			SELECT bin_id, fill_percentage, checked_on,
 				LAG(fill_percentage) OVER (PARTITION BY bin_id ORDER BY checked_on) as prev_fill,
 				LAG(checked_on) OVER (PARTITION BY bin_id ORDER BY checked_on) as prev_checked_on
-			FROM checks
-			WHERE fill_percentage IS NOT NULL
+			FROM checks WHERE fill_percentage IS NOT NULL
 		)
-		SELECT bin_id,
-			AVG((fill_percentage - prev_fill)::float / GREATEST(1, (checked_on - prev_checked_on)::float / 86400)) as avg_rate
+		SELECT bin_id, AVG((fill_percentage - prev_fill)::float / GREATEST(1, (checked_on - prev_checked_on)::float / 86400)) as avg_rate
 		FROM ordered_checks
-		WHERE prev_fill IS NOT NULL
-			AND fill_percentage > prev_fill
+		WHERE prev_fill IS NOT NULL AND fill_percentage > prev_fill
 			AND (checked_on - prev_checked_on) > 3600
 			AND (fill_percentage - prev_fill)::float / GREATEST(1, (checked_on - prev_checked_on)::float / 86400) < 50
-		GROUP BY bin_id
-		HAVING COUNT(*) >= 2
+		GROUP BY bin_id HAVING COUNT(*) >= 2
 	`)
 	perBinFillRate := map[string]float64{}
 	for _, r := range binRates {
 		perBinFillRate[r.BinID] = r.AvgRate
 	}
-	log.Printf("📍 [Recommend] Calculated per-bin fill rates for %d bins", len(perBinFillRate))
+	log.Printf("📍 [Recommend] Per-bin fill rates for %d bins", len(perBinFillRate))
 
-	// Step 3: Get active no-go zones
+	// Step 3: No-go zones
 	var zones []noGoZone
-	h.db.Select(&zones, `
-		SELECT center_latitude, center_longitude, GREATEST(radius_meters, 500) as radius_meters
-		FROM no_go_zones WHERE status = 'active' AND merged_into_zone_id IS NULL
-	`)
-	log.Printf("📍 [Recommend] Loaded %d active no-go zones", len(zones))
+	h.db.Select(&zones, `SELECT center_latitude, center_longitude, GREATEST(radius_meters, 500) as radius_meters FROM no_go_zones WHERE status = 'active' AND merged_into_zone_id IS NULL`)
+	log.Printf("📍 [Recommend] %d active no-go zones", len(zones))
 
-	// Step 4: Get census data (income + population)
+	// Step 4: Census data
 	type censusRow struct {
 		Zip        string `db:"zip"`
 		Income     int    `db:"median_household_income"`
@@ -162,23 +185,18 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		zipIncome[c.Zip] = c.Income
 		zipPopulation[c.Zip] = c.Population
 	}
-	log.Printf("📍 [Recommend] Loaded %d zip code census records (income + population)", len(census))
 
-	// Step 5: Generate candidate locations — midpoints between distant bins in same city
+	// Step 5: Generate candidates
 	var candidates []candidate
-
-	// Group bins by city
 	allCityBins := map[string][]existingBin{}
 	for _, b := range bins {
 		allCityBins[b.City] = append(allCityBins[b.City], b)
 	}
-
 	for city, cBins := range allCityBins {
 		if len(cBins) < minBinsPerCity {
-			log.Printf("📍 [Recommend] Skipping %s — only %d bins (need %d)", city, len(cBins), minBinsPerCity)
+			log.Printf("📍 [Recommend] Skipping %s — only %d bins", city, len(cBins))
 			continue
 		}
-
 		cityGenerated := 0
 		for i := 0; i < len(cBins); i++ {
 			for j := i + 1; j < len(cBins); j++ {
@@ -186,49 +204,36 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				if dist < minGapMiles*2 || dist > maxGapMiles*2 {
 					continue
 				}
-
-				// Use the higher fill rate of the two neighboring bins
 				rate1 := perBinFillRate[cBins[i].ID]
 				rate2 := perBinFillRate[cBins[j].ID]
 				nearestRate := math.Max(rate1, rate2)
 				if nearestRate <= 0 {
-					nearestRate = 5.0 // default if no check data
+					nearestRate = 5.0
 				}
-
 				midLat := (cBins[i].Latitude + cBins[j].Latitude) / 2
 				midLng := (cBins[i].Longitude + cBins[j].Longitude) / 2
-
 				points := [][2]float64{{midLat, midLng}}
-				if dist > minGapMiles*4 && dist <= maxGapMiles*2 {
+				if dist > minGapMiles*4 {
 					points = append(points,
 						[2]float64{cBins[i].Latitude + (cBins[j].Latitude-cBins[i].Latitude)/3, cBins[i].Longitude + (cBins[j].Longitude-cBins[i].Longitude)/3},
 						[2]float64{cBins[i].Latitude + 2*(cBins[j].Latitude-cBins[i].Latitude)/3, cBins[i].Longitude + 2*(cBins[j].Longitude-cBins[i].Longitude)/3},
 					)
 				}
-
 				for _, pt := range points {
-					candidates = append(candidates, candidate{
-						Lat:             pt[0],
-						Lng:             pt[1],
-						City:            city,
-						Zip:             cBins[i].Zip,
-						NearestFillRate: nearestRate,
-					})
+					candidates = append(candidates, candidate{Lat: pt[0], Lng: pt[1], City: city, Zip: cBins[i].Zip, NearestFillRate: nearestRate})
 					cityGenerated++
 				}
 			}
 		}
-		log.Printf("📍 [Recommend] %s: generated %d candidates from %d bins", city, cityGenerated, len(cBins))
+		log.Printf("📍 [Recommend] %s: %d candidates from %d bins", city, cityGenerated, len(cBins))
 	}
-
-	log.Printf("📍 [Recommend] Total raw candidates: %d", len(candidates))
+	log.Printf("📍 [Recommend] Total raw: %d", len(candidates))
 	if len(candidates) == 0 {
-		return `{"count":0,"recommendations":[],"message":"No geographic gaps found between existing bins. All areas appear well-covered."}`, nil
+		return `{"count":0,"recommendations":[],"message":"No geographic gaps found."}`, nil
 	}
 
 	// Step 6: Filter no-go zones
 	var filtered []candidate
-	noGoFiltered := 0
 	for _, c := range candidates {
 		inNoGo := false
 		for _, z := range zones {
@@ -239,14 +244,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 		if !inNoGo {
 			filtered = append(filtered, c)
-		} else {
-			noGoFiltered++
 		}
 	}
 	candidates = filtered
-	log.Printf("📍 [Recommend] After no-go zone filter: %d candidates (%d removed)", len(candidates), noGoFiltered)
 
-	// Step 7: Deduplicate
+	// Step 7: Dedup
 	var deduped []candidate
 	for _, c := range candidates {
 		tooClose := false
@@ -260,12 +262,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			deduped = append(deduped, c)
 		}
 	}
-	log.Printf("📍 [Recommend] After dedup: %d candidates (removed %d)", len(deduped), len(candidates)-len(deduped))
 	candidates = deduped
 
-	// Step 8: Filter by distance to existing bins + attach nearest bin info
+	// Step 8: Gap filter + attach nearest bin
 	var gapped []candidate
-	tooCloseCount, tooFarCount := 0, 0
 	for _, c := range candidates {
 		minDist := math.MaxFloat64
 		nearestNum := 0
@@ -278,39 +278,31 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				nearestID = b.ID
 			}
 		}
-		if minDist < minGapMiles {
-			tooCloseCount++
-			continue
-		}
-		if minDist > maxGapMiles {
-			tooFarCount++
+		if minDist < minGapMiles || minDist > maxGapMiles {
 			continue
 		}
 		c.NearestBinNum = nearestNum
 		c.NearestBinDist = math.Round(minDist*10) / 10
-		// Use the actual nearest bin's fill rate
 		if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
 			c.NearestFillRate = rate
 		}
 		gapped = append(gapped, c)
 	}
-	log.Printf("📍 [Recommend] After gap filter: %d candidates (removed %d close, %d far)", len(gapped), tooCloseCount, tooFarCount)
 	candidates = gapped
+	log.Printf("📍 [Recommend] After all filters: %d candidates", len(candidates))
 
 	if len(candidates) == 0 {
-		return `{"count":0,"recommendations":[],"message":"No suitable gaps found. Existing bins cover the area well, or all gaps fall within no-go zones."}`, nil
+		return `{"count":0,"recommendations":[],"message":"No suitable gaps found."}`, nil
 	}
 
-	// Step 9: Score candidates with improved formula
-	// New weights: fill_rate 30%, gap 20%, population 20%, traffic 15%, income 15%
+	// Step 9: Preliminary score (without traffic/POI — those come later for top candidates)
 	maxRate := 0.0
 	maxPop := 0
 	for _, c := range candidates {
 		if c.NearestFillRate > maxRate {
 			maxRate = c.NearestFillRate
 		}
-		zip5 := stripZipPlus4(c.Zip)
-		if pop := zipPopulation[zip5]; pop > maxPop {
+		if pop := zipPopulation[stripZipPlus4(c.Zip)]; pop > maxPop {
 			maxPop = pop
 		}
 	}
@@ -323,65 +315,53 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	for i := range candidates {
 		zip5 := stripZipPlus4(candidates[i].Zip)
-
-		// Fill rate score (30%) — per-bin, not city average
 		fillScore := candidates[i].NearestFillRate / maxRate
-
-		// Gap distance score (20%)
 		gapScore := math.Min(candidates[i].NearestBinDist, maxGapMiles) / maxGapMiles
-
-		// Population density score (20%)
-		popScore := 0.5 // default if no data
+		popScore := 0.5
 		if pop, ok := zipPopulation[zip5]; ok && pop > 0 {
 			popScore = float64(pop) / float64(maxPop)
 		}
-
-		// Income score (15%)
-		incomeScore := 0.5 // default
+		incomeScore := 0.5
 		if income, ok := zipIncome[zip5]; ok && income > 0 {
 			incomeScore = float64(income) / 150000.0
 			if incomeScore > 1.5 {
 				incomeScore = 1.5
 			}
 		}
-
-		// Traffic placeholder (15%) — will be filled in Step 11 for top candidates
-		trafficScore := 0.5 // default, updated later for top candidates
-
-		candidates[i].Score = math.Round((fillScore*0.30+gapScore*0.20+popScore*0.20+trafficScore*0.15+incomeScore*0.15)*100) / 10
+		// Preliminary score (POI=0.5, traffic=0.5 as defaults)
+		candidates[i].Score = fillScore*0.25 + gapScore*0.15 + popScore*0.15 + 0.5*0.15 + incomeScore*0.10 + 0.5*0.20
 	}
 
-	// Step 10: Sort and take top candidates for traffic lookup + geocoding
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Score > candidates[j].Score
-	})
-	takeCount := count * 2
+	// Step 10: Sort and take top candidates for enrichment
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+	takeCount := count * 3 // take 3x to account for filtering
 	if takeCount > len(candidates) {
 		takeCount = len(candidates)
 	}
 	candidates = candidates[:takeCount]
-	log.Printf("📍 [Recommend] Top %d candidates selected for traffic lookup + geocoding", takeCount)
+	log.Printf("📍 [Recommend] Top %d candidates for enrichment", takeCount)
 
-	// Step 11: Enrich top candidates with HERE Traffic flow data, filter malls, geocode
+	// Step 11: Enrich with traffic, POI classification, geocode, and validate
 	var recommendations []LocationRecommendation
-	mallFiltered, badAddrFiltered := 0, 0
 
 	for _, c := range candidates {
 		if len(recommendations) >= count {
 			break
 		}
 
-		// Check mall/Safeway
-		nearMall, _ := isNearMallOrSupermarket(c.Lat, c.Lng)
-		if nearMall {
-			log.Printf("🏬 [Recommend] Filtered: %.4f,%.4f — near mall/supermarket", c.Lat, c.Lng)
-			mallFiltered++
-			continue
-		}
-
-		// Get traffic score from HERE
+		// Get traffic score
 		trafficJam := getTrafficJamFactor(c.Lat, c.Lng)
 		c.TrafficScore = trafficJam
+
+		// Browse nearby POIs — classifies location AND checks for malls/Safeway in one call
+		poiScore, locationType, nearMall := classifyLocation(c.Lat, c.Lng)
+		c.POIScore = poiScore
+		c.LocationType = locationType
+
+		if nearMall {
+			log.Printf("🏬 [Recommend] Filtered: %.4f,%.4f — near mall/supermarket", c.Lat, c.Lng)
+			continue
+		}
 
 		// Reverse geocode
 		address, zip := reverseGeocodeHERE(c.Lat, c.Lng)
@@ -392,12 +372,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 		// Filter bad addresses
 		if isVagueAddress(address, c.City) {
-			log.Printf("🚫 [Recommend] Filtered: %.4f,%.4f — vague address %q", c.Lat, c.Lng, address)
-			badAddrFiltered++
+			log.Printf("🚫 [Recommend] Filtered: vague address %q", address)
+			continue
+		}
+		if isBadAddressKeyword(address) {
+			log.Printf("🚫 [Recommend] Filtered: bad keyword in %q", address)
 			continue
 		}
 
-		// Recalculate final score with real traffic data
+		// Recalculate final score with real data
 		fillScore := c.NearestFillRate / maxRate
 		gapScore := math.Min(c.NearestBinDist, maxGapMiles) / maxGapMiles
 		popScore := 0.5
@@ -411,10 +394,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				incomeScore = 1.5
 			}
 		}
-		// Traffic: jamFactor 0-10, higher = busier = better for us
 		trafficNorm := math.Min(trafficJam, 10.0) / 10.0
 
-		finalScore := math.Round((fillScore*0.30+gapScore*0.20+popScore*0.20+trafficNorm*0.15+incomeScore*0.15)*100) / 10
+		finalScore := math.Round((fillScore*0.25+gapScore*0.15+popScore*0.15+trafficNorm*0.15+incomeScore*0.10+poiScore*0.20)*100) / 10
 
 		// Build reasoning
 		reasoning := fmt.Sprintf("%.1f mi gap from bin #%d", c.NearestBinDist, c.NearestBinNum)
@@ -426,13 +408,16 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			reasoning += fmt.Sprintf(", pop %dk", pop/1000)
 		}
 		if trafficJam > 0 {
-			trafficLabel := "low"
+			tLabel := "low"
 			if trafficJam >= 5 {
-				trafficLabel = "high"
+				tLabel = "high"
 			} else if trafficJam >= 2 {
-				trafficLabel = "moderate"
+				tLabel = "moderate"
 			}
-			reasoning += fmt.Sprintf(", %s traffic", trafficLabel)
+			reasoning += fmt.Sprintf(", %s traffic", tLabel)
+		}
+		if locationType != "" {
+			reasoning += fmt.Sprintf(", %s area", locationType)
 		}
 
 		rec := LocationRecommendation{
@@ -448,72 +433,112 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			AreaAvgFillRate: math.Round(c.NearestFillRate*10) / 10,
 			MedianIncome:    zipIncome[zip5],
 			TrafficScore:    math.Round(trafficJam*10) / 10,
+			LocationType:    locationType,
 		}
 		recommendations = append(recommendations, rec)
-		log.Printf("✅ [Recommend] #%d: %s (score %.1f, fill %.1f, gap %.1f mi, traffic %.1f, pop %dk, income $%dk)",
-			len(recommendations), address, finalScore, c.NearestFillRate, c.NearestBinDist,
-			trafficJam, zipPopulation[zip5]/1000, zipIncome[zip5]/1000)
+		log.Printf("✅ [Recommend] #%d: %s (score %.1f, fill %.1f, gap %.1f, traffic %.1f, POI %.1f/%s)",
+			len(recommendations), address, finalScore, c.NearestFillRate, c.NearestBinDist, trafficJam, poiScore, locationType)
 	}
 
-	// Re-sort by final score (since traffic data may have changed rankings)
-	sort.Slice(recommendations, func(i, j int) bool {
-		return recommendations[i].Score > recommendations[j].Score
-	})
+	sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
+	log.Printf("📍 [Recommend] Final: %d recommendations", len(recommendations))
 
-	log.Printf("📍 [Recommend] Final: %d recommendations (filtered %d malls, %d bad addresses)", len(recommendations), mallFiltered, badAddrFiltered)
-
-	result, _ := json.Marshal(map[string]any{
-		"count":           len(recommendations),
-		"recommendations": recommendations,
-	})
+	result, _ := json.Marshal(map[string]any{"count": len(recommendations), "recommendations": recommendations})
 	return string(result), nil
 }
 
-// getTrafficJamFactor queries HERE Traffic Flow API for the jam factor at a location.
-// Returns 0-10 where 0=free flow, 10=gridlock. Higher = busier road = better visibility.
-func getTrafficJamFactor(lat, lng float64) float64 {
+// classifyLocation calls HERE Browse API with no category filter to find nearby POIs,
+// then classifies as commercial/community/residential based on what's found.
+// Also returns whether a mall or Safeway is nearby (for filtering).
+func classifyLocation(lat, lng float64) (poiScore float64, locationType string, nearMallOrSafeway bool) {
 	url := fmt.Sprintf(
-		"https://data.traffic.hereapi.com/v7/flow?in=circle:%.6f,%.6f;r=100&locationReferencing=none&apiKey=%s",
-		lat, lng, HereAPIKey,
+		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=10&in=circle:%.6f,%.6f;r=150&apiKey=%s",
+		lat, lng, lat, lng, HereAPIKey,
 	)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		log.Printf("⚠️ [Traffic] API error at %.4f,%.4f: %v", lat, lng, err)
-		return 0
+		return 0.3, "unknown", false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		log.Printf("⚠️ [Traffic] HTTP %d at %.4f,%.4f", resp.StatusCode, lat, lng)
-		return 0
+		return 0.3, "unknown", false
 	}
 
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Results []struct {
-			CurrentFlow struct {
-				JamFactor float64 `json:"jamFactor"`
-				Speed     float64 `json:"speed"`
-			} `json:"currentFlow"`
-		} `json:"results"`
+		Items []struct {
+			Title      string `json:"title"`
+			Categories []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"categories"`
+		} `json:"items"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil || len(result.Results) == 0 {
-		return 0
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0.3, "unknown", false
 	}
 
-	// Return the highest jam factor from nearby road segments
-	maxJam := 0.0
-	for _, r := range result.Results {
-		if r.CurrentFlow.JamFactor > maxJam {
-			maxJam = r.CurrentFlow.JamFactor
+	if len(result.Items) == 0 {
+		return 0.2, "residential", false
+	}
+
+	hasCommercial := false
+	hasCommunity := false
+
+	for _, item := range result.Items {
+		titleLower := strings.ToLower(item.Title)
+
+		// Check for mall or Safeway
+		if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
+			nearMallOrSafeway = true
+		}
+
+		for _, cat := range item.Categories {
+			// Check for mall category
+			if cat.ID == "600-6100-0062" {
+				nearMallOrSafeway = true
+			}
+
+			// Check commercial
+			for _, prefix := range commercialCategoryPrefixes {
+				if strings.HasPrefix(cat.ID, prefix) {
+					hasCommercial = true
+					break
+				}
+			}
+			// Check community
+			for _, prefix := range communityCategoryPrefixes {
+				if strings.HasPrefix(cat.ID, prefix) {
+					hasCommunity = true
+					break
+				}
+			}
 		}
 	}
-	return maxJam
+
+	if hasCommercial {
+		return 1.0, "commercial", nearMallOrSafeway
+	}
+	if hasCommunity {
+		return 0.6, "community", nearMallOrSafeway
+	}
+	return 0.3, "mixed", nearMallOrSafeway
 }
 
-// isVagueAddress checks if a reverse geocoded address is too vague to be useful
+// isBadAddressKeyword checks if address contains keywords that indicate a non-placement spot
+func isBadAddressKeyword(address string) bool {
+	lower := strings.ToLower(address)
+	for _, kw := range badAddressKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func isVagueAddress(address string, city string) bool {
 	lower := strings.ToLower(strings.TrimSpace(address))
 	if strings.HasPrefix(lower, "37.") || strings.HasPrefix(lower, "-12") {
@@ -538,64 +563,50 @@ func isVagueAddress(address string, city string) bool {
 	return false
 }
 
-// haversineDistMiles calculates distance in miles between two coordinates
-func haversineDistMiles(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadiusMiles = 3958.8
-	dLat := (lat2 - lat1) * math.Pi / 180
-	dLon := (lon2 - lon1) * math.Pi / 180
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
-			math.Sin(dLon/2)*math.Sin(dLon/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return earthRadiusMiles * c
-}
-
-// isNearMallOrSupermarket checks if a location is near a shopping mall or Safeway via HERE Places API.
-func isNearMallOrSupermarket(lat, lng float64) (bool, error) {
+func getTrafficJamFactor(lat, lng float64) float64 {
+	url := fmt.Sprintf(
+		"https://data.traffic.hereapi.com/v7/flow?in=circle:%.6f,%.6f;r=100&locationReferencing=none&apiKey=%s",
+		lat, lng, HereAPIKey,
+	)
 	client := &http.Client{Timeout: 5 * time.Second}
-	mallURL := fmt.Sprintf(
-		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=3&in=circle:%.6f,%.6f;r=200&name=mall&apiKey=%s",
-		lat, lng, lat, lng, HereAPIKey,
-	)
-	if found, _ := hereBrowseHasResults(client, mallURL); found {
-		return true, nil
-	}
-	safewayURL := fmt.Sprintf(
-		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=3&in=circle:%.6f,%.6f;r=200&name=Safeway&apiKey=%s",
-		lat, lng, lat, lng, HereAPIKey,
-	)
-	if found, _ := hereBrowseHasResults(client, safewayURL); found {
-		return true, nil
-	}
-	return false, nil
-}
-
-// hereBrowseHasResults makes a HERE Browse API call and returns true if any items are found
-func hereBrowseHasResults(client *http.Client, url string) (bool, error) {
 	resp, err := client.Get(url)
 	if err != nil {
-		return false, err
+		return 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return false, nil
+		return 0
 	}
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Items []any `json:"items"`
+		Results []struct {
+			CurrentFlow struct {
+				JamFactor float64 `json:"jamFactor"`
+			} `json:"currentFlow"`
+		} `json:"results"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return false, nil
+	if err := json.Unmarshal(body, &result); err != nil || len(result.Results) == 0 {
+		return 0
 	}
-	return len(result.Items) > 0, nil
+	maxJam := 0.0
+	for _, r := range result.Results {
+		if r.CurrentFlow.JamFactor > maxJam {
+			maxJam = r.CurrentFlow.JamFactor
+		}
+	}
+	return maxJam
 }
 
-// reverseGeocodeHERE reverse geocodes a coordinate to an address using HERE API
+func haversineDistMiles(lat1, lon1, lat2, lon2 float64) float64 {
+	const r = 3958.8
+	dLat := (lat2 - lat1) * math.Pi / 180
+	dLon := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) + math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return r * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+}
+
 func reverseGeocodeHERE(lat, lng float64) (string, string) {
-	url := fmt.Sprintf(
-		"https://revgeocode.search.hereapi.com/v1/revgeocode?at=%.6f,%.6f&apiKey=%s",
-		lat, lng, HereAPIKey,
-	)
+	url := fmt.Sprintf("https://revgeocode.search.hereapi.com/v1/revgeocode?at=%.6f,%.6f&apiKey=%s", lat, lng, HereAPIKey)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
