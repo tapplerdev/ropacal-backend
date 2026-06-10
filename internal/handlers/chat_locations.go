@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -259,17 +261,57 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 
 	// ======================================================================
-	// STRATEGY A: Gap-fill candidates (70% of results) — near existing bins
+	// STRATEGY A: GraphVenn optimal demand hotspots (primary)
+	// Falls back to midpoint generation if GraphVenn service unavailable
 	// ======================================================================
 	var gapCandidates []candidate
-	if len(bins) >= 3 {
+
+	// Try GraphVenn first
+	graphvennURL := os.Getenv("GRAPHVENN_SERVICE_URL")
+	if graphvennURL != "" && len(bins) >= 3 {
+		gvCandidates := callGraphVennService(graphvennURL, bins, perBinFillRate, zones, count)
+		if len(gvCandidates) > 0 {
+			log.Printf("📍 [Recommend] GraphVenn returned %d demand hotspots", len(gvCandidates))
+			// Attach nearest bin info and fill rates
+			for i := range gvCandidates {
+				minDist := math.MaxFloat64
+				nearestNum := 0
+				nearestID := ""
+				for _, b := range bins {
+					d := haversineDistMiles(gvCandidates[i].Lat, gvCandidates[i].Lng, b.Latitude, b.Longitude)
+					if d < minDist {
+						minDist = d
+						nearestNum = b.BinNumber
+						nearestID = b.ID
+					}
+				}
+				gvCandidates[i].NearestBinNum = nearestNum
+				gvCandidates[i].NearestBinDist = math.Round(minDist*10) / 10
+				if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
+					gvCandidates[i].NearestFillRate = rate
+				}
+				// Find city from nearest bin
+				for _, b := range bins {
+					if b.BinNumber == nearestNum {
+						gvCandidates[i].City = b.City
+						gvCandidates[i].Zip = b.Zip
+						break
+					}
+				}
+			}
+			gapCandidates = gvCandidates
+		}
+	}
+
+	// Fallback: midpoint generation if GraphVenn unavailable or returned nothing
+	if len(gapCandidates) == 0 && len(bins) >= 3 {
+		log.Printf("📍 [Recommend] Using midpoint fallback (GraphVenn unavailable or empty)")
 		allCityBins := map[string][]existingBin{}
 		for _, b := range bins {
 			allCityBins[b.City] = append(allCityBins[b.City], b)
 		}
 		for city, cBins := range allCityBins {
 			if len(cBins) < minBinsPerCity {
-				log.Printf("📍 [Recommend] Skipping %s — only %d bins", city, len(cBins))
 				continue
 			}
 			for i := 0; i < len(cBins); i++ {
@@ -308,7 +350,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// Filter gap candidates: no-go zones, dedup, distance
 	gapCandidates = filterNoGoZones(gapCandidates, zones)
 	gapCandidates = deduplicateCandidates(gapCandidates)
-	gapCandidates = filterByDistance(gapCandidates, bins, minGapMiles, maxGapMiles, perBinFillRate)
+	if graphvennURL == "" { // only apply distance filter for midpoint mode — GraphVenn already handles this
+		gapCandidates = filterByDistance(gapCandidates, bins, minGapMiles, maxGapMiles, perBinFillRate)
+	}
 	log.Printf("📍 [Recommend] Gap-fill after filters: %d", len(gapCandidates))
 
 	// ======================================================================
@@ -997,4 +1041,142 @@ func reverseGeocodeHERE(lat, lng float64) (string, string) {
 		return fmt.Sprintf("%.4f, %.4f", lat, lng), ""
 	}
 	return result.Items[0].Address.Label, result.Items[0].Address.PostalCode
+}
+
+// callGraphVennService calls the GraphVenn Python microservice to get optimal demand hotspots.
+// Builds a demand surface from bin fill rates (radiated outward in rings) and sends it
+// to the service for optimal placement computation.
+func callGraphVennService(serviceURL string, bins []existingBin, perBinFillRate map[string]float64, zones []noGoZone, count int) []candidate {
+	// Build demand surface: each bin radiates demand in a ring at 0.5, 1.0, 1.5 miles
+	type demandPoint struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+		Weight    float64 `json:"weight"`
+		Label     string  `json:"label,omitempty"`
+	}
+	type existBin struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+		BinNumber int     `json:"bin_number"`
+	}
+	type noGoReq struct {
+		CenterLatitude  float64 `json:"center_latitude"`
+		CenterLongitude float64 `json:"center_longitude"`
+		RadiusMeters    int     `json:"radius_meters"`
+	}
+
+	var demandPoints []demandPoint
+	for _, b := range bins {
+		fill := 10.0 // default
+		if b.FillPercentage != nil {
+			fill = float64(*b.FillPercentage)
+		}
+		// Also use per-bin fill rate if available (better signal)
+		if rate, ok := perBinFillRate[b.ID]; ok && rate > 0 {
+			fill = rate * 10 // scale fill rate to weight
+		}
+		weight := math.Max(fill/100.0, 0.1)
+
+		// Generate demand ring: 8 directions at 3 distances
+		for _, distMiles := range []float64{0.5, 1.0, 1.5} {
+			distDeg := distMiles / 69.0
+			for angleDeg := 0; angleDeg < 360; angleDeg += 45 {
+				angleRad := float64(angleDeg) * math.Pi / 180
+				dlat := distDeg * math.Cos(angleRad)
+				dlng := distDeg * math.Sin(angleRad) / math.Cos(b.Latitude*math.Pi/180)
+				distWeight := weight * (1.0 - distMiles/2.0)
+
+				demandPoints = append(demandPoints, demandPoint{
+					Latitude:  math.Round((b.Latitude+dlat)*1e6) / 1e6,
+					Longitude: math.Round((b.Longitude+dlng)*1e6) / 1e6,
+					Weight:    math.Round(distWeight*1000) / 1000,
+					Label:     fmt.Sprintf("Near Bin #%d", b.BinNumber),
+				})
+			}
+		}
+	}
+
+	var existBins []existBin
+	for _, b := range bins {
+		existBins = append(existBins, existBin{
+			Latitude: b.Latitude, Longitude: b.Longitude, BinNumber: b.BinNumber,
+		})
+	}
+
+	var noGoReqs []noGoReq
+	for _, z := range zones {
+		noGoReqs = append(noGoReqs, noGoReq{
+			CenterLatitude: z.CenterLat, CenterLongitude: z.CenterLng, RadiusMeters: z.RadiusMeters,
+		})
+	}
+
+	reqBody := map[string]any{
+		"demand_points":                  demandPoints,
+		"existing_bins":                  existBins,
+		"no_go_zones":                    noGoReqs,
+		"count":                          count * 3, // request 3x for filtering buffer
+		"radius_meters":                  400,
+		"min_distance_from_bins_meters":  500,
+		"strategy":                       "greedy",
+		"precision":                      3,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		log.Printf("⚠️ [GraphVenn] Failed to marshal request: %v", err)
+		return nil
+	}
+
+	log.Printf("📍 [GraphVenn] Calling service at %s with %d demand points, %d bins", serviceURL, len(demandPoints), len(bins))
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Post(serviceURL+"/recommend", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("⚠️ [GraphVenn] Service call failed: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("⚠️ [GraphVenn] Service returned HTTP %d: %s", resp.StatusCode, string(respBody)[:200])
+		return nil
+	}
+
+	var gvResp struct {
+		Success   bool `json:"success"`
+		Locations []struct {
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+			Score     float64 `json:"score"`
+			Rank      int     `json:"rank"`
+		} `json:"locations"`
+		CoveragePercentage float64 `json:"coverage_percentage"`
+		SolverRuntimeMs    int     `json:"solver_runtime_ms"`
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(respBody, &gvResp); err != nil {
+		log.Printf("⚠️ [GraphVenn] Failed to parse response: %v", err)
+		return nil
+	}
+
+	if !gvResp.Success || len(gvResp.Locations) == 0 {
+		log.Printf("⚠️ [GraphVenn] No results returned")
+		return nil
+	}
+
+	log.Printf("✅ [GraphVenn] Got %d hotspots in %dms (%.1f%% coverage)",
+		len(gvResp.Locations), gvResp.SolverRuntimeMs, gvResp.CoveragePercentage)
+
+	// Convert to candidates
+	var candidates []candidate
+	for _, loc := range gvResp.Locations {
+		candidates = append(candidates, candidate{
+			Lat:    loc.Latitude,
+			Lng:    loc.Longitude,
+			Source: "graphvenn",
+		})
+	}
+	return candidates
 }
