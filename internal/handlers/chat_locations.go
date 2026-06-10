@@ -107,12 +107,25 @@ const poiBrowseRadiusM = 800 // Search radius for POI classification (meters)
 // B2B/service business keywords in POI titles — these are NOT consumer foot traffic
 // even if their HERE category says "restaurant" or "car wash"
 var b2bTitleKeywords = []string{
-	"repair", "service", "detail", "detailing", "printing", "supply",
-	"wholesale", "distribution", "logistics", "warehouse", "industrial",
-	"manufacturing", "auto body", "autobody", "towing", "welding",
-	"plumbing", "electric", "roofing", "contractor", "construction",
-	"equipment", "machinery", "parts", "scrap", "salvage", "recycling",
-	"storage", "moving", "freight", "shipping", "paving",
+	// Automotive B2B
+	"repair", "service", "detail", "detailing", "auto body", "autobody",
+	"auto glass", "towing", "tires", "tire shop", "motors", "motor",
+	"customs", "custom", "smog", "transmission", "muffler", "brake",
+	// Industrial/manufacturing
+	"printing", "supply", "supplies", "wholesale", "distribution",
+	"logistics", "warehouse", "industrial", "manufacturing", "fabricat",
+	"welding", "machine shop", "machinery", "equipment", "packaging",
+	// Construction/trades
+	"plumbing", "plumber", "electric", "roofing", "contractor",
+	"construction", "paving", "flooring", "landscap", "painting",
+	"hvac", "insulation", "fence", "demolition",
+	// Other B2B
+	"parts", "scrap", "salvage", "recycling", "storage", "moving",
+	"freight", "shipping", "courier", "staffing", "consulting",
+	"designs", "furniture", "upholster", "glass",
+	// Medical (not foot traffic for donations)
+	"acupuncture", "chiropract", "dentist", "clinic", "medical",
+	"veterinar", "lab ", "laboratory",
 }
 
 // Bay Area cities for expansion mode — places we could expand to
