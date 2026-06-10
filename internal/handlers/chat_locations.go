@@ -70,7 +70,8 @@ var badAddressKeywords = []string{
 	"bridge", "railroad", "creek", "river trl", "river trail",
 }
 
-var commercialCategoryPrefixes = []string{
+// Retail commercial — places regular people visit (great for bins)
+var retailCategoryPrefixes = []string{
 	"700-7600", // Gas/Petrol Station
 	"600-6000", // Convenience Store
 	"600-6300", // Grocery
@@ -80,7 +81,17 @@ var commercialCategoryPrefixes = []string{
 	"100-1000", // Restaurant
 	"100-1100", // Coffee/Tea
 	"700-7850", // Car Wash
-	"700-7900", // Auto Dealer/Service
+	"200-2000", // Bar or Pub
+	"200-2300", // Bowling/Arcade
+	"600-6100", // Shopping Mall (detected but filtered separately)
+}
+
+// Industrial/office — workers go here, not donation traffic
+var industrialCategoryPrefixes = []string{
+	"700-7100", // Communication/Media
+	"700-7200", // Commercial Services / IT
+	"700-7300", // Facility Management
+	"700-7900", // Auto Dealer/Repair (mixed — could be retail-facing)
 }
 
 var communityCategoryPrefixes = []string{
@@ -90,6 +101,7 @@ var communityCategoryPrefixes = []string{
 	"550-5510", // Park/Recreation
 	"700-7400", // Post Office
 	"700-7000", // Bank
+	"700-7010", // ATM
 }
 
 // Bay Area cities for expansion mode — places we could expand to
@@ -455,9 +467,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			continue
 		}
 
-		// HARD FILTER: residential/mixed with no commercial POI = discard
+		// HARD FILTER: residential or industrial = discard
 		if locationType == "residential" {
 			log.Printf("🏠 [Recommend] Filtered: %.4f,%.4f — residential (no commercial POIs)", c.Lat, c.Lng)
+			continue
+		}
+		if locationType == "industrial" {
+			log.Printf("🏭 [Recommend] Filtered: %.4f,%.4f — industrial/warehouse (no foot traffic)", c.Lat, c.Lng)
 			continue
 		}
 
@@ -649,7 +665,7 @@ func findCommercialPOIs(defaultLat, defaultLng float64, city string) []struct {
 	}
 
 	// Search for commercial spots: gas stations, strip malls, retail plazas
-	queries := []string{"gas station", "strip mall", "retail plaza", "shopping center parking"}
+	queries := []string{"gas station", "dollar tree", "grocery store", "laundromat", "church parking lot"}
 	lat, lng := defaultLat, defaultLng
 
 	// If no default coords, geocode the city
@@ -762,10 +778,11 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 		return 0.2, "residential", false, 0, 0
 	}
 
-	hasCommercial := false
+	hasRetail := false
+	hasIndustrial := false
 	hasCommunity := false
-	var bestCommercialLat, bestCommercialLng float64
-	bestCommercialDist := math.MaxFloat64
+	var bestRetailLat, bestRetailLng float64
+	bestRetailDist := math.MaxFloat64
 
 	for _, item := range result.Items {
 		titleLower := strings.ToLower(item.Title)
@@ -773,15 +790,28 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 			nearMallOrSafeway = true
 		}
 
-		isCommercial := false
+		// Check for industrial keywords in title
+		isIndustrialTitle := strings.Contains(titleLower, "warehouse") ||
+			strings.Contains(titleLower, "distribution") ||
+			strings.Contains(titleLower, "logistics") ||
+			strings.Contains(titleLower, "industrial") ||
+			strings.Contains(titleLower, "manufacturing")
+
+		isRetailPOI := false
 		for _, cat := range item.Categories {
 			if cat.ID == "600-6100-0062" {
 				nearMallOrSafeway = true
 			}
-			for _, prefix := range commercialCategoryPrefixes {
+			for _, prefix := range retailCategoryPrefixes {
 				if strings.HasPrefix(cat.ID, prefix) {
-					hasCommercial = true
-					isCommercial = true
+					hasRetail = true
+					isRetailPOI = true
+					break
+				}
+			}
+			for _, prefix := range industrialCategoryPrefixes {
+				if strings.HasPrefix(cat.ID, prefix) {
+					hasIndustrial = true
 					break
 				}
 			}
@@ -793,22 +823,33 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 			}
 		}
 
-		// Track nearest commercial POI for snapping
-		if isCommercial && item.Position.Lat != 0 {
+		// If title says industrial, override category classification
+		if isIndustrialTitle {
+			isRetailPOI = false
+			hasIndustrial = true
+		}
+
+		// Track nearest RETAIL POI for snapping (not industrial)
+		if isRetailPOI && item.Position.Lat != 0 {
 			dist := haversineDistMiles(lat, lng, item.Position.Lat, item.Position.Lng)
-			if dist < bestCommercialDist {
-				bestCommercialDist = dist
-				bestCommercialLat = item.Position.Lat
-				bestCommercialLng = item.Position.Lng
+			if dist < bestRetailDist {
+				bestRetailDist = dist
+				bestRetailLat = item.Position.Lat
+				bestRetailLng = item.Position.Lng
 			}
 		}
 	}
 
-	if hasCommercial {
-		return 1.0, "commercial", nearMallOrSafeway, bestCommercialLat, bestCommercialLng
+	// Retail trumps everything — if there's a gas station + warehouse nearby, it's retail
+	if hasRetail {
+		return 1.0, "commercial", nearMallOrSafeway, bestRetailLat, bestRetailLng
 	}
 	if hasCommunity {
 		return 0.6, "community", nearMallOrSafeway, 0, 0
+	}
+	// Industrial only (no retail, no community) — bad for bins
+	if hasIndustrial {
+		return 0.3, "industrial", nearMallOrSafeway, 0, 0
 	}
 	return 0.2, "residential", nearMallOrSafeway, 0, 0
 }
