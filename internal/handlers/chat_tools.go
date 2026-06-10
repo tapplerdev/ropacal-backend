@@ -424,6 +424,55 @@ func (h *ChatHandler) toolGetPotentialLocations(params map[string]any) (string, 
 	return string(b), nil
 }
 
+// toolGetCensusIncome looks up median household income by zip code or city
+func (h *ChatHandler) toolGetCensusIncome(params map[string]any) (string, error) {
+	type incomeRow struct {
+		Zip        string `db:"zip" json:"zip"`
+		Income     int    `db:"median_household_income" json:"median_household_income"`
+		Population int    `db:"population" json:"population"`
+	}
+
+	zip, hasZip := params["zip"].(string)
+	city, hasCity := params["city"].(string)
+
+	var rows []incomeRow
+
+	if hasZip && zip != "" {
+		// Look up bins in this zip to find the city name
+		err := h.db.Select(&rows, `SELECT zip, median_household_income, population FROM census_income_cache WHERE zip LIKE $1||'%'`, zip)
+		if err != nil || len(rows) == 0 {
+			return fmt.Sprintf(`{"error":"No income data found for zip %s"}`, zip), nil
+		}
+	} else if hasCity && city != "" {
+		// Find all zips for bins in this city, then look up income
+		var zips []string
+		h.db.Select(&zips, `SELECT DISTINCT zip FROM bins WHERE LOWER(city) = LOWER($1) AND status = 'active'`, city)
+		if len(zips) == 0 {
+			return fmt.Sprintf(`{"error":"No bins found in %s to look up zip codes"}`, city), nil
+		}
+		// Look up income for each zip (strip extended zip+4)
+		for _, z := range zips {
+			short := z
+			if len(z) > 5 {
+				short = z[:5]
+			}
+			var row incomeRow
+			err := h.db.Get(&row, `SELECT zip, median_household_income, population FROM census_income_cache WHERE zip = $1`, short)
+			if err == nil {
+				rows = append(rows, row)
+			}
+		}
+		if len(rows) == 0 {
+			return fmt.Sprintf(`{"city":"%s","zips":%d,"message":"No census income data cached for these zip codes"}`, city, len(zips)), nil
+		}
+	} else {
+		return `{"error":"Provide either zip or city parameter"}`, nil
+	}
+
+	b, _ := json.Marshal(map[string]any{"count": len(rows), "income_data": rows})
+	return string(b), nil
+}
+
 // haversineMetersChat calculates distance in meters between two coordinates
 func haversineMetersChat(lat1, lon1, lat2, lon2 float64) float64 {
 	const earthRadius = 6371000

@@ -274,6 +274,16 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 				},
 			},
 		},
+		{
+			Name: "get_census_income",
+			Description: anthropic.String(`Look up median household income for Bay Area zip codes. Use this when the user asks about income levels, demographics, or affordability of an area. Can look up a specific zip code or return all zip codes for a city.`),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"zip":  map[string]any{"type": "string", "description": "Specific zip code to look up (e.g. '94306')"},
+					"city": map[string]any{"type": "string", "description": "Look up all zip codes in a city (e.g. 'Palo Alto', 'San Jose')"},
+				},
+			},
+		},
 	}
 
 	tools := make([]anthropic.ToolUnionParam, len(toolParams))
@@ -474,6 +484,8 @@ func (h *ChatHandler) executeTool(name string, input json.RawMessage) (string, e
 		return h.toolGetPotentialLocations(params)
 	case "recommend_bin_locations":
 		return h.toolRecommendLocations(params)
+	case "get_census_income":
+		return h.toolGetCensusIncome(params)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
