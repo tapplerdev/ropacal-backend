@@ -104,6 +104,17 @@ var communityWhitelist = []struct {
 
 const poiBrowseRadiusM = 800 // Search radius for POI classification (meters)
 
+// B2B/service business keywords in POI titles — these are NOT consumer foot traffic
+// even if their HERE category says "restaurant" or "car wash"
+var b2bTitleKeywords = []string{
+	"repair", "service", "detail", "detailing", "printing", "supply",
+	"wholesale", "distribution", "logistics", "warehouse", "industrial",
+	"manufacturing", "auto body", "autobody", "towing", "welding",
+	"plumbing", "electric", "roofing", "contractor", "construction",
+	"equipment", "machinery", "parts", "scrap", "salvage", "recycling",
+	"storage", "moving", "freight", "shipping", "paving",
+}
+
 // Bay Area cities for expansion mode — places we could expand to
 var expansionCities = []struct {
 	City string
@@ -815,7 +826,19 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 			}
 		}
 
-		// Check against retail whitelist
+		// Check against retail whitelist — but reject if title contains B2B keywords
+		isB2B := false
+		for _, kw := range b2bTitleKeywords {
+			if strings.Contains(titleLower, kw) {
+				isB2B = true
+				break
+			}
+		}
+		if isB2B {
+			log.Printf("   ⬜ %s (%s, %dm) — B2B/service (skipped: title match)", item.Title, primaryCat, item.Distance)
+			goto nextItem
+		}
+
 		for _, wl := range retailWhitelist {
 			for _, cat := range item.Categories {
 				if strings.HasPrefix(cat.ID, wl.Prefix) {
