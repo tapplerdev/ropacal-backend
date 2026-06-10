@@ -418,6 +418,10 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Get("/manager/bins/daily-priorities", handlers.GetDailyPriorities(db))
 			r.Post("/manager/routes/generate-smart", handlers.GenerateSmartRoutes(db))
 
+			// AI Chat
+			chatHandler := handlers.NewChatHandler(db)
+			r.Post("/manager/chat", chatHandler.Handle)
+
 			// Potential Locations management (managers can delete and convert)
 			r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
 			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, redisClient, wsHub, centrifugoClient))
