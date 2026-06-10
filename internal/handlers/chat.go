@@ -369,7 +369,7 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Build dynamic system prompt with live fleet stats
 	dynamicPrompt := h.buildDynamicSystemPrompt()
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 240*time.Second)
 	defer cancel()
 
 	var toolCallsMade []string

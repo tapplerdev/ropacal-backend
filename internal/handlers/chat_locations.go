@@ -1114,7 +1114,7 @@ func callGraphVennService(serviceURL string, bins []existingBin, perBinFillRate 
 		"demand_points":                  demandPoints,
 		"existing_bins":                  existBins,
 		"no_go_zones":                    noGoReqs,
-		"count":                          count * 3, // request 3x for filtering buffer
+		"count":                          count * 2, // request 2x for filtering buffer
 		"radius_meters":                  400,
 		"min_distance_from_bins_meters":  500,
 		"strategy":                       "greedy",
