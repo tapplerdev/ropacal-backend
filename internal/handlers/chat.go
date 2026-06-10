@@ -319,9 +319,18 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		anthropic.NewTextBlock(req.Message),
 	))
 
-	// Cap conversation history at last 20 messages to stay within context limits
-	if len(session.Messages) > 20 {
-		session.Messages = session.Messages[len(session.Messages)-20:]
+	// Keep only last 10 messages (5 exchanges) to stay within token limits.
+	// Tool use conversations generate large intermediate messages (tool_use + tool_result blocks)
+	// that consume most of the context window.
+	if len(session.Messages) > 10 {
+		session.Messages = session.Messages[len(session.Messages)-10:]
+		// Ensure messages start with a user message (API requirement)
+		for len(session.Messages) > 0 {
+			if session.Messages[0].Role == anthropic.MessageParamRoleUser {
+				break
+			}
+			session.Messages = session.Messages[1:]
+		}
 	}
 
 	// Copy messages for this request
@@ -332,7 +341,7 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Build dynamic system prompt with live fleet stats
 	dynamicPrompt := h.buildDynamicSystemPrompt()
 
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
 	var toolCallsMade []string
