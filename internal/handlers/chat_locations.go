@@ -57,6 +57,7 @@ type candidate struct {
 	TrafficScore    float64
 	POIScore        float64
 	LocationType    string
+	NearbyPOI       string // name of the whitelisted POI that matched (e.g. "Chevron Gas")
 	Source          string // "gap_fill" or "expansion"
 }
 
@@ -70,39 +71,38 @@ var badAddressKeywords = []string{
 	"bridge", "railroad", "creek", "river trl", "river trail",
 }
 
-// Retail commercial — places regular people visit (great for bins)
-var retailCategoryPrefixes = []string{
-	"700-7600", // Gas/Petrol Station
-	"600-6000", // Convenience Store
-	"600-6300", // Grocery
-	"600-6400", // Drug Store/Pharmacy
-	"600-6500", // Hardware/Home Improvement
-	"600-6900", // Consumer Goods
-	"100-1000", // Restaurant
-	"100-1100", // Coffee/Tea
-	"700-7850", // Car Wash
-	"200-2000", // Bar or Pub
-	"200-2300", // Bowling/Arcade
-	"600-6100", // Shopping Mall (detected but filtered separately)
+// Whitelisted retail POI categories — places regular people visit where bins perform well.
+// If none of these are within 800m, the candidate is discarded.
+var retailWhitelist = []struct {
+	Prefix string
+	Label  string
+}{
+	{"700-7600", "gas station"},
+	{"600-6000", "convenience store"},
+	{"600-6300", "grocery store"},
+	{"600-6400", "pharmacy"},
+	{"600-6900", "retail store"},
+	{"600-6500", "hardware store"},
+	{"100-1000", "restaurant"},
+	{"100-1100", "coffee shop"},
+	{"700-7850", "car wash"},
+	{"200-2000", "bar/pub"},
 }
 
-// Industrial/office — workers go here, not donation traffic
-var industrialCategoryPrefixes = []string{
-	"700-7100", // Communication/Media
-	"700-7200", // Commercial Services / IT
-	"700-7300", // Facility Management
-	"700-7900", // Auto Dealer/Repair (mixed — could be retail-facing)
+// Community POIs — acceptable but lower priority than retail
+var communityWhitelist = []struct {
+	Prefix string
+	Label  string
+}{
+	{"300-3200", "church"},
+	{"550-5510", "park"},
+	{"800-8200", "school"},
+	{"800-8100", "college"},
+	{"700-7400", "post office"},
+	{"700-7000", "bank"},
 }
 
-var communityCategoryPrefixes = []string{
-	"300-3200", // Church/Place of Worship
-	"800-8200", // School
-	"800-8100", // University/College
-	"550-5510", // Park/Recreation
-	"700-7400", // Post Office
-	"700-7000", // Bank
-	"700-7010", // ATM
-}
+const poiBrowseRadiusM = 800 // Search radius for POI classification (meters)
 
 // Bay Area cities for expansion mode — places we could expand to
 var expansionCities = []struct {
@@ -457,23 +457,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		trafficJam := getTrafficJamFactor(c.Lat, c.Lng)
 		c.TrafficScore = trafficJam
 
-		// POI classification + snap to commercial
-		poiScore, locationType, nearMall, snappedLat, snappedLng := classifyAndSnap(c.Lat, c.Lng)
+		// POI classification + snap to retail
+		poiScore, locationType, nearMall, snappedLat, snappedLng, matchedPOI := classifyAndSnap(c.Lat, c.Lng)
 		c.POIScore = poiScore
 		c.LocationType = locationType
+		c.NearbyPOI = matchedPOI
 
 		if nearMall {
 			log.Printf("🏬 [Recommend] Filtered: %.4f,%.4f — near mall/Safeway", c.Lat, c.Lng)
 			continue
 		}
 
-		// HARD FILTER: residential or industrial = discard
-		if locationType == "residential" {
-			log.Printf("🏠 [Recommend] Filtered: %.4f,%.4f — residential (no commercial POIs)", c.Lat, c.Lng)
-			continue
-		}
-		if locationType == "industrial" {
-			log.Printf("🏭 [Recommend] Filtered: %.4f,%.4f — industrial/warehouse (no foot traffic)", c.Lat, c.Lng)
+		// HARD FILTER: no whitelisted retail or community POI = discard
+		if locationType == "residential" || locationType == "no_retail" || locationType == "industrial" || locationType == "unknown" {
+			log.Printf("🚫 [Recommend] Filtered: %.4f,%.4f — %s", c.Lat, c.Lng, locationType)
 			continue
 		}
 
@@ -538,7 +535,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 			reasoning += fmt.Sprintf(", %s traffic", tLabel)
 		}
-		if locationType != "" {
+		if c.NearbyPOI != "" {
+			reasoning += fmt.Sprintf(", near %s", c.NearbyPOI)
+		} else if locationType != "" {
 			reasoning += fmt.Sprintf(", %s area", locationType)
 		}
 
@@ -745,113 +744,127 @@ func geocodeCityHERE(city string) (struct{ Lat, Lng float64 }, error) {
 	return struct{ Lat, Lng float64 }{}, fmt.Errorf("geocode failed for %s", city)
 }
 
-// classifyAndSnap classifies a location AND returns the nearest commercial POI coordinates for snapping
-func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, nearMallOrSafeway bool, snapLat, snapLng float64) {
+// classifyAndSnap searches within 800m for whitelisted retail POIs.
+// Returns the classification, whether to filter (mall/Safeway), and snap coordinates.
+// Logs every POI found for debugging.
+func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, nearMallOrSafeway bool, snapLat, snapLng float64, poiName string) {
 	url := fmt.Sprintf(
-		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=10&in=circle:%.6f,%.6f;r=150&apiKey=%s",
-		lat, lng, lat, lng, HereAPIKey,
+		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=20&in=circle:%.6f,%.6f;r=%d&apiKey=%s",
+		lat, lng, lat, lng, poiBrowseRadiusM, HereAPIKey,
 	)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return 0.3, "unknown", false, 0, 0
+		log.Printf("⚠️ [POI] Browse API error at %.4f,%.4f: %v", lat, lng, err)
+		return 0, "unknown", false, 0, 0, ""
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0.3, "unknown", false, 0, 0
+		log.Printf("⚠️ [POI] Browse HTTP %d at %.4f,%.4f", resp.StatusCode, lat, lng)
+		return 0, "unknown", false, 0, 0, ""
 	}
 	body, _ := io.ReadAll(resp.Body)
+
+	type herePOI struct {
+		Title    string `json:"title"`
+		Distance int    `json:"distance"` // meters from search point
+		Position struct {
+			Lat float64 `json:"lat"`
+			Lng float64 `json:"lng"`
+		} `json:"position"`
+		Categories []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Primary bool   `json:"primary"`
+		} `json:"categories"`
+	}
 	var result struct {
-		Items []struct {
-			Title    string `json:"title"`
-			Position struct {
-				Lat float64 `json:"lat"`
-				Lng float64 `json:"lng"`
-			} `json:"position"`
-			Categories []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"categories"`
-		} `json:"items"`
+		Items []herePOI `json:"items"`
 	}
 	if json.Unmarshal(body, &result) != nil || len(result.Items) == 0 {
-		return 0.2, "residential", false, 0, 0
+		log.Printf("📍 [POI] %.4f,%.4f: no POIs within %dm → RESIDENTIAL (discard)", lat, lng, poiBrowseRadiusM)
+		return 0, "residential", false, 0, 0, ""
 	}
 
-	hasRetail := false
-	hasIndustrial := false
-	hasCommunity := false
-	var bestRetailLat, bestRetailLng float64
-	bestRetailDist := math.MaxFloat64
+	log.Printf("📍 [POI] %.4f,%.4f: found %d POIs within %dm", lat, lng, len(result.Items), poiBrowseRadiusM)
 
-	for _, item := range result.Items {
+	// Scan all POIs, find best retail match
+	var bestRetailPOI *herePOI
+	var bestRetailLabel string
+	bestRetailDist := math.MaxFloat64
+	var bestCommunityPOI *herePOI
+	var bestCommunityLabel string
+
+	for idx := range result.Items {
+		item := &result.Items[idx]
 		titleLower := strings.ToLower(item.Title)
-		if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
-			nearMallOrSafeway = true
+		dist := haversineDistMiles(lat, lng, item.Position.Lat, item.Position.Lng)
+		primaryCat := ""
+		if len(item.Categories) > 0 {
+			primaryCat = item.Categories[0].ID
 		}
 
-		// Check for industrial keywords in title
-		isIndustrialTitle := strings.Contains(titleLower, "warehouse") ||
-			strings.Contains(titleLower, "distribution") ||
-			strings.Contains(titleLower, "logistics") ||
-			strings.Contains(titleLower, "industrial") ||
-			strings.Contains(titleLower, "manufacturing")
-
-		isRetailPOI := false
+		// Check for mall or Safeway
+		if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
+			nearMallOrSafeway = true
+			log.Printf("   🚫 %s (%s, %dm) — MALL/SAFEWAY", item.Title, primaryCat, item.Distance)
+		}
 		for _, cat := range item.Categories {
 			if cat.ID == "600-6100-0062" {
 				nearMallOrSafeway = true
 			}
-			for _, prefix := range retailCategoryPrefixes {
-				if strings.HasPrefix(cat.ID, prefix) {
-					hasRetail = true
-					isRetailPOI = true
-					break
-				}
-			}
-			for _, prefix := range industrialCategoryPrefixes {
-				if strings.HasPrefix(cat.ID, prefix) {
-					hasIndustrial = true
-					break
-				}
-			}
-			for _, prefix := range communityCategoryPrefixes {
-				if strings.HasPrefix(cat.ID, prefix) {
-					hasCommunity = true
-					break
+		}
+
+		// Check against retail whitelist
+		for _, wl := range retailWhitelist {
+			for _, cat := range item.Categories {
+				if strings.HasPrefix(cat.ID, wl.Prefix) {
+					log.Printf("   ✅ %s (%s, %dm) — RETAIL MATCH: %s", item.Title, primaryCat, item.Distance, wl.Label)
+					if dist < bestRetailDist {
+						bestRetailDist = dist
+						bestRetailPOI = item
+						bestRetailLabel = wl.Label
+					}
+					goto nextItem
 				}
 			}
 		}
 
-		// If title says industrial, override category classification
-		if isIndustrialTitle {
-			isRetailPOI = false
-			hasIndustrial = true
-		}
-
-		// Track nearest RETAIL POI for snapping (not industrial)
-		if isRetailPOI && item.Position.Lat != 0 {
-			dist := haversineDistMiles(lat, lng, item.Position.Lat, item.Position.Lng)
-			if dist < bestRetailDist {
-				bestRetailDist = dist
-				bestRetailLat = item.Position.Lat
-				bestRetailLng = item.Position.Lng
+		// Check against community whitelist
+		for _, wl := range communityWhitelist {
+			for _, cat := range item.Categories {
+				if strings.HasPrefix(cat.ID, wl.Prefix) {
+					log.Printf("   🔵 %s (%s, %dm) — COMMUNITY: %s", item.Title, primaryCat, item.Distance, wl.Label)
+					if bestCommunityPOI == nil {
+						bestCommunityPOI = item
+						bestCommunityLabel = wl.Label
+					}
+					goto nextItem
+				}
 			}
 		}
+
+		// Not whitelisted — log as skipped
+		log.Printf("   ⬜ %s (%s, %dm) — not whitelisted", item.Title, primaryCat, item.Distance)
+
+	nextItem:
 	}
 
-	// Retail trumps everything — if there's a gas station + warehouse nearby, it's retail
-	if hasRetail {
-		return 1.0, "commercial", nearMallOrSafeway, bestRetailLat, bestRetailLng
+	// Decision: retail > community > nothing
+	if bestRetailPOI != nil {
+		snapDist := haversineDistMiles(lat, lng, bestRetailPOI.Position.Lat, bestRetailPOI.Position.Lng)
+		log.Printf("   → Snapping to %s (%s) at %.4f,%.4f (%.0fm snap)",
+			bestRetailPOI.Title, bestRetailLabel, bestRetailPOI.Position.Lat, bestRetailPOI.Position.Lng, snapDist*1609)
+		return 1.0, "commercial", nearMallOrSafeway, bestRetailPOI.Position.Lat, bestRetailPOI.Position.Lng, bestRetailPOI.Title
 	}
-	if hasCommunity {
-		return 0.6, "community", nearMallOrSafeway, 0, 0
+	if bestCommunityPOI != nil {
+		log.Printf("   → Community match: %s (%s), no snap (community POIs aren't placement targets)",
+			bestCommunityPOI.Title, bestCommunityLabel)
+		return 0.6, "community", nearMallOrSafeway, 0, 0, bestCommunityPOI.Title
 	}
-	// Industrial only (no retail, no community) — bad for bins
-	if hasIndustrial {
-		return 0.3, "industrial", nearMallOrSafeway, 0, 0
-	}
-	return 0.2, "residential", nearMallOrSafeway, 0, 0
+
+	log.Printf("   → No whitelisted POI within %dm → DISCARD", poiBrowseRadiusM)
+	return 0, "no_retail", nearMallOrSafeway, 0, 0, ""
 }
 
 func isBadAddressKeyword(address string) bool {
