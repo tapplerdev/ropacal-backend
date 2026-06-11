@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -629,7 +630,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		c.TrafficScore = trafficJam
 
 		// POI density + anchor tenant detection (300m radius)
-		poiDensity, hasAnchor, anchorName, anchorLat, anchorLng := scorePOIDensity(c.Lat, c.Lng)
+		poiDensity, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio := scorePOIDensity(c.Lat, c.Lng)
+
+		// HARD FILTER: retail ratio below 40% = industrial area with a few retail tenants
+		if retailRatio < 0.4 && poiDensity < 6 {
+			log.Printf("🚫 [Recommend] Filtered: %s — retail ratio %.0f%% (need 40%%+)", c.NearbyPOI, retailRatio*100)
+			continue
+		}
 
 		// Snap to anchor tenant if detected — anchor has more foot traffic than the original business
 		if hasAnchor && anchorLat != 0 && anchorLng != 0 {
@@ -705,6 +712,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 		trafficNorm := math.Min(trafficJam, 10.0) / 10.0
 		finalScore := math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
+
+		// Visual verification — satellite image + Claude Vision
+		visualPass, visualReason := verifyLocationVisually(c.Lat, c.Lng, c.NearbyPOI)
+		if !visualPass {
+			log.Printf("👁️ [Recommend] Filtered by vision: %s — %s", c.NearbyPOI, visualReason)
+			continue
+		}
 
 		// Minimum score cutoff — below this is not worth recommending
 		if finalScore < 5.5 {
@@ -1093,8 +1107,8 @@ var anchorTenants = []string{
 }
 
 // scorePOIDensity counts retail POIs within 300m and detects anchor tenants.
-// Returns: (poiCount, hasAnchor, anchorName)
-func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64) {
+// Returns: (retailCount, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio)
+func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64, float64) {
 	url := fmt.Sprintf(
 		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=20&in=circle:%.6f,%.6f;r=300&apiKey=%s",
 		lat, lng, lat, lng, HereAPIKey,
@@ -1102,11 +1116,11 @@ func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64) {
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return 0, false, "", 0, 0
+		return 0, false, "", 0, 0, 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0, false, "", 0, 0
+		return 0, false, "", 0, 0, 0
 	}
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
@@ -1123,15 +1137,16 @@ func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64) {
 		} `json:"items"`
 	}
 	if json.Unmarshal(body, &result) != nil {
-		return 0, false, "", 0, 0
+		return 0, false, "", 0, 0, 0
 	}
 
 	retailCount := 0
+	totalPOIs := len(result.Items)
 	hasAnchor := false
 	anchorName := ""
 	var anchorLat, anchorLng float64
 
-	log.Printf("📊 [Density] Scanning %d POIs within 300m of (%.4f, %.4f)", len(result.Items), lat, lng)
+	log.Printf("📊 [Density] Scanning %d POIs within 300m of (%.4f, %.4f)", totalPOIs, lat, lng)
 
 	for _, item := range result.Items {
 		titleLower := strings.ToLower(item.Title)
@@ -1197,8 +1212,115 @@ func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64) {
 		}
 	}
 
-	log.Printf("📊 [Density] Result: %d retail POIs, anchor=%v (%s)", retailCount, hasAnchor, anchorName)
-	return retailCount, hasAnchor, anchorName, anchorLat, anchorLng
+	retailRatio := 0.0
+	if totalPOIs > 0 {
+		retailRatio = float64(retailCount) / float64(totalPOIs)
+	}
+	log.Printf("📊 [Density] Result: %d/%d retail POIs (%.0f%%), anchor=%v (%s)", retailCount, totalPOIs, retailRatio*100, hasAnchor, anchorName)
+	return retailCount, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio
+}
+
+// verifyLocationVisually fetches a satellite image and uses Claude Vision to judge if it's a good bin placement spot.
+// Returns: (isGoodSpot bool, reason string)
+func verifyLocationVisually(lat, lng float64, businessName string) (bool, string) {
+	googleKey := os.Getenv("GOOGLE_MAPS_API_KEY")
+	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
+	if googleKey == "" || anthropicKey == "" {
+		log.Printf("⚠️ [Vision] Skipping visual verification — missing API keys")
+		return true, "skipped" // fail open
+	}
+
+	// Fetch satellite image from Google Static Maps
+	imgURL := fmt.Sprintf(
+		"https://maps.googleapis.com/maps/api/staticmap?center=%.6f,%.6f&zoom=18&size=600x600&maptype=satellite&key=%s",
+		lat, lng, googleKey,
+	)
+
+	imgClient := &http.Client{Timeout: 10 * time.Second}
+	imgResp, err := imgClient.Get(imgURL)
+	if err != nil {
+		log.Printf("⚠️ [Vision] Failed to fetch satellite image: %v", err)
+		return true, "image fetch failed"
+	}
+	defer imgResp.Body.Close()
+
+	imgBytes, _ := io.ReadAll(imgResp.Body)
+	if len(imgBytes) == 0 {
+		return true, "empty image"
+	}
+
+	// Encode image as base64
+	imgBase64 := base64.StdEncoding.EncodeToString(imgBytes)
+
+	// Call Claude Vision to analyze the image
+	requestBody := map[string]any{
+		"model":      "claude-sonnet-4-5-20250929",
+		"max_tokens": 200,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type": "image",
+						"source": map[string]any{
+							"type":       "base64",
+							"media_type": "image/png",
+							"data":       imgBase64,
+						},
+					},
+					{
+						"type": "text",
+						"text": fmt.Sprintf(`This is a satellite image of a potential clothing donation bin placement at coordinates (%.4f, %.4f), near "%s".
+
+Answer YES or NO: Is this a suitable spot for a clothing donation bin?
+
+Good spots: retail parking lots, gas station lots, strip mall plazas, church parking lots, grocery store parking lots. Look for visible parking areas and commercial buildings.
+
+Bad spots: residential houses/backyards, industrial warehouse rooftops, empty lots, freeways, dense apartment complexes with no public parking.
+
+Respond in this exact format:
+VERDICT: YES or NO
+REASON: one sentence why`, lat, lng, businessName),
+					},
+				},
+			},
+		},
+	}
+
+	bodyJSON, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(bodyJSON))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", anthropicKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	visionClient := &http.Client{Timeout: 30 * time.Second}
+	visionResp, err := visionClient.Do(req)
+	if err != nil {
+		log.Printf("⚠️ [Vision] Claude API error: %v", err)
+		return true, "vision API failed"
+	}
+	defer visionResp.Body.Close()
+
+	visionBody, _ := io.ReadAll(visionResp.Body)
+	var visionResult struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(visionBody, &visionResult) != nil || len(visionResult.Content) == 0 {
+		log.Printf("⚠️ [Vision] Failed to parse response")
+		return true, "parse failed"
+	}
+
+	response := visionResult.Content[0].Text
+	isGood := strings.Contains(strings.ToUpper(response), "VERDICT: YES")
+	reason := response
+	if idx := strings.Index(response, "REASON:"); idx >= 0 {
+		reason = strings.TrimSpace(response[idx+7:])
+	}
+
+	log.Printf("👁️ [Vision] %.4f,%.4f (%s): %s — %s", lat, lng, businessName, map[bool]string{true: "PASS", false: "FAIL"}[isGood], reason)
+	return isGood, reason
 }
 
 type discoveredBusiness struct {
