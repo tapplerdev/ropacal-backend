@@ -2073,14 +2073,15 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						return
 					}
 
-					// Check if this bin number is already taken
+					// Check if this bin number is already taken — auto-assign next available if duplicate
 					var binAlreadyExists bool
 					db.QueryRow(`SELECT EXISTS(SELECT 1 FROM bins WHERE bin_number = $1)`, actualBinNumber).Scan(&binAlreadyExists)
 					if binAlreadyExists {
-						log.Printf("[DIAGNOSTIC] ❌ Bin #%d already exists — rejecting duplicate", actualBinNumber)
-						db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
-						utils.RespondError(w, http.StatusConflict, fmt.Sprintf("Bin #%d already exists, please use a different number", actualBinNumber))
-						return
+						log.Printf("[DIAGNOSTIC] ⚠️ Bin #%d already exists — auto-assigning next available", actualBinNumber)
+						var maxBinNum int
+						db.QueryRow(`SELECT COALESCE(MAX(bin_number), 0) FROM bins`).Scan(&maxBinNum)
+						actualBinNumber = maxBinNum + 1
+						log.Printf("[DIAGNOSTIC] ✅ Auto-assigned bin number: #%d", actualBinNumber)
 					}
 
 					_, err = db.Exec(
