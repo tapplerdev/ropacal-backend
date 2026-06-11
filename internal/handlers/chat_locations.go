@@ -261,101 +261,200 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 
 	// ======================================================================
-	// STRATEGY A: GraphVenn optimal demand hotspots (primary)
-	// Falls back to midpoint generation if GraphVenn service unavailable
+	// STRATEGY A: Business-first — search for real businesses in demand areas
+	// Step 1: Identify high-demand areas (from bin performance data)
+	// Step 2: Search HERE Discover for businesses in those areas
+	// Step 3: Filter and score
 	// ======================================================================
 	var gapCandidates []candidate
 
-	// Try GraphVenn first
+	// Identify high-demand cities/areas sorted by fill rate
+	type cityDemand struct {
+		City     string
+		CenterLat float64
+		CenterLng float64
+		AvgRate   float64
+		BinCount  int
+	}
+	cityDemandMap := map[string]*cityDemand{}
+	for _, b := range bins {
+		cd, ok := cityDemandMap[b.City]
+		if !ok {
+			cd = &cityDemand{City: b.City}
+			cityDemandMap[b.City] = cd
+		}
+		cd.CenterLat += b.Latitude
+		cd.CenterLng += b.Longitude
+		cd.BinCount++
+		if rate, ok := perBinFillRate[b.ID]; ok {
+			cd.AvgRate += rate
+		}
+	}
+	var demandAreas []cityDemand
+	for _, cd := range cityDemandMap {
+		if cd.BinCount >= minBinsPerCity {
+			cd.CenterLat /= float64(cd.BinCount)
+			cd.CenterLng /= float64(cd.BinCount)
+			cd.AvgRate /= float64(cd.BinCount)
+			demandAreas = append(demandAreas, *cd)
+		}
+	}
+	sort.Slice(demandAreas, func(i, j int) bool { return demandAreas[i].AvgRate > demandAreas[j].AvgRate })
+
+	// Also check GraphVenn for additional demand hotspot areas
 	graphvennURL := os.Getenv("GRAPHVENN_SERVICE_URL")
+	var gvHotspots []struct{ Lat, Lng float64 }
 	if graphvennURL != "" && len(bins) >= 3 {
 		gvCandidates := callGraphVennService(graphvennURL, bins, perBinFillRate, zones, count)
 		if len(gvCandidates) > 0 {
-			log.Printf("📍 [Recommend] GraphVenn returned %d demand hotspots", len(gvCandidates))
-			// Attach nearest bin info and fill rates
-			for i := range gvCandidates {
-				minDist := math.MaxFloat64
+			log.Printf("📍 [Recommend] GraphVenn identified %d demand hotspot areas", len(gvCandidates))
+			for _, c := range gvCandidates {
+				gvHotspots = append(gvHotspots, struct{ Lat, Lng float64 }{c.Lat, c.Lng})
+			}
+		}
+	}
+
+	// Search for REAL BUSINESSES in high-demand areas
+	businessQueries := []string{"gas station", "laundromat", "dollar tree", "grocery store", "coffee shop"}
+	client := &http.Client{Timeout: 8 * time.Second}
+
+	// Search in top demand cities
+	searchAreas := demandAreas
+	if len(searchAreas) > 5 {
+		searchAreas = searchAreas[:5]
+	}
+
+	for _, area := range searchAreas {
+		for _, query := range businessQueries {
+			businesses := discoverBusinesses(client, area.CenterLat, area.CenterLng, query)
+			for _, biz := range businesses {
+				// Check not too close to existing bin
+				tooClose := false
 				nearestNum := 0
 				nearestID := ""
+				nearestDist := math.MaxFloat64
 				for _, b := range bins {
-					d := haversineDistMiles(gvCandidates[i].Lat, gvCandidates[i].Lng, b.Latitude, b.Longitude)
-					if d < minDist {
-						minDist = d
+					d := haversineDistMiles(biz.Lat, biz.Lng, b.Latitude, b.Longitude)
+					if d < nearestDist {
+						nearestDist = d
 						nearestNum = b.BinNumber
 						nearestID = b.ID
 					}
+					if d < minGapMiles {
+						tooClose = true
+					}
 				}
-				gvCandidates[i].NearestBinNum = nearestNum
-				gvCandidates[i].NearestBinDist = math.Round(minDist*10) / 10
-				if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
-					gvCandidates[i].NearestFillRate = rate
+				if tooClose {
+					continue
 				}
-				// Find city from nearest bin
-				for _, b := range bins {
-					if b.BinNumber == nearestNum {
-						gvCandidates[i].City = b.City
-						gvCandidates[i].Zip = b.Zip
+				// Check no-go zones
+				inNoGo := false
+				for _, z := range zones {
+					if haversineMetersChat(biz.Lat, biz.Lng, z.CenterLat, z.CenterLng) <= float64(z.RadiusMeters) {
+						inNoGo = true
 						break
 					}
 				}
-			}
-			gapCandidates = gvCandidates
-		}
-	}
-
-	// ALWAYS run midpoint generation alongside GraphVenn — merge results
-	// GraphVenn finds optimal demand areas, midpoints find gaps between bins
-	// Together they cover both strategies
-	if len(bins) >= 3 {
-		log.Printf("📍 [Recommend] Running midpoint generation (alongside GraphVenn)")
-		allCityBins := map[string][]existingBin{}
-		for _, b := range bins {
-			allCityBins[b.City] = append(allCityBins[b.City], b)
-		}
-		for city, cBins := range allCityBins {
-			if len(cBins) < minBinsPerCity {
-				continue
-			}
-			for i := 0; i < len(cBins); i++ {
-				for j := i + 1; j < len(cBins); j++ {
-					dist := haversineDistMiles(cBins[i].Latitude, cBins[i].Longitude, cBins[j].Latitude, cBins[j].Longitude)
-					if dist < minGapMiles*2 || dist > maxGapMiles*2 {
-						continue
-					}
-					rate1 := perBinFillRate[cBins[i].ID]
-					rate2 := perBinFillRate[cBins[j].ID]
-					nearestRate := math.Max(rate1, rate2)
-					if nearestRate <= 0 {
-						nearestRate = 5.0
-					}
-					midLat := (cBins[i].Latitude + cBins[j].Latitude) / 2
-					midLng := (cBins[i].Longitude + cBins[j].Longitude) / 2
-					points := [][2]float64{{midLat, midLng}}
-					if dist > minGapMiles*4 {
-						points = append(points,
-							[2]float64{cBins[i].Latitude + (cBins[j].Latitude-cBins[i].Latitude)/3, cBins[i].Longitude + (cBins[j].Longitude-cBins[i].Longitude)/3},
-							[2]float64{cBins[i].Latitude + 2*(cBins[j].Latitude-cBins[i].Latitude)/3, cBins[i].Longitude + 2*(cBins[j].Longitude-cBins[i].Longitude)/3},
-						)
-					}
-					for _, pt := range points {
-						gapCandidates = append(gapCandidates, candidate{
-							Lat: pt[0], Lng: pt[1], City: city, Zip: cBins[i].Zip,
-							NearestFillRate: nearestRate, Source: "gap_fill",
-						})
+				if inNoGo {
+					continue
+				}
+				// Check not a mall or Safeway
+				titleLower := strings.ToLower(biz.Name)
+				if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
+					continue
+				}
+				// Check B2B keywords
+				isB2B := false
+				for _, kw := range b2bTitleKeywords {
+					if strings.Contains(titleLower, kw) {
+						isB2B = true
+						break
 					}
 				}
+				if isB2B {
+					continue
+				}
+
+				fillRate := 5.0
+				if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
+					fillRate = rate
+				}
+				gapCandidates = append(gapCandidates, candidate{
+					Lat: biz.Lat, Lng: biz.Lng, City: area.City, Zip: biz.Zip,
+					NearestFillRate: fillRate, NearestBinNum: nearestNum,
+					NearestBinDist: math.Round(nearestDist*10) / 10,
+					NearbyPOI: biz.Name, LocationType: "commercial",
+					POIScore: 1.0, Source: "business_search",
+				})
 			}
 		}
 	}
-	log.Printf("📍 [Recommend] Gap-fill raw candidates: %d", len(gapCandidates))
 
-	// Filter gap candidates: no-go zones, dedup, distance
-	gapCandidates = filterNoGoZones(gapCandidates, zones)
-	gapCandidates = deduplicateCandidates(gapCandidates)
-	if graphvennURL == "" { // only apply distance filter for midpoint mode — GraphVenn already handles this
-		gapCandidates = filterByDistance(gapCandidates, bins, minGapMiles, maxGapMiles, perBinFillRate)
+	// Also search around GraphVenn hotspots (if available)
+	for _, hs := range gvHotspots {
+		for _, query := range businessQueries[:3] { // fewer queries per hotspot to save API calls
+			businesses := discoverBusinesses(client, hs.Lat, hs.Lng, query)
+			for _, biz := range businesses {
+				tooClose := false
+				nearestNum := 0
+				nearestID := ""
+				nearestDist := math.MaxFloat64
+				for _, b := range bins {
+					d := haversineDistMiles(biz.Lat, biz.Lng, b.Latitude, b.Longitude)
+					if d < nearestDist {
+						nearestDist = d
+						nearestNum = b.BinNumber
+						nearestID = b.ID
+					}
+					if d < minGapMiles {
+						tooClose = true
+					}
+				}
+				if tooClose {
+					continue
+				}
+				inNoGo := false
+				for _, z := range zones {
+					if haversineMetersChat(biz.Lat, biz.Lng, z.CenterLat, z.CenterLng) <= float64(z.RadiusMeters) {
+						inNoGo = true
+						break
+					}
+				}
+				if inNoGo {
+					continue
+				}
+				titleLower := strings.ToLower(biz.Name)
+				if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
+					continue
+				}
+				isB2B := false
+				for _, kw := range b2bTitleKeywords {
+					if strings.Contains(titleLower, kw) {
+						isB2B = true
+						break
+					}
+				}
+				if isB2B {
+					continue
+				}
+				fillRate := 5.0
+				if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
+					fillRate = rate
+				}
+				gapCandidates = append(gapCandidates, candidate{
+					Lat: biz.Lat, Lng: biz.Lng, City: biz.City, Zip: biz.Zip,
+					NearestFillRate: fillRate, NearestBinNum: nearestNum,
+					NearestBinDist: math.Round(nearestDist*10) / 10,
+					NearbyPOI: biz.Name, LocationType: "commercial",
+					POIScore: 1.0, Source: "graphvenn_business",
+				})
+			}
+		}
 	}
-	log.Printf("📍 [Recommend] Gap-fill after filters: %d", len(gapCandidates))
+
+	log.Printf("📍 [Recommend] Business search found %d candidates", len(gapCandidates))
+	gapCandidates = deduplicateCandidates(gapCandidates)
+	log.Printf("📍 [Recommend] After dedup: %d", len(gapCandidates))
 
 	// ======================================================================
 	// STRATEGY B: Expansion candidates (30% of results) — new areas
@@ -527,39 +626,49 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		trafficJam := getTrafficJamFactor(c.Lat, c.Lng)
 		c.TrafficScore = trafficJam
 
-		// POI classification + snap to retail
-		poiScore, locationType, nearMall, snappedLat, snappedLng, matchedPOI := classifyAndSnap(c.Lat, c.Lng)
-		c.POIScore = poiScore
-		c.LocationType = locationType
-		c.NearbyPOI = matchedPOI
+		var address string
+		var zip5 string
 
-		if nearMall {
-			log.Printf("🏬 [Recommend] Filtered: %.4f,%.4f — near mall/Safeway", c.Lat, c.Lng)
-			continue
-		}
+		if c.Source == "business_search" || c.Source == "graphvenn_business" {
+			// Business-first: already have real coordinates and POI name
+			// Just need to reverse geocode for the address
+			addr, zip := reverseGeocodeHERE(c.Lat, c.Lng)
+			address = addr
+			if zip != "" {
+				c.Zip = zip
+			}
+			zip5 = stripZipPlus4(c.Zip)
+			log.Printf("✅ [Recommend] Business: %s at %s", c.NearbyPOI, address)
+		} else {
+			// Legacy: POI classification + snap for midpoint/expansion candidates
+			poiScore, locationType, nearMall, snappedLat, snappedLng, matchedPOI := classifyAndSnap(c.Lat, c.Lng)
+			c.POIScore = poiScore
+			c.LocationType = locationType
+			c.NearbyPOI = matchedPOI
 
-		// HARD FILTER: no whitelisted retail or community POI = discard
-		if locationType == "residential" || locationType == "no_retail" || locationType == "industrial" || locationType == "unknown" {
-			log.Printf("🚫 [Recommend] Filtered: %.4f,%.4f — %s", c.Lat, c.Lng, locationType)
-			continue
-		}
+			if nearMall {
+				log.Printf("🏬 [Recommend] Filtered: %.4f,%.4f — near mall/Safeway", c.Lat, c.Lng)
+				continue
+			}
+			if locationType == "residential" || locationType == "no_retail" || locationType == "industrial" || locationType == "unknown" {
+				log.Printf("🚫 [Recommend] Filtered: %.4f,%.4f — %s", c.Lat, c.Lng, locationType)
+				continue
+			}
+			if snappedLat != 0 && snappedLng != 0 {
+				c.Lat = snappedLat
+				c.Lng = snappedLng
+			}
+			addr, zip := reverseGeocodeHERE(c.Lat, c.Lng)
+			address = addr
+			if zip != "" {
+				c.Zip = zip
+			}
+			zip5 = stripZipPlus4(c.Zip)
 
-		// Snap to nearest commercial POI if found
-		if snappedLat != 0 && snappedLng != 0 {
-			c.Lat = snappedLat
-			c.Lng = snappedLng
-		}
-
-		// Reverse geocode the (possibly snapped) coordinates
-		address, zip := reverseGeocodeHERE(c.Lat, c.Lng)
-		if zip != "" {
-			c.Zip = zip
-		}
-		zip5 := stripZipPlus4(c.Zip)
-
-		if isVagueAddress(address, c.City) || isBadAddressKeyword(address) {
-			log.Printf("🚫 [Recommend] Filtered: %q", address)
-			continue
+			if isVagueAddress(address, c.City) || isBadAddressKeyword(address) {
+				log.Printf("🚫 [Recommend] Filtered: %q", address)
+				continue
+			}
 		}
 
 		// Final score with real data
@@ -580,7 +689,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 		}
 		trafficNorm := math.Min(trafficJam, 10.0) / 10.0
-		finalScore := math.Round((fillScore*0.25+gapScore*0.15+popScore*0.15+trafficNorm*0.15+incomeScore*0.10+poiScore*0.20)*100) / 10
+		finalScore := math.Round((fillScore*0.25+gapScore*0.15+popScore*0.15+trafficNorm*0.15+incomeScore*0.10+c.POIScore*0.20)*100) / 10
 
 		// Build reasoning
 		reasoning := ""
@@ -607,8 +716,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 		if c.NearbyPOI != "" {
 			reasoning += fmt.Sprintf(", near %s", c.NearbyPOI)
-		} else if locationType != "" {
-			reasoning += fmt.Sprintf(", %s area", locationType)
+		} else if c.LocationType != "" {
+			reasoning += fmt.Sprintf(", %s area", c.LocationType)
 		}
 
 		rec := LocationRecommendation{
@@ -624,7 +733,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			AreaAvgFillRate: math.Round(c.NearestFillRate*10) / 10,
 			MedianIncome:    zipIncome[zip5],
 			TrafficScore:    math.Round(trafficJam*10) / 10,
-			LocationType:    locationType,
+			LocationType:    c.LocationType,
 			Source:          c.Source,
 		}
 		recommendations = append(recommendations, rec)
@@ -634,7 +743,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			expResults++
 		}
 		log.Printf("✅ [Recommend] #%d [%s]: %s (score %.1f, %s, traffic %.1f)",
-			len(recommendations), c.Source, address, finalScore, locationType, trafficJam)
+			len(recommendations), c.Source, address, finalScore, c.LocationType, trafficJam)
 	}
 
 	sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
@@ -947,6 +1056,61 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 
 	log.Printf("   → No whitelisted POI within %dm → DISCARD", poiBrowseRadiusM)
 	return 0, "no_retail", nearMallOrSafeway, 0, 0, ""
+}
+
+type discoveredBusiness struct {
+	Name string
+	Lat  float64
+	Lng  float64
+	City string
+	Zip  string
+}
+
+// discoverBusinesses searches for real businesses near a location using HERE Discover API
+func discoverBusinesses(client *http.Client, lat, lng float64, query string) []discoveredBusiness {
+	url := fmt.Sprintf(
+		"https://discover.search.hereapi.com/v1/discover?at=%.6f,%.6f&q=%s&limit=15&in=countryCode:USA&apiKey=%s",
+		lat, lng, strings.ReplaceAll(query, " ", "+"), HereAPIKey,
+	)
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Items []struct {
+			Title    string `json:"title"`
+			Position struct {
+				Lat float64 `json:"lat"`
+				Lng float64 `json:"lng"`
+			} `json:"position"`
+			Address struct {
+				City       string `json:"city"`
+				PostalCode string `json:"postalCode"`
+			} `json:"address"`
+		} `json:"items"`
+	}
+	if json.Unmarshal(body, &result) != nil {
+		return nil
+	}
+	var businesses []discoveredBusiness
+	for _, item := range result.Items {
+		if item.Position.Lat != 0 {
+			businesses = append(businesses, discoveredBusiness{
+				Name: item.Title,
+				Lat:  item.Position.Lat,
+				Lng:  item.Position.Lng,
+				City: item.Address.City,
+				Zip:  item.Address.PostalCode,
+			})
+		}
+	}
+	log.Printf("📍 [Discover] %q near (%.3f,%.3f): found %d", query, lat, lng, len(businesses))
+	return businesses
 }
 
 func isBadAddressKeyword(address string) bool {
