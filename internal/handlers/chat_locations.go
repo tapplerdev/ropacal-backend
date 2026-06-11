@@ -645,14 +645,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 		}
 
-		// POI density score: 1-3 POIs=0.3, 4-8=0.6, 9+=0.9, anchor bonus +0.1
-		densityScore := 0.2
+		// HARD FILTER: minimum 3 retail POIs within 300m — if fewer, it's not a real commercial area
+		if poiDensity < 3 {
+			log.Printf("🚫 [Recommend] Filtered: %s — only %d POIs within 300m (need 3+)", c.NearbyPOI, poiDensity)
+			continue
+		}
+
+		// POI density score: 3-5 POIs=0.4, 6-8=0.6, 9+=0.9, anchor bonus +0.1
+		densityScore := 0.3
 		if poiDensity >= 9 {
 			densityScore = 0.9
-		} else if poiDensity >= 4 {
+		} else if poiDensity >= 6 {
 			densityScore = 0.6
-		} else if poiDensity >= 1 {
-			densityScore = 0.3
+		} else {
+			densityScore = 0.4
 		}
 		if hasAnchor {
 			densityScore = math.Min(densityScore+0.1, 1.0)
@@ -691,6 +697,12 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 		trafficNorm := math.Min(trafficJam, 10.0) / 10.0
 		finalScore := math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
+
+		// Minimum score cutoff — below this is not worth recommending
+		if finalScore < 5.5 {
+			log.Printf("🚫 [Recommend] Filtered: %s — score %.1f below 5.5 threshold", c.NearbyPOI, finalScore)
+			continue
+		}
 
 		// Build reasoning
 		reasoning := ""
