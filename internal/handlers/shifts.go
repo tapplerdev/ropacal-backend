@@ -2670,13 +2670,31 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		binsOnTruck = 0 // Safety check
 	}
 
+	// Count remaining (uncompleted) placements
+	remainingPlacements := 0
+	for _, task := range tasks {
+		if task.TaskType == "placement" {
+			remainingPlacements++
+		}
+	}
+
+	// KEY FIX: If remaining placements fit within truck capacity, treat ALL as preloaded.
+	// This prevents OR-Tools from creating a separate warehouse stop per placement.
+	// The end-of-route warehouse stop (added by optimizer) serves as the reload point.
+	if remainingPlacements <= capacity && binsOnTruck < remainingPlacements {
+		log.Printf("📦 [REOPTIMIZE] Adjusting: %d remaining placements fit in truck (capacity=%d). Driver has %d, needs %d more.",
+			remainingPlacements, capacity, binsOnTruck, remainingPlacements-binsOnTruck)
+		log.Printf("📦 [REOPTIMIZE] Treating all as preloaded — driver will reload at warehouse stop.")
+		binsOnTruck = remainingPlacements
+	}
+
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("🔢 [REOPTIMIZE] Bin Inventory Calculation:")
 	log.Printf("   Warehouse stops completed: %d", warehouseStopsCompleted)
-	log.Printf("   Bins loaded: %d (capacity=%d)", binsLoaded, capacity)
+	log.Printf("   Bins loaded (original): %d (capacity=%d)", binsLoaded, capacity)
 	log.Printf("   Placements completed: %d", placementsCompleted)
-	log.Printf("   Bins on truck: %d", binsOnTruck)
-	log.Printf("   Remaining placements: %d", len(tasks))
+	log.Printf("   Bins on truck (adjusted): %d", binsOnTruck)
+	log.Printf("   Remaining placements: %d", remainingPlacements)
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// Set startup bins to current truck inventory
