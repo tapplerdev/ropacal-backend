@@ -592,7 +592,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	var topCandidates []candidate
 	gapTaken, expTaken := 0, 0
 	for _, c := range allCandidates {
-		if c.Source == "gap_fill" && gapTaken < gapCount*3 { // 3x for filtering buffer
+		isGapFill := c.Source == "gap_fill" || c.Source == "business_search" || c.Source == "graphvenn_business"
+		if isGapFill && gapTaken < gapCount*3 { // 3x for filtering buffer
 			topCandidates = append(topCandidates, c)
 			gapTaken++
 		} else if c.Source == "expansion" && expTaken < expansionCount*3 {
@@ -615,7 +616,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		if gapResults >= gapCount && expResults >= expansionCount {
 			break
 		}
-		if c.Source == "gap_fill" && gapResults >= gapCount {
+		isGapSource := c.Source == "gap_fill" || c.Source == "business_search" || c.Source == "graphvenn_business"
+		if isGapSource && gapResults >= gapCount {
 			continue
 		}
 		if c.Source == "expansion" && expResults >= expansionCount {
@@ -693,10 +695,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 		// Build reasoning
 		reasoning := ""
-		if c.Source == "gap_fill" {
-			reasoning = fmt.Sprintf("%.1f mi gap from bin #%d", c.NearestBinDist, c.NearestBinNum)
-		} else {
+		if c.Source == "expansion" {
 			reasoning = "expansion area"
+		} else {
+			reasoning = fmt.Sprintf("%.1f mi gap from bin #%d", c.NearestBinDist, c.NearestBinNum)
 		}
 		reasoning += fmt.Sprintf(", fill rate %.1f%%/day", c.NearestFillRate)
 		if income, ok := zipIncome[zip5]; ok && income > 0 {
@@ -737,7 +739,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			Source:          c.Source,
 		}
 		recommendations = append(recommendations, rec)
-		if c.Source == "gap_fill" {
+		if c.Source != "expansion" {
 			gapResults++
 		} else {
 			expResults++
