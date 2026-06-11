@@ -447,6 +447,37 @@ func CreateShiftWithTasks(
 			}
 		}
 
+		// Auto-populate potential location coordinates if missing
+		if plIDInterface, ok := taskData["potential_location_id"]; ok && plIDInterface != nil {
+			plID, _ := plIDInterface.(string)
+			if plID != "" {
+				lat, hasLat := taskData["latitude"].(float64)
+				lon, hasLon := taskData["longitude"].(float64)
+				_, hasAddr := taskData["address"]
+
+				if !hasLat || !hasLon || !hasAddr || lat == 0 || lon == 0 {
+					var plData struct {
+						Latitude  float64 `db:"latitude"`
+						Longitude float64 `db:"longitude"`
+						Street    string  `db:"street"`
+						City      string  `db:"city"`
+						Zip       string  `db:"zip"`
+					}
+					err := tx.Get(&plData, "SELECT latitude, longitude, street, city, zip FROM potential_locations WHERE id = $1", plID)
+					if err == nil && plData.Latitude != 0 {
+						taskData["latitude"] = plData.Latitude
+						taskData["longitude"] = plData.Longitude
+						if !hasAddr {
+							taskData["address"] = fmt.Sprintf("%s, %s, %s", plData.Street, plData.City, plData.Zip)
+						}
+						log.Printf("   ✅ Task #%d: Auto-populated from potential location (%.6f, %.6f) %s", i+1, plData.Latitude, plData.Longitude, plData.Street)
+					} else if err != nil {
+						log.Printf("   ⚠️  Task #%d: Failed to lookup potential location %s: %v", i+1, plID, err)
+					}
+				}
+			}
+		}
+
 		// Auto-populate move request addresses if missing
 		if moveReqIDInterface, ok := taskData["move_request_id"]; ok && moveReqIDInterface != nil {
 			moveReqID, _ := moveReqIDInterface.(string)
