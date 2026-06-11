@@ -628,52 +628,51 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		trafficJam := getTrafficJamFactor(c.Lat, c.Lng)
 		c.TrafficScore = trafficJam
 
-		var address string
-		var zip5 string
+		// POI density + anchor tenant detection (300m radius)
+		poiDensity, hasAnchor, anchorName := scorePOIDensity(c.Lat, c.Lng)
 
-		if c.Source == "business_search" || c.Source == "graphvenn_business" {
-			// Business-first: already have real coordinates and POI name
-			// Just need to reverse geocode for the address
-			addr, zip := reverseGeocodeHERE(c.Lat, c.Lng)
-			address = addr
-			if zip != "" {
-				c.Zip = zip
-			}
-			zip5 = stripZipPlus4(c.Zip)
-			log.Printf("✅ [Recommend] Business: %s at %s", c.NearbyPOI, address)
-		} else {
-			// Legacy: POI classification + snap for midpoint/expansion candidates
-			poiScore, locationType, nearMall, snappedLat, snappedLng, matchedPOI := classifyAndSnap(c.Lat, c.Lng)
-			c.POIScore = poiScore
-			c.LocationType = locationType
-			c.NearbyPOI = matchedPOI
+		// Reverse geocode
+		address, zip := reverseGeocodeHERE(c.Lat, c.Lng)
+		if zip != "" {
+			c.Zip = zip
+		}
+		zip5 := stripZipPlus4(c.Zip)
 
-			if nearMall {
-				log.Printf("🏬 [Recommend] Filtered: %.4f,%.4f — near mall/Safeway", c.Lat, c.Lng)
-				continue
-			}
-			if locationType == "residential" || locationType == "no_retail" || locationType == "industrial" || locationType == "unknown" {
-				log.Printf("🚫 [Recommend] Filtered: %.4f,%.4f — %s", c.Lat, c.Lng, locationType)
-				continue
-			}
-			if snappedLat != 0 && snappedLng != 0 {
-				c.Lat = snappedLat
-				c.Lng = snappedLng
-			}
-			addr, zip := reverseGeocodeHERE(c.Lat, c.Lng)
-			address = addr
-			if zip != "" {
-				c.Zip = zip
-			}
-			zip5 = stripZipPlus4(c.Zip)
-
+		if c.Source != "business_search" && c.Source != "graphvenn_business" {
 			if isVagueAddress(address, c.City) || isBadAddressKeyword(address) {
 				log.Printf("🚫 [Recommend] Filtered: %q", address)
 				continue
 			}
 		}
 
-		// Final score with real data
+		// POI density score: 1-3 POIs=0.3, 4-8=0.6, 9+=0.9, anchor bonus +0.1
+		densityScore := 0.2
+		if poiDensity >= 9 {
+			densityScore = 0.9
+		} else if poiDensity >= 4 {
+			densityScore = 0.6
+		} else if poiDensity >= 1 {
+			densityScore = 0.3
+		}
+		if hasAnchor {
+			densityScore = math.Min(densityScore+0.1, 1.0)
+		}
+
+		locationType := "commercial"
+		if poiDensity >= 9 {
+			locationType = "retail plaza"
+		} else if poiDensity >= 4 {
+			locationType = "commercial strip"
+		}
+		if hasAnchor {
+			locationType += " (anchor: " + anchorName + ")"
+		}
+		c.LocationType = locationType
+
+		log.Printf("📊 [Density] %s: %d POIs, anchor=%v (%s), density=%.1f",
+			c.NearbyPOI, poiDensity, hasAnchor, anchorName, densityScore)
+
+		// Final score: density+anchors 30%, fill 20%, traffic 15%, pop 15%, gap 10%, income 10%
 		fillScore := c.NearestFillRate / maxRate
 		gapScore := math.Min(c.NearestBinDist, maxGapMiles) / maxGapMiles
 		if c.Source == "expansion" {
@@ -691,7 +690,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 		}
 		trafficNorm := math.Min(trafficJam, 10.0) / 10.0
-		finalScore := math.Round((fillScore*0.25+gapScore*0.15+popScore*0.15+trafficNorm*0.15+incomeScore*0.10+c.POIScore*0.20)*100) / 10
+		finalScore := math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
 
 		// Build reasoning
 		reasoning := ""
@@ -716,10 +715,14 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 			reasoning += fmt.Sprintf(", %s traffic", tLabel)
 		}
+		if poiDensity > 0 {
+			reasoning += fmt.Sprintf(", %d nearby POIs", poiDensity)
+		}
+		if hasAnchor {
+			reasoning += fmt.Sprintf(", near %s", anchorName)
+		}
 		if c.NearbyPOI != "" {
-			reasoning += fmt.Sprintf(", near %s", c.NearbyPOI)
-		} else if c.LocationType != "" {
-			reasoning += fmt.Sprintf(", %s area", c.LocationType)
+			reasoning += fmt.Sprintf(", at %s", c.NearbyPOI)
 		}
 
 		rec := LocationRecommendation{
@@ -1058,6 +1061,101 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 
 	log.Printf("   → No whitelisted POI within %dm → DISCARD", poiBrowseRadiusM)
 	return 0, "no_retail", nearMallOrSafeway, 0, 0, ""
+}
+
+// Anchor tenant names — major retailers that generate halo foot traffic
+var anchorTenants = []string{
+	"target", "walmart", "costco", "home depot", "lowe's", "lowes",
+	"trader joe", "whole foods", "safeway", "lucky", "food maxx", "foodmaxx",
+	"cvs", "walgreens", "rite aid", "ross", "marshalls", "tj maxx",
+	"dollar tree", "99 cents", "big lots", "grocery outlet",
+	"planet fitness", "24 hour fitness", "starbucks",
+}
+
+// scorePOIDensity counts retail POIs within 300m and detects anchor tenants.
+// Returns: (poiCount, hasAnchor, anchorName)
+func scorePOIDensity(lat, lng float64) (int, bool, string) {
+	url := fmt.Sprintf(
+		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=20&in=circle:%.6f,%.6f;r=300&apiKey=%s",
+		lat, lng, lat, lng, HereAPIKey,
+	)
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, false, ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, false, ""
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Items []struct {
+			Title      string `json:"title"`
+			Categories []struct {
+				ID string `json:"id"`
+			} `json:"categories"`
+		} `json:"items"`
+	}
+	if json.Unmarshal(body, &result) != nil {
+		return 0, false, ""
+	}
+
+	retailCount := 0
+	hasAnchor := false
+	anchorName := ""
+
+	for _, item := range result.Items {
+		titleLower := strings.ToLower(item.Title)
+
+		// Skip B2B businesses from count
+		isB2B := false
+		for _, kw := range b2bTitleKeywords {
+			if strings.Contains(titleLower, kw) {
+				isB2B = true
+				break
+			}
+		}
+		if isB2B {
+			continue
+		}
+
+		// Check if it's a retail POI (not industrial)
+		isRetail := false
+		for _, cat := range item.Categories {
+			for _, wl := range retailWhitelist {
+				if strings.HasPrefix(cat.ID, wl.Prefix) {
+					isRetail = true
+					break
+				}
+			}
+			for _, wl := range communityWhitelist {
+				if strings.HasPrefix(cat.ID, wl.Prefix) {
+					isRetail = true
+					break
+				}
+			}
+			if isRetail {
+				break
+			}
+		}
+		if isRetail {
+			retailCount++
+		}
+
+		// Check for anchor tenant
+		if !hasAnchor {
+			for _, anchor := range anchorTenants {
+				if strings.Contains(titleLower, anchor) {
+					hasAnchor = true
+					anchorName = item.Title
+					break
+				}
+			}
+		}
+	}
+
+	return retailCount, hasAnchor, anchorName
 }
 
 type discoveredBusiness struct {
