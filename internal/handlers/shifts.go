@@ -2073,15 +2073,11 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						return
 					}
 
-					// Check if this bin number is already taken — auto-assign next available if duplicate
+					// Check if this bin number is already taken — allow duplicates for now
 					var binAlreadyExists bool
 					db.QueryRow(`SELECT EXISTS(SELECT 1 FROM bins WHERE bin_number = $1)`, actualBinNumber).Scan(&binAlreadyExists)
 					if binAlreadyExists {
-						log.Printf("[DIAGNOSTIC] ⚠️ Bin #%d already exists — auto-assigning next available", actualBinNumber)
-						var maxBinNum int
-						db.QueryRow(`SELECT COALESCE(MAX(bin_number), 0) FROM bins`).Scan(&maxBinNum)
-						actualBinNumber = maxBinNum + 1
-						log.Printf("[DIAGNOSTIC] ✅ Auto-assigned bin number: #%d", actualBinNumber)
+						log.Printf("[DIAGNOSTIC] ⚠️ Bin #%d already exists — allowing duplicate", actualBinNumber)
 					}
 
 					_, err = db.Exec(

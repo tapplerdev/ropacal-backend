@@ -909,6 +909,10 @@ func Migrate(db *sqlx.DB) error {
 			updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 		)`,
 
+		// Drop UNIQUE constraint on bin_number to allow duplicates
+		`ALTER TABLE bins DROP CONSTRAINT IF EXISTS bins_bin_number_key`,
+		`DROP INDEX IF EXISTS bins_bin_number_key`,
+
 		// Seed Bay Area census income data (ACS 2022 estimates)
 		`INSERT INTO census_income_cache (zip, median_household_income, population) VALUES
 			('95110', 82000, 42000), ('95112', 78000, 55000), ('95116', 72000, 60000),
