@@ -261,6 +261,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		zipPopulation[c.Zip] = c.Population
 	}
 
+	// Step 5: Get existing potential locations (to avoid recommending same spots)
+	type potentialLoc struct {
+		Latitude  float64 `db:"latitude"`
+		Longitude float64 `db:"longitude"`
+	}
+	var existingPotentials []potentialLoc
+	h.db.Select(&existingPotentials, `SELECT latitude, longitude FROM potential_locations WHERE latitude IS NOT NULL AND longitude IS NOT NULL`)
+	log.Printf("📍 [Recommend] %d existing potential locations to avoid", len(existingPotentials))
+
 	// ======================================================================
 	// STRATEGY A: Business-first — search for real businesses in demand areas
 	// Step 1: Identify high-demand areas (from bin performance data)
@@ -348,6 +357,16 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				if tooClose {
 					continue
 				}
+				// Check not too close to existing potential locations
+				for _, pl := range existingPotentials {
+					if haversineDistMiles(biz.Lat, biz.Lng, pl.Latitude, pl.Longitude) < minGapMiles {
+						tooClose = true
+						break
+					}
+				}
+				if tooClose {
+					continue
+				}
 				// Check no-go zones
 				inNoGo := false
 				for _, z := range zones {
@@ -409,6 +428,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 					}
 					if d < minGapMiles {
 						tooClose = true
+					}
+				}
+				if tooClose {
+					continue
+				}
+				for _, pl := range existingPotentials {
+					if haversineDistMiles(biz.Lat, biz.Lng, pl.Latitude, pl.Longitude) < minGapMiles {
+						tooClose = true
+						break
 					}
 				}
 				if tooClose {
