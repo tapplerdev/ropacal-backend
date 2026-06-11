@@ -4434,6 +4434,14 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
 		shouldReoptimize := req.Reoptimize || addedCount > 0 || removedCount > 0 || changes["driver_changed"].(bool)
 
+		// Clean up warehouse stops on ready shifts — they're meaningless before optimization
+		if shouldReoptimize && shift.Status == "ready" {
+			result, _ := db.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND task_type = 'warehouse_stop' AND is_completed = 0`, shiftID)
+			if deleted, _ := result.RowsAffected(); deleted > 0 {
+				log.Printf("🗑️ Cleaned up %d stale warehouse stops on ready shift", deleted)
+			}
+		}
+
 		if shouldReoptimize && shift.Status == "active" {
 			log.Printf("🔄 Re-optimizing route (tasks changed or driver reassigned)...")
 
