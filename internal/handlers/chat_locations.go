@@ -629,7 +629,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		c.TrafficScore = trafficJam
 
 		// POI density + anchor tenant detection (300m radius)
-		poiDensity, hasAnchor, anchorName := scorePOIDensity(c.Lat, c.Lng)
+		poiDensity, hasAnchor, anchorName, anchorLat, anchorLng := scorePOIDensity(c.Lat, c.Lng)
+
+		// Snap to anchor tenant if detected — anchor has more foot traffic than the original business
+		if hasAnchor && anchorLat != 0 && anchorLng != 0 {
+			snapDist := haversineDistMiles(c.Lat, c.Lng, anchorLat, anchorLng)
+			log.Printf("🏪 [Snap] Moving pin from %s to anchor %s (%.0fm)", c.NearbyPOI, anchorName, snapDist*1609)
+			c.Lat = anchorLat
+			c.Lng = anchorLng
+		}
 
 		// Reverse geocode
 		address, zip := reverseGeocodeHERE(c.Lat, c.Lng)
@@ -1086,7 +1094,7 @@ var anchorTenants = []string{
 
 // scorePOIDensity counts retail POIs within 300m and detects anchor tenants.
 // Returns: (poiCount, hasAnchor, anchorName)
-func scorePOIDensity(lat, lng float64) (int, bool, string) {
+func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64) {
 	url := fmt.Sprintf(
 		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=20&in=circle:%.6f,%.6f;r=300&apiKey=%s",
 		lat, lng, lat, lng, HereAPIKey,
@@ -1094,31 +1102,43 @@ func scorePOIDensity(lat, lng float64) (int, bool, string) {
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return 0, false, ""
+		return 0, false, "", 0, 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0, false, ""
+		return 0, false, "", 0, 0
 	}
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
 		Items []struct {
-			Title      string `json:"title"`
+			Title    string `json:"title"`
+			Distance int    `json:"distance"`
+			Position struct {
+				Lat float64 `json:"lat"`
+				Lng float64 `json:"lng"`
+			} `json:"position"`
 			Categories []struct {
 				ID string `json:"id"`
 			} `json:"categories"`
 		} `json:"items"`
 	}
 	if json.Unmarshal(body, &result) != nil {
-		return 0, false, ""
+		return 0, false, "", 0, 0
 	}
 
 	retailCount := 0
 	hasAnchor := false
 	anchorName := ""
+	var anchorLat, anchorLng float64
+
+	log.Printf("📊 [Density] Scanning %d POIs within 300m of (%.4f, %.4f)", len(result.Items), lat, lng)
 
 	for _, item := range result.Items {
 		titleLower := strings.ToLower(item.Title)
+		primaryCat := ""
+		if len(item.Categories) > 0 {
+			primaryCat = item.Categories[0].ID
+		}
 
 		// Skip B2B businesses from count
 		isB2B := false
@@ -1129,21 +1149,25 @@ func scorePOIDensity(lat, lng float64) (int, bool, string) {
 			}
 		}
 		if isB2B {
+			log.Printf("   ⬜ %s (%s, %dm) — B2B skipped", item.Title, primaryCat, item.Distance)
 			continue
 		}
 
-		// Check if it's a retail POI (not industrial)
+		// Check if it's a retail POI
 		isRetail := false
+		matchLabel := ""
 		for _, cat := range item.Categories {
 			for _, wl := range retailWhitelist {
 				if strings.HasPrefix(cat.ID, wl.Prefix) {
 					isRetail = true
+					matchLabel = wl.Label
 					break
 				}
 			}
 			for _, wl := range communityWhitelist {
 				if strings.HasPrefix(cat.ID, wl.Prefix) {
 					isRetail = true
+					matchLabel = wl.Label
 					break
 				}
 			}
@@ -1153,6 +1177,9 @@ func scorePOIDensity(lat, lng float64) (int, bool, string) {
 		}
 		if isRetail {
 			retailCount++
+			log.Printf("   ✅ %s (%s, %dm) — %s", item.Title, primaryCat, item.Distance, matchLabel)
+		} else {
+			log.Printf("   ⬜ %s (%s, %dm) — no whitelist match", item.Title, primaryCat, item.Distance)
 		}
 
 		// Check for anchor tenant
@@ -1161,13 +1188,17 @@ func scorePOIDensity(lat, lng float64) (int, bool, string) {
 				if strings.Contains(titleLower, anchor) {
 					hasAnchor = true
 					anchorName = item.Title
+					anchorLat = item.Position.Lat
+					anchorLng = item.Position.Lng
+					log.Printf("   🏪 ANCHOR DETECTED: %s at (%.4f, %.4f) %dm away", item.Title, item.Position.Lat, item.Position.Lng, item.Distance)
 					break
 				}
 			}
 		}
 	}
 
-	return retailCount, hasAnchor, anchorName
+	log.Printf("📊 [Density] Result: %d retail POIs, anchor=%v (%s)", retailCount, hasAnchor, anchorName)
+	return retailCount, hasAnchor, anchorName, anchorLat, anchorLng
 }
 
 type discoveredBusiness struct {
