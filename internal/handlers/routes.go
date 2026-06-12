@@ -9,6 +9,8 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/models"
@@ -1449,6 +1451,107 @@ func GetBinCollectionStats(db *sqlx.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"bins": result,
+		})
+	}
+}
+
+// EstimateRouteDuration takes a list of bin_ids, calls OSRM to get
+// driving duration/distance, and returns estimates.
+func EstimateRouteDuration(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BinIDs []string `json:"bin_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BinIDs) == 0 {
+			http.Error(w, `{"error":"bin_ids array required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Fetch bin coordinates
+		type binCoord struct {
+			ID  string  `db:"id"`
+			Lat float64 `db:"latitude"`
+			Lng float64 `db:"longitude"`
+		}
+		query, args, _ := sqlx.In(`SELECT id, latitude, longitude FROM bins WHERE id IN (?)`, req.BinIDs)
+		query = db.Rebind(query)
+		var coords []binCoord
+		if err := db.Select(&coords, query, args...); err != nil {
+			log.Printf("❌ Failed to fetch bin coords: %v", err)
+			http.Error(w, `{"error":"failed to fetch bin coordinates"}`, http.StatusInternalServerError)
+			return
+		}
+
+		if len(coords) < 2 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"estimated_duration_hours": 0, "estimated_distance_miles": 0,
+			})
+			return
+		}
+
+		// Get warehouse location
+		var warehouseLat, warehouseLng float64 = 37.6368013, -122.1269379
+		var whJSON []byte
+		if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&whJSON); err == nil {
+			var wh struct {
+				Lat float64 `json:"latitude"`
+				Lng float64 `json:"longitude"`
+			}
+			if json.Unmarshal(whJSON, &wh) == nil {
+				warehouseLat, warehouseLng = wh.Lat, wh.Lng
+			}
+		}
+
+		// Build OSRM route request: warehouse → bins → warehouse
+		osrmCoords := make([]string, 0, len(coords)+2)
+		osrmCoords = append(osrmCoords, fmt.Sprintf("%.6f,%.6f", warehouseLng, warehouseLat))
+		for _, c := range coords {
+			osrmCoords = append(osrmCoords, fmt.Sprintf("%.6f,%.6f", c.Lng, c.Lat))
+		}
+		osrmCoords = append(osrmCoords, fmt.Sprintf("%.6f,%.6f", warehouseLng, warehouseLat))
+
+		osrmURL := os.Getenv("OSRM_SERVER_URL")
+		if osrmURL == "" {
+			osrmURL = "http://router.project-osrm.org"
+		}
+		routeURL := fmt.Sprintf("%s/route/v1/driving/%s?overview=false", osrmURL, strings.Join(osrmCoords, ";"))
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(routeURL)
+		if err != nil {
+			log.Printf("❌ OSRM route request failed: %v", err)
+			http.Error(w, `{"error":"OSRM request failed"}`, http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		var osrmData struct {
+			Code   string `json:"code"`
+			Routes []struct {
+				Distance float64 `json:"distance"` // meters
+				Duration float64 `json:"duration"` // seconds
+			} `json:"routes"`
+		}
+		if err := json.Unmarshal(body, &osrmData); err != nil || osrmData.Code != "Ok" || len(osrmData.Routes) == 0 {
+			log.Printf("❌ OSRM response error: %v", err)
+			http.Error(w, `{"error":"OSRM returned an error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		route := osrmData.Routes[0]
+		// Add 5 min service time per bin
+		totalDurationSec := route.Duration + float64(len(coords))*300
+		durationHours := math.Round(totalDurationSec/3600*10) / 10
+		distanceMiles := math.Round(route.Distance/1609.34*10) / 10
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"estimated_duration_hours": durationHours,
+			"estimated_distance_miles": distanceMiles,
+			"bin_count":                len(coords),
+			"driving_duration_hours":   math.Round(route.Duration/3600*10) / 10,
 		})
 	}
 }
