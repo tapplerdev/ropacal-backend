@@ -939,6 +939,29 @@ func Migrate(db *sqlx.DB) error {
 			('94577', 80000, 42000), ('94578', 75000, 30000), ('94579', 85000, 20000),
 			('94580', 90000, 18000)
 		ON CONFLICT (zip) DO NOTHING`,
+
+		// AI Recommendations table for agentic AI operations
+		`CREATE TABLE IF NOT EXISTS ai_recommendations (
+			id TEXT PRIMARY KEY,
+			type TEXT NOT NULL,
+			entity_type TEXT NOT NULL,
+			entity_id TEXT,
+			title TEXT NOT NULL,
+			description TEXT NOT NULL,
+			severity TEXT DEFAULT 'medium',
+			recommended_action TEXT,
+			status TEXT DEFAULT 'pending',
+			source TEXT DEFAULT 'ai_agent',
+			reasoning TEXT,
+			created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+			expires_at BIGINT,
+			actioned_at BIGINT,
+			actioned_by_user_id TEXT,
+			snoozed_until BIGINT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_recommendations_status ON ai_recommendations(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_recommendations_type ON ai_recommendations(type)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_recommendations_created ON ai_recommendations(created_at DESC)`,
 	}
 
 	for _, migration := range migrations {

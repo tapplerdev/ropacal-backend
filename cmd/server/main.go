@@ -184,6 +184,11 @@ func main() {
 		log.Println("✅ Stale shift monitor started (checks for disconnected drivers)")
 	}
 
+	// Start AI Operations Agent (generates recommendations every 30 min)
+	aiAgent := services.NewAIOperationsAgent(db, fcmService, centrifugoClient)
+	aiAgent.Start()
+	log.Println("✅ AI Operations Agent started (30-minute cycles)")
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()
@@ -421,6 +426,13 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			// AI Chat
 			chatHandler := handlers.NewChatHandler(db)
 			r.Post("/manager/chat", chatHandler.Handle)
+
+			// AI Recommendations
+			r.Get("/manager/ai-recommendations", handlers.GetAIRecommendations(db))
+			r.Get("/manager/ai-recommendations/pending-count", handlers.GetPendingRecommendationCount(db))
+			r.Put("/manager/ai-recommendations/{id}/accept", handlers.AcceptRecommendation(db))
+			r.Put("/manager/ai-recommendations/{id}/dismiss", handlers.DismissRecommendation(db))
+			r.Put("/manager/ai-recommendations/{id}/snooze", handlers.SnoozeRecommendation(db))
 
 			// Potential Locations management (managers can delete and convert)
 			r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
