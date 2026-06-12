@@ -90,6 +90,9 @@ func (a *AIOperationsAgent) runCycle() {
 	// Check route performance
 	a.checkRoutePerformance()
 
+	// Check for underperforming bins
+	a.checkUnderperformingBins()
+
 	log.Printf("🤖 [AIAgent] Cycle complete")
 	log.Printf("🤖 [AIAgent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
@@ -248,6 +251,54 @@ func (a *AIOperationsAgent) checkRoutePerformance() {
 		a.createRecommendation("route_split", "route", *route.RouteID, title, description, "medium",
 			"Split this route into two shorter routes or remove low-priority bins",
 			fmt.Sprintf("%.0f%% avg completion over %d shifts suggests the route is too long or has problematic bins.", route.AvgCompletion, route.ShiftCount))
+	}
+}
+
+// checkUnderperformingBins finds bins with avg fill <15% across 5+ checks — likely bad locations
+func (a *AIOperationsAgent) checkUnderperformingBins() {
+	type underperformer struct {
+		ID            string  `db:"id"`
+		BinNumber     int     `db:"bin_number"`
+		CurrentStreet string  `db:"current_street"`
+		City          string  `db:"city"`
+		AvgFill       float64 `db:"avg_fill"`
+		CheckCount    int     `db:"check_count"`
+	}
+
+	var bins []underperformer
+	err := a.db.Select(&bins, `
+		SELECT b.id, b.bin_number, b.current_street, b.city,
+			ROUND(AVG(c.fill_percentage)::numeric, 1) AS avg_fill,
+			COUNT(c.id) AS check_count
+		FROM bins b
+		JOIN checks c ON b.id = c.bin_id
+		WHERE b.status = 'active' AND c.fill_percentage IS NOT NULL
+		GROUP BY b.id, b.bin_number, b.current_street, b.city
+		HAVING COUNT(c.id) >= 5 AND AVG(c.fill_percentage) < 15
+	`)
+	if err != nil {
+		log.Printf("❌ [AIAgent] Failed to query underperforming bins: %v", err)
+		return
+	}
+
+	log.Printf("🤖 [AIAgent] Found %d underperforming bins (avg fill <15%%, 5+ checks)", len(bins))
+
+	for _, bin := range bins {
+		var existing int
+		a.db.Get(&existing, `SELECT COUNT(*) FROM ai_recommendations WHERE entity_id = $1 AND type = 'bin_relocate' AND status = 'pending'`, bin.ID)
+		if existing > 0 {
+			continue
+		}
+
+		a.createRecommendation(
+			"bin_relocate", "bin", bin.ID,
+			fmt.Sprintf("Bin #%d averaging %.0f%% fill — consider relocating", bin.BinNumber, bin.AvgFill),
+			fmt.Sprintf("Bin #%d at %s, %s has averaged %.0f%% fill across %d checks. This location may have low donation activity.",
+				bin.BinNumber, bin.CurrentStreet, bin.City, bin.AvgFill, bin.CheckCount),
+			"low",
+			"Relocate to higher-traffic location or retire if not needed",
+			fmt.Sprintf("Historical avg fill %.0f%% across %d checks indicates underperformance.", bin.AvgFill, bin.CheckCount),
+		)
 	}
 }
 

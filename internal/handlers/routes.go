@@ -1365,27 +1365,35 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 func GetRoutePerformance(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type RoutePerf struct {
-			RouteID            string   `db:"route_id" json:"route_id"`
-			ShiftsCompleted    int      `db:"shifts_completed" json:"shifts_completed"`
-			AvgCompletionRate  float64  `db:"avg_completion_rate" json:"avg_completion_rate"`
-			AvgDurationMinutes *float64 `db:"avg_duration_minutes" json:"avg_duration_minutes"`
-			TotalBinsCollected int      `db:"total_bins_collected" json:"total_bins_collected"`
-			TotalIncidents     int      `db:"total_incidents" json:"total_incidents"`
-			LastRunAt          int64    `db:"last_run_at" json:"last_run_at"`
+			RouteID             string   `db:"route_id" json:"route_id"`
+			ShiftsCompleted     int      `db:"shifts_completed" json:"shifts_completed"`
+			AvgCompletionRate   float64  `db:"avg_completion_rate" json:"avg_completion_rate"`
+			AvgDurationMinutes  *float64 `db:"avg_duration_minutes" json:"avg_duration_minutes"`
+			TotalBinsCollected  int      `db:"total_bins_collected" json:"total_bins_collected"`
+			TotalIncidents      int      `db:"total_incidents" json:"total_incidents"`
+			LastRunAt           int64    `db:"last_run_at" json:"last_run_at"`
+			AvgFillAtCollection *float64 `db:"avg_fill_at_collection" json:"avg_fill_at_collection"`
 		}
 
 		query := `
 			SELECT
 				sh.route_id,
-				COUNT(*) AS shifts_completed,
+				COUNT(DISTINCT sh.id) AS shifts_completed,
 				ROUND(AVG(sh.completion_rate)::numeric, 1) AS avg_completion_rate,
 				ROUND(AVG(CASE WHEN sh.end_time > sh.start_time
 					THEN (sh.end_time - sh.start_time) / 60.0
 					ELSE NULL END)::numeric, 0) AS avg_duration_minutes,
 				COALESCE(SUM(sh.completed_bins), 0) AS total_bins_collected,
 				COALESCE(SUM(sh.incidents_reported), 0) AS total_incidents,
-				MAX(sh.ended_at) AS last_run_at
+				MAX(sh.ended_at) AS last_run_at,
+				ROUND(AVG(cfill.avg_fill)::numeric, 1) AS avg_fill_at_collection
 			FROM shift_history sh
+			LEFT JOIN (
+				SELECT c.shift_id, AVG(c.fill_percentage) AS avg_fill
+				FROM checks c
+				WHERE c.fill_percentage IS NOT NULL AND c.shift_id IS NOT NULL
+				GROUP BY c.shift_id
+			) cfill ON cfill.shift_id = sh.id
 			WHERE sh.route_id IS NOT NULL
 			GROUP BY sh.route_id
 		`
@@ -1405,6 +1413,42 @@ func GetRoutePerformance(db *sqlx.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"routes": result,
+		})
+	}
+}
+
+// GetBinCollectionStats returns per-bin avg fill at collection from checks data.
+func GetBinCollectionStats(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type BinStat struct {
+			BinID      string  `db:"bin_id" json:"bin_id"`
+			AvgFill    float64 `db:"avg_fill" json:"avg_fill"`
+			CheckCount int     `db:"check_count" json:"check_count"`
+		}
+
+		var rows []BinStat
+		err := db.Select(&rows, `
+			SELECT bin_id,
+				ROUND(AVG(fill_percentage)::numeric, 1) AS avg_fill,
+				COUNT(*) AS check_count
+			FROM checks
+			WHERE fill_percentage IS NOT NULL
+			GROUP BY bin_id
+		`)
+		if err != nil {
+			log.Printf("❌ Failed to query bin collection stats: %v", err)
+			http.Error(w, `{"error":"failed to query bin collection stats"}`, http.StatusInternalServerError)
+			return
+		}
+
+		result := make(map[string]BinStat, len(rows))
+		for _, row := range rows {
+			result[row.BinID] = row
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"bins": result,
 		})
 	}
 }
