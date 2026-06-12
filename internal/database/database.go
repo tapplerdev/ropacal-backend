@@ -228,6 +228,7 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_shift_history_ended_at ON shift_history(ended_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_shift_history_end_reason ON shift_history(end_reason)`,
 		`CREATE INDEX IF NOT EXISTS idx_shift_history_completion_rate ON shift_history(completion_rate)`,
+		`CREATE INDEX IF NOT EXISTS idx_shift_history_route_id ON shift_history(route_id)`,
 
 		// Create no_go_zones table
 		`CREATE TABLE IF NOT EXISTS no_go_zones (

@@ -295,6 +295,7 @@ func CreateShiftWithTasks(
 		)
 	`
 
+	skippedInactive := 0
 	for i, taskData := range tasks {
 		taskID := uuid.New().String()
 
@@ -401,6 +402,16 @@ func CreateShiftWithTasks(
 		if binIDInterface, ok := taskData["bin_id"]; ok && binIDInterface != nil {
 			binID, _ := binIDInterface.(string)
 			if binID != "" {
+				// Safety net: skip retired/missing bins
+				var binStatus string
+				if err := tx.Get(&binStatus, "SELECT status FROM bins WHERE id = $1", binID); err == nil {
+					if binStatus == "retired" || binStatus == "missing" {
+						log.Printf("   ⚠️  Task #%d: Skipping %s bin %s (status=%s)", i+1, taskType, binID, binStatus)
+						skippedInactive++
+						continue
+					}
+				}
+
 				// Auto-populate bin details from bins table if missing
 				_, hasBinNumber := taskData["bin_number"]
 				_, hasFillPercentage := taskData["fill_percentage"]
@@ -645,15 +656,21 @@ func CreateShiftWithTasks(
 	// ❌ REMOVED: Auto-append warehouse stop logic
 	// Mapbox Optimization v2 will automatically add warehouse stops (end stops) as needed
 	// Let the optimizer handle warehouse returns for optimal routing
-	log.Printf("✅ Created shift with %d tasks - Mapbox will add warehouse stops during optimization", len(tasks))
+	actualTasks := len(tasks) - skippedInactive
+	if skippedInactive > 0 {
+		log.Printf("⚠️  Skipped %d inactive bins (retired/missing) from shift", skippedInactive)
+		// Update total_bins on the shift to reflect actual task count
+		_, _ = tx.Exec("UPDATE shifts SET total_bins = total_bins - $1 WHERE id = $2", skippedInactive, shiftID)
+	}
+	log.Printf("✅ Created shift with %d tasks - Mapbox will add warehouse stops during optimization", actualTasks)
 
 	err = tx.Commit()
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	log.Printf("✅ Created shift %s with %d tasks", shiftID, len(tasks))
-	return shiftID, len(tasks), nil
+	log.Printf("✅ Created shift %s with %d tasks (%d inactive skipped)", shiftID, actualTasks, skippedInactive)
+	return shiftID, actualTasks, nil
 }
 
 // CompleteTask marks a task as completed

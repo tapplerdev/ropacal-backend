@@ -1359,3 +1359,52 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(response)
 	}
 }
+
+// GetRoutePerformance aggregates shift_history by route_id to provide
+// performance metrics for each route template.
+func GetRoutePerformance(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type RoutePerf struct {
+			RouteID            string   `db:"route_id" json:"route_id"`
+			ShiftsCompleted    int      `db:"shifts_completed" json:"shifts_completed"`
+			AvgCompletionRate  float64  `db:"avg_completion_rate" json:"avg_completion_rate"`
+			AvgDurationMinutes *float64 `db:"avg_duration_minutes" json:"avg_duration_minutes"`
+			TotalBinsCollected int      `db:"total_bins_collected" json:"total_bins_collected"`
+			TotalIncidents     int      `db:"total_incidents" json:"total_incidents"`
+			LastRunAt          int64    `db:"last_run_at" json:"last_run_at"`
+		}
+
+		query := `
+			SELECT
+				sh.route_id,
+				COUNT(*) AS shifts_completed,
+				ROUND(AVG(sh.completion_rate)::numeric, 1) AS avg_completion_rate,
+				ROUND(AVG(CASE WHEN sh.end_time > sh.start_time
+					THEN (sh.end_time - sh.start_time) / 60.0
+					ELSE NULL END)::numeric, 0) AS avg_duration_minutes,
+				COALESCE(SUM(sh.completed_bins), 0) AS total_bins_collected,
+				COALESCE(SUM(sh.incidents_reported), 0) AS total_incidents,
+				MAX(sh.ended_at) AS last_run_at
+			FROM shift_history sh
+			WHERE sh.route_id IS NOT NULL
+			GROUP BY sh.route_id
+		`
+
+		var rows []RoutePerf
+		if err := db.Select(&rows, query); err != nil {
+			log.Printf("❌ Failed to query route performance: %v", err)
+			http.Error(w, `{"error":"failed to query route performance"}`, http.StatusInternalServerError)
+			return
+		}
+
+		result := make(map[string]RoutePerf, len(rows))
+		for _, row := range rows {
+			result[row.RouteID] = row
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"routes": result,
+		})
+	}
+}

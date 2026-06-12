@@ -422,6 +422,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			// Smart routes & daily priorities
 			r.Get("/manager/bins/daily-priorities", handlers.GetDailyPriorities(db))
 			r.Post("/manager/routes/generate-smart", handlers.GenerateSmartRoutes(db))
+			r.Get("/manager/routes/performance", handlers.GetRoutePerformance(db))
 
 			// AI Chat
 			chatHandler := handlers.NewChatHandler(db)
