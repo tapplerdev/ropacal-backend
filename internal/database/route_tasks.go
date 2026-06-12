@@ -211,6 +211,8 @@ func CreateShiftWithTasks(
 	scheduledEnd *string,
 	// Date this shift is scheduled for
 	scheduledDate *string,
+	// Route template ID (if created from a template)
+	routeID *string,
 ) (string, int, error) {
 	tx, err := db.Beginx()
 	if err != nil {
@@ -242,8 +244,8 @@ func CreateShiftWithTasks(
 			start_latitude, start_longitude, start_address,
 			end_latitude, end_longitude, end_address,
 			scheduled_start, scheduled_end, scheduled_date,
-			created_at, updated_at
-		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+			route_id, created_at, updated_at
+		) VALUES ($1, $2, 'ready', $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 	`
 
 	// Count only bin-related tasks (exclude warehouse_stop) for total_bins
@@ -264,7 +266,7 @@ func CreateShiftWithTasks(
 		startLat, startLon, startAddr,
 		endLat, endLon, endAddr,
 		scheduledStart, scheduledEnd, scheduledDate,
-		now, now,
+		routeID, now, now,
 	)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create shift: %w", err)

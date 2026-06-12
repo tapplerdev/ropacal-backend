@@ -120,6 +120,7 @@ type CreateShiftWithTasksRequest struct {
 	ScheduledStart *string  `json:"scheduled_start,omitempty"` // ISO 8601 — vehicle earliest_start
 	ScheduledEnd   *string  `json:"scheduled_end,omitempty"`   // ISO 8601 — vehicle latest_end
 	ScheduledDate  *string  `json:"scheduled_date,omitempty"`  // YYYY-MM-DD — which date this shift is for
+	RouteID        *string  `json:"route_id,omitempty"`        // Route template ID (if created from a template)
 }
 
 // CompleteTaskRequest represents the request to complete a task
