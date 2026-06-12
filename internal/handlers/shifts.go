@@ -5863,7 +5863,8 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 			if json.Unmarshal(warehouseJSON, &warehouse) == nil {
 				_, err = db.Exec(`
 					UPDATE bins
-					SET status = $1, latitude = $2, longitude = $3, current_street = $4, city = '', zip = '', updated_at = $5
+					SET status = $1, latitude = $2, longitude = $3, current_street = $4, city = '', zip = '',
+					    fill_percentage = 0, last_checked_at = NULL, updated_at = $5
 					WHERE id = $6
 				`, newStatus, warehouse.Latitude, warehouse.Longitude, warehouse.Address, now, moveRequest.BinID)
 				if err != nil {
@@ -5872,11 +5873,11 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 				log.Printf("[MOVE] ✅ Bin status updated to %s, coordinates updated to warehouse (%.6f, %.6f)", newStatus, warehouse.Latitude, warehouse.Longitude)
 			} else {
 				log.Printf("[MOVE] ⚠️  Failed to parse warehouse config, updating status only")
-				db.Exec(`UPDATE bins SET status = $1, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
+				db.Exec(`UPDATE bins SET status = $1, fill_percentage = 0, last_checked_at = NULL, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
 			}
 		} else {
 			log.Printf("[MOVE] ⚠️  Warehouse config not found, updating status only")
-			db.Exec(`UPDATE bins SET status = $1, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
+			db.Exec(`UPDATE bins SET status = $1, fill_percentage = 0, last_checked_at = NULL, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
 		}
 
 	} else if moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment" {
