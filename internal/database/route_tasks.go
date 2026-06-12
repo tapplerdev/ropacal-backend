@@ -405,7 +405,7 @@ func CreateShiftWithTasks(
 				// Safety net: skip retired/missing bins
 				var binStatus string
 				if err := tx.Get(&binStatus, "SELECT status FROM bins WHERE id = $1", binID); err == nil {
-					if binStatus == "retired" || binStatus == "missing" {
+					if binStatus == "retired" || binStatus == "missing" || binStatus == "in_storage" {
 						log.Printf("   ⚠️  Task #%d: Skipping %s bin %s (status=%s)", i+1, taskType, binID, binStatus)
 						skippedInactive++
 						continue
