@@ -96,23 +96,26 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Filter out low performers
-		var removedBins []reoptBin
-		var activeBins []reoptBin
+		// Flag low performers (but keep them on routes — they still need collection)
+		type lowPerformer struct {
+			reoptBin
+			AvgFill    float64 `json:"avg_fill"`
+			CheckCount int     `json:"check_count"`
+		}
+		var lowPerformers []lowPerformer
+		activeBins := allBins // All active bins stay in the optimization
 		for _, bin := range allBins {
 			var avgFill float64
 			var checkCount int
 			db.QueryRow(`SELECT COALESCE(AVG(fill_percentage), -1), COUNT(*) FROM checks WHERE bin_id = $1 AND fill_percentage IS NOT NULL`, bin.ID).Scan(&avgFill, &checkCount)
 
 			if checkCount >= 5 && avgFill >= 0 && avgFill < req.LowPerformerThresh {
-				removedBins = append(removedBins, bin)
-				log.Printf("   ⚠️  Excluding low performer Bin #%d (%.1f%% avg over %d checks)", bin.BinNumber, avgFill, checkCount)
-				continue
+				lowPerformers = append(lowPerformers, lowPerformer{bin, avgFill, checkCount})
+				log.Printf("   ⚠️  Low performer Bin #%d (%.1f%% avg over %d checks) — flagged, kept on route", bin.BinNumber, avgFill, checkCount)
 			}
-			activeBins = append(activeBins, bin)
 		}
 
-		log.Printf("🤖 [REOPT] %d active bins (%d low performers excluded)", len(activeBins), len(removedBins))
+		log.Printf("🤖 [REOPT] %d active bins (%d flagged as low performers)", len(activeBins), len(lowPerformers))
 
 		if len(activeBins) < 2 {
 			http.Error(w, `{"error":"not enough active bins"}`, http.StatusBadRequest)
@@ -180,12 +183,14 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		// Let OR-Tools decide how many routes — calculate from bin count / capacity
-		softCapacity := req.MaxBinsPerRoute + 2
+		// Calculate number of routes from bin count / max capacity
 		numVehicles := int(math.Ceil(float64(len(activeBins)) / float64(req.MaxBinsPerRoute)))
 		if numVehicles < 1 {
 			numVehicles = 1
 		}
+		// Balance capacity: ceil(bins/vehicles) + 1 so each route gets roughly equal load
+		// e.g. 82 bins / 3 vehicles = 28 per route (not 32/32/18)
+		balancedCapacity := int(math.Ceil(float64(len(activeBins))/float64(numVehicles))) + 1
 
 		type ortoolsLoc struct {
 			ID   string  `json:"id"`
@@ -199,14 +204,14 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			ortoolsLocs[i+1] = ortoolsLoc{ID: b.ID, Lat: b.Latitude, Lon: b.Longitude, Name: fmt.Sprintf("Bin #%d", b.BinNumber)}
 		}
 
-		log.Printf("🤖 [REOPT] %d bins / %d max per route = %d vehicles", len(activeBins), req.MaxBinsPerRoute, numVehicles)
+		log.Printf("🤖 [REOPT] %d bins / %d max = %d vehicles, balanced capacity %d", len(activeBins), req.MaxBinsPerRoute, numVehicles, balancedCapacity)
 
 		ortoolsReq := map[string]interface{}{
 			"locations":           ortoolsLocs,
 			"distance_matrix":    distMatrix,
 			"duration_matrix":    durMatrix,
 			"num_vehicles":       numVehicles,
-			"vehicle_capacity":   softCapacity,
+			"vehicle_capacity":   balancedCapacity,
 			"depot_index":        0,
 			"max_runtime_seconds": 30,
 		}
@@ -217,7 +222,7 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		reqBody, _ := json.Marshal(ortoolsReq)
-		log.Printf("🚀 [REOPT] Calling OR-Tools: %d bins, %d vehicles, capacity %d", len(activeBins), numTemplates, softCapacity)
+		log.Printf("🚀 [REOPT] Calling OR-Tools: %d bins, %d vehicles, capacity %d", len(activeBins), numVehicles, balancedCapacity)
 
 		ortoolsClient := &http.Client{Timeout: 60 * time.Second}
 		ortoolsHTTPResp, err := ortoolsClient.Post(ortoolsServiceURL+"/generate-templates", "application/json", bytes.NewReader(reqBody))
@@ -386,14 +391,15 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"routes":           resultRoutes,
-			"removed_bins":     removedBins,
+			"low_performers":   lowPerformers,
 			"delete_route_ids": deleteRouteIDs,
 			"total_bins":       len(activeBins),
 			"solver": map[string]interface{}{
-				"runtime_ms":   ortoolsResult.SolverRuntimeMs,
-				"feasible":     ortoolsResult.Feasible,
-				"unassigned":   len(ortoolsResult.Unassigned),
-				"num_vehicles": numVehicles,
+				"runtime_ms":        ortoolsResult.SolverRuntimeMs,
+				"feasible":          ortoolsResult.Feasible,
+				"unassigned":        len(ortoolsResult.Unassigned),
+				"num_vehicles":      numVehicles,
+				"balanced_capacity": balancedCapacity,
 			},
 		})
 	}
