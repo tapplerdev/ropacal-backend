@@ -110,7 +110,7 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			db.QueryRow(`SELECT COALESCE(AVG(fill_percentage), -1), COUNT(*) FROM checks WHERE bin_id = $1 AND fill_percentage IS NOT NULL`, bin.ID).Scan(&avgFill, &checkCount)
 
 			if checkCount >= 5 && avgFill >= 0 && avgFill < req.LowPerformerThresh {
-				lowPerformers = append(lowPerformers, lowPerformer{bin, avgFill, checkCount})
+				lowPerformers = append(lowPerformers, lowPerformer{bin, math.Round(avgFill), checkCount})
 				log.Printf("   ⚠️  Low performer Bin #%d (%.1f%% avg over %d checks) — flagged, kept on route", bin.BinNumber, avgFill, checkCount)
 			}
 		}
