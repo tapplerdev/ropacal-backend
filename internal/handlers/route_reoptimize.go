@@ -180,8 +180,12 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		// Call OR-Tools with soft capacity: allow +2 overflow to avoid tiny leftover routes
+		// Let OR-Tools decide how many routes — calculate from bin count / capacity
 		softCapacity := req.MaxBinsPerRoute + 2
+		numVehicles := int(math.Ceil(float64(len(activeBins)) / float64(req.MaxBinsPerRoute)))
+		if numVehicles < 1 {
+			numVehicles = 1
+		}
 
 		type ortoolsLoc struct {
 			ID   string  `json:"id"`
@@ -195,11 +199,13 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			ortoolsLocs[i+1] = ortoolsLoc{ID: b.ID, Lat: b.Latitude, Lon: b.Longitude, Name: fmt.Sprintf("Bin #%d", b.BinNumber)}
 		}
 
+		log.Printf("🤖 [REOPT] %d bins / %d max per route = %d vehicles", len(activeBins), req.MaxBinsPerRoute, numVehicles)
+
 		ortoolsReq := map[string]interface{}{
 			"locations":           ortoolsLocs,
 			"distance_matrix":    distMatrix,
 			"duration_matrix":    durMatrix,
-			"num_vehicles":       numTemplates,
+			"num_vehicles":       numVehicles,
 			"vehicle_capacity":   softCapacity,
 			"depot_index":        0,
 			"max_runtime_seconds": 30,
@@ -363,15 +369,31 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			log.Printf("   ➕ Unassigned Bin #%d → %s (%.1f mi)", ub.BinNumber, resultRoutes[bestRouteIdx].SuggestedName, bestDist)
 		}
 
+		// Find template IDs that got no bins (should be deleted)
+		usedRouteIDs := make(map[string]bool)
+		for _, r := range resultRoutes {
+			if r.RouteID != "" {
+				usedRouteIDs[r.RouteID] = true
+			}
+		}
+		var deleteRouteIDs []string
+		for _, id := range req.RouteIDs {
+			if !usedRouteIDs[id] {
+				deleteRouteIDs = append(deleteRouteIDs, id)
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"routes":       resultRoutes,
-			"removed_bins": removedBins,
-			"total_bins":   len(activeBins),
+			"routes":           resultRoutes,
+			"removed_bins":     removedBins,
+			"delete_route_ids": deleteRouteIDs,
+			"total_bins":       len(activeBins),
 			"solver": map[string]interface{}{
-				"runtime_ms": ortoolsResult.SolverRuntimeMs,
-				"feasible":   ortoolsResult.Feasible,
-				"unassigned": len(ortoolsResult.Unassigned),
+				"runtime_ms":   ortoolsResult.SolverRuntimeMs,
+				"feasible":     ortoolsResult.Feasible,
+				"unassigned":   len(ortoolsResult.Unassigned),
+				"num_vehicles": numVehicles,
 			},
 		})
 	}
