@@ -424,6 +424,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Post("/manager/routes/generate-smart", handlers.GenerateSmartRoutes(db))
 			r.Get("/manager/routes/performance", handlers.GetRoutePerformance(db))
 			r.Post("/manager/routes/estimate-duration", handlers.EstimateRouteDuration(db))
+			r.Post("/manager/routes/smart-reoptimize", handlers.SmartReoptimize(db))
 			r.Get("/manager/bins/collection-stats", handlers.GetBinCollectionStats(db))
 
 			// AI Chat
