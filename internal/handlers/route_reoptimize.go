@@ -264,6 +264,12 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 
 		// Build result routes
 		resultRoutes := make([]reoptRoute, 0, len(ortoolsResult.Routes))
+		type routeCityData struct {
+			dominantCity string
+			avgLat       float64
+			baseName     string
+		}
+		var routeDominantCities []routeCityData
 
 		for i, ortRoute := range ortoolsResult.Routes {
 			routeBins := make([]reoptBin, 0)
@@ -296,7 +302,7 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			durationHours := math.Round(durationSec/3600*10) / 10
 			distMiles := math.Round(float64(ortRoute.TotalDistance)/1609.34*10) / 10
 
-			// Generate name: dominant city + secondary cities
+			// Generate base name: dominant city + secondary cities
 			cityCount := make(map[string]int)
 			for _, b := range routeBins {
 				cityCount[b.City]++
@@ -311,18 +317,25 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			}
 			sort.Slice(cities, func(a, b int) bool { return cities[a].Count > cities[b].Count })
 
-			suggestedName := cities[0].City
-			if len(cities) > 1 {
+			dominantCity := cities[0].City
+			baseName := dominantCity
+			if len(cities) > 3 {
+				baseName += fmt.Sprintf(" + %d areas", len(cities)-1)
+			} else if len(cities) > 1 {
 				secondary := make([]string, 0)
 				for j := 1; j < len(cities) && j <= 2; j++ {
 					secondary = append(secondary, cities[j].City)
 				}
-				if len(cities) > 3 {
-					suggestedName += fmt.Sprintf(" + %d areas", len(cities)-1)
-				} else if len(secondary) > 0 {
-					suggestedName += " / " + strings.Join(secondary, " / ")
-				}
+				baseName += " / " + strings.Join(secondary, " / ")
 			}
+
+			// Track for directional suffix (applied after all routes built)
+			avgLat := 0.0
+			for _, b := range routeBins {
+				avgLat += b.Latitude
+			}
+			avgLat /= float64(len(routeBins))
+			routeDominantCities = append(routeDominantCities, routeCityData{dominantCity, avgLat, baseName})
 
 			// Map to existing template ID (by index)
 			routeID := ""
@@ -343,7 +356,7 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			resultRoutes = append(resultRoutes, reoptRoute{
 				RouteID:          routeID,
 				Name:             originalName,
-				SuggestedName:    suggestedName,
+				SuggestedName:    baseName,
 				BinIDs:           binIDs,
 				Bins:             routeBins,
 				BinCount:         len(routeBins),
@@ -353,6 +366,43 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 				GeographicArea:   cities[0].City,
 				SchedulePattern:  schedule,
 			})
+		}
+
+		// Apply directional suffixes for routes with same dominant city
+		cityCounts := make(map[string]int)
+		for _, rcd := range routeDominantCities {
+			cityCounts[rcd.dominantCity]++
+		}
+		for city, count := range cityCounts {
+			if count <= 1 {
+				continue
+			}
+			// Collect indices of routes with this dominant city, sorted by latitude
+			type idxLat struct {
+				idx    int
+				avgLat float64
+			}
+			var entries []idxLat
+			for i, rcd := range routeDominantCities {
+				if rcd.dominantCity == city {
+					entries = append(entries, idxLat{i, rcd.avgLat})
+				}
+			}
+			sort.Slice(entries, func(a, b int) bool { return entries[a].avgLat < entries[b].avgLat })
+			suffixes := []string{"South", "Central", "North"}
+			if len(entries) == 2 {
+				suffixes = []string{"South", "North"}
+			} else if len(entries) > 3 {
+				suffixes = nil
+				for j := range entries {
+					suffixes = append(suffixes, fmt.Sprintf("Area %d", j+1))
+				}
+			}
+			for j, e := range entries {
+				if e.idx < len(resultRoutes) {
+					resultRoutes[e.idx].SuggestedName = routeDominantCities[e.idx].baseName + " — " + suffixes[j]
+				}
+			}
 		}
 
 		// Distribute any unassigned bins to nearest routes
