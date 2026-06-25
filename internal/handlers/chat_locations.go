@@ -422,6 +422,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 						tooClose = true
 					}
 				}
+				// Infill mode: reject candidates more than 3 miles from nearest bin
+				if placementMode == "infill" && nearestDist > 3.0 {
+					log.Printf("🚫 [Infill] Skipping %s — %.1f mi from nearest bin #%d (max 3.0)", biz.Name, nearestDist, nearestNum)
+					continue
+				}
 				if tooClose {
 					continue
 				}
@@ -588,12 +593,22 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				continue
 			}
 			// Skip if we already have bins there
-			if hasBinsInCity(bins, ec.City) {
+			// Fix: skip ANY city that already has bins (threshold 1, not 3)
+			hasBins := false
+			for _, b := range bins {
+				if strings.EqualFold(b.City, ec.City) {
+					hasBins = true
+					break
+				}
+			}
+			if hasBins {
+				log.Printf("📍 [Expand] Skipping %s — already has bins", ec.City)
 				continue
 			}
 
 			// For expansion: search for commercial POIs in this city using HERE Browse
 			expPOIs := findCommercialPOIs(ec.Lat, ec.Lng, ec.City)
+			log.Printf("📍 [Expand] %s: found %d POIs", ec.City, len(expPOIs))
 			for _, poi := range expPOIs {
 				// Check no-go zones
 				inNoGo := false
@@ -607,14 +622,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 					continue
 				}
 
-				// Use zip-level fill rate from historical data if available
-				zip5 := stripZipPlus4(poi.Zip)
-				fillRate := zipFillRate[zip5]
-				if fillRate <= 0 {
-					fillRate = 5.0 // default for unknown areas
-				}
-
-				// Find nearest bin for expansion candidates (bug fix: was defaulting to 0)
+				// Fix: Check not too close to existing bins (was missing entirely)
+				tooClose := false
 				nearestNum := 0
 				nearestDist := math.MaxFloat64
 				for _, b := range bins {
@@ -623,12 +632,36 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 						nearestDist = d
 						nearestNum = b.BinNumber
 					}
+					if d < minGapMiles {
+						tooClose = true
+					}
+				}
+				if tooClose {
+					log.Printf("🚫 [Expand] Skipping POI — %.2f mi from Bin #%d (min gap %.2f)", nearestDist, nearestNum, minGapMiles)
+					continue
+				}
+				// Also check existing potential locations
+				for _, pl := range existingPotentials {
+					if haversineDistMiles(poi.Lat, poi.Lng, pl.Latitude, pl.Longitude) < minGapMiles {
+						tooClose = true
+						break
+					}
+				}
+				if tooClose {
+					continue
+				}
+
+				// Use zip-level fill rate from historical data if available
+				zip5 := stripZipPlus4(poi.Zip)
+				fillRate := zipFillRate[zip5]
+				if fillRate <= 0 {
+					fillRate = 5.0 // default for unknown areas
 				}
 
 				expCandidates = append(expCandidates, candidate{
 					Lat: poi.Lat, Lng: poi.Lng, City: poi.City, Zip: poi.Zip,
 					NearestFillRate: fillRate, NearestBinNum: nearestNum,
-					NearestBinDist: nearestDist, Source: "expansion",
+					NearestBinDist: math.Round(nearestDist*10) / 10, Source: "expansion",
 					LocationType: "commercial", POIScore: 1.0,
 				})
 			}
@@ -722,6 +755,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 	}
 	log.Printf("📍 [Recommend] Selected %d for enrichment (gap:%d, exp:%d)", len(topCandidates), gapTaken, expTaken)
+	for i, tc := range topCandidates {
+		log.Printf("   📌 [Candidate %d] %s (%.4f,%.4f) src=%s nearest=#%d (%.1f mi) city=%s",
+			i+1, tc.NearbyPOI, tc.Lat, tc.Lng, tc.Source, tc.NearestBinNum, tc.NearestBinDist, tc.City)
+	}
 
 	// ======================================================================
 	// Enrich: traffic, POI classification, geocode, snap to commercial
