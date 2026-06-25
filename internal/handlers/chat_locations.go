@@ -80,7 +80,6 @@ var retailWhitelist = []struct {
 	Prefix string
 	Label  string
 }{
-	{"700-7600", "gas station"},
 	{"600-6000", "convenience store"},
 	{"600-6300", "grocery store"},
 	{"600-6400", "pharmacy"},
@@ -1135,8 +1134,13 @@ func findCommercialPOIs(defaultLat, defaultLng float64, city string) []struct {
 		Zip  string
 	}
 
-	// Search for commercial spots: gas stations, strip malls, retail plazas
-	queries := []string{"gas station", "dollar tree", "grocery store", "laundromat", "church parking lot"}
+	// Search for commercial spots — same v2 keywords as main search path
+	queries := []string{
+		"Target", "Walmart", "Safeway", "Trader Joe's", "Costco",
+		"Home Depot", "Lowe's", "Grocery Outlet", "Dollar Tree",
+		"CVS", "Walgreens", "grocery store", "coffee shop",
+		"shopping center",
+	}
 	lat, lng := defaultLat, defaultLng
 
 	// If no default coords, geocode the city
