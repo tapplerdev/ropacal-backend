@@ -755,10 +755,22 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 
 			if esriData != nil && esriData.HasData {
-				// Daytime population: normalize to 30K (high foot traffic area)
-				daytimeScore := math.Min(esriData.DaytimePopulation/30000.0, 1.0)
+				// Clothing spending: strongest correlator with actual fill rates (r=+0.534)
+				// Normalize to $5000/yr = 1.0
+				clothingScore := math.Min(esriData.AvgClothingSpend/5000.0, 1.0)
 
-				// Income: sweet spot $80K-150K gets highest score, taper above/below
+				// Crime: second strongest correlator (r=-0.503)
+				// 100 = national avg. Lower is safer.
+				crimeScore := 1.0
+				if esriData.CrimeIndex > 200 {
+					crimeScore = 0.1 // dangerous area
+				} else if esriData.CrimeIndex > 130 {
+					crimeScore = 0.3 // high crime
+				} else if esriData.CrimeIndex > 100 {
+					crimeScore = 0.7 // above average crime
+				}
+
+				// Income: sweet spot $80K-150K gets highest score (r=+0.450)
 				incomeVal := esriData.MedianHouseholdIncome
 				incomeScore := 0.5
 				if incomeVal >= 80000 && incomeVal <= 150000 {
@@ -769,33 +781,24 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 					incomeScore = incomeVal / 150000.0
 				}
 
-				// Clothing spending: normalize to $5000/yr (high clothing area)
-				clothingScore := math.Min(esriData.AvgClothingSpend/5000.0, 1.0)
-
-				// Population growth: positive growth is good, negative is bad
+				// Population growth: declining = bad sign
 				growthScore := 0.5
 				if esriData.PopulationGrowthRate > 0 {
-					growthScore = math.Min(0.5+esriData.PopulationGrowthRate*10, 1.0) // +0.1% growth = 0.6 score
+					growthScore = math.Min(0.5+esriData.PopulationGrowthRate*10, 1.0)
 				} else {
-					growthScore = math.Max(0.5+esriData.PopulationGrowthRate*5, 0.0) // -0.1% = 0.0 score
+					growthScore = math.Max(0.5+esriData.PopulationGrowthRate*5, 0.0)
 				}
 
-				// Crime: 100 = national avg. Below 100 is safer. Penalize above 150.
-				crimeScore := 1.0
-				if esriData.CrimeIndex > 150 {
-					crimeScore = 0.3 // high crime area
-				} else if esriData.CrimeIndex > 100 {
-					crimeScore = 1.0 - (esriData.CrimeIndex-100)/200.0
-				}
+				// v2 weights based on correlation analysis:
+				// POI density 25% (business search is core), clothing 20% (r=+0.534),
+				// crime 15% (r=-0.503), income 15% (r=+0.450),
+				// fill rate 15% (demand signal), gap 5%, growth 5%
+				finalScore = math.Round((densityScore*0.25+clothingScore*0.20+crimeScore*0.15+
+					incomeScore*0.15+fillScore*0.15+gapScore*0.05+growthScore*0.05)*100) / 10
 
-				// v2 weights: density 25%, daytime pop 20%, fill 15%, clothing 10%, income 10%, growth 5%, gap 5%, crime 10%
-				finalScore = math.Round((densityScore*0.25+daytimeScore*0.20+fillScore*0.15+
-					clothingScore*0.10+incomeScore*0.10+growthScore*0.05+
-					gapScore*0.05+crimeScore*0.10)*100) / 10
-
-				log.Printf("📊 [v2 Score] %s: %.1f (density=%.2f, daytime=%.2f, fill=%.2f, clothing=%.2f, income=%.2f, growth=%.2f, gap=%.2f, crime=%.2f) | pop=%,.0f, daytime=%,.0f, income=$%,.0f, clothing=$%,.0f, crime=%,.0f",
-					c.NearbyPOI, finalScore, densityScore, daytimeScore, fillScore, clothingScore, incomeScore, growthScore, gapScore, crimeScore,
-					esriData.TotalPopulation, esriData.DaytimePopulation, esriData.MedianHouseholdIncome, esriData.AvgClothingSpend, esriData.CrimeIndex)
+				log.Printf("📊 [v2 Score] %s: %.1f (density=%.2f, clothing=%.2f, crime=%.2f, income=%.2f, fill=%.2f, gap=%.2f, growth=%.2f) | clothing=$%,.0f, crime=%,.0f, income=$%,.0f, growth=%.2f%%",
+					c.NearbyPOI, finalScore, densityScore, clothingScore, crimeScore, incomeScore, fillScore, gapScore, growthScore,
+					esriData.AvgClothingSpend, esriData.CrimeIndex, esriData.MedianHouseholdIncome, esriData.PopulationGrowthRate)
 			} else {
 				// ESRI data unavailable — fall back to v1 scoring
 				popScore := 0.5
