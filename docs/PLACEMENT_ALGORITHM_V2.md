@@ -47,31 +47,41 @@ Clothing spend < $2,500 → REJECT
 ```
 Rationale: ESRI returns identical values for same-city candidates, so using it as a weighted score component compresses all scores into a narrow band. As a gate, it prevents bad markets without diluting site quality ranking.
 
-### Site Quality Score (0-10 scale)
-After passing the ESRI gate, candidates are ranked purely by site quality:
+### Site Quality Score (multiplicative, 0-10 scale)
+After passing the ESRI gate, candidates are ranked by site quality using multiplicative aggregation. A weakness in ANY dimension tanks the score — no compensation.
+
+**POI density** — continuous log-scaled:
 ```
-POI density:    50%  — physical placement quality (plaza vs isolated)
-Anchor tenant:  30%  — Tier 1 anchor presence (1.0 if yes, 0.0 if no)
-Fill rate gap:  20%  — nearest existing bin's fill rate / max fill rate
+densityScore = ln(1 + POI_count) / ln(1 + 20)
 ```
+Examples: 4 POIs → 0.53, 7 POIs → 0.68, 12 POIs → 0.84, 14 POIs → 0.89
+
+**Anchor tenant** — tiered by traffic draw:
 ```
-finalScore = (densityScore × 0.50 + anchorScore × 0.30 + fillScore × 0.20) × 10
+National anchor (Target, Walmart, Costco, Home Depot, Lowe's, Safeway, Trader Joe's, Whole Foods): 1.0
+Regional chain (CVS, Walgreens, Grocery Outlet, FoodMaxx, 99 Ranch, Lucky, Dollar Tree): 0.7
+Non-anchor: 0.15
+```
+
+**Fill rate gap** — nearest bin's fill rate / max fill rate (floor 0.1)
+
+**Formula:**
+```
+finalScore = (density ^ 0.5) × (anchor ^ 0.3) × (fill ^ 0.2) × 10
 ```
 Minimum cutoff: 4.0.
 
 ### Score Tiers
-- 8.0-10.0: Anchor tenant + dense plaza (dream spot)
-- 7.0-8.0: Anchor tenant alone
-- 5.0-6.0: Dense non-anchor (8+ POIs)
-- 4.0-5.0: Medium density non-anchor (5-7 POIs)
+- 8.0-9.0: National anchor + dense plaza (Target + 14 POIs = 9.0)
+- 7.0-8.0: National anchor + moderate density OR regional chain + dense plaza
+- 6.0-7.0: Regional chain + moderate density
+- 5.0-6.0: Non-anchor dense plaza (11+ POIs)
+- 4.0-5.0: Non-anchor commercial strip (7+ POIs)
 - Below 4.0: Rejected (sparse/isolated)
 
-### POI Density Scoring
-- Anchor + 5+ businesses: 1.0
-- Anchor alone: 0.9
-- 8+ non-B2B businesses: 0.8
-- 5-7 businesses: 0.6
-- 4 businesses: 0.4
+### POI Density Scoring (v2 — continuous log-scaled)
+- Uses `ln(1 + count) / ln(21)` for smooth 0-1 range
+- 4 POIs: 0.53, 7: 0.68, 10: 0.79, 14: 0.89, 20: 1.0
 
 ## Filtering
 
