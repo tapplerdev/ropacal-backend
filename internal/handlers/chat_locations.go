@@ -174,7 +174,14 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		minGapMiles = mg
 	}
 
-	log.Printf("📍 [Recommend] Starting: count=%d, city=%q, minGap=%.1f mi", count, targetCity, minGapMiles)
+	// Algorithm version: "v1" (default) or "v2" (ESRI-enhanced)
+	algorithm := "v1"
+	if alg, ok := params["algorithm"].(string); ok && alg == "v2" {
+		algorithm = "v2"
+	}
+	useV2 := algorithm == "v2"
+
+	log.Printf("📍 [Recommend] Starting: count=%d, city=%q, minGap=%.1f mi, algorithm=%s", count, targetCity, minGapMiles, algorithm)
 
 	// Step 1: Get all active bins (for gap detection)
 	var bins []existingBin
@@ -351,6 +358,14 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 						nearestID = b.ID
 					}
 					if d < minGapMiles {
+						// v2: cross-street awareness — if OSRM driving distance is 3x+
+						// the straight-line distance, they're separated by a major road
+						if useV2 {
+							drivingDist := getOSRMDrivingDistMiles(biz.Lat, biz.Lng, b.Latitude, b.Longitude)
+							if drivingDist > d*3.0 {
+								continue // separated by major road, allow
+							}
+						}
 						tooClose = true
 					}
 				}
@@ -721,25 +736,97 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		log.Printf("📊 [Density] %s: %d POIs, anchor=%v (%s), density=%.1f",
 			c.NearbyPOI, poiDensity, hasAnchor, anchorName, densityScore)
 
-		// Final score: density+anchors 30%, fill 20%, traffic 15%, pop 15%, gap 10%, income 10%
+		// Final scoring
 		fillScore := c.NearestFillRate / maxRate
 		gapScore := math.Min(c.NearestBinDist, maxGapMiles) / maxGapMiles
 		if c.Source == "expansion" {
 			gapScore = 0.8
 		}
-		popScore := 0.5
-		if pop, ok := zipPopulation[zip5]; ok && pop > 0 {
-			popScore = float64(pop) / float64(maxPop)
-		}
-		incomeScore := 0.5
-		if income, ok := zipIncome[zip5]; ok && income > 0 {
-			incomeScore = float64(income) / 150000.0
-			if incomeScore > 1.5 {
-				incomeScore = 1.5
+
+		var finalScore float64
+
+		if useV2 {
+			// v2: ESRI-enhanced scoring
+			esriData, esriErr := EnrichLocation(c.Lat, c.Lng)
+			if esriErr != nil {
+				log.Printf("⚠️ [ESRI] Enrichment failed for %.4f,%.4f: %v", c.Lat, c.Lng, esriErr)
+				// Fall back to v1 scoring
+				esriData = nil
 			}
+
+			if esriData != nil && esriData.HasData {
+				// Daytime population: normalize to 30K (high foot traffic area)
+				daytimeScore := math.Min(esriData.DaytimePopulation/30000.0, 1.0)
+
+				// Income: sweet spot $80K-150K gets highest score, taper above/below
+				incomeVal := esriData.MedianHouseholdIncome
+				incomeScore := 0.5
+				if incomeVal >= 80000 && incomeVal <= 150000 {
+					incomeScore = 1.0
+				} else if incomeVal > 150000 {
+					incomeScore = 0.8 // still good, just not sweet spot
+				} else if incomeVal >= 50000 {
+					incomeScore = incomeVal / 150000.0
+				}
+
+				// Clothing spending: normalize to $5000/yr (high clothing area)
+				clothingScore := math.Min(esriData.AvgClothingSpend/5000.0, 1.0)
+
+				// Population growth: positive growth is good, negative is bad
+				growthScore := 0.5
+				if esriData.PopulationGrowthRate > 0 {
+					growthScore = math.Min(0.5+esriData.PopulationGrowthRate*10, 1.0) // +0.1% growth = 0.6 score
+				} else {
+					growthScore = math.Max(0.5+esriData.PopulationGrowthRate*5, 0.0) // -0.1% = 0.0 score
+				}
+
+				// Crime: 100 = national avg. Below 100 is safer. Penalize above 150.
+				crimeScore := 1.0
+				if esriData.CrimeIndex > 150 {
+					crimeScore = 0.3 // high crime area
+				} else if esriData.CrimeIndex > 100 {
+					crimeScore = 1.0 - (esriData.CrimeIndex-100)/200.0
+				}
+
+				// v2 weights: density 25%, daytime pop 20%, fill 15%, clothing 10%, income 10%, growth 5%, gap 5%, crime 10%
+				finalScore = math.Round((densityScore*0.25+daytimeScore*0.20+fillScore*0.15+
+					clothingScore*0.10+incomeScore*0.10+growthScore*0.05+
+					gapScore*0.05+crimeScore*0.10)*100) / 10
+
+				log.Printf("📊 [v2 Score] %s: %.1f (density=%.2f, daytime=%.2f, fill=%.2f, clothing=%.2f, income=%.2f, growth=%.2f, gap=%.2f, crime=%.2f) | pop=%,.0f, daytime=%,.0f, income=$%,.0f, clothing=$%,.0f, crime=%,.0f",
+					c.NearbyPOI, finalScore, densityScore, daytimeScore, fillScore, clothingScore, incomeScore, growthScore, gapScore, crimeScore,
+					esriData.TotalPopulation, esriData.DaytimePopulation, esriData.MedianHouseholdIncome, esriData.AvgClothingSpend, esriData.CrimeIndex)
+			} else {
+				// ESRI data unavailable — fall back to v1 scoring
+				popScore := 0.5
+				if pop, ok := zipPopulation[zip5]; ok && pop > 0 {
+					popScore = float64(pop) / float64(maxPop)
+				}
+				incomeScore := 0.5
+				if income, ok := zipIncome[zip5]; ok && income > 0 {
+					incomeScore = float64(income) / 150000.0
+					if incomeScore > 1.5 { incomeScore = 1.5 }
+				}
+				trafficNorm := math.Min(trafficJam, 10.0) / 10.0
+				finalScore = math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
+				log.Printf("⚠️ [v2 Fallback] %s: %.1f (no ESRI data, using v1 scoring)", c.NearbyPOI, finalScore)
+			}
+		} else {
+			// v1: original scoring
+			popScore := 0.5
+			if pop, ok := zipPopulation[zip5]; ok && pop > 0 {
+				popScore = float64(pop) / float64(maxPop)
+			}
+			incomeScore := 0.5
+			if income, ok := zipIncome[zip5]; ok && income > 0 {
+				incomeScore = float64(income) / 150000.0
+				if incomeScore > 1.5 {
+					incomeScore = 1.5
+				}
+			}
+			trafficNorm := math.Min(trafficJam, 10.0) / 10.0
+			finalScore = math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
 		}
-		trafficNorm := math.Min(trafficJam, 10.0) / 10.0
-		finalScore := math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
 
 		// Visual verification — satellite image + Claude Vision
 		visualPass, visualReason := verifyLocationVisually(c.Lat, c.Lng, c.NearbyPOI)
@@ -1638,4 +1725,33 @@ func callGraphVennService(serviceURL string, bins []existingBin, perBinFillRate 
 		})
 	}
 	return candidates
+}
+
+// getOSRMDrivingDistMiles returns the driving distance between two points via OSRM
+func getOSRMDrivingDistMiles(lat1, lng1, lat2, lng2 float64) float64 {
+	osrmURL := os.Getenv("OSRM_SERVER_URL")
+	if osrmURL == "" {
+		osrmURL = "http://router.project-osrm.org"
+	}
+	url := fmt.Sprintf("%s/route/v1/driving/%.6f,%.6f;%.6f,%.6f?overview=false",
+		osrmURL, lng1, lat1, lng2, lat2)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code   string `json:"code"`
+		Routes []struct {
+			Distance float64 `json:"distance"`
+		} `json:"routes"`
+	}
+	if json.Unmarshal(body, &result) != nil || result.Code != "Ok" || len(result.Routes) == 0 {
+		return 0
+	}
+	return result.Routes[0].Distance / 1609.34 // meters to miles
 }

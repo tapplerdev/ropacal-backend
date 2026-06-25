@@ -271,6 +271,7 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 					"count":         map[string]any{"type": "integer", "description": "Number of locations to recommend (default 10, max 30)"},
 					"target_city":   map[string]any{"type": "string", "description": "Optional: focus recommendations on a specific city (e.g. 'San Jose')"},
 					"min_gap_miles": map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
+					"algorithm":     map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (ESRI GeoEnrichment with daytime population, clothing spend, crime, growth projections)"},
 				},
 			},
 		},
