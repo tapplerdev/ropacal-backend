@@ -691,90 +691,62 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		maxRate = 1
 	}
 
-	// Score ALL candidates with v2 ESRI scoring
+	// v2: ESRI as pass/fail GATE — reject candidates in areas with bad demographics.
+	// Demographics decide WHERE to look (which neighborhoods). Site quality decides
+	// WHICH specific spot within that area. Mixing them in a weighted average dilutes
+	// both signals since ESRI returns identical values for same-city candidates.
+	tier1Anchors := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowes", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree", "cvs", "walgreens"}
+	if useV2 && esriResults != nil {
+		var gatedCandidates []candidate
+		for i := range allCandidates {
+			if i < len(esriResults) && esriResults[i].HasData {
+				e := esriResults[i]
+				if e.MedianHouseholdIncome > 0 && e.MedianHouseholdIncome < 50000 {
+					log.Printf("🚫 [ESRI Gate] %s — income $%.0fk below $50k minimum", allCandidates[i].NearbyPOI, e.MedianHouseholdIncome/1000)
+					continue
+				}
+				if e.CrimeIndex > 200 {
+					log.Printf("🚫 [ESRI Gate] %s — crime index %.0f above 200 maximum", allCandidates[i].NearbyPOI, e.CrimeIndex)
+					continue
+				}
+				if e.AvgClothingSpend > 0 && e.AvgClothingSpend < 2500 {
+					log.Printf("🚫 [ESRI Gate] %s — clothing spend $%.0f below $2,500 minimum", allCandidates[i].NearbyPOI, e.AvgClothingSpend)
+					continue
+				}
+			}
+			// Candidates without ESRI data pass the gate (don't reject on API failure)
+			gatedCandidates = append(gatedCandidates, allCandidates[i])
+		}
+		log.Printf("📊 [ESRI Gate] %d → %d candidates passed demographic gates", len(allCandidates), len(gatedCandidates))
+		allCandidates = gatedCandidates
+	}
+
+	// Preliminary score for sorting: anchor name match + fill rate gap.
+	// This determines which candidates get the expensive POI density check first.
 	for i := range allCandidates {
 		fillScore := allCandidates[i].NearestFillRate / maxRate
-		gapScore := math.Min(allCandidates[i].NearestBinDist, maxGapMiles) / maxGapMiles
-		if allCandidates[i].Source == "expansion" {
-			gapScore = 0.8
+		anchorBoost := 0.0
+		nameLower := strings.ToLower(allCandidates[i].NearbyPOI)
+		nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
+		for _, anchor := range tier1Anchors {
+			if strings.Contains(nameNorm, anchor) {
+				anchorBoost = 1.0
+				break
+			}
 		}
-
-		if esriResults != nil && i < len(esriResults) && esriResults[i].HasData {
-			e := esriResults[i]
-			clothingScore := math.Min(e.AvgClothingSpend/5000.0, 1.0)
-			crimeScore := 1.0
-			if e.CrimeIndex > 200 {
-				crimeScore = 0.1
-			} else if e.CrimeIndex > 130 {
-				crimeScore = 0.3
-			} else if e.CrimeIndex > 100 {
-				crimeScore = 0.7
-			}
-			incomeVal := e.MedianHouseholdIncome
-			incomeScore := 0.5
-			if incomeVal >= 80000 && incomeVal <= 150000 {
-				incomeScore = 1.0
-			} else if incomeVal > 150000 {
-				incomeScore = 0.8
-			} else if incomeVal >= 50000 {
-				incomeScore = incomeVal / 150000.0
-			}
-			growthScore := 0.5
-			if e.PopulationGrowthRate > 0 {
-				growthScore = math.Min(0.5+e.PopulationGrowthRate*10, 1.0)
-			} else {
-				growthScore = math.Max(0.5+e.PopulationGrowthRate*5, 0.0)
-			}
-
-			// Anchor name boost — Tier 1 anchors get POIScore 1.5
-			poiScore := allCandidates[i].POIScore
-			nameLower := strings.ToLower(allCandidates[i].NearbyPOI)
-			// Normalize apostrophes for matching
-			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
-			tier1Anchors := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowes", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree", "cvs", "walgreens"}
-			for _, anchor := range tier1Anchors {
-				if strings.Contains(nameNorm, anchor) {
-					poiScore = 1.5
-					break
-				}
-			}
-			poiNorm := math.Min(poiScore, 1.5) / 1.5
-
-			// v2 score: POI 25%, clothing 20%, crime 15%, income 15%, fill 15%, gap 5%, growth 5%
-			allCandidates[i].Score = poiNorm*0.25 + clothingScore*0.20 + crimeScore*0.15 +
-				incomeScore*0.15 + fillScore*0.15 + gapScore*0.05 + growthScore*0.05
-
-			// Analog model bonus
-			analogClothing := math.Abs(e.AvgClothingSpend-5400) / 5400
-			analogIncome := math.Abs(e.MedianHouseholdIncome-185000) / 185000
-			analogCrime := math.Abs(e.CrimeIndex-116) / 116
-			if analogClothing < 0.20 && analogIncome < 0.20 && analogCrime < 0.20 {
-				allCandidates[i].Score += 0.05
-			}
-		} else {
-			// No ESRI data — use basic scoring
-			zip5 := stripZipPlus4(allCandidates[i].Zip)
-			incomeScore := 0.5
-			if income, ok := zipIncome[zip5]; ok && income > 0 {
-				incomeScore = float64(income) / 150000.0
-				if incomeScore > 1.5 {
-					incomeScore = 1.5
-				}
-			}
-			allCandidates[i].Score = fillScore*0.30 + gapScore*0.15 + incomeScore*0.15 + 0.4*0.20
-		}
+		allCandidates[i].Score = anchorBoost*0.6 + fillScore*0.4
 	}
 
 	// Sort by score and take top candidates
 	sort.Slice(allCandidates, func(i, j int) bool { return allCandidates[i].Score > allCandidates[j].Score })
 
-	topCount := count * 3 // 3x buffer for enrichment filtering
+	topCount := count * 4 // 4x buffer for POI density filtering
 	if topCount > len(allCandidates) {
 		topCount = len(allCandidates)
 	}
 	topCandidates := allCandidates[:topCount]
 
-	log.Printf("📍 [Recommend] ESRI-scored %d candidates, selected top %d for POI enrichment", len(allCandidates), topCount)
+	log.Printf("📍 [Recommend] %d candidates passed gates, selected top %d for POI enrichment", len(allCandidates), topCount)
 	for i, tc := range topCandidates {
 		if i < 10 { // log first 10
 			log.Printf("   📌 [%d] %.3f %s (%.4f,%.4f) src=%s nearest=#%d (%.1f mi)",
@@ -910,48 +882,45 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		log.Printf("📊 [Density] %s: %d POIs, anchor=%v (%s), density=%.1f",
 			c.NearbyPOI, poiDensity, hasAnchor, anchorName, densityScore)
 
-		// Final scoring
+		// Final scoring — site quality only (ESRI used as gate above, not in score)
 		fillScore := c.NearestFillRate / maxRate
-		gapScore := math.Min(c.NearestBinDist, maxGapMiles) / maxGapMiles
-		if c.Source == "expansion" {
-			gapScore = 0.8
-		}
 
-		// Final score: combine pre-computed ESRI score with POI density from this enrichment step
-		// The ESRI scoring was already done in the batch step above — c.Score has the base score.
-		// Now we refine it with POI density data which requires per-candidate HERE Browse API calls.
 		var finalScore float64
 
 		if useV2 {
-			// v2: combine pre-computed ESRI score with POI density
-			esriBaseScore := c.Score // 0-1 range from batch scoring
-			rawScore := esriBaseScore*0.75 + densityScore*0.25
-
-			// Spread score across 0-10 range (practical ESRI scores cluster 0.5-0.9)
-			finalScore = math.Max(0, math.Min(10, (rawScore-0.4)*16.67))
-			finalScore = math.Round(finalScore*10) / 10
-
-			// Anchor boost: Tier 1 anchors get +1.5 direct bonus
+			// v2 gate-based: rank by site quality only
+			// POI density: 50% — strongest predictor of physical placement quality
+			// Anchor presence: 30% — Tier 1 anchors = high foot traffic guaranteed
+			// Fill rate gap: 20% — real performance data from nearest existing bin
+			anchorScore := 0.0
+			if hasAnchor {
+				anchorScore = 1.0
+			}
 			nameLower := strings.ToLower(c.NearbyPOI)
-			// Normalize apostrophes for matching
 			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
-			tier1 := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowes", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree", "cvs", "walgreens"}
-			for _, anchor := range tier1 {
+			for _, anchor := range tier1Anchors {
 				if strings.Contains(nameNorm, anchor) {
-					finalScore = math.Min(10, finalScore+1.5)
-					log.Printf("⭐ [Anchor] %s: +1.5 bonus (matched '%s')", c.NearbyPOI, anchor)
+					anchorScore = 1.0
 					break
 				}
 			}
 
-			log.Printf("📊 [v2 Final] %s: %.1f (esri=%.3f, density=%.2f, raw=%.3f, anchor=%v, POIs=%d)",
-				c.NearbyPOI, finalScore, esriBaseScore, densityScore, rawScore, hasAnchor, poiDensity)
+			siteScore := densityScore*0.50 + anchorScore*0.30 + fillScore*0.20
+			finalScore = math.Round(siteScore*100) / 10 // scale to 0-10
+			finalScore = math.Min(10, finalScore)
+
+			log.Printf("📊 [v2 Site] %s: %.1f (density=%.2f, anchor=%.0f, fill=%.2f, POIs=%d)",
+				c.NearbyPOI, finalScore, densityScore, anchorScore, fillScore, poiDensity)
 		} else {
 			// v1 fallback — census-based scoring
+			gapScore := math.Min(c.NearestBinDist, maxGapMiles) / maxGapMiles
+			if c.Source == "expansion" {
+				gapScore = 0.8
+			}
 			zip5fb := stripZipPlus4(c.Zip)
 			popScore := 0.5
 			if pop, ok := zipPopulation[zip5fb]; ok && pop > 0 {
-				popScore = math.Min(float64(pop)/50000.0, 1.0) // normalize to 50k
+				popScore = math.Min(float64(pop)/50000.0, 1.0)
 			}
 			incomeScore := 0.5
 			if income, ok := zipIncome[zip5fb]; ok && income > 0 {
@@ -973,8 +942,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// }
 
 		// Minimum score cutoff — below this is not worth recommending
-		if finalScore < 5.5 {
-			log.Printf("🚫 [Recommend] Filtered: %s — score %.1f below 5.5 threshold", c.NearbyPOI, finalScore)
+		if finalScore < 4.0 {
+			log.Printf("🚫 [Recommend] Filtered: %s — score %.1f below 4.0 threshold", c.NearbyPOI, finalScore)
 			continue
 		}
 

@@ -13,12 +13,12 @@ The placement algorithm recommends locations for new donation bins. It searches 
 4. Collect all raw candidates
 5. Dedup (0.15 mile threshold)
 6. Centralized filter (no-go zones, B2B, gap check, mode filters)
-7. ESRI batch enrichment (ALL filtered candidates — clothing, crime, income, growth)
-8. Score ALL candidates with v2 formula
-9. Sort by score, take top N×3
+7. ESRI batch enrichment (ALL filtered candidates)
+8. ESRI demographic gate (reject: income <$50k, crime >200, clothing <$2.5k)
+9. Preliminary sort (anchor name match + fill rate), take top N×4
 10. POI density + anchor detection per candidate (HERE Browse API)
-11. Final score (ESRI base × 0.75 + POI density × 0.25)
-12. Vision verification — DISABLED (ESRI + POI density covers these cases)
+11. Site quality score (density × 0.50 + anchor × 0.30 + fill × 0.20) × 10
+12. Reject below 4.0 cutoff
 13. Return top N results
 ```
 
@@ -38,29 +38,33 @@ gas station, laundromat, church parking lot
 
 ## Scoring Formula
 
-### ESRI Base Score (applied to ALL candidates)
+### ESRI Demographic Gate (pass/fail, NOT scored)
+Candidates in areas with bad demographics are rejected before scoring:
 ```
-POI name boost:    Tier 1 anchor name match → POIScore = 1.5 (else 1.0)
-Clothing spend:    20%  — normalize to $5,000/yr = 1.0
-Crime index:       15%  — <100 = 1.0, 100-130 = 0.7, 130-200 = 0.3, >200 = 0.1
-Income:            15%  — $80-150K = 1.0, >$150K = 0.8, scale below
-Fill rate gap:     15%  — nearest bin's fill rate / max fill rate
-POI name:          25%  — anchor boost / 1.5
-Gap distance:       5%  — capped at 2 miles
-Pop growth:         5%  — positive = bonus, negative = penalty
+Income < $50K          → REJECT
+Crime index > 200      → REJECT
+Clothing spend < $2,500 → REJECT
 ```
+Rationale: ESRI returns identical values for same-city candidates, so using it as a weighted score component compresses all scores into a narrow band. As a gate, it prevents bad markets without diluting site quality ranking.
 
-### Analog Model Bonus
-+0.05 if candidate's ESRI profile matches top performer averages within 20%:
-- Clothing spend: $5,400 ± 20%
-- Income: $185,000 ± 20%
-- Crime: 116 ± 20%
+### Site Quality Score (0-10 scale)
+After passing the ESRI gate, candidates are ranked purely by site quality:
+```
+POI density:    50%  — physical placement quality (plaza vs isolated)
+Anchor tenant:  30%  — Tier 1 anchor presence (1.0 if yes, 0.0 if no)
+Fill rate gap:  20%  — nearest existing bin's fill rate / max fill rate
+```
+```
+finalScore = (densityScore × 0.50 + anchorScore × 0.30 + fillScore × 0.20) × 10
+```
+Minimum cutoff: 4.0.
 
-### Final Score (after POI density enrichment)
-```
-finalScore = (ESRI base score × 0.75) + (POI density score × 0.25)
-```
-Scaled to 0-10 range. Minimum cutoff: 5.5.
+### Score Tiers
+- 8.0-10.0: Anchor tenant + dense plaza (dream spot)
+- 7.0-8.0: Anchor tenant alone
+- 5.0-6.0: Dense non-anchor (8+ POIs)
+- 4.0-5.0: Medium density non-anchor (5-7 POIs)
+- Below 4.0: Rejected (sparse/isolated)
 
 ### POI Density Scoring
 - Anchor + 5+ businesses: 1.0
