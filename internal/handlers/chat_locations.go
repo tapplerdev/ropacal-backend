@@ -160,6 +160,134 @@ func stripZipPlus4(zip string) string {
 	return zip
 }
 
+// filterCandidates applies ALL filters consistently to any candidate regardless of source.
+// This replaces the scattered inline checks across business_search, graphvenn, and expansion paths.
+type potentialLocFilter struct {
+	Latitude  float64
+	Longitude float64
+}
+
+func filterCandidates(
+	candidates []candidate,
+	bins []existingBin,
+	existingPotentials []potentialLocFilter,
+	zones []noGoZone,
+	minGapMiles float64,
+	placementMode string,
+	useV2 bool,
+) []candidate {
+	var filtered []candidate
+	binCities := map[string]bool{}
+	for _, b := range bins {
+		binCities[strings.ToLower(b.City)] = true
+	}
+
+	for _, c := range candidates {
+		rejected := false
+		reason := ""
+
+		// 1. No-go zone check
+		for _, z := range zones {
+			if haversineMetersChat(c.Lat, c.Lng, z.CenterLat, z.CenterLng) <= float64(z.RadiusMeters) {
+				rejected = true
+				reason = "in no-go zone"
+				break
+			}
+		}
+		if rejected {
+			log.Printf("🚫 [Filter] %s — %s", c.NearbyPOI, reason)
+			continue
+		}
+
+		// 2. B2B keyword filter
+		nameLower := strings.ToLower(c.NearbyPOI)
+		for _, kw := range b2bTitleKeywords {
+			if strings.Contains(nameLower, kw) {
+				rejected = true
+				reason = fmt.Sprintf("B2B keyword '%s'", kw)
+				break
+			}
+		}
+		if rejected {
+			log.Printf("🚫 [Filter] %s — %s", c.NearbyPOI, reason)
+			continue
+		}
+
+		// 3. Mall/Safeway filter
+		if strings.Contains(nameLower, "safeway") || strings.Contains(nameLower, "mall") {
+			log.Printf("🚫 [Filter] %s — mall/Safeway excluded", c.NearbyPOI)
+			continue
+		}
+
+		// 4. Gap check — too close to existing bin
+		nearestNum := 0
+		nearestDist := math.MaxFloat64
+		nearestID := ""
+		tooClose := false
+		for _, b := range bins {
+			d := haversineDistMiles(c.Lat, c.Lng, b.Latitude, b.Longitude)
+			if d < nearestDist {
+				nearestDist = d
+				nearestNum = b.BinNumber
+				nearestID = b.ID
+			}
+			if d < minGapMiles {
+				if useV2 {
+					// Cross-street awareness: allow if driving distance is 3x+ straight-line
+					drivingDist := getOSRMDrivingDistMiles(c.Lat, c.Lng, b.Latitude, b.Longitude)
+					if drivingDist > d*3.0 {
+						continue // separated by major road, allow
+					}
+				}
+				tooClose = true
+			}
+		}
+		if tooClose {
+			log.Printf("🚫 [Filter] %s — too close to Bin #%d (%.2f mi, min %.2f)", c.NearbyPOI, nearestNum, nearestDist, minGapMiles)
+			continue
+		}
+
+		// Update candidate with nearest bin info
+		c.NearestBinNum = nearestNum
+		c.NearestBinDist = math.Round(nearestDist*10) / 10
+		if rate, ok := perBinFillRateGlobal[nearestID]; ok && rate > 0 {
+			c.NearestFillRate = rate
+		}
+
+		// 5. Existing potentials check
+		for _, pl := range existingPotentials {
+			if haversineDistMiles(c.Lat, c.Lng, pl.Latitude, pl.Longitude) < minGapMiles {
+				tooClose = true
+				break
+			}
+		}
+		if tooClose {
+			log.Printf("🚫 [Filter] %s — too close to existing potential location", c.NearbyPOI)
+			continue
+		}
+
+		// 6. Infill mode: max 3 miles from nearest bin
+		if placementMode == "infill" && nearestDist > 3.0 {
+			log.Printf("🚫 [Filter/Infill] %s — %.1f mi from nearest bin #%d (max 3.0)", c.NearbyPOI, nearestDist, nearestNum)
+			continue
+		}
+
+		// 7. Expand mode: skip candidates in cities with existing bins
+		if placementMode == "expand" && binCities[strings.ToLower(c.City)] {
+			log.Printf("🚫 [Filter/Expand] %s — city %s already has bins", c.NearbyPOI, c.City)
+			continue
+		}
+
+		filtered = append(filtered, c)
+	}
+
+	log.Printf("📋 [Filter] %d → %d candidates after filtering (mode=%s)", len(candidates), len(filtered), placementMode)
+	return filtered
+}
+
+// perBinFillRateGlobal is set during toolRecommendLocations and used by filterCandidates
+var perBinFillRateGlobal map[string]float64
+
 func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, error) {
 	count := 10
 	if c, ok := params["count"].(float64); ok && c > 0 {
@@ -239,6 +367,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	for _, r := range binRates {
 		perBinFillRate[r.BinID] = r.AvgRate
 	}
+	perBinFillRateGlobal = perBinFillRate // make available to filterCandidates
 
 	// Also compute per-zip average fill rate (from all bins, including retired)
 	type zipRate struct {
@@ -398,84 +527,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		for _, query := range businessQueries {
 			businesses := discoverBusinesses(client, area.CenterLat, area.CenterLng, query)
 			for _, biz := range businesses {
-				// Check not too close to existing bin
-				tooClose := false
-				nearestNum := 0
-				nearestID := ""
-				nearestDist := math.MaxFloat64
-				for _, b := range bins {
-					d := haversineDistMiles(biz.Lat, biz.Lng, b.Latitude, b.Longitude)
-					if d < nearestDist {
-						nearestDist = d
-						nearestNum = b.BinNumber
-						nearestID = b.ID
-					}
-					if d < minGapMiles {
-						// v2: cross-street awareness — if OSRM driving distance is 3x+
-						// the straight-line distance, they're separated by a major road
-						if useV2 {
-							drivingDist := getOSRMDrivingDistMiles(biz.Lat, biz.Lng, b.Latitude, b.Longitude)
-							if drivingDist > d*3.0 {
-								continue // separated by major road, allow
-							}
-						}
-						tooClose = true
-					}
-				}
-				// Infill mode: reject candidates more than 3 miles from nearest bin
-				if placementMode == "infill" && nearestDist > 3.0 {
-					log.Printf("🚫 [Infill] Skipping %s — %.1f mi from nearest bin #%d (max 3.0)", biz.Name, nearestDist, nearestNum)
-					continue
-				}
-				if tooClose {
-					continue
-				}
-				// Check not too close to existing potential locations
-				for _, pl := range existingPotentials {
-					if haversineDistMiles(biz.Lat, biz.Lng, pl.Latitude, pl.Longitude) < minGapMiles {
-						tooClose = true
-						break
-					}
-				}
-				if tooClose {
-					continue
-				}
-				// Check no-go zones
-				inNoGo := false
-				for _, z := range zones {
-					if haversineMetersChat(biz.Lat, biz.Lng, z.CenterLat, z.CenterLng) <= float64(z.RadiusMeters) {
-						inNoGo = true
-						break
-					}
-				}
-				if inNoGo {
-					continue
-				}
-				// Check not a mall or Safeway
-				titleLower := strings.ToLower(biz.Name)
-				if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
-					continue
-				}
-				// Check B2B keywords
-				isB2B := false
-				for _, kw := range b2bTitleKeywords {
-					if strings.Contains(titleLower, kw) {
-						isB2B = true
-						break
-					}
-				}
-				if isB2B {
-					continue
-				}
-
-				fillRate := 5.0
-				if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
-					fillRate = rate
-				}
+				// Raw append — all filtering happens in centralized filterCandidates()
 				gapCandidates = append(gapCandidates, candidate{
 					Lat: biz.Lat, Lng: biz.Lng, City: area.City, Zip: biz.Zip,
-					NearestFillRate: fillRate, NearestBinNum: nearestNum,
-					NearestBinDist: math.Round(nearestDist*10) / 10,
 					NearbyPOI: biz.Name, LocationType: "commercial",
 					POIScore: 1.0, Source: "business_search",
 				})
@@ -488,65 +542,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		for _, query := range businessQueries[:3] { // fewer queries per hotspot to save API calls
 			businesses := discoverBusinesses(client, hs.Lat, hs.Lng, query)
 			for _, biz := range businesses {
-				tooClose := false
-				nearestNum := 0
-				nearestID := ""
-				nearestDist := math.MaxFloat64
-				for _, b := range bins {
-					d := haversineDistMiles(biz.Lat, biz.Lng, b.Latitude, b.Longitude)
-					if d < nearestDist {
-						nearestDist = d
-						nearestNum = b.BinNumber
-						nearestID = b.ID
-					}
-					if d < minGapMiles {
-						tooClose = true
-					}
-				}
-				if tooClose {
-					continue
-				}
-				for _, pl := range existingPotentials {
-					if haversineDistMiles(biz.Lat, biz.Lng, pl.Latitude, pl.Longitude) < minGapMiles {
-						tooClose = true
-						break
-					}
-				}
-				if tooClose {
-					continue
-				}
-				inNoGo := false
-				for _, z := range zones {
-					if haversineMetersChat(biz.Lat, biz.Lng, z.CenterLat, z.CenterLng) <= float64(z.RadiusMeters) {
-						inNoGo = true
-						break
-					}
-				}
-				if inNoGo {
-					continue
-				}
-				titleLower := strings.ToLower(biz.Name)
-				if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
-					continue
-				}
-				isB2B := false
-				for _, kw := range b2bTitleKeywords {
-					if strings.Contains(titleLower, kw) {
-						isB2B = true
-						break
-					}
-				}
-				if isB2B {
-					continue
-				}
-				fillRate := 5.0
-				if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
-					fillRate = rate
-				}
+				// Raw append — all filtering in centralized filterCandidates()
 				gapCandidates = append(gapCandidates, candidate{
 					Lat: biz.Lat, Lng: biz.Lng, City: biz.City, Zip: biz.Zip,
-					NearestFillRate: fillRate, NearestBinNum: nearestNum,
-					NearestBinDist: math.Round(nearestDist*10) / 10,
 					NearbyPOI: biz.Name, LocationType: "commercial",
 					POIScore: 1.0, Source: "graphvenn_business",
 				})
@@ -622,47 +620,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 					continue
 				}
 
-				// Fix: Check not too close to existing bins (was missing entirely)
-				tooClose := false
-				nearestNum := 0
-				nearestDist := math.MaxFloat64
-				for _, b := range bins {
-					d := haversineDistMiles(poi.Lat, poi.Lng, b.Latitude, b.Longitude)
-					if d < nearestDist {
-						nearestDist = d
-						nearestNum = b.BinNumber
-					}
-					if d < minGapMiles {
-						tooClose = true
-					}
-				}
-				if tooClose {
-					log.Printf("🚫 [Expand] Skipping POI — %.2f mi from Bin #%d (min gap %.2f)", nearestDist, nearestNum, minGapMiles)
-					continue
-				}
-				// Also check existing potential locations
-				for _, pl := range existingPotentials {
-					if haversineDistMiles(poi.Lat, poi.Lng, pl.Latitude, pl.Longitude) < minGapMiles {
-						tooClose = true
-						break
-					}
-				}
-				if tooClose {
-					continue
-				}
-
-				// Use zip-level fill rate from historical data if available
-				zip5 := stripZipPlus4(poi.Zip)
-				fillRate := zipFillRate[zip5]
-				if fillRate <= 0 {
-					fillRate = 5.0 // default for unknown areas
-				}
-
+				// Raw append — all filtering in centralized filterCandidates()
 				expCandidates = append(expCandidates, candidate{
 					Lat: poi.Lat, Lng: poi.Lng, City: poi.City, Zip: poi.Zip,
-					NearestFillRate: fillRate, NearestBinNum: nearestNum,
-					NearestBinDist: math.Round(nearestDist*10) / 10, Source: "expansion",
-					LocationType: "commercial", POIScore: 1.0,
+					Source: "expansion", LocationType: "commercial", POIScore: 1.0,
 				})
 			}
 		}
@@ -684,9 +645,18 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 
 	// ======================================================================
-	// Score and enrich all candidates
+	// Centralized filtering — apply ALL filters consistently to ALL candidates
 	// ======================================================================
-	allCandidates := append(gapCandidates, expCandidates...)
+	rawCandidates := append(gapCandidates, expCandidates...)
+	log.Printf("📍 [Recommend] Raw candidates before filtering: %d (gap:%d, exp:%d)", len(rawCandidates), len(gapCandidates), len(expCandidates))
+	rawCandidates = deduplicateCandidates(rawCandidates)
+	// Convert potentialLoc to potentialLocFilter for the centralized filter
+	var potFilters []potentialLocFilter
+	for _, pl := range existingPotentials {
+		potFilters = append(potFilters, potentialLocFilter{Latitude: pl.Latitude, Longitude: pl.Longitude})
+	}
+	allCandidates := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2)
+
 	if len(allCandidates) == 0 {
 		return `{"count":0,"recommendations":[],"message":"No suitable locations found."}`, nil
 	}
@@ -1177,8 +1147,8 @@ func findCommercialPOIs(defaultLat, defaultLng float64, city string) []struct {
 	client := &http.Client{Timeout: 8 * time.Second}
 	for _, q := range queries {
 		url := fmt.Sprintf(
-			"https://discover.search.hereapi.com/v1/discover?at=%.6f,%.6f&q=%s&limit=5&in=countryCode:USA&apiKey=%s",
-			lat, lng, strings.ReplaceAll(q, " ", "+"), HereAPIKey,
+			"https://discover.search.hereapi.com/v1/discover?at=%.6f,%.6f&q=%s&limit=5&in=circle:%.6f,%.6f;r=5000&in=countryCode:USA&apiKey=%s",
+			lat, lng, strings.ReplaceAll(q, " ", "+"), lat, lng, HereAPIKey,
 		)
 		resp, err := client.Get(url)
 		if err != nil {
@@ -1613,8 +1583,8 @@ type discoveredBusiness struct {
 // discoverBusinesses searches for real businesses near a location using HERE Discover API
 func discoverBusinesses(client *http.Client, lat, lng float64, query string) []discoveredBusiness {
 	url := fmt.Sprintf(
-		"https://discover.search.hereapi.com/v1/discover?at=%.6f,%.6f&q=%s&limit=15&in=countryCode:USA&apiKey=%s",
-		lat, lng, strings.ReplaceAll(query, " ", "+"), HereAPIKey,
+		"https://discover.search.hereapi.com/v1/discover?at=%.6f,%.6f&q=%s&limit=15&in=circle:%.6f,%.6f;r=8000&in=countryCode:USA&apiKey=%s",
+		lat, lng, strings.ReplaceAll(query, " ", "+"), lat, lng, HereAPIKey,
 	)
 	resp, err := client.Get(url)
 	if err != nil {
