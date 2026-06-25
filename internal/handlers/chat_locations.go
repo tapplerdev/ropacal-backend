@@ -184,7 +184,22 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 	useV2 := algorithm == "v2"
 
-	log.Printf("📍 [Recommend] Starting: count=%d, city=%q, minGap=%.1f mi, algorithm=%s", count, targetCity, minGapMiles, algorithm)
+	// Placement mode: "infill" (near existing high performers) or "expand" (new areas)
+	placementMode := "auto" // default: mixed
+	if pm, ok := params["mode"].(string); ok {
+		placementMode = pm
+	}
+
+	// Adjust parameters based on mode
+	if useV2 && placementMode == "infill" {
+		minGapMiles = 0.15 // tighter spacing OK near proven locations
+		log.Printf("📍 [Mode] INFILL — searching near existing high performers, gap=%.2f mi", minGapMiles)
+	} else if useV2 && placementMode == "expand" {
+		minGapMiles = 0.3 // standard gap for new areas
+		log.Printf("📍 [Mode] EXPAND — searching new areas with good demographics")
+	}
+
+	log.Printf("📍 [Recommend] Starting: count=%d, city=%q, minGap=%.1f mi, algorithm=%s, mode=%s", count, targetCity, minGapMiles, algorithm, placementMode)
 
 	// Step 1: Get all active bins (for gap detection)
 	var bins []existingBin
@@ -320,6 +335,25 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 	}
 	sort.Slice(demandAreas, func(i, j int) bool { return demandAreas[i].AvgRate > demandAreas[j].AvgRate })
+
+	// Mode-based filtering of demand areas
+	if useV2 && placementMode == "infill" {
+		// Infill: only search in top-performing cities (avg fill > 30%)
+		var infillAreas []cityDemand
+		for _, a := range demandAreas {
+			if a.AvgRate >= 30 {
+				infillAreas = append(infillAreas, a)
+			}
+		}
+		if len(infillAreas) > 0 {
+			demandAreas = infillAreas
+			log.Printf("📍 [Infill] Filtered to %d high-performing areas (avg fill >= 30%%)", len(infillAreas))
+		}
+	} else if useV2 && placementMode == "expand" {
+		// Expand: skip demand areas entirely — we'll use expansion cities below
+		demandAreas = nil
+		log.Printf("📍 [Expand] Skipping demand areas — will search expansion cities only")
+	}
 
 	// Also check GraphVenn for additional demand hotspot areas
 	graphvennURL := os.Getenv("GRAPHVENN_SERVICE_URL")
@@ -520,14 +554,22 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	log.Printf("📍 [Recommend] After dedup: %d", len(gapCandidates))
 
 	// ======================================================================
-	// STRATEGY B: Expansion candidates (30% of results) — new areas
+	// STRATEGY B: Expansion candidates — new areas
 	// ======================================================================
-	expansionCount := int(math.Ceil(float64(count) * 0.3))
-	gapCount := count - expansionCount
+	var expansionCount, gapCount int
+	if useV2 && placementMode == "expand" {
+		expansionCount = count    // all results from expansion
+		gapCount = 0
+	} else if useV2 && placementMode == "infill" {
+		expansionCount = 0        // no expansion results
+		gapCount = count
+	} else {
+		expansionCount = int(math.Ceil(float64(count) * 0.3)) // default: 30% expansion
+		gapCount = count - expansionCount
+	}
 
 	var expCandidates []candidate
-	// Only generate expansion candidates if not targeting a specific city with existing bins
-	shouldExpand := targetCity == "" || !hasBinsInCity(bins, targetCity)
+	shouldExpand := placementMode == "expand" || (placementMode != "infill" && (targetCity == "" || !hasBinsInCity(bins, targetCity)))
 
 	if shouldExpand {
 		// Use expansion cities or the target city if specified
