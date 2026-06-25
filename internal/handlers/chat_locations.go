@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -222,6 +223,7 @@ func filterCandidates(
 		nearestNum := 0
 		nearestDist := math.MaxFloat64
 		nearestID := ""
+		var nearestBinLat, nearestBinLng float64
 		tooClose := false
 		for _, b := range bins {
 			d := haversineDistMiles(c.Lat, c.Lng, b.Latitude, b.Longitude)
@@ -229,6 +231,8 @@ func filterCandidates(
 				nearestDist = d
 				nearestNum = b.BinNumber
 				nearestID = b.ID
+				nearestBinLat = b.Latitude
+				nearestBinLng = b.Longitude
 			}
 			if d < minGapMiles {
 				if useV2 {
@@ -265,10 +269,22 @@ func filterCandidates(
 			continue
 		}
 
-		// 6. Infill mode: max 3 miles from nearest bin
-		if placementMode == "infill" && nearestDist > 3.0 {
-			log.Printf("🚫 [Filter/Infill] %s — %.1f mi from nearest bin #%d (max 3.0)", c.NearbyPOI, nearestDist, nearestNum)
-			continue
+		// 6. Infill mode: max 10-minute drive from nearest bin
+		if placementMode == "infill" {
+			if nearestDist > 5.0 {
+				// Definitely too far — skip OSRM call
+				log.Printf("🚫 [Filter/Infill] %s — %.1f mi from nearest bin #%d (>5 mi, skip drive-time check)", c.NearbyPOI, nearestDist, nearestNum)
+				continue
+			} else if nearestDist > 2.0 {
+				// Borderline — check actual drive time
+				driveTime := getOSRMDriveTimeMins(c.Lat, c.Lng, nearestBinLat, nearestBinLng)
+				if driveTime > 10.0 {
+					log.Printf("🚫 [Filter/Infill] %s — %.1f min drive from nearest bin #%d (>10 min cap)", c.NearbyPOI, driveTime, nearestNum)
+					continue
+				}
+				log.Printf("✅ [Filter/Infill] %s — %.1f mi / %.1f min drive from bin #%d (within 10 min)", c.NearbyPOI, nearestDist, driveTime, nearestNum)
+			}
+			// < 2.0 miles: always within 10 min drive, no need to check
 		}
 
 		// 7. Expand mode: skip candidates in cities with existing bins
@@ -328,9 +344,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		log.Printf("📍 [Mode] EXPAND — searching new areas with good demographics")
 	}
 
+	tTotal := time.Now()
 	log.Printf("📍 [Recommend] Starting: count=%d, city=%q, minGap=%.1f mi, algorithm=%s, mode=%s", count, targetCity, minGapMiles, algorithm, placementMode)
 
 	// Step 1: Get all active bins (for gap detection)
+	tDB := time.Now()
 	var bins []existingBin
 	query := `SELECT id, bin_number, latitude, longitude, city, zip, fill_percentage
 		FROM bins WHERE status = 'active' AND latitude IS NOT NULL AND longitude IS NOT NULL`
@@ -424,136 +442,122 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	var existingPotentials []potentialLoc
 	h.db.Select(&existingPotentials, `SELECT latitude, longitude FROM potential_locations WHERE latitude IS NOT NULL AND longitude IS NOT NULL`)
 	log.Printf("📍 [Recommend] %d existing potential locations to avoid", len(existingPotentials))
+	log.Printf("⏱️ [Timing] DB setup: %v (%d bins, %d fill rates, %d zones, %d census)",
+		time.Since(tDB), len(bins), len(perBinFillRate), len(zones), len(census))
 
 	// ======================================================================
-	// STRATEGY A: Business-first — search for real businesses in demand areas
-	// Step 1: Identify high-demand areas (from bin performance data)
-	// Step 2: Search HERE Discover for businesses in those areas
-	// Step 3: Filter and score
+	// STRATEGY A: Per-bin search — search for real businesses near each existing bin
+	// Each bin becomes a search origin. Bins within 0.5mi share one origin.
+	// High-fill bins get full keyword search, low-fill bins get anchors only.
+	// All searches run in parallel via goroutine worker pool.
 	// ======================================================================
+	tSearchStart := time.Now()
 	var gapCandidates []candidate
 
-	// Identify high-demand cities/areas sorted by fill rate
-	type cityDemand struct {
-		City     string
-		CenterLat float64
-		CenterLng float64
-		AvgRate   float64
-		BinCount  int
+	// Keywords for business search
+	// Tier 1: high-value anchors (13 keywords — used for ALL bins)
+	tier1Keywords := []string{
+		"Target", "Walmart", "Safeway", "Trader Joe's", "Costco",
+		"Home Depot", "Lowe's", "Grocery Outlet", "Food Maxx",
+		"99 Ranch", "Lucky Supermarket", "Whole Foods", "Dollar Tree",
 	}
-	cityDemandMap := map[string]*cityDemand{}
-	for _, b := range bins {
-		cd, ok := cityDemandMap[b.City]
-		if !ok {
-			cd = &cityDemand{City: b.City}
-			cityDemandMap[b.City] = cd
-		}
-		cd.CenterLat += b.Latitude
-		cd.CenterLng += b.Longitude
-		cd.BinCount++
-		if rate, ok := perBinFillRate[b.ID]; ok {
-			cd.AvgRate += rate
-		}
-	}
-	var demandAreas []cityDemand
-	for _, cd := range cityDemandMap {
-		if cd.BinCount >= minBinsPerCity {
-			cd.CenterLat /= float64(cd.BinCount)
-			cd.CenterLng /= float64(cd.BinCount)
-			cd.AvgRate /= float64(cd.BinCount)
-			demandAreas = append(demandAreas, *cd)
-		}
-	}
-	sort.Slice(demandAreas, func(i, j int) bool { return demandAreas[i].AvgRate > demandAreas[j].AvgRate })
+	// Full keyword list: Tier 1 + Tier 2 + Tier 3 (19 keywords — high-fill bins only)
+	allKeywords := append(append([]string{}, tier1Keywords...),
+		"CVS", "Walgreens", "grocery store", "coffee shop",
+		"shopping center", "shopping plaza",
+	)
+	// v1 fallback
+	v1Keywords := []string{"gas station", "laundromat", "dollar tree", "grocery store", "coffee shop"}
 
-	// Mode-based filtering of demand areas
-	if useV2 && placementMode == "infill" {
-		// Infill: only search in top-performing cities (avg fill > 30%)
-		var infillAreas []cityDemand
-		for _, a := range demandAreas {
-			if a.AvgRate >= 30 {
-				infillAreas = append(infillAreas, a)
-			}
-		}
-		if len(infillAreas) > 0 {
-			demandAreas = infillAreas
-			log.Printf("📍 [Infill] Filtered to %d high-performing areas (avg fill >= 30%%)", len(infillAreas))
-		}
-	} else if useV2 && placementMode == "expand" {
-		// Expand: skip demand areas entirely — we'll use expansion cities below
-		demandAreas = nil
-		log.Printf("📍 [Expand] Skipping demand areas — will search expansion cities only")
-	}
-
-	// Also check GraphVenn for additional demand hotspot areas
-	graphvennURL := os.Getenv("GRAPHVENN_SERVICE_URL")
-	var gvHotspots []struct{ Lat, Lng float64 }
-	if graphvennURL != "" && len(bins) >= 3 {
-		gvCandidates := callGraphVennService(graphvennURL, bins, perBinFillRate, zones, count)
-		if len(gvCandidates) > 0 {
-			log.Printf("📍 [Recommend] GraphVenn identified %d demand hotspot areas", len(gvCandidates))
-			for _, c := range gvCandidates {
-				gvHotspots = append(gvHotspots, struct{ Lat, Lng float64 }{c.Lat, c.Lng})
-			}
-		}
-	}
-
-	// Search for REAL BUSINESSES in high-demand areas
-	var businessQueries []string
-	if useV2 {
-		// v2: expanded keyword search — anchors, retail chains, location types
-		businessQueries = []string{
-			// Tier 1: high-value anchors
-			"Target", "Walmart", "Safeway", "Trader Joe's", "Costco",
-			"Home Depot", "Lowe's", "Grocery Outlet", "Food Maxx",
-			"99 Ranch", "Lucky Supermarket", "Whole Foods", "Dollar Tree",
-			// Tier 2: common retail
-			"CVS", "Walgreens", "grocery store", "coffee shop",
-			// Tier 3: location types
-			"shopping center", "shopping plaza",
-		}
-	} else {
-		// v1: original keywords
-		businessQueries = []string{"gas station", "laundromat", "dollar tree", "grocery store", "coffee shop"}
-	}
 	client := &http.Client{Timeout: 8 * time.Second}
 
-	// Search in top demand cities
-	searchAreas := demandAreas
-	if len(searchAreas) > 5 {
-		searchAreas = searchAreas[:5]
-	}
+	if useV2 && placementMode != "expand" {
+		// v2: cluster bins into search origins, build job queue, fan out
+		origins := clusterSearchOrigins(bins, perBinFillRate)
+		log.Printf("📍 [Search] Clustered %d bins into %d search origins", len(bins), len(origins))
+		for i, o := range origins {
+			kwCount := len(tier1Keywords)
+			if o.MaxFillRate >= 40 {
+				kwCount = len(allKeywords)
+			}
+			if i < 15 { // log first 15 origins
+				log.Printf("📍 [Origin] #%d: (%.4f,%.4f) %s, fill=%.1f%%, %d keywords, %d bins",
+					i+1, o.Lat, o.Lng, o.City, o.MaxFillRate, kwCount, o.BinCount)
+			}
+		}
 
-	for _, area := range searchAreas {
-		for _, query := range businessQueries {
-			businesses := discoverBusinesses(client, area.CenterLat, area.CenterLng, query)
-			for _, biz := range businesses {
-				// Raw append — all filtering happens in centralized filterCandidates()
-				gapCandidates = append(gapCandidates, candidate{
-					Lat: biz.Lat, Lng: biz.Lng, City: area.City, Zip: biz.Zip,
-					NearbyPOI: biz.Name, LocationType: "commercial",
-					POIScore: 1.0, Source: "business_search",
+		// Build search jobs
+		var jobs []searchJob
+		for _, origin := range origins {
+			keywords := tier1Keywords
+			if origin.MaxFillRate >= 40 {
+				keywords = allKeywords
+			}
+			for _, kw := range keywords {
+				jobs = append(jobs, searchJob{
+					Lat: origin.Lat, Lng: origin.Lng,
+					Query: kw, City: origin.City,
+					Source: "business_search",
 				})
 			}
 		}
-	}
+		log.Printf("📍 [Search] Built %d search jobs from %d origins", len(jobs), len(origins))
 
-	// Also search around GraphVenn hotspots (if available)
-	for _, hs := range gvHotspots {
-		for _, query := range businessQueries[:3] { // fewer queries per hotspot to save API calls
-			businesses := discoverBusinesses(client, hs.Lat, hs.Lng, query)
-			for _, biz := range businesses {
-				// Raw append — all filtering in centralized filterCandidates()
-				gapCandidates = append(gapCandidates, candidate{
-					Lat: biz.Lat, Lng: biz.Lng, City: biz.City, Zip: biz.Zip,
-					NearbyPOI: biz.Name, LocationType: "commercial",
-					POIScore: 1.0, Source: "graphvenn_business",
-				})
+		// Fan out with 10 workers
+		gapCandidates = fanOutSearch(client, jobs, 10)
+	} else if !useV2 {
+		// v1 fallback: sequential search from top 5 cities by fill rate
+		type cityDemand struct {
+			City      string
+			CenterLat float64
+			CenterLng float64
+			AvgRate   float64
+			BinCount  int
+		}
+		cityDemandMap := map[string]*cityDemand{}
+		for _, b := range bins {
+			cd, ok := cityDemandMap[b.City]
+			if !ok {
+				cd = &cityDemand{City: b.City}
+				cityDemandMap[b.City] = cd
+			}
+			cd.CenterLat += b.Latitude
+			cd.CenterLng += b.Longitude
+			cd.BinCount++
+			if rate, ok := perBinFillRate[b.ID]; ok {
+				cd.AvgRate += rate
+			}
+		}
+		var demandAreas []cityDemand
+		for _, cd := range cityDemandMap {
+			if cd.BinCount >= minBinsPerCity {
+				cd.CenterLat /= float64(cd.BinCount)
+				cd.CenterLng /= float64(cd.BinCount)
+				cd.AvgRate /= float64(cd.BinCount)
+				demandAreas = append(demandAreas, *cd)
+			}
+		}
+		sort.Slice(demandAreas, func(i, j int) bool { return demandAreas[i].AvgRate > demandAreas[j].AvgRate })
+		searchAreas := demandAreas
+		if len(searchAreas) > 5 {
+			searchAreas = searchAreas[:5]
+		}
+		for _, area := range searchAreas {
+			for _, query := range v1Keywords {
+				businesses := discoverBusinesses(client, area.CenterLat, area.CenterLng, query)
+				for _, biz := range businesses {
+					gapCandidates = append(gapCandidates, candidate{
+						Lat: biz.Lat, Lng: biz.Lng, City: area.City, Zip: biz.Zip,
+						NearbyPOI: biz.Name, LocationType: "commercial",
+						POIScore: 1.0, Source: "business_search",
+					})
+				}
 			}
 		}
 	}
+	// else: expand mode skips business search entirely
 
-	log.Printf("📍 [Recommend] Business search found %d candidates", len(gapCandidates))
+	log.Printf("⏱️ [Timing] Business search: %v, found %d raw candidates", time.Since(tSearchStart), len(gapCandidates))
 	gapCandidates = deduplicateCandidates(gapCandidates)
 	log.Printf("📍 [Recommend] After dedup: %d", len(gapCandidates))
 
@@ -572,27 +576,31 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		gapCount = count - expansionCount
 	}
 
+	tExpStart := time.Now()
 	var expCandidates []candidate
 	shouldExpand := placementMode == "expand" || (placementMode != "infill" && (targetCity == "" || !hasBinsInCity(bins, targetCity)))
 
 	if shouldExpand {
-		// Use expansion cities or the target city if specified
+		// Build expansion jobs using same fanOutSearch pattern
 		cities := expansionCities
 		if targetCity != "" {
-			// User asked for a specific new city — generate candidates there
 			cities = []struct {
 				City string
 				Lat  float64
 				Lng  float64
-			}{{targetCity, 0, 0}} // lat/lng will be geocoded
+			}{{targetCity, 0, 0}}
+		}
+
+		var expJobs []searchJob
+		expKeywords := tier1Keywords // use anchor keywords for expansion
+		if !useV2 {
+			expKeywords = v1Keywords
 		}
 
 		for _, ec := range cities {
 			if targetCity != "" && !strings.EqualFold(ec.City, targetCity) {
 				continue
 			}
-			// Skip if we already have bins there
-			// Fix: skip ANY city that already has bins (threshold 1, not 3)
 			hasBins := false
 			for _, b := range bins {
 				if strings.EqualFold(b.City, ec.City) {
@@ -604,32 +612,21 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				log.Printf("📍 [Expand] Skipping %s — already has bins", ec.City)
 				continue
 			}
-
-			// For expansion: search for commercial POIs in this city using HERE Browse
-			expPOIs := findCommercialPOIs(ec.Lat, ec.Lng, ec.City)
-			log.Printf("📍 [Expand] %s: found %d POIs", ec.City, len(expPOIs))
-			for _, poi := range expPOIs {
-				// Check no-go zones
-				inNoGo := false
-				for _, z := range zones {
-					if haversineMetersChat(poi.Lat, poi.Lng, z.CenterLat, z.CenterLng) <= float64(z.RadiusMeters) {
-						inNoGo = true
-						break
-					}
-				}
-				if inNoGo {
-					continue
-				}
-
-				// Raw append — all filtering in centralized filterCandidates()
-				expCandidates = append(expCandidates, candidate{
-					Lat: poi.Lat, Lng: poi.Lng, City: poi.City, Zip: poi.Zip,
-					Source: "expansion", LocationType: "commercial", POIScore: 1.0,
+			for _, kw := range expKeywords {
+				expJobs = append(expJobs, searchJob{
+					Lat: ec.Lat, Lng: ec.Lng,
+					Query: kw, City: ec.City,
+					Source: "expansion",
 				})
 			}
 		}
-		expCandidates = deduplicateCandidates(expCandidates)
-		log.Printf("📍 [Recommend] Expansion candidates: %d", len(expCandidates))
+
+		if len(expJobs) > 0 {
+			log.Printf("📍 [Expand] Built %d expansion search jobs", len(expJobs))
+			expCandidates = fanOutSearch(client, expJobs, 10)
+			expCandidates = deduplicateCandidates(expCandidates)
+			log.Printf("⏱️ [Timing] Expansion search: %v, found %d candidates", time.Since(tExpStart), len(expCandidates))
+		}
 	}
 
 	// Adjust counts based on what we actually have
@@ -648,15 +645,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// ======================================================================
 	// Centralized filtering — apply ALL filters consistently to ALL candidates
 	// ======================================================================
+	tFilter := time.Now()
 	rawCandidates := append(gapCandidates, expCandidates...)
-	log.Printf("📍 [Recommend] Raw candidates before filtering: %d (gap:%d, exp:%d)", len(rawCandidates), len(gapCandidates), len(expCandidates))
+	rawCount := len(rawCandidates)
+	log.Printf("📍 [Recommend] Raw candidates before filtering: %d (gap:%d, exp:%d)", rawCount, len(gapCandidates), len(expCandidates))
 	rawCandidates = deduplicateCandidates(rawCandidates)
+	dedupCount := len(rawCandidates)
+	log.Printf("📍 [Recommend] After dedup: %d (removed %d duplicates)", dedupCount, rawCount-dedupCount)
 	// Convert potentialLoc to potentialLocFilter for the centralized filter
 	var potFilters []potentialLocFilter
 	for _, pl := range existingPotentials {
 		potFilters = append(potFilters, potentialLocFilter{Latitude: pl.Latitude, Longitude: pl.Longitude})
 	}
 	allCandidates := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2)
+	log.Printf("⏱️ [Timing] Filter: %v, %d → %d candidates", time.Since(tFilter), dedupCount, len(allCandidates))
 
 	if len(allCandidates) == 0 {
 		return `{"count":0,"recommendations":[],"message":"No suitable locations found."}`, nil
@@ -666,6 +668,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// ESRI batch enrichment — enrich ALL filtered candidates, then score with v2
 	// No preliminary scoring gate — every candidate gets ESRI data
 	// ======================================================================
+	tESRI := time.Now()
 	log.Printf("📊 [ESRI] Enriching %d candidates...", len(allCandidates))
 
 	// Build batch locations for ESRI
@@ -701,6 +704,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		for i := range allCandidates {
 			if i < len(esriResults) && esriResults[i].HasData {
 				e := esriResults[i]
+				// All-zeros = ESRI has no data for this coordinate. Reject conservatively —
+				// can't verify neighborhood safety (caught Oakland FoodMaxx in high-crime area).
+				if e.MedianHouseholdIncome == 0 && e.CrimeIndex == 0 && e.AvgClothingSpend == 0 {
+					log.Printf("🚫 [ESRI Gate] %s (%.4f,%.4f) — no ESRI data available, rejecting",
+						allCandidates[i].NearbyPOI, allCandidates[i].Lat, allCandidates[i].Lng)
+					continue
+				}
 				if e.MedianHouseholdIncome > 0 && e.MedianHouseholdIncome < 50000 {
 					log.Printf("🚫 [ESRI Gate] %s — income $%.0fk below $50k minimum", allCandidates[i].NearbyPOI, e.MedianHouseholdIncome/1000)
 					continue
@@ -717,7 +727,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// Candidates without ESRI data pass the gate (don't reject on API failure)
 			gatedCandidates = append(gatedCandidates, allCandidates[i])
 		}
-		log.Printf("📊 [ESRI Gate] %d → %d candidates passed demographic gates", len(allCandidates), len(gatedCandidates))
+		gateRejected := len(allCandidates) - len(gatedCandidates)
+		log.Printf("📊 [ESRI Gate] %d → %d candidates passed demographic gates (%d rejected)", len(allCandidates), len(gatedCandidates), gateRejected)
+		log.Printf("⏱️ [Timing] ESRI enrichment + gate: %v", time.Since(tESRI))
 		allCandidates = gatedCandidates
 	}
 
@@ -755,12 +767,53 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 
 	// ======================================================================
-	// Enrich: traffic, POI classification, geocode, snap to commercial
+	// Enrich: POI density (parallel), then geocode + scoring (sequential)
 	// ======================================================================
+
+	// Pre-fetch POI density for ALL topCandidates in parallel (biggest latency win)
+	type poiResult struct {
+		Index       int
+		Density     int
+		HasAnchor   bool
+		AnchorName  string
+		AnchorLat   float64
+		AnchorLng   float64
+		RetailRatio float64
+	}
+	tEnrichStart := time.Now()
+	poiResults := make([]poiResult, len(topCandidates))
+	{
+		poiJobCh := make(chan int, len(topCandidates))
+		var poiWg sync.WaitGroup
+		poiWorkers := 8
+		for w := 0; w < poiWorkers; w++ {
+			poiWg.Add(1)
+			go func() {
+				defer poiWg.Done()
+				for idx := range poiJobCh {
+					tc := topCandidates[idx]
+					density, hasAnc, ancName, ancLat, ancLng, retRatio := scorePOIDensity(tc.Lat, tc.Lng)
+					poiResults[idx] = poiResult{
+						Index: idx, Density: density,
+						HasAnchor: hasAnc, AnchorName: ancName,
+						AnchorLat: ancLat, AnchorLng: ancLng,
+						RetailRatio: retRatio,
+					}
+				}
+			}()
+		}
+		for i := range topCandidates {
+			poiJobCh <- i
+		}
+		close(poiJobCh)
+		poiWg.Wait()
+	}
+	log.Printf("⏱️ [Timing] POI density enrichment (%d candidates, 8 workers): %v", len(topCandidates), time.Since(tEnrichStart))
+
 	var recommendations []LocationRecommendation
 	gapResults, expResults := 0, 0
 
-	for _, c := range topCandidates {
+	for idx, c := range topCandidates {
 		if gapResults >= gapCount && expResults >= expansionCount {
 			break
 		}
@@ -779,8 +832,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			c.TrafficScore = trafficJam
 		}
 
-		// POI density + anchor tenant detection (300m radius)
-		poiDensity, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio := scorePOIDensity(c.Lat, c.Lng)
+		// Use pre-fetched POI density data
+		pr := poiResults[idx]
+		poiDensity := pr.Density
+		hasAnchor := pr.HasAnchor
+		anchorName := pr.AnchorName
+		anchorLat := pr.AnchorLat
+		anchorLng := pr.AnchorLng
+		retailRatio := pr.RetailRatio
+		_ = retailRatio // used in v1 path below
 
 		if useV2 {
 			// v2: anchor = auto-pass, else 4+ non-B2B businesses required
@@ -1028,6 +1088,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
 	log.Printf("📍 [Recommend] Final: %d (gap_fill: %d, expansion: %d)", len(recommendations), gapResults, expResults)
+	log.Printf("⏱️ [Timing] TOTAL: %v, returning %d results", time.Since(tTotal), len(recommendations))
 
 	result, _ := json.Marshal(map[string]any{"count": len(recommendations), "recommendations": recommendations})
 	return string(result), nil
@@ -1052,6 +1113,110 @@ func filterNoGoZones(candidates []candidate, zones []noGoZone) []candidate {
 		}
 	}
 	return filtered
+}
+
+// searchOrigin represents a deduplicated bin location used as a HERE Discover search center.
+// Bins within 0.5 miles of each other share one origin to avoid duplicate API calls.
+type searchOrigin struct {
+	Lat, Lng    float64
+	City        string
+	MaxFillRate float64
+	BinCount    int
+}
+
+// searchJob is a single HERE Discover API call to make.
+type searchJob struct {
+	Lat, Lng float64
+	Query    string
+	City     string
+	Source   string // "business_search" or "expansion"
+}
+
+// clusterSearchOrigins groups bins by proximity (0.5mi) and returns deduplicated search origins.
+// Bins are sorted by fill rate (highest first) so high-performing bins become cluster centers.
+func clusterSearchOrigins(bins []existingBin, perBinFillRate map[string]float64) []searchOrigin {
+	// Sort bins by fill rate descending — best performers become cluster centers
+	type binWithRate struct {
+		Bin  existingBin
+		Rate float64
+	}
+	var binsWithRates []binWithRate
+	for _, b := range bins {
+		rate := perBinFillRate[b.ID]
+		binsWithRates = append(binsWithRates, binWithRate{Bin: b, Rate: rate})
+	}
+	sort.Slice(binsWithRates, func(i, j int) bool { return binsWithRates[i].Rate > binsWithRates[j].Rate })
+
+	var origins []searchOrigin
+	for _, br := range binsWithRates {
+		// Check if this bin is within 0.5 miles of an existing origin
+		tooClose := false
+		for i := range origins {
+			if haversineDistMiles(br.Bin.Latitude, br.Bin.Longitude, origins[i].Lat, origins[i].Lng) < 0.5 {
+				origins[i].BinCount++
+				if br.Rate > origins[i].MaxFillRate {
+					origins[i].MaxFillRate = br.Rate
+				}
+				tooClose = true
+				break
+			}
+		}
+		if !tooClose {
+			origins = append(origins, searchOrigin{
+				Lat:         br.Bin.Latitude,
+				Lng:         br.Bin.Longitude,
+				City:        br.Bin.City,
+				MaxFillRate: br.Rate,
+				BinCount:    1,
+			})
+		}
+	}
+	return origins
+}
+
+// fanOutSearch runs HERE Discover API calls in parallel using a worker pool.
+func fanOutSearch(client *http.Client, jobs []searchJob, workers int) []candidate {
+	jobCh := make(chan searchJob, len(jobs))
+	resultCh := make(chan []candidate, len(jobs))
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobCh {
+				businesses := discoverBusinesses(client, job.Lat, job.Lng, job.Query)
+				var candidates []candidate
+				for _, biz := range businesses {
+					candidates = append(candidates, candidate{
+						Lat: biz.Lat, Lng: biz.Lng, City: job.City, Zip: biz.Zip,
+						NearbyPOI: biz.Name, LocationType: "commercial",
+						POIScore: 1.0, Source: job.Source,
+					})
+				}
+				resultCh <- candidates
+			}
+		}()
+	}
+
+	// Send all jobs
+	for _, job := range jobs {
+		jobCh <- job
+	}
+	close(jobCh)
+
+	// Wait for workers then close results
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	// Collect all results
+	var allCandidates []candidate
+	for batch := range resultCh {
+		allCandidates = append(allCandidates, batch...)
+	}
+	return allCandidates
 }
 
 func deduplicateCandidates(candidates []candidate) []candidate {
@@ -1858,8 +2023,14 @@ func callGraphVennService(serviceURL string, bins []existingBin, perBinFillRate 
 	return candidates
 }
 
-// getOSRMDrivingDistMiles returns the driving distance between two points via OSRM
-func getOSRMDrivingDistMiles(lat1, lng1, lat2, lng2 float64) float64 {
+// osrmRouteResult holds both distance and duration from OSRM
+type osrmRouteResult struct {
+	DistanceMiles float64
+	DurationMins  float64
+}
+
+// getOSRMRoute returns driving distance (miles) and duration (minutes) between two points
+func getOSRMRoute(lat1, lng1, lat2, lng2 float64) osrmRouteResult {
 	osrmURL := os.Getenv("OSRM_SERVER_URL")
 	if osrmURL == "" {
 		osrmURL = "http://router.project-osrm.org"
@@ -1870,7 +2041,7 @@ func getOSRMDrivingDistMiles(lat1, lng1, lat2, lng2 float64) float64 {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return 0
+		return osrmRouteResult{}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -1879,10 +2050,24 @@ func getOSRMDrivingDistMiles(lat1, lng1, lat2, lng2 float64) float64 {
 		Code   string `json:"code"`
 		Routes []struct {
 			Distance float64 `json:"distance"`
+			Duration float64 `json:"duration"`
 		} `json:"routes"`
 	}
 	if json.Unmarshal(body, &result) != nil || result.Code != "Ok" || len(result.Routes) == 0 {
-		return 0
+		return osrmRouteResult{}
 	}
-	return result.Routes[0].Distance / 1609.34 // meters to miles
+	return osrmRouteResult{
+		DistanceMiles: result.Routes[0].Distance / 1609.34,
+		DurationMins:  result.Routes[0].Duration / 60.0,
+	}
+}
+
+// getOSRMDrivingDistMiles returns the driving distance between two points via OSRM (legacy wrapper)
+func getOSRMDrivingDistMiles(lat1, lng1, lat2, lng2 float64) float64 {
+	return getOSRMRoute(lat1, lng1, lat2, lng2).DistanceMiles
+}
+
+// getOSRMDriveTimeMins returns the driving time in minutes between two points via OSRM
+func getOSRMDriveTimeMins(lat1, lng1, lat2, lng2 float64) float64 {
+	return getOSRMRoute(lat1, lng1, lat2, lng2).DurationMins
 }
