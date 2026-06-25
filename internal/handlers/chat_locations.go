@@ -129,6 +129,9 @@ var b2bTitleKeywords = []string{
 	// Medical (not foot traffic for donations)
 	"acupuncture", "chiropract", "dentist", "clinic", "medical",
 	"veterinar", "lab ", "laboratory",
+	// Personal services (not retail foot traffic for donations)
+	"spa", "salon", "nail", "wellness", "massage", "waxing", "lash",
+	"tattoo", "piercing", "barber",
 }
 
 // Bay Area cities for expansion mode — places we could expand to
@@ -332,7 +335,23 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 
 	// Search for REAL BUSINESSES in high-demand areas
-	businessQueries := []string{"gas station", "laundromat", "dollar tree", "grocery store", "coffee shop"}
+	var businessQueries []string
+	if useV2 {
+		// v2: expanded keyword search — anchors, retail chains, location types
+		businessQueries = []string{
+			// Tier 1: high-value anchors
+			"Target", "Walmart", "Safeway", "Trader Joe's", "Costco",
+			"Home Depot", "Lowe's", "Grocery Outlet", "Food Maxx",
+			"99 Ranch", "Lucky Supermarket", "Whole Foods", "Dollar Tree",
+			// Tier 2: common retail
+			"CVS", "Walgreens", "grocery store", "coffee shop",
+			// Tier 3: location types
+			"shopping center", "shopping plaza",
+		}
+	} else {
+		// v1: original keywords
+		businessQueries = []string{"gas station", "laundromat", "dollar tree", "grocery store", "coffee shop"}
+	}
 	client := &http.Client{Timeout: 8 * time.Second}
 
 	// Search in top demand cities
@@ -553,9 +572,21 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 					fillRate = 5.0 // default for unknown areas
 				}
 
+				// Find nearest bin for expansion candidates (bug fix: was defaulting to 0)
+				nearestNum := 0
+				nearestDist := math.MaxFloat64
+				for _, b := range bins {
+					d := haversineDistMiles(poi.Lat, poi.Lng, b.Latitude, b.Longitude)
+					if d < nearestDist {
+						nearestDist = d
+						nearestNum = b.BinNumber
+					}
+				}
+
 				expCandidates = append(expCandidates, candidate{
 					Lat: poi.Lat, Lng: poi.Lng, City: poi.City, Zip: poi.Zip,
-					NearestFillRate: fillRate, Source: "expansion",
+					NearestFillRate: fillRate, NearestBinNum: nearestNum,
+					NearestBinDist: nearestDist, Source: "expansion",
 					LocationType: "commercial", POIScore: 1.0,
 				})
 			}
@@ -668,17 +699,28 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			continue
 		}
 
-		// Traffic
-		trafficJam := getTrafficJamFactor(c.Lat, c.Lng)
-		c.TrafficScore = trafficJam
+		// Traffic (v1 only — v2 uses ESRI data instead)
+		trafficJam := 0.0
+		if !useV2 {
+			trafficJam = getTrafficJamFactor(c.Lat, c.Lng)
+			c.TrafficScore = trafficJam
+		}
 
 		// POI density + anchor tenant detection (300m radius)
 		poiDensity, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio := scorePOIDensity(c.Lat, c.Lng)
 
-		// HARD FILTER: retail ratio below 40% = industrial area with a few retail tenants
-		if retailRatio < 0.4 && poiDensity < 6 {
-			log.Printf("🚫 [Recommend] Filtered: %s — retail ratio %.0f%% (need 40%%+)", c.NearbyPOI, retailRatio*100)
-			continue
+		if useV2 {
+			// v2: anchor = auto-pass, else 4+ non-B2B businesses required
+			if !hasAnchor && poiDensity < 4 {
+				log.Printf("🚫 [v2] Filtered: %s — no anchor + only %d POIs (need 4+)", c.NearbyPOI, poiDensity)
+				continue
+			}
+		} else {
+			// v1: retail ratio filter
+			if retailRatio < 0.4 && poiDensity < 6 {
+				log.Printf("🚫 [Recommend] Filtered: %s — retail ratio %.0f%% (need 40%%+)", c.NearbyPOI, retailRatio*100)
+				continue
+			}
 		}
 
 		// Snap to anchor tenant if detected — anchor has more foot traffic than the original business
@@ -687,6 +729,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			log.Printf("🏪 [Snap] Moving pin from %s to anchor %s (%.0fm)", c.NearbyPOI, anchorName, snapDist*1609)
 			c.Lat = anchorLat
 			c.Lng = anchorLng
+
+			// BUG FIX: Re-check gap after snap — candidate may have moved onto an existing bin
+			for _, b := range bins {
+				d := haversineDistMiles(c.Lat, c.Lng, b.Latitude, b.Longitude)
+				if d < 0.05 { // within ~260 feet = same location
+					log.Printf("🚫 [Snap] Post-snap rejection: now %.0fm from Bin #%d", d*1609, b.BinNumber)
+					hasAnchor = false // use as flag to skip this candidate
+					break
+				}
+			}
+			if !hasAnchor {
+				continue // snapped onto existing bin, skip
+			}
+			hasAnchor = true // restore flag
 		}
 
 		// Reverse geocode
@@ -703,23 +759,40 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 		}
 
-		// HARD FILTER: minimum 3 retail POIs within 300m — if fewer, it's not a real commercial area
-		if poiDensity < 3 {
+		// HARD FILTER: minimum POI density (v2 already checked above with anchor logic)
+		if !useV2 && poiDensity < 3 {
 			log.Printf("🚫 [Recommend] Filtered: %s — only %d POIs within 300m (need 3+)", c.NearbyPOI, poiDensity)
 			continue
 		}
 
 		// POI density score: 3-5 POIs=0.4, 6-8=0.6, 9+=0.9, anchor bonus +0.1
-		densityScore := 0.3
-		if poiDensity >= 9 {
-			densityScore = 0.9
-		} else if poiDensity >= 6 {
-			densityScore = 0.6
+		var densityScore float64
+		if useV2 {
+			// v2: anchor-first scoring
+			if hasAnchor && poiDensity >= 5 {
+				densityScore = 1.0 // anchor + plaza = dream spot
+			} else if hasAnchor {
+				densityScore = 0.9 // anchor alone
+			} else if poiDensity >= 8 {
+				densityScore = 0.8
+			} else if poiDensity >= 5 {
+				densityScore = 0.6
+			} else {
+				densityScore = 0.4
+			}
 		} else {
-			densityScore = 0.4
-		}
-		if hasAnchor {
-			densityScore = math.Min(densityScore+0.1, 1.0)
+			// v1: original scoring
+			densityScore = 0.3
+			if poiDensity >= 9 {
+				densityScore = 0.9
+			} else if poiDensity >= 6 {
+				densityScore = 0.6
+			} else {
+				densityScore = 0.4
+			}
+			if hasAnchor {
+				densityScore = math.Min(densityScore+0.1, 1.0)
+			}
 		}
 
 		locationType := "commercial"
@@ -790,11 +863,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				}
 
 				// v2 weights based on correlation analysis:
-				// POI density 25% (business search is core), clothing 20% (r=+0.534),
-				// crime 15% (r=-0.503), income 15% (r=+0.450),
-				// fill rate 15% (demand signal), gap 5%, growth 5%
+				// POI density 25%, clothing 20% (r=+0.446), crime 15% (r=-0.419),
+				// income 15%, fill rate 15%, gap 5%, growth 5%
 				finalScore = math.Round((densityScore*0.25+clothingScore*0.20+crimeScore*0.15+
 					incomeScore*0.15+fillScore*0.15+gapScore*0.05+growthScore*0.05)*100) / 10
+
+				// Analog model bonus: if profile matches top performers within 20%
+				// Top performer averages: clothing=$5,400, income=$185K, crime=116
+				analogClothing := math.Abs(esriData.AvgClothingSpend-5400) / 5400
+				analogIncome := math.Abs(esriData.MedianHouseholdIncome-185000) / 185000
+				analogCrime := math.Abs(esriData.CrimeIndex-116) / 116
+				if analogClothing < 0.20 && analogIncome < 0.20 && analogCrime < 0.20 {
+					finalScore += 0.5
+					log.Printf("⭐ [v2 Analog] %s: matches top performer profile (+0.5 bonus)", c.NearbyPOI)
+				}
 
 				log.Printf("📊 [v2 Score] %s: %.1f (density=%.2f, clothing=%.2f, crime=%.2f, income=%.2f, fill=%.2f, gap=%.2f, growth=%.2f) | clothing=$%,.0f, crime=%,.0f, income=$%,.0f, growth=%.2f%%",
 					c.NearbyPOI, finalScore, densityScore, clothingScore, crimeScore, incomeScore, fillScore, gapScore, growthScore,
