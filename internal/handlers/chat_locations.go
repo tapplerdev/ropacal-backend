@@ -306,9 +306,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 
 	// Algorithm version: "v1" (default) or "v2" (ESRI-enhanced)
-	algorithm := "v1"
-	if alg, ok := params["algorithm"].(string); ok && alg == "v2" {
-		algorithm = "v2"
+	// v2 is the default algorithm (ESRI-enhanced scoring, expanded keywords, centralized filtering)
+	// v1 available as fallback if explicitly requested
+	algorithm := "v2"
+	if alg, ok := params["algorithm"].(string); ok && alg == "v1" {
+		algorithm = "v1"
 	}
 	useV2 := algorithm == "v2"
 
@@ -962,12 +964,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			finalScore = math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
 		}
 
-		// Visual verification — satellite image + Claude Vision
-		visualPass, visualReason := verifyLocationVisually(c.Lat, c.Lng, c.NearbyPOI)
-		if !visualPass {
-			log.Printf("👁️ [Recommend] Filtered by vision: %s — %s", c.NearbyPOI, visualReason)
-			continue
-		}
+		// Visual verification — DISABLED (saves ~$0.01-0.03 per candidate)
+		// ESRI demographics + POI density + B2B filter catch the cases vision was meant for.
+		// Vision couldn't distinguish office parks from retail plazas in satellite view.
+		// Keeping verifyLocationVisually() function for future use if needed.
+		// visualPass, visualReason := verifyLocationVisually(c.Lat, c.Lng, c.NearbyPOI)
+		// if !visualPass {
+		// 	log.Printf("👁️ [Recommend] Filtered by vision: %s — %s", c.NearbyPOI, visualReason)
+		// 	continue
+		// }
 
 		// Minimum score cutoff — below this is not worth recommending
 		if finalScore < 5.5 {
