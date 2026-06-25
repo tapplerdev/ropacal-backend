@@ -838,23 +838,18 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			continue
 		}
 
-		// POI density score: 3-5 POIs=0.4, 6-8=0.6, 9+=0.9, anchor bonus +0.1
+		// POI density score: log-scaled continuous (v2) or tiered (v1)
 		var densityScore float64
 		if useV2 {
-			// v2: anchor-first scoring
-			if hasAnchor && poiDensity >= 5 {
-				densityScore = 1.0 // anchor + plaza = dream spot
-			} else if hasAnchor {
-				densityScore = 0.9 // anchor alone
-			} else if poiDensity >= 8 {
-				densityScore = 0.8
-			} else if poiDensity >= 5 {
-				densityScore = 0.6
-			} else {
-				densityScore = 0.4
+			// v2: continuous log-scaled density — ln(1+count) / ln(1+max)
+			// max 20 POIs = 1.0. Spreads 5-14 POI range into 0.60-0.89 instead of all being 1.0.
+			maxPOI := 20.0
+			densityScore = math.Log(1+float64(poiDensity)) / math.Log(1+maxPOI)
+			if densityScore > 1.0 {
+				densityScore = 1.0
 			}
 		} else {
-			// v1: original scoring
+			// v1: original tiered scoring
 			densityScore = 0.3
 			if poiDensity >= 9 {
 				densityScore = 0.9
@@ -888,29 +883,54 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		var finalScore float64
 
 		if useV2 {
-			// v2 gate-based: rank by site quality only
-			// POI density: 50% — strongest predictor of physical placement quality
-			// Anchor presence: 30% — Tier 1 anchors = high foot traffic guaranteed
-			// Fill rate gap: 20% — real performance data from nearest existing bin
-			anchorScore := 0.0
-			if hasAnchor {
-				anchorScore = 1.0
-			}
+			// v2: multiplicative site quality scoring
+			// Uses (density^0.5) × (anchor^0.3) × (fill^0.2) × 10
+			// Multiplicative = weakness in ANY dimension tanks the score (no compensation).
+			// A Target in a dead zone scores worse than a Target at a busy plaza.
+
+			// Tiered anchor score: national anchor > regional chain > non-anchor
+			anchorScore := 0.15 // non-anchor floor (prevents zero from killing score)
 			nameLower := strings.ToLower(c.NearbyPOI)
 			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
-			for _, anchor := range tier1Anchors {
+			// Tier 1 national anchors — highest foot traffic
+			tier1National := []string{"target", "walmart", "costco", "home depot", "lowes", "safeway", "trader joe", "whole foods"}
+			// Tier 2 regional chains — good foot traffic
+			tier2Regional := []string{"cvs", "walgreens", "grocery outlet", "food maxx", "99 ranch", "lucky", "dollar tree"}
+			isT1 := false
+			for _, anchor := range tier1National {
 				if strings.Contains(nameNorm, anchor) {
 					anchorScore = 1.0
+					isT1 = true
 					break
 				}
 			}
+			if !isT1 {
+				for _, anchor := range tier2Regional {
+					if strings.Contains(nameNorm, anchor) {
+						anchorScore = 0.7
+						break
+					}
+				}
+			}
+			// POI density anchor detection also counts
+			if hasAnchor && anchorScore < 0.7 {
+				anchorScore = 0.7
+			}
 
-			siteScore := densityScore*0.50 + anchorScore*0.30 + fillScore*0.20
-			finalScore = math.Round(siteScore*100) / 10 // scale to 0-10
+			// Ensure fill score has a floor (expansion areas with 0 fill shouldn't zero out)
+			fillVal := fillScore
+			if fillVal < 0.1 {
+				fillVal = 0.1
+			}
+
+			// Multiplicative: (density^0.5) × (anchor^0.3) × (fill^0.2) × 10
+			finalScore = math.Pow(densityScore, 0.5) * math.Pow(anchorScore, 0.3) * math.Pow(fillVal, 0.2) * 10
+			finalScore = math.Round(finalScore*10) / 10 // round to 1 decimal
 			finalScore = math.Min(10, finalScore)
 
-			log.Printf("📊 [v2 Site] %s: %.1f (density=%.2f, anchor=%.0f, fill=%.2f, POIs=%d)",
-				c.NearbyPOI, finalScore, densityScore, anchorScore, fillScore, poiDensity)
+			log.Printf("📊 [v2 Site] %s: %.1f (density=%.3f, anchor=%.2f, fill=%.2f, POIs=%d, d^.5=%.3f, a^.3=%.3f, f^.2=%.3f)",
+				c.NearbyPOI, finalScore, densityScore, anchorScore, fillVal, poiDensity,
+				math.Pow(densityScore, 0.5), math.Pow(anchorScore, 0.3), math.Pow(fillVal, 0.2))
 		} else {
 			// v1 fallback — census-based scoring
 			gapScore := math.Min(c.NearestBinDist, maxGapMiles) / maxGapMiles
