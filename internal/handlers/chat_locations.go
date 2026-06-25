@@ -1147,7 +1147,7 @@ func findCommercialPOIs(defaultLat, defaultLng float64, city string) []struct {
 	client := &http.Client{Timeout: 8 * time.Second}
 	for _, q := range queries {
 		url := fmt.Sprintf(
-			"https://discover.search.hereapi.com/v1/discover?at=%.6f,%.6f&q=%s&limit=5&in=countryCode:USA&apiKey=%s",
+			"https://discover.search.hereapi.com/v1/discover?in=circle:%.6f,%.6f;r=5000&q=%s&limit=5&apiKey=%s",
 			lat, lng, strings.ReplaceAll(q, " ", "+"), HereAPIKey,
 		)
 		resp, err := client.Get(url)
@@ -1583,7 +1583,7 @@ type discoveredBusiness struct {
 // discoverBusinesses searches for real businesses near a location using HERE Discover API
 func discoverBusinesses(client *http.Client, lat, lng float64, query string) []discoveredBusiness {
 	url := fmt.Sprintf(
-		"https://discover.search.hereapi.com/v1/discover?at=%.6f,%.6f&q=%s&limit=15&in=countryCode:USA&apiKey=%s",
+		"https://discover.search.hereapi.com/v1/discover?in=circle:%.6f,%.6f;r=8000&q=%s&limit=15&apiKey=%s",
 		lat, lng, strings.ReplaceAll(query, " ", "+"), HereAPIKey,
 	)
 	resp, err := client.Get(url)
