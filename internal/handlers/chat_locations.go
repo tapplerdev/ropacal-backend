@@ -65,7 +65,7 @@ type candidate struct {
 }
 
 const maxGapMiles = 2.0
-const minBinsPerCity = 3
+const minBinsPerCity = 1
 const minDedupeDistMiles = 0.15
 
 var badAddressKeywords = []string{
@@ -729,9 +729,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// Anchor name boost — Tier 1 anchors get POIScore 1.5
 			poiScore := allCandidates[i].POIScore
 			nameLower := strings.ToLower(allCandidates[i].NearbyPOI)
-			tier1Anchors := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowe's", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree"}
+			// Normalize apostrophes for matching
+			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
+			tier1Anchors := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowes", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree", "cvs", "walgreens"}
 			for _, anchor := range tier1Anchors {
-				if strings.Contains(nameLower, anchor) {
+				if strings.Contains(nameNorm, anchor) {
 					poiScore = 1.5
 					break
 				}
@@ -921,13 +923,29 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		var finalScore float64
 
 		if useV2 {
-			// v2: use pre-computed ESRI score (c.Score) and add POI density component
-			// Rebalance: ESRI score contributed 75% of total, POI density adds 25%
-			esriBaseScore := c.Score // already includes clothing, crime, income, fill, gap, growth
-			finalScore = math.Round((esriBaseScore*0.75+densityScore*0.25)*100) / 10
+			// v2: combine pre-computed ESRI score with POI density
+			esriBaseScore := c.Score // 0-1 range from batch scoring
+			rawScore := esriBaseScore*0.75 + densityScore*0.25
 
-			log.Printf("📊 [v2 Final] %s: %.1f (esri_base=%.3f, density=%.2f, anchor=%v, POIs=%d)",
-				c.NearbyPOI, finalScore, esriBaseScore, densityScore, hasAnchor, poiDensity)
+			// Spread score across 0-10 range (practical ESRI scores cluster 0.5-0.9)
+			finalScore = math.Max(0, math.Min(10, (rawScore-0.4)*16.67))
+			finalScore = math.Round(finalScore*10) / 10
+
+			// Anchor boost: Tier 1 anchors get +1.5 direct bonus
+			nameLower := strings.ToLower(c.NearbyPOI)
+			// Normalize apostrophes for matching
+			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
+			tier1 := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowes", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree", "cvs", "walgreens"}
+			for _, anchor := range tier1 {
+				if strings.Contains(nameNorm, anchor) {
+					finalScore = math.Min(10, finalScore+1.5)
+					log.Printf("⭐ [Anchor] %s: +1.5 bonus (matched '%s')", c.NearbyPOI, anchor)
+					break
+				}
+			}
+
+			log.Printf("📊 [v2 Final] %s: %.1f (esri=%.3f, density=%.2f, raw=%.3f, anchor=%v, POIs=%d)",
+				c.NearbyPOI, finalScore, esriBaseScore, densityScore, rawScore, hasAnchor, poiDensity)
 		} else {
 			// v1 fallback — census-based scoring
 			zip5fb := stripZipPlus4(c.Zip)
