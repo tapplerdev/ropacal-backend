@@ -427,6 +427,9 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			r.Post("/manager/routes/smart-reoptimize", handlers.SmartReoptimize(db))
 			r.Get("/manager/bins/collection-stats", handlers.GetBinCollectionStats(db))
 
+			// Placement Planner
+			r.Get("/manager/placement/opportunities", handlers.GetPlacementOpportunities(db))
+
 			// AI Chat
 			chatHandler := handlers.NewChatHandler(db)
 			r.Post("/manager/chat", chatHandler.Handle)
