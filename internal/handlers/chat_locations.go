@@ -465,15 +465,17 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	var gapCandidates []candidate
 
 	// Keywords for business search
-	// Tier 1: high-value anchors (13 keywords — used for ALL bins)
+	// Tier 1: high-value anchors (used for ALL bins)
 	tier1Keywords := []string{
 		"Target", "Walmart", "Safeway", "Trader Joe's", "Costco",
 		"Home Depot", "Lowe's", "Grocery Outlet", "Food Maxx",
 		"99 Ranch", "Lucky Supermarket", "Whole Foods", "Dollar Tree",
+		"Dick's Sporting Goods", "Kohl's", "Sprouts",
 	}
-	// Full keyword list: Tier 1 + Tier 2 + Tier 3 (19 keywords — high-fill bins only)
+	// Full keyword list: Tier 1 + Tier 2 + Tier 3 (high-fill bins only)
 	allKeywords := append(append([]string{}, tier1Keywords...),
-		"CVS", "Walgreens", "grocery store", "coffee shop",
+		"CVS", "Walgreens", "Best Buy", "PetSmart", "Petco",
+		"grocery store", "coffee shop",
 		"shopping center", "shopping plaza",
 	)
 	// v1 fallback
@@ -993,9 +995,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			nameLower := strings.ToLower(c.NearbyPOI)
 			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
 			// Tier 1 national anchors — highest foot traffic
-			tier1National := []string{"target", "walmart", "costco", "home depot", "lowes", "safeway", "trader joe", "whole foods"}
+			tier1National := []string{"target", "walmart", "costco", "home depot", "lowes", "safeway", "trader joe", "whole foods", "dicks sporting", "kohls", "best buy", "sprouts"}
 			// Tier 2 regional chains — good foot traffic
-			tier2Regional := []string{"cvs", "walgreens", "grocery outlet", "food maxx", "99 ranch", "lucky", "dollar tree"}
+			tier2Regional := []string{"cvs", "walgreens", "grocery outlet", "food maxx", "99 ranch", "lucky", "dollar tree", "petco", "petsmart", "ross", "marshalls"}
 			isT1 := false
 			for _, anchor := range tier1National {
 				if strings.Contains(nameNorm, anchor) {
@@ -1567,6 +1569,21 @@ var anchorTenants = []string{
 	"cvs", "walgreens", "rite aid", "ross", "marshalls", "tj maxx",
 	"dollar tree", "99 cents", "big lots", "grocery outlet",
 	"planet fitness", "24 hour fitness", "starbucks",
+	"dick's sporting", "dicks sporting", "kohl's", "kohls", "sprouts",
+	"99 ranch", "best buy", "petco", "petsmart",
+}
+
+// Non-retail HERE category prefixes to exclude from POI density count.
+// These inflate counts without indicating retail foot traffic.
+var nonRetailCategories = []string{
+	"400-4000", // bus stop / transit
+	"400-4100", // train station
+	"400-4300", // parking
+	"700-7600", // ATM
+	"700-7400", // post office (already in community whitelist but shouldn't inflate density)
+	"900-9200", // outdoor / recreation area
+	"550-",     // leisure / parks
+	"700-7010", // ATM
 }
 
 // scorePOIDensity counts retail POIs within 300m and detects anchor tenants.
@@ -1616,6 +1633,24 @@ func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64, flo
 		primaryCat := ""
 		if len(item.Categories) > 0 {
 			primaryCat = item.Categories[0].ID
+		}
+
+		// Skip non-retail categories (bus stops, ATMs, parking — inflate count without foot traffic)
+		isNonRetail := false
+		for _, cat := range item.Categories {
+			for _, prefix := range nonRetailCategories {
+				if strings.HasPrefix(cat.ID, prefix) {
+					isNonRetail = true
+					break
+				}
+			}
+			if isNonRetail {
+				break
+			}
+		}
+		if isNonRetail {
+			log.Printf("   ⬜ %s (%s, %dm) — non-retail category skipped", item.Title, primaryCat, item.Distance)
+			continue
 		}
 
 		// Skip B2B businesses from count
