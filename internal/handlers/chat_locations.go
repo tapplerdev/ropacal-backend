@@ -347,20 +347,30 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	tTotal := time.Now()
 	log.Printf("📍 [Recommend] Starting: count=%d, city=%q, minGap=%.1f mi, algorithm=%s, mode=%s", count, targetCity, minGapMiles, algorithm, placementMode)
 
-	// Step 1: Get all active bins (for gap detection)
+	// Step 1: Get ALL active bins (for gap detection against entire fleet)
 	tDB := time.Now()
-	var bins []existingBin
-	query := `SELECT id, bin_number, latitude, longitude, city, zip, fill_percentage
-		FROM bins WHERE status = 'active' AND latitude IS NOT NULL AND longitude IS NOT NULL`
-	args := []any{}
-	if targetCity != "" {
-		query += " AND LOWER(city) = LOWER($1)"
-		args = append(args, targetCity)
-	}
-	if err := h.db.Select(&bins, query, args...); err != nil {
+	var allBins []existingBin
+	if err := h.db.Select(&allBins, `SELECT id, bin_number, latitude, longitude, city, zip, fill_percentage
+		FROM bins WHERE status = 'active' AND latitude IS NOT NULL AND longitude IS NOT NULL`); err != nil {
 		return "", fmt.Errorf("failed to fetch bins: %w", err)
 	}
-	log.Printf("📍 [Recommend] Found %d active bins", len(bins))
+
+	// For search origins: use only target city bins (if specified), otherwise all bins
+	var searchBins []existingBin
+	if targetCity != "" {
+		for _, b := range allBins {
+			if strings.EqualFold(b.City, targetCity) {
+				searchBins = append(searchBins, b)
+			}
+		}
+		log.Printf("📍 [Recommend] Found %d active bins total, %d in %s for search origins", len(allBins), len(searchBins), targetCity)
+	} else {
+		searchBins = allBins
+		log.Printf("📍 [Recommend] Found %d active bins", len(allBins))
+	}
+
+	// Use allBins for gap checking, searchBins for search origins
+	bins := allBins // gap checking, nearest bin, etc. see the full fleet
 
 	// Step 2: Per-bin fill rates from ALL bins (active + retired + missing) — full history
 	type binRate struct {
@@ -473,7 +483,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	if useV2 && placementMode != "expand" {
 		// v2: cluster bins into search origins, build job queue, fan out
-		origins := clusterSearchOrigins(bins, perBinFillRate)
+		origins := clusterSearchOrigins(searchBins, perBinFillRate)
 		log.Printf("📍 [Search] Clustered %d bins into %d search origins", len(bins), len(origins))
 		for i, o := range origins {
 			kwCount := len(tier1Keywords)
@@ -584,11 +594,18 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// Build expansion jobs using same fanOutSearch pattern
 		cities := expansionCities
 		if targetCity != "" {
+			// Geocode the target city to get real coordinates
+			cityCoords, geoErr := geocodeCityHERE(targetCity)
+			if geoErr != nil {
+				log.Printf("⚠️ [Expand] Failed to geocode %s: %v", targetCity, geoErr)
+			} else {
+				log.Printf("📍 [Expand] Geocoded %s → (%.4f, %.4f)", targetCity, cityCoords.Lat, cityCoords.Lng)
+			}
 			cities = []struct {
 				City string
 				Lat  float64
 				Lng  float64
-			}{{targetCity, 0, 0}}
+			}{{targetCity, cityCoords.Lat, cityCoords.Lng}}
 		}
 
 		var expJobs []searchJob
@@ -752,7 +769,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// Sort by score and take top candidates
 	sort.Slice(allCandidates, func(i, j int) bool { return allCandidates[i].Score > allCandidates[j].Score })
 
-	topCount := count * 4 // 4x buffer for POI density filtering
+	topCount := count * 6 // 6x buffer — city cap + POI filter + score cutoff need headroom
 	if topCount > len(allCandidates) {
 		topCount = len(allCandidates)
 	}
@@ -813,7 +830,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	var recommendations []LocationRecommendation
 	gapResults, expResults := 0, 0
 	cityCount := map[string]int{} // track results per city for diversity cap
-	maxPerCity := count/3 + 2     // e.g., 20 placements → max 8 per city, 10 → max 5
+	maxPerCity := count/2 + 1     // e.g., 20 placements → max 11 per city, 10 → max 6
+	if maxPerCity < 5 {
+		maxPerCity = 5
+	}
+	if targetCity != "" {
+		maxPerCity = count // no cap when user explicitly asked for a specific city
+	}
 
 	for idx, c := range topCandidates {
 		if gapResults >= gapCount && expResults >= expansionCount {
