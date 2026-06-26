@@ -135,12 +135,18 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 				income = c.AvgIncome
 			}
 
-			// Opportunity score
-			demand := cs.AvgFill / 100.0
-			estimatedNeed := math.Max(float64(pop)/25000.0, 2) // at least 2 bins per city
-			coverageGap := math.Max(0, 1.0-float64(cs.BinCount)/estimatedNeed)
-			incomeFactor := math.Min(float64(income)/150000.0, 1.0)
-			score := math.Round((demand*0.4+coverageGap*0.4+incomeFactor*0.2)*100) / 10 // 0-10 scale
+			// Opportunity score — proven demand cities
+			// High fill + few bins = strongest signal (underserved proven market)
+			// Low fill + many bins = weakest (saturated or poor area)
+			demand := cs.AvgFill / 100.0                                       // 0-1, higher = more demand
+			estimatedNeed := math.Max(float64(pop)/25000.0, 2)                 // at least 2 bins per city
+			coverageGap := math.Max(0, 1.0-float64(cs.BinCount)/estimatedNeed) // 0-1, higher = more underserved
+			incomeFactor := math.Min(float64(income)/150000.0, 1.0)            // 0-1
+
+			// Multiplicative: high demand AND coverage gap = high score
+			// Either being low tanks the score (same logic as placement algorithm)
+			demandCoverage := math.Sqrt(demand * coverageGap) // geometric mean, 0-1
+			score := math.Round((demandCoverage*0.7+incomeFactor*0.3)*100) / 10
 
 			// Recommended additional bins
 			recommended := int(math.Max(0, math.Ceil(estimatedNeed)-float64(cs.BinCount)))
@@ -150,9 +156,9 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 
 			// Label
 			label := "low"
-			if score >= 7 {
+			if score >= 5 {
 				label = "high"
-			} else if score >= 4 {
+			} else if score >= 3 {
 				label = "moderate"
 			}
 
@@ -213,8 +219,16 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 				continue
 			}
 			estimatedNeed := math.Max(float64(ec.Pop)/25000.0, 2)
-			score := math.Round((0.0*0.4+1.0*0.4+0.6*0.2)*100) / 10 // no demand data, full gap, moderate income
+			// Expansion cities: no proven demand, score conservatively
+			// Population-based estimate only — capped below proven-demand cities
+			popFactor := math.Min(float64(ec.Pop)/500000.0, 1.0) // larger city = more potential
+			score := math.Round(popFactor*30) / 10                // max 3.0 for expansion cities
 			recommended := int(math.Min(estimatedNeed, 5))
+
+			label := "moderate"
+			if score < 2 {
+				label = "low"
+			}
 
 			cities = append(cities, CityOpportunity{
 				City:             ec.City,
@@ -223,8 +237,8 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 				Population:       ec.Pop,
 				MedianIncome:     0,
 				OpportunityScore: score,
-				OpportunityLabel: "moderate",
-				Reasoning:        fmt.Sprintf("New territory — %dk population, no existing bins", ec.Pop/1000),
+				OpportunityLabel: label,
+				Reasoning:        fmt.Sprintf("New territory — %dk population, no existing bins, unvalidated demand", ec.Pop/1000),
 				RecommendedBins:  recommended,
 				TopCorridors:     []string{},
 				CenterLat:        ec.Lat,
@@ -247,9 +261,19 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		allocation := fmt.Sprintf("Focus on %s (highest opportunity). ", strings.Join(highCities, ", "))
+		var allocation string
+		if len(highCities) > 0 {
+			allocation = fmt.Sprintf("Focus on %s (proven demand, highest opportunity). ", strings.Join(highCities, ", "))
+		}
 		if len(modCities) > 0 {
-			allocation += fmt.Sprintf("Secondary: %s.", strings.Join(modCities[:minInt(3, len(modCities))], ", "))
+			if allocation == "" {
+				allocation = fmt.Sprintf("Moderate opportunity in %s. ", strings.Join(modCities[:minInt(3, len(modCities))], ", "))
+			} else {
+				allocation += fmt.Sprintf("Secondary: %s.", strings.Join(modCities[:minInt(3, len(modCities))], ", "))
+			}
+		}
+		if allocation == "" {
+			allocation = "All cities have low opportunity scores — consider improving existing bin placements before expanding."
 		}
 
 		log.Printf("📍 [Opportunities] Computed %d cities in %v (total recommended: %d)", len(cities), time.Since(tStart), totalRec)
