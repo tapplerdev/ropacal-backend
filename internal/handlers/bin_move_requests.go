@@ -3307,3 +3307,64 @@ func GetMoveRequestHistory(db *sqlx.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(history)
 	}
 }
+
+// GetDriverPendingMoves returns pending/assigned/overdue move requests for a specific driver.
+// Used by shift creation to show move request awareness banners.
+func GetDriverPendingMoves(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		driverID := chi.URLParam(r, "id")
+		if driverID == "" {
+			http.Error(w, "Missing driver ID", http.StatusBadRequest)
+			return
+		}
+
+		type PendingMove struct {
+			ID            string  `json:"id" db:"id"`
+			BinID         string  `json:"bin_id" db:"bin_id"`
+			BinNumber     int     `json:"bin_number" db:"bin_number"`
+			Status        string  `json:"status" db:"status"`
+			MoveType      string  `json:"move_type" db:"move_type"`
+			ScheduledDate int64   `json:"scheduled_date" db:"scheduled_date"`
+			Reason        *string `json:"reason" db:"reason"`
+			CurrentStreet string  `json:"current_street" db:"current_street"`
+			City          string  `json:"city" db:"city"`
+			Urgency       string  `json:"urgency"`
+		}
+
+		var moves []PendingMove
+		err := db.Select(&moves, `
+			SELECT mr.id, mr.bin_id, b.bin_number, mr.status, mr.move_type,
+				COALESCE(EXTRACT(EPOCH FROM mr.scheduled_date)::bigint, 0) as scheduled_date,
+				mr.reason, b.current_street, b.city
+			FROM bin_move_requests mr
+			JOIN bins b ON b.id = mr.bin_id
+			WHERE mr.assigned_user_id = $1
+				AND mr.status IN ('pending', 'assigned', 'in_progress')
+			ORDER BY mr.scheduled_date ASC
+		`, driverID)
+		if err != nil {
+			log.Printf("❌ [PendingMoves] DB error: %v", err)
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+
+		// Compute urgency based on scheduled date
+		now := time.Now().Unix()
+		for i := range moves {
+			if moves[i].ScheduledDate == 0 {
+				moves[i].Urgency = "scheduled"
+			} else if moves[i].ScheduledDate < now-7*86400 {
+				moves[i].Urgency = "critical" // overdue >7 days
+			} else if moves[i].ScheduledDate < now {
+				moves[i].Urgency = "overdue"
+			} else if moves[i].ScheduledDate < now+86400 {
+				moves[i].Urgency = "due_today"
+			} else {
+				moves[i].Urgency = "scheduled"
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(moves)
+	}
+}

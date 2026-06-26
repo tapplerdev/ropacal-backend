@@ -450,6 +450,7 @@ r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))           
 			// Fleet management
 			r.Get("/manager/drivers", handlers.GetAllDrivers(db, redisClient))
 			r.Get("/manager/drivers/{driverId}/shifts", handlers.GetDriverShiftHistoryByID(db))
+			r.Get("/manager/drivers/{id}/pending-moves", handlers.GetDriverPendingMoves(db))
 			r.Get("/manager/active-drivers", handlers.GetActiveDrivers(db, redisClient))
 			r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
 
