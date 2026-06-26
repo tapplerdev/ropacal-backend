@@ -58,7 +58,12 @@ type RouteTask struct {
 	CompletedAt           *int64  `json:"completed_at,omitempty" db:"completed_at"`
 	Skipped               bool    `json:"skipped" db:"skipped"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty" db:"updated_fill_percentage"`
-	PhotoURL              *string `json:"photo_url,omitempty" db:"photo_url"` // For bin tasks: from checks table via JOIN. For service tasks: stored directly on route_tasks.
+	PhotoURL              *string  `json:"photo_url,omitempty" db:"photo_url"`
+	AfterPhotoURL         *string  `json:"after_photo_url,omitempty" db:"after_photo_url"`
+	PhotoLatitude         *float64 `json:"photo_latitude,omitempty" db:"photo_latitude"`
+	PhotoLongitude        *float64 `json:"photo_longitude,omitempty" db:"photo_longitude"`
+	AfterPhotoLatitude    *float64 `json:"after_photo_latitude,omitempty" db:"after_photo_latitude"`
+	AfterPhotoLongitude   *float64 `json:"after_photo_longitude,omitempty" db:"after_photo_longitude"`
 
 	// Addition tracking (for audit trail)
 	AddedBy        *string `json:"added_by,omitempty" db:"added_by"`             // User ID who added the task (NULL if created with shift)
