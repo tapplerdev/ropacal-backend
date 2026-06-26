@@ -72,23 +72,27 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 
 		// 2. Get census data grouped by city (aggregate zip-level data)
 		type cityCensus struct {
-			City       string `db:"city"`
-			Population int    `db:"total_pop"`
-			AvgIncome  int    `db:"avg_income"`
+			City       string  `db:"city"`
+			Population int     `db:"total_pop"`
+			AvgIncome  float64 `db:"avg_income"`
 		}
 		var census []cityCensus
-		db.Select(&census, `
+		censusErr := db.Select(&census, `
 			SELECT
 				b.city,
-				SUM(DISTINCT cc.population) as total_pop,
-				AVG(cc.median_household_income) as avg_income
+				COALESCE(SUM(DISTINCT cc.population), 0)::int as total_pop,
+				COALESCE(AVG(cc.median_household_income), 0) as avg_income
 			FROM bins b
 			JOIN census_income_cache cc ON SUBSTRING(b.zip FROM 1 FOR 5) = cc.zip
 			WHERE b.status = 'active' AND cc.population > 0
 			GROUP BY b.city
 		`)
+		if censusErr != nil {
+			log.Printf("⚠️ [Opportunities] Census query failed: %v", censusErr)
+		}
 		censusMap := map[string]cityCensus{}
 		for _, c := range census {
+			log.Printf("📊 [Census] %s: pop=%d, income=%.0f", c.City, c.Population, c.AvgIncome)
 			censusMap[strings.ToLower(c.City)] = c
 		}
 
@@ -132,7 +136,7 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 			income := 0
 			if c, ok := censusMap[strings.ToLower(cs.City)]; ok {
 				pop = c.Population
-				income = c.AvgIncome
+				income = int(c.AvgIncome)
 			}
 
 			// Opportunity score — proven demand cities
@@ -162,23 +166,34 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 				label = "moderate"
 			}
 
-			// Reasoning
+			// Reasoning — operator-friendly language
 			reasoning := ""
-			if cs.BinCount <= 2 && cs.AvgFill > 30 {
-				reasoning = fmt.Sprintf("%d bin(s) serving %dk population at %.0f%% fill — severely underserved",
-					cs.BinCount, pop/1000, cs.AvgFill)
+			corridors := cityCorridors[strings.ToLower(cs.City)]
+			corridorText := ""
+			if len(corridors) > 0 {
+				corridorText = fmt.Sprintf(" Top corridors: %s.", strings.Join(corridors, ", "))
+			}
+
+			if cs.BinCount == 1 && cs.AvgFill > 35 {
+				reasoning = fmt.Sprintf("Only 1 bin filling at %.0f%% — strong demand with almost no coverage. Adding %d bins along major retail corridors would capture unserved donors.%s",
+					cs.AvgFill, recommended, corridorText)
+			} else if cs.BinCount <= 3 && cs.AvgFill > 30 {
+				reasoning = fmt.Sprintf("%d bins filling at %.0f%% average — proven demand but thin coverage. %d more bins would strengthen the network.%s",
+					cs.BinCount, cs.AvgFill, recommended, corridorText)
 			} else if cs.AvgFill > 50 {
-				reasoning = fmt.Sprintf("%d bins averaging %.0f%% fill — high demand, room for more",
-					cs.BinCount, cs.AvgFill)
-			} else if cs.AvgFill < 25 {
-				reasoning = fmt.Sprintf("%d bins averaging only %.0f%% fill — consider relocation over expansion",
+				reasoning = fmt.Sprintf("%d bins averaging %.0f%% fill — highest demand area. These bins are filling fast, adding more along proven corridors will capture overflow.%s",
+					cs.BinCount, cs.AvgFill, corridorText)
+			} else if cs.AvgFill > 30 {
+				reasoning = fmt.Sprintf("%d bins at %.0f%% fill — solid performance. Focus new bins on high-traffic corridors where existing bins do best.%s",
+					cs.BinCount, cs.AvgFill, corridorText)
+			} else if cs.AvgFill > 15 {
+				reasoning = fmt.Sprintf("%d bins averaging %.0f%% fill — moderate performance. Consider relocating underperformers before adding new bins.",
 					cs.BinCount, cs.AvgFill)
 			} else {
-				reasoning = fmt.Sprintf("%d bins at %.0f%% fill — moderate demand",
+				reasoning = fmt.Sprintf("%d bins averaging only %.0f%% fill — low performance suggests poor placement. Prioritize relocation over expansion.",
 					cs.BinCount, cs.AvgFill)
 			}
 
-			corridors := cityCorridors[strings.ToLower(cs.City)]
 			if corridors == nil {
 				corridors = []string{}
 			}
