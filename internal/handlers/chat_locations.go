@@ -912,14 +912,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			hasAnchor = true // restore flag
 		}
 
-		// Reverse geocode (with retry — HERE may throttle after parallel search burst)
+		// Reverse geocode (with retries — HERE may throttle after parallel POI density burst)
+		// Small delay between geocode calls to avoid rate limiting
+		time.Sleep(100 * time.Millisecond)
 		address, zip := reverseGeocodeHERE(c.Lat, c.Lng)
-		if len(address) > 0 && address[0] >= '0' && address[0] <= '9' && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
-			// Got raw coordinates back (no letters = failed geocode) — retry once after delay
-			time.Sleep(300 * time.Millisecond)
-			address, zip = reverseGeocodeHERE(c.Lat, c.Lng)
-			if len(address) > 0 && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
-				log.Printf("⚠️ [Geocode] Retry failed for (%.4f, %.4f) — using coordinates as address", c.Lat, c.Lng)
+		isRawCoords := len(address) > 0 && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+		if isRawCoords {
+			// Retry up to 2 more times with increasing delay
+			for retry := 0; retry < 2 && isRawCoords; retry++ {
+				time.Sleep(time.Duration(300*(retry+1)) * time.Millisecond)
+				address, zip = reverseGeocodeHERE(c.Lat, c.Lng)
+				isRawCoords = len(address) > 0 && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+			}
+			if isRawCoords {
+				log.Printf("⚠️ [Geocode] All retries failed for (%.4f, %.4f) — using coordinates as address", c.Lat, c.Lng)
 			}
 		}
 		if zip != "" {
