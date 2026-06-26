@@ -812,6 +812,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	var recommendations []LocationRecommendation
 	gapResults, expResults := 0, 0
+	cityCount := map[string]int{} // track results per city for diversity cap
+	maxPerCity := count/3 + 2     // e.g., 20 placements → max 8 per city, 10 → max 5
 
 	for idx, c := range topCandidates {
 		if gapResults >= gapCount && expResults >= expansionCount {
@@ -822,6 +824,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			continue
 		}
 		if c.Source == "expansion" && expResults >= expansionCount {
+			continue
+		}
+
+		// City diversity cap — force geographic spread
+		cityKey := strings.ToLower(c.City)
+		if cityCount[cityKey] >= maxPerCity {
+			log.Printf("📍 [Diversity] Skipping %s in %s — city cap reached (%d/%d)", c.NearbyPOI, c.City, cityCount[cityKey], maxPerCity)
 			continue
 		}
 
@@ -878,8 +887,16 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			hasAnchor = true // restore flag
 		}
 
-		// Reverse geocode
+		// Reverse geocode (with retry — HERE may throttle after parallel search burst)
 		address, zip := reverseGeocodeHERE(c.Lat, c.Lng)
+		if len(address) > 0 && address[0] >= '0' && address[0] <= '9' && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
+			// Got raw coordinates back (no letters = failed geocode) — retry once after delay
+			time.Sleep(300 * time.Millisecond)
+			address, zip = reverseGeocodeHERE(c.Lat, c.Lng)
+			if len(address) > 0 && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
+				log.Printf("⚠️ [Geocode] Retry failed for (%.4f, %.4f) — using coordinates as address", c.Lat, c.Lng)
+			}
+		}
 		if zip != "" {
 			c.Zip = zip
 		}
@@ -975,6 +992,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// POI density anchor detection also counts
 			if hasAnchor && anchorScore < 0.7 {
 				anchorScore = 0.7
+			}
+
+			// Fix location type label if name matching found anchor but scorePOIDensity didn't
+			if anchorScore >= 0.7 && !hasAnchor {
+				// Name matching detected an anchor — update the label
+				matchedAnchorName := c.NearbyPOI // use the business name as anchor name
+				if !strings.Contains(c.LocationType, "anchor:") {
+					c.LocationType += " (anchor: " + matchedAnchorName + ")"
+				}
 			}
 
 			// Ensure fill score has a floor (expansion areas with 0 fill shouldn't zero out)
@@ -1077,6 +1103,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			Source:          c.Source,
 		}
 		recommendations = append(recommendations, rec)
+		cityCount[cityKey]++
 		if c.Source != "expansion" {
 			gapResults++
 		} else {
