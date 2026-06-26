@@ -1076,38 +1076,40 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			continue
 		}
 
-		// Build reasoning
-		reasoning := ""
-		if c.Source == "expansion" {
-			reasoning = "expansion area"
-		} else {
-			reasoning = fmt.Sprintf("%.1f mi gap from bin #%d", c.NearestBinDist, c.NearestBinNum)
-		}
-		reasoning += fmt.Sprintf(", fill rate %.1f%%/day", c.NearestFillRate)
-		if income, ok := zipIncome[zip5]; ok && income > 0 {
-			reasoning += fmt.Sprintf(", income $%dk", income/1000)
-		}
-		if pop, ok := zipPopulation[zip5]; ok && pop > 0 {
-			reasoning += fmt.Sprintf(", pop %dk", pop/1000)
-		}
-		if trafficJam > 0 {
-			tLabel := "low"
-			if trafficJam >= 5 {
-				tLabel = "high"
-			} else if trafficJam >= 2 {
-				tLabel = "moderate"
-			}
-			reasoning += fmt.Sprintf(", %s traffic", tLabel)
-		}
-		if poiDensity > 0 {
-			reasoning += fmt.Sprintf(", %d nearby POIs", poiDensity)
-		}
+		// Build reasoning — operator-friendly, explains WHY this location is good
+		var reasoningParts []string
+
+		// Location context
 		if hasAnchor {
-			reasoning += fmt.Sprintf(", near %s", anchorName)
+			poiLabel := anchorName
+			if poiLabel == "" {
+				poiLabel = c.NearbyPOI
+			}
+			reasoningParts = append(reasoningParts, fmt.Sprintf("Near %s", poiLabel))
+		} else if c.NearbyPOI != "" {
+			reasoningParts = append(reasoningParts, fmt.Sprintf("At %s", c.NearbyPOI))
 		}
-		if c.NearbyPOI != "" {
-			reasoning += fmt.Sprintf(", at %s", c.NearbyPOI)
+
+		// POI density context
+		if poiDensity >= 10 {
+			reasoningParts = append(reasoningParts, fmt.Sprintf("busy retail area (%d businesses nearby)", poiDensity))
+		} else if poiDensity >= 5 {
+			reasoningParts = append(reasoningParts, fmt.Sprintf("%d businesses nearby", poiDensity))
 		}
+
+		// Distance from nearest bin
+		if c.Source == "expansion" {
+			reasoningParts = append(reasoningParts, "new territory with no existing bins")
+		} else if c.NearestBinDist > 0 {
+			reasoningParts = append(reasoningParts, fmt.Sprintf("%.1f mi from nearest bin (#%d)", c.NearestBinDist, c.NearestBinNum))
+		}
+
+		// Area demographics
+		if income, ok := zipIncome[zip5]; ok && income > 0 {
+			reasoningParts = append(reasoningParts, fmt.Sprintf("$%dk median income area", income/1000))
+		}
+
+		reasoning := strings.Join(reasoningParts, " · ")
 
 		rec := LocationRecommendation{
 			Latitude:        math.Round(c.Lat*10000) / 10000,
