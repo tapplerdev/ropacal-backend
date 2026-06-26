@@ -307,8 +307,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	count := 10
 	if c, ok := params["count"].(float64); ok && c > 0 {
 		count = int(c)
-		if count > 30 {
-			count = 30
+		if count > 100 {
+			count = 100
 		}
 	}
 	targetCity := ""
