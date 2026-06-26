@@ -963,6 +963,13 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_ai_recommendations_status ON ai_recommendations(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_ai_recommendations_type ON ai_recommendations(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_ai_recommendations_created ON ai_recommendations(created_at DESC)`,
+
+		// Before/after photos + EXIF GPS for collection verification
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS after_photo_url TEXT`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS photo_latitude DOUBLE PRECISION`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS photo_longitude DOUBLE PRECISION`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS after_photo_latitude DOUBLE PRECISION`,
+		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS after_photo_longitude DOUBLE PRECISION`,
 	}
 
 	for _, migration := range migrations {

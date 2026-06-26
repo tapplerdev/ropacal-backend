@@ -577,6 +577,11 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 			BinStreet           *string  `db:"bin_street"            json:"bin_street"`
 			BinCity             *string  `db:"bin_city"              json:"bin_city"`
 			PhotoURL            *string  `db:"photo_url"             json:"photo_url"`
+			AfterPhotoURL       *string  `db:"after_photo_url"       json:"after_photo_url"`
+			PhotoLatitude       *float64 `db:"photo_latitude"        json:"photo_latitude"`
+			PhotoLongitude      *float64 `db:"photo_longitude"       json:"photo_longitude"`
+			AfterPhotoLatitude  *float64 `db:"after_photo_latitude"  json:"after_photo_latitude"`
+			AfterPhotoLongitude *float64 `db:"after_photo_longitude" json:"after_photo_longitude"`
 			// Placement fields
 			PotentialLocationID *string  `db:"potential_location_id" json:"potential_location_id"`
 			NewBinNumber        *int     `db:"new_bin_number"        json:"new_bin_number"`
@@ -615,6 +620,11 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				b.current_street    AS bin_street,
 				b.city              AS bin_city,
 				COALESCE(bc.photo_url, rt.photo_url) AS photo_url,
+				rt.after_photo_url,
+				rt.photo_latitude,
+				rt.photo_longitude,
+				rt.after_photo_latitude,
+				rt.after_photo_longitude,
 				rt.potential_location_id,
 				rt.new_bin_number,
 				pl.address          AS placement_address,
@@ -1736,7 +1746,12 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			TaskID                string     `json:"task_id"`                      // ID of route_tasks record (identifies specific waypoint)
 			BinID                 string  `json:"bin_id"`                            // DEPRECATED: Use task_id instead
 			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
-			PhotoUrl              *string `json:"photo_url,omitempty"`
+			PhotoUrl              *string `json:"photo_url,omitempty"`               // "Before" photo — bin contents before collection
+			AfterPhotoUrl         *string `json:"after_photo_url,omitempty"`          // "After" photo — bin empty after collection
+			PhotoLatitude         *float64 `json:"photo_latitude,omitempty"`          // EXIF GPS from before photo
+			PhotoLongitude        *float64 `json:"photo_longitude,omitempty"`         // EXIF GPS from before photo
+			AfterPhotoLatitude    *float64 `json:"after_photo_latitude,omitempty"`    // EXIF GPS from after photo
+			AfterPhotoLongitude   *float64 `json:"after_photo_longitude,omitempty"`   // EXIF GPS from after photo
 			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
 			NewBinNumber          int     `json:"new_bin_number"`                // REQUIRED: Driver-provided bin number for placements
 			CompletionNotes       *string `json:"completion_notes,omitempty"`     // Driver notes for service tasks
@@ -1875,16 +1890,22 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				return
 			}
 		}
-		// Update the task as completed
+		// Update the task as completed (with before/after photos + EXIF GPS)
 		updateQuery := `UPDATE route_tasks
 						SET is_completed = 1,
 							completed_at = $1,
 							updated_fill_percentage = $2,
 							completion_notes = $3,
 							updated_at = $4,
-							photo_url = $6
+							photo_url = $6,
+							after_photo_url = $7,
+							photo_latitude = $8,
+							photo_longitude = $9,
+							after_photo_latitude = $10,
+							after_photo_longitude = $11
 						WHERE id = $5`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, req.CompletionNotes, now, taskID, req.PhotoUrl)
+		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, req.CompletionNotes, now, taskID,
+			req.PhotoUrl, req.AfterPhotoUrl, req.PhotoLatitude, req.PhotoLongitude, req.AfterPhotoLatitude, req.AfterPhotoLongitude)
 		if err != nil {
 			log.Printf("❌ Error marking task as completed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
@@ -5778,8 +5799,13 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 	BinID                 string  `json:"bin_id"`
 	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
 	PhotoUrl              *string `json:"photo_url,omitempty"`
-	MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
-	NewBinNumber          int     `json:"new_bin_number"`            // Required for placements (not used for moves)
+	AfterPhotoUrl         *string `json:"after_photo_url,omitempty"`
+	PhotoLatitude         *float64 `json:"photo_latitude,omitempty"`
+	PhotoLongitude        *float64 `json:"photo_longitude,omitempty"`
+	AfterPhotoLatitude    *float64 `json:"after_photo_latitude,omitempty"`
+	AfterPhotoLongitude   *float64 `json:"after_photo_longitude,omitempty"`
+	MoveRequestID         *string `json:"move_request_id,omitempty"`
+	NewBinNumber          int     `json:"new_bin_number"`
 	CompletionNotes       *string `json:"completion_notes,omitempty"`
 	HasIncident           bool    `json:"has_incident"`
 	IncidentType          *string `json:"incident_type,omitempty"`
