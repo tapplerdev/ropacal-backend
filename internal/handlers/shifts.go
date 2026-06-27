@@ -103,7 +103,7 @@ func archiveShift(exec shiftHistoryExec, p archiveShiftParams) (sql.Result, erro
 }
 
 // GetCurrentShift returns the current active shift for the driver
-func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
+func GetCurrentShift(store ShiftStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: GET /api/driver/shift/current")
 
@@ -115,34 +115,14 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
-		// Check what shifts exist for this driver (for debugging)
-		var allShifts []models.Shift
-		debugQuery := `SELECT id, status, created_at FROM shifts WHERE driver_id = $1 ORDER BY created_at DESC LIMIT 3`
-		db.Select(&allShifts, debugQuery, userClaims.UserID)
-		log.Printf("   🔍 DEBUG: Found %d total shifts for this driver:", len(allShifts))
-		for i, s := range allShifts {
-			log.Printf("      %d. Shift ID: %s, Status: %s, Created: %v", i+1, s.ID, s.Status, s.CreatedAt)
-		}
+		ctx := r.Context()
 
-		var shift models.Shift
 		// Prioritize active/paused shifts (any date), then ready shifts for today or earlier.
 		// Future-scheduled ready shifts only show on or after their scheduled_date.
 		pacific, _ := time.LoadLocation("America/Los_Angeles")
 		todayStr := time.Now().In(pacific).Format("2006-01-02")
-		query := `SELECT * FROM shifts
-				  WHERE driver_id = $1
-				  AND status IN ('active', 'paused', 'ready')
-				  AND (status IN ('active', 'paused') OR scheduled_date IS NULL OR scheduled_date <= $2)
-				  ORDER BY
-			    CASE status
-			      WHEN 'active' THEN 1
-			      WHEN 'paused' THEN 2
-			      WHEN 'ready' THEN 3
-			    END ASC,
-			    created_at DESC
-				  LIMIT 1`
 
-		err := db.Get(&shift, query, userClaims.UserID, todayStr)
+		shift, err := store.CurrentByDriver(ctx, userClaims.UserID, todayStr)
 		if err == sql.ErrNoRows {
 			log.Printf("📤 RESPONSE: 200 - No active shift found")
 			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
@@ -157,27 +137,22 @@ func GetCurrentShift(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get route bins with details (for backward compatibility)
-		bins, err := getShiftTasksWithDetails(db, shift.ID)
-		if err != nil {
+		// Fetch the legacy bin-detail view. It isn't part of the response, but the
+		// original handler 500s if it fails — preserve that behavior exactly.
+		if _, err := store.TasksWithDetails(ctx, shift.ID); err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route bins")
 			return
 		}
 
-		// Also get tasks from route_tasks table (new task-based system)
-		tasks, err := database.GetShiftTasks(db, shift.ID)
+		// Get tasks from route_tasks table (new task-based system)
+		tasks, err := store.Tasks(ctx, shift.ID)
 		if err != nil {
 			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
 			tasks = []models.RouteTask{} // Empty tasks array on error
 		}
 
-		log.Printf("📤 RESPONSE: 200 OK")
-		log.Printf("   Shift ID: %s", shift.ID)
-		log.Printf("   Status: %s", shift.Status)
-		log.Printf("   Route: %v", shift.RouteID)
-		log.Printf("   Bins: %d/%d (%d bin details)", shift.CompletedBins, shift.TotalBins, len(bins))
-		log.Printf("   Tasks: %d (new task-based system)", len(tasks))
+		log.Printf("📤 RESPONSE: 200 OK — shift %s status %s, %d tasks", shift.ID, shift.Status, len(tasks))
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,

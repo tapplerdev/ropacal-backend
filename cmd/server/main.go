@@ -356,7 +356,7 @@ func main() {
 			}
 
 			// Shift management
-			r.Get("/driver/shift/current", handlers.GetCurrentShift(db))
+			r.Get("/driver/shift/current", handlers.GetCurrentShift(handlers.NewSQLShiftStore(db)))
 			r.Post("/driver/shift/preflight", handlers.PreflightCheck(db, redisClient))
 			r.Post("/driver/shift/start", handlers.StartShift(db, wsHub, redisClient, centrifugoClient))
 			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub, centrifugoClient))
