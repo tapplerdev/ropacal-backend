@@ -10,6 +10,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/websocket"
 )
 
 // fakeShiftStore is an in-memory ShiftStore for tests — no database required.
@@ -26,6 +27,15 @@ func (f fakeShiftStore) CurrentByDriver(_ context.Context, _, _ string) (*models
 	return f.shift, f.shiftErr
 }
 func (f fakeShiftStore) ByIDForDriver(_ context.Context, _, _ string) (*models.Shift, error) {
+	return f.shift, f.shiftErr
+}
+func (f fakeShiftStore) PauseByDriver(_ context.Context, _ string, _ int64) (*models.Shift, error) {
+	return f.shift, f.shiftErr
+}
+func (f fakeShiftStore) PausedByDriver(_ context.Context, _ string) (*models.Shift, error) {
+	return f.shift, f.shiftErr
+}
+func (f fakeShiftStore) ResumeByID(_ context.Context, _ string, _, _ int64) (*models.Shift, error) {
 	return f.shift, f.shiftErr
 }
 func (f fakeShiftStore) TasksWithDetails(_ context.Context, _ string) ([]models.ShiftBinWithDetails, error) {
@@ -158,6 +168,67 @@ func TestGetShiftDetails_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d", rec.Code)
+	}
+}
+
+func TestPauseShift_Success(t *testing.T) {
+	// Regression guard for the long-standing $1-reuse bug: pause must now succeed
+	// and report the paused state. Uses an in-memory hub + nil Centrifugo — no
+	// live broadcasts.
+	pst := int64(1700000000)
+	h := PauseShift(fakeShiftStore{
+		shift: &models.Shift{ID: "s1", DriverID: "d1", Status: "paused", PauseStartTime: &pst},
+	}, websocket.NewHub(), nil)
+	rec := httptest.NewRecorder()
+	h(rec, withDriver("d1"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !resp.Success || resp.Data["status"] != "paused" {
+		t.Fatalf("want paused, got %+v", resp)
+	}
+}
+
+func TestPauseShift_NoActiveShift(t *testing.T) {
+	h := PauseShift(fakeShiftStore{shiftErr: sql.ErrNoRows}, websocket.NewHub(), nil)
+	rec := httptest.NewRecorder()
+	h(rec, withDriver("d1"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", rec.Code)
+	}
+}
+
+func TestResumeShift_Success(t *testing.T) {
+	pst := int64(1700000000)
+	h := ResumeShift(fakeShiftStore{
+		shift: &models.Shift{ID: "s1", DriverID: "d1", Status: "active", PauseStartTime: &pst, TotalPauseSeconds: 10},
+	}, websocket.NewHub(), nil)
+	rec := httptest.NewRecorder()
+	h(rec, withDriver("d1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Data["status"] != "active" {
+		t.Fatalf("want active, got %+v", resp.Data)
+	}
+}
+
+func TestResumeShift_NoPausedShift(t *testing.T) {
+	h := ResumeShift(fakeShiftStore{shiftErr: sql.ErrNoRows}, websocket.NewHub(), nil)
+	rec := httptest.NewRecorder()
+	h(rec, withDriver("d1"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", rec.Code)
 	}
 }
 

@@ -1276,7 +1276,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 }
 
 // PauseShift pauses an active shift
-func PauseShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func PauseShift(store ShiftStore, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: POST /api/driver/shift/pause")
 
@@ -1288,30 +1288,19 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Cl
 
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
+		ctx := r.Context()
 		now := time.Now().Unix()
-		query := `UPDATE shifts
-				  SET status = 'paused',
-					  pause_start_time = $1,
-					  updated_at = $2
-				  WHERE driver_id = $1
-				  AND status = 'active'`
 
-		result, err := db.Exec(query, now, now, userClaims.UserID)
+		shift, err := store.PauseByDriver(ctx, userClaims.UserID, now)
+		if err == sql.ErrNoRows {
+			utils.RespondError(w, http.StatusBadRequest, "No active shift to pause")
+			return
+		}
 		if err != nil {
 			log.Printf("❌ Error pausing shift: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to pause shift")
 			return
 		}
-
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected == 0 {
-			utils.RespondError(w, http.StatusBadRequest, "No active shift to pause")
-			return
-		}
-
-		// Get updated shift
-		var shift models.Shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, userClaims.UserID)
 
 		// Broadcast WebSocket update to driver
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
@@ -1357,16 +1346,16 @@ func PauseShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Cl
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
-			"data": map[string]interface{}{
-				"status":           shift.Status,
-				"pause_start_time": shift.PauseStartTime,
+			"data": pauseResponse{
+				PauseStartTime: shift.PauseStartTime,
+				Status:         shift.Status,
 			},
 		})
 	}
 }
 
 // ResumeShift resumes a paused shift
-func ResumeShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func ResumeShift(store ShiftStore, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -1374,39 +1363,30 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.C
 			return
 		}
 
-		// Get current shift
-		var shift models.Shift
-		err := db.Get(&shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, userClaims.UserID)
+		ctx := r.Context()
+
+		// Get the paused shift
+		paused, err := store.PausedByDriver(ctx, userClaims.UserID)
 		if err != nil {
 			utils.RespondError(w, http.StatusBadRequest, "No paused shift to resume")
 			return
 		}
 
-		// Calculate pause duration
+		// Calculate accumulated pause duration
 		pauseDuration := 0
-		if shift.PauseStartTime != nil {
-			pauseDuration = int(time.Now().Unix() - *shift.PauseStartTime)
+		if paused.PauseStartTime != nil {
+			pauseDuration = int(time.Now().Unix() - *paused.PauseStartTime)
 		}
-		totalPause := shift.TotalPauseSeconds + pauseDuration
+		totalPause := paused.TotalPauseSeconds + pauseDuration
 
-		// Update shift
+		// Flip back to active with the updated pause total
 		now := time.Now().Unix()
-		query := `UPDATE shifts
-				  SET status = 'active',
-					  total_pause_seconds = $1,
-					  pause_start_time = NULL,
-					  updated_at = $2
-				  WHERE id = $3`
-
-		_, err = db.Exec(query, totalPause, now, shift.ID)
+		shift, err := store.ResumeByID(ctx, paused.ID, int64(totalPause), now)
 		if err != nil {
 			log.Printf("❌ Error resuming shift: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to resume shift")
 			return
 		}
-
-		// Get updated shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
 		// Broadcast WebSocket update to driver
 		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
@@ -1452,9 +1432,9 @@ func ResumeShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.C
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
-			"data": map[string]interface{}{
-				"status":              shift.Status,
-				"total_pause_seconds": shift.TotalPauseSeconds,
+			"data": resumeResponse{
+				Status:            shift.Status,
+				TotalPauseSeconds: shift.TotalPauseSeconds,
 			},
 		})
 	}

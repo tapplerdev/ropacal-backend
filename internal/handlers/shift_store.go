@@ -24,6 +24,14 @@ type ShiftStore interface {
 	// ByIDForDriver returns a specific shift owned by the given driver (the
 	// driver_id scope enforces ownership). Returns an error if not found.
 	ByIDForDriver(ctx context.Context, shiftID, driverID string) (*models.Shift, error)
+	// PauseByDriver flips the driver's ACTIVE shift to paused and returns the
+	// updated shift. Returns sql.ErrNoRows if the driver has no active shift.
+	PauseByDriver(ctx context.Context, driverID string, now int64) (*models.Shift, error)
+	// PausedByDriver returns the driver's paused shift, or sql.ErrNoRows if none.
+	PausedByDriver(ctx context.Context, driverID string) (*models.Shift, error)
+	// ResumeByID flips a shift back to active, setting total_pause_seconds, and
+	// returns the updated shift.
+	ResumeByID(ctx context.Context, shiftID string, totalPauseSeconds, now int64) (*models.Shift, error)
 	// TasksWithDetails returns the legacy bin-detail view for a shift.
 	TasksWithDetails(ctx context.Context, shiftID string) ([]models.ShiftBinWithDetails, error)
 	// Tasks returns the route_tasks for a shift.
@@ -70,6 +78,18 @@ type shiftDetailsResponse struct {
 	UpdatedAt         int64              `json:"updated_at"`
 }
 
+// pauseResponse / resumeResponse are the typed `data` payloads for the pause and
+// resume endpoints (replacing ad-hoc maps).
+type pauseResponse struct {
+	PauseStartTime *int64             `json:"pause_start_time"`
+	Status         models.ShiftStatus `json:"status"`
+}
+
+type resumeResponse struct {
+	Status            models.ShiftStatus `json:"status"`
+	TotalPauseSeconds int                `json:"total_pause_seconds"`
+}
+
 // sqlShiftStore is the Postgres-backed ShiftStore.
 type sqlShiftStore struct {
 	db *sqlx.DB
@@ -106,6 +126,41 @@ func (s *sqlShiftStore) CurrentByDriver(ctx context.Context, driverID, today str
 func (s *sqlShiftStore) ByIDForDriver(ctx context.Context, shiftID, driverID string) (*models.Shift, error) {
 	var shift models.Shift
 	if err := s.db.GetContext(ctx, &shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, driverID); err != nil {
+		return nil, err
+	}
+	return &shift, nil
+}
+
+// PauseByDriver fixes the long-standing bug where the UPDATE reused $1 for both
+// pause_start_time and driver_id (so it always errored). Correct params: $1/$2
+// timestamps, $3 driver_id. RETURNING * gives the updated row in one round-trip.
+func (s *sqlShiftStore) PauseByDriver(ctx context.Context, driverID string, now int64) (*models.Shift, error) {
+	var shift models.Shift
+	err := s.db.GetContext(ctx, &shift, `UPDATE shifts
+		SET status = 'paused', pause_start_time = $1, updated_at = $2
+		WHERE driver_id = $3 AND status = 'active'
+		RETURNING *`, now, now, driverID)
+	if err != nil {
+		return nil, err
+	}
+	return &shift, nil
+}
+
+func (s *sqlShiftStore) PausedByDriver(ctx context.Context, driverID string) (*models.Shift, error) {
+	var shift models.Shift
+	if err := s.db.GetContext(ctx, &shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, driverID); err != nil {
+		return nil, err
+	}
+	return &shift, nil
+}
+
+func (s *sqlShiftStore) ResumeByID(ctx context.Context, shiftID string, totalPauseSeconds, now int64) (*models.Shift, error) {
+	var shift models.Shift
+	err := s.db.GetContext(ctx, &shift, `UPDATE shifts
+		SET status = 'active', total_pause_seconds = $1, pause_start_time = NULL, updated_at = $2
+		WHERE id = $3
+		RETURNING *`, totalPauseSeconds, now, shiftID)
+	if err != nil {
 		return nil, err
 	}
 	return &shift, nil

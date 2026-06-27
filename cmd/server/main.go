@@ -246,7 +246,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "tier3-incr2-shiftdetails",
+			"version": "tier3-incr3-pause-resume-fix",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -359,8 +359,8 @@ func main() {
 			r.Get("/driver/shift/current", handlers.GetCurrentShift(handlers.NewSQLShiftStore(db)))
 			r.Post("/driver/shift/preflight", handlers.PreflightCheck(db, redisClient))
 			r.Post("/driver/shift/start", handlers.StartShift(db, wsHub, redisClient, centrifugoClient))
-			r.Post("/driver/shift/pause", handlers.PauseShift(db, wsHub, centrifugoClient))
-			r.Post("/driver/shift/resume", handlers.ResumeShift(db, wsHub, centrifugoClient))
+			r.Post("/driver/shift/pause", handlers.PauseShift(handlers.NewSQLShiftStore(db), wsHub, centrifugoClient))
+			r.Post("/driver/shift/resume", handlers.ResumeShift(handlers.NewSQLShiftStore(db), wsHub, centrifugoClient))
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub, centrifugoClient))
 			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub, centrifugoClient))
 			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, redisClient, wsHub, centrifugoClient))
