@@ -623,6 +623,10 @@ func formatIncidentTypeLabel(t string) string {
 
 // createZoneAndIncident creates a new zone + incident for each report.
 // Each incident gets its own zone (1:1). No clustering or merging.
+//
+// This is a thin wrapper around createZoneAndIncidentExt that runs the inserts
+// on the bare *sqlx.DB pool. Callers that need the writes to participate in an
+// existing transaction should call createZoneAndIncidentExt with their tx.
 func createZoneAndIncident(
 	db *sqlx.DB,
 	centrifugoClient *centrifugo.Client,
@@ -642,9 +646,52 @@ func createZoneAndIncident(
 	source *string,
 	moveRequestID *string,
 ) (string, error) {
+	return createZoneAndIncidentExt(
+		db,
+		lat, lng,
+		zoneName,
+		incidentType,
+		binID,
+		reportedByUserID,
+		description,
+		photoURL,
+		shiftID,
+		checkID,
+		reporterLat,
+		reporterLng,
+		isFieldObservation,
+		now,
+		source,
+		moveRequestID,
+	)
+}
+
+// createZoneAndIncidentExt is the sqlx.Ext-based implementation of
+// createZoneAndIncident. It accepts any handle satisfying sqlx.Ext (both the
+// *sqlx.DB pool and a *sqlx.Tx), so callers can run the two inserts inside an
+// existing transaction. The centrifugoClient is intentionally not a parameter
+// here since this function performs no broadcasting.
+func createZoneAndIncidentExt(
+	ext sqlx.Ext,
+	lat, lng float64,
+	zoneName string,
+	incidentType string,
+	binID *string,
+	reportedByUserID string,
+	description *string,
+	photoURL *string,
+	shiftID *string,
+	checkID *int,
+	reporterLat *float64,
+	reporterLng *float64,
+	isFieldObservation bool,
+	now int64,
+	source *string,
+	moveRequestID *string,
+) (string, error) {
 	// 1. Always create a new zone for this incident
 	zoneID := uuid.New().String()
-	if _, err := db.Exec(`
+	if _, err := ext.Exec(`
 		INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, 0, 0, 'active', $5, $6, $6)
 	`, zoneID, zoneName, lat, lng, reportedByUserID, now); err != nil {
@@ -654,7 +701,7 @@ func createZoneAndIncident(
 
 	// 2. Insert incident record
 	incidentID := uuid.New().String()
-	if _, err := db.Exec(`
+	if _, err := ext.Exec(`
 		INSERT INTO zone_incidents (
 			id, zone_id, bin_id, incident_type,
 			reported_by_user_id, reported_at,

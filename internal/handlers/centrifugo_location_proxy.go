@@ -237,6 +237,14 @@ const autoEndTimeoutMinutes = 5
 // checkWarehouseProximity checks if a driver is near the warehouse with all tasks done.
 // If so, prompts the driver to end the shift. If ignored for 5 minutes, auto-ends.
 func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService, driverID string, shiftID string, driverLat, driverLon float64) {
+	// Runs in a fire-and-forget goroutine — recover from any panic (e.g. a nil
+	// deref) so it can't take down the whole server.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("❌ [PROXIMITY] Recovered from panic in checkWarehouseProximity (driver=%s, shift=%s): %v", driverID, shiftID, rec)
+		}
+	}()
+
 	// 1. Get shift status and ready_to_end_at
 	var shift struct {
 		Status             string   `db:"status"`
@@ -293,13 +301,17 @@ func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, f
 
 	// Set ready_to_end_at timestamp
 	now := time.Now().Unix()
-	db.Exec(`UPDATE shifts SET ready_to_end_at = $1 WHERE id = $2`, now, shiftID)
+	if _, err := db.Exec(`UPDATE shifts SET ready_to_end_at = $1 WHERE id = $2`, now, shiftID); err != nil {
+		log.Printf("⚠️  [PROXIMITY] Failed to set ready_to_end_at for shift %s: %v", shiftID, err)
+	}
 
 	// Auto-complete warehouse_stop tasks
-	db.Exec(`
+	if _, err := db.Exec(`
 		UPDATE route_tasks SET is_completed = 1, completed_at = $1, updated_at = $1
 		WHERE shift_id = $2 AND task_type = 'warehouse_stop' AND is_completed = 0 AND is_deleted = false
-	`, now, shiftID)
+	`, now, shiftID); err != nil {
+		log.Printf("⚠️  [PROXIMITY] Failed to auto-complete warehouse_stop tasks for shift %s: %v", shiftID, err)
+	}
 
 	// Send Centrifugo event to driver
 	ctx := context.Background()
@@ -353,7 +365,7 @@ func proximityAutoEndShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcm
 	}
 
 	// Archive to shift_history
-	db.Exec(`
+	if _, err := db.Exec(`
 		INSERT INTO shift_history (
 			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 			total_pause_seconds, total_bins, completed_bins, completion_rate,
@@ -363,13 +375,19 @@ func proximityAutoEndShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcm
 		ON CONFLICT (id) DO NOTHING
 	`, shiftID, driverID, shift.RouteID, shift.StartTime, now, shift.CreatedAt, now,
 		shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
-		0, 0, "completed", nil, nil, nil)
+		0, 0, "completed", nil, nil, nil); err != nil {
+		log.Printf("⚠️  [PROXIMITY] Failed to archive shift %s to shift_history: %v", shiftID[:12], err)
+	}
 
 	// Update shift status
-	db.Exec(`UPDATE shifts SET status = 'ended', end_time = $1, pause_start_time = NULL, ready_to_end_at = NULL, updated_at = $2 WHERE id = $3`, now, now, shiftID)
+	if _, err := db.Exec(`UPDATE shifts SET status = 'ended', end_time = $1, pause_start_time = NULL, ready_to_end_at = NULL, updated_at = $2 WHERE id = $3`, now, now, shiftID); err != nil {
+		log.Printf("⚠️  [PROXIMITY] Failed to update shift %s status to ended: %v", shiftID[:12], err)
+	}
 
 	// Return incomplete move requests to pending
-	db.Exec(`UPDATE bin_move_requests SET status = 'pending', assigned_shift_id = NULL, updated_at = $1 WHERE assigned_shift_id = $2 AND status = 'in_progress'`, now, shiftID)
+	if _, err := db.Exec(`UPDATE bin_move_requests SET status = 'pending', assigned_shift_id = NULL, updated_at = $1 WHERE assigned_shift_id = $2 AND status = 'in_progress'`, now, shiftID); err != nil {
+		log.Printf("⚠️  [PROXIMITY] Failed to return incomplete move requests to pending for shift %s: %v", shiftID[:12], err)
+	}
 
 	log.Printf("✅ [PROXIMITY] Shift %s auto-ended — driver near warehouse, all tasks done", shiftID[:12])
 

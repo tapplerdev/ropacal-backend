@@ -1212,7 +1212,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 
 		// Also publish via Centrifugo shift channel
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
+			if pubErr := centrifugoClient.PublishShiftUpdate(context.Background(), shift.ID, map[string]interface{}{
 				"type": "shift_update",
 				"data": shiftUpdateData,
 			}); pubErr != nil {
@@ -1244,7 +1244,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 
 		// Also publish via Centrifugo for mobile app notification pipeline
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "driver_shift_change", map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,

@@ -1,8 +1,8 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -48,29 +48,29 @@ func GetAIRecommendations(db *sqlx.DB) http.HandlerFunc {
 		argIdx := 1
 
 		if status != "" && status != "all" {
-			query += ` AND status = $` + string(rune('0'+argIdx))
+			query += fmt.Sprintf(` AND status = $%d`, argIdx)
 			args = append(args, status)
 			argIdx++
 		}
 		if recType != "" {
-			query += ` AND type = $` + string(rune('0'+argIdx))
+			query += fmt.Sprintf(` AND type = $%d`, argIdx)
 			args = append(args, recType)
 			argIdx++
 		}
 
 		// Exclude expired recommendations
 		now := time.Now().Unix()
-		query += ` AND (expires_at IS NULL OR expires_at > $` + string(rune('0'+argIdx)) + `)`
+		query += fmt.Sprintf(` AND (expires_at IS NULL OR expires_at > $%d)`, argIdx)
 		args = append(args, now)
 		argIdx++
 
 		// Exclude snoozed recommendations that haven't reached their snooze time
-		query += ` AND (snoozed_until IS NULL OR snoozed_until <= $` + string(rune('0'+argIdx)) + `)`
+		query += fmt.Sprintf(` AND (snoozed_until IS NULL OR snoozed_until <= $%d)`, argIdx)
 		args = append(args, now)
 		argIdx++
 
 		query += ` ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at DESC`
-		query += ` LIMIT $` + string(rune('0'+argIdx))
+		query += fmt.Sprintf(` LIMIT $%d`, argIdx)
 		args = append(args, limit)
 
 		var recs []AIRecommendation
@@ -227,6 +227,3 @@ func GetPendingRecommendationCount(db *sqlx.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]int{"count": count})
 	}
 }
-
-// Suppress unused import
-var _ = sql.ErrNoRows

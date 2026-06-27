@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -83,7 +84,7 @@ func (c *Client) GetAllDriverLocations(ctx context.Context) (map[string]string, 
 
 		// Extract driver ID from key (ropacal:driver:{id}:location)
 		// Split by ":" and get the 3rd element (index 2)
-		parts := splitKey(key)
+		parts := strings.Split(key, ":")
 		if len(parts) == 4 && parts[0] == "ropacal" && parts[1] == "driver" && parts[3] == "location" {
 			driverID := parts[2]
 			result[driverID] = locationJSON
@@ -97,27 +98,4 @@ func (c *Client) GetAllDriverLocations(ctx context.Context) (map[string]string, 
 func (c *Client) DeleteDriverLocation(ctx context.Context, driverID string) error {
 	key := fmt.Sprintf("ropacal:driver:%s:location", driverID)
 	return c.Del(ctx, key).Err()
-}
-
-// Helper function to split Redis key by ":"
-func splitKey(key string) []string {
-	var parts []string
-	var current string
-
-	for _, char := range key {
-		if char == ':' {
-			if current != "" {
-				parts = append(parts, current)
-				current = ""
-			}
-		} else {
-			current += string(char)
-		}
-	}
-
-	if current != "" {
-		parts = append(parts, current)
-	}
-
-	return parts
 }

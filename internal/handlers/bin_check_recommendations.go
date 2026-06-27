@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 
 	"github.com/go-chi/chi/v5"
@@ -223,7 +224,12 @@ func GetBinCheckRecommendations(db *sqlx.DB) http.HandlerFunc {
 func DismissBinCheckRecommendation(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		recommendationID := chi.URLParam(r, "id")
-		userID, _ := r.Context().Value("user_id").(string)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		userID := userClaims.UserID
 
 		var req struct {
 			Notes *string `json:"notes"`

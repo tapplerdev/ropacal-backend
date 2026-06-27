@@ -420,17 +420,11 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			log.Printf("✅ [UPDATE-BIN] Check record created")
 		}
 
-		// Commit transaction
-		log.Printf("💾 [UPDATE-BIN] Committing transaction")
-		if err := tx.Commit(); err != nil {
-			log.Printf("❌ [UPDATE-BIN] Failed to commit transaction: %v", err)
-			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
-			return
-		}
-
-		log.Printf("✅ [UPDATE-BIN] Transaction committed successfully")
-
 		// ── Change log + optional no-go zone creation ───────────────────────────
+		// NOTE: All follow-on writes below run inside the SAME transaction (tx)
+		// opened above. The transaction is committed once at the very end so a
+		// failure in any follow-on write rolls back the entire update (no partial
+		// state).
 		nowUnix := time.Now().Unix()
 
 		// ── Potential Location Conversion (if bin relocated to potential location) ──
@@ -459,7 +453,7 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				// Build full address for snapshot (use new address from request)
 				fullAddress := fmt.Sprintf("%s, %s, %s", req.CurrentStreet, req.City, req.Zip)
 
-				_, err = db.Exec(`
+				_, err = tx.Exec(`
 					UPDATE potential_locations
 					SET converted_to_bin_id = $1,
 						converted_bin_number_snapshot = $2,
@@ -474,11 +468,12 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				`, id, existing.BinNumber, fullAddress, nowUnix, userID, string(metadataJSON), *req.SourcePotentialLocationID)
 
 				if err != nil {
-					log.Printf("[UPDATE-BIN] ⚠️  Error capturing relocation snapshot: %v", err)
-				} else {
-					log.Printf("[UPDATE-BIN] ✅ Relocation snapshot captured: Bin #%d moved from %s to %s",
-						existing.BinNumber, metadata["bin_previous_address"], fullAddress)
+					log.Printf("[UPDATE-BIN] ❌ Error capturing relocation snapshot: %v", err)
+					http.Error(w, "Failed to capture relocation snapshot", http.StatusInternalServerError)
+					return
 				}
+				log.Printf("[UPDATE-BIN] ✅ Relocation snapshot captured: Bin #%d moved from %s to %s",
+					existing.BinNumber, metadata["bin_previous_address"], fullAddress)
 			}
 		}
 
@@ -545,7 +540,7 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 			// Update potential location status
 			if newStatus != "active" {
-				_, err = db.Exec(`
+				_, err = tx.Exec(`
 					UPDATE potential_locations
 					SET bin_current_status = $1,
 						updated_at = $2
@@ -553,10 +548,11 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				`, newStatus, nowUnix, *existing.SourcePotentialLocationID)
 
 				if err != nil {
-					log.Printf("[UPDATE-BIN] ⚠️  Error updating potential location status: %v", err)
-				} else {
-					log.Printf("[UPDATE-BIN] ✅ Potential location status updated to '%s'", newStatus)
+					log.Printf("[UPDATE-BIN] ❌ Error updating potential location status: %v", err)
+					http.Error(w, "Failed to update potential location status", http.StatusInternalServerError)
+					return
 				}
+				log.Printf("[UPDATE-BIN] ✅ Potential location status updated to '%s'", newStatus)
 			}
 		}
 
@@ -591,9 +587,10 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				adminBinChangeSource := "admin_bin_change"
 				incidentDesc := fmt.Sprintf("Bin #%d address updated by manager. Previous location flagged — %s", existing.BinNumber, formatIncidentTypeLabel(*req.ReasonCategory))
 				binIDCopy := id
-				_, zoneErr := createZoneAndIncident(
-					db,
-					centrifugoClient,
+				// Run on the same transaction so the zone + incident are atomic
+				// with the bin update and change-log write below.
+				_, zoneErr := createZoneAndIncidentExt(
+					tx,
 					*existing.Latitude, *existing.Longitude,
 					zoneName,
 					*req.ReasonCategory,
@@ -610,23 +607,24 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 					nil, // moveRequestID
 				)
 				if zoneErr != nil {
-					log.Printf("⚠️  [UPDATE-BIN] Failed to create no-go zone: %v", zoneErr)
-				} else {
-					noGoZoneCreated = true
-					// Fetch the zone ID just created (nearest active zone at old coords)
-					var fetchedZoneID string
-					if fetchErr := db.QueryRow(
-						`SELECT id FROM no_go_zones WHERE status='active'
-						 ORDER BY (center_latitude - $1)^2 + (center_longitude - $2)^2 ASC LIMIT 1`,
-						*existing.Latitude, *existing.Longitude,
-					).Scan(&fetchedZoneID); fetchErr == nil {
-						noGoZoneID = &fetchedZoneID
-					}
-					log.Printf("✅ [UPDATE-BIN] No-go zone created at old location (%s)", zoneName)
+					log.Printf("❌ [UPDATE-BIN] Failed to create no-go zone: %v", zoneErr)
+					http.Error(w, "Failed to create no-go zone", http.StatusInternalServerError)
+					return
 				}
+				noGoZoneCreated = true
+				// Fetch the zone ID just created (nearest active zone at old coords)
+				var fetchedZoneID string
+				if fetchErr := tx.QueryRow(
+					`SELECT id FROM no_go_zones WHERE status='active'
+					 ORDER BY (center_latitude - $1)^2 + (center_longitude - $2)^2 ASC LIMIT 1`,
+					*existing.Latitude, *existing.Longitude,
+				).Scan(&fetchedZoneID); fetchErr == nil {
+					noGoZoneID = &fetchedZoneID
+				}
+				log.Printf("✅ [UPDATE-BIN] No-go zone created at old location (%s)", zoneName)
 			}
 
-			_, logErr := db.Exec(`
+			_, logErr := tx.Exec(`
 				INSERT INTO bin_change_log
 					(id, bin_id, changed_by_user_id, created_at, change_type,
 					 old_values, new_values, reason_category, reason_notes,
@@ -639,14 +637,19 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				noGoZoneCreated, noGoZoneID,
 			)
 			if logErr != nil {
-				log.Printf("⚠️  [UPDATE-BIN] Failed to write change log: %v", logErr)
-				// Non-fatal — bin was already updated successfully
-			} else {
-				log.Printf("✅ [UPDATE-BIN] Change log entry created (%s)", changeType)
+				log.Printf("❌ [UPDATE-BIN] Failed to write change log: %v", logErr)
+				http.Error(w, "Failed to write change log", http.StatusInternalServerError)
+				return
 			}
+			log.Printf("✅ [UPDATE-BIN] Change log entry created (%s)", changeType)
 		}
 
 		// ── Cascading Update: Update active shift tasks if address changed ───────
+		// DB reads/writes here run inside tx. Driver notifications are deferred
+		// until AFTER the commit (see pendingShiftNotifications) so they only
+		// fire once the route_task changes are durable, and so NotifyDriverOfRouteUpdate
+		// (which reads route_tasks on the bare pool) sees committed data.
+		shiftTasksMap := make(map[string][]string)
 		if addrChanged && centrifugoClient != nil {
 			log.Printf("🔄 [UPDATE-BIN] Address changed - checking for active shift dependencies")
 
@@ -657,7 +660,7 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 				OldAddress string `db:"old_address"`
 			}
 
-			err = db.Select(&affectedShifts, `
+			err = tx.Select(&affectedShifts, `
 				SELECT
 					rt.shift_id,
 					rt.id as task_id,
@@ -670,17 +673,18 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			`, id)
 
 			if err != nil && err != sql.ErrNoRows {
-				log.Printf("⚠️  [UPDATE-BIN] Failed to check active shift dependencies: %v", err)
+				log.Printf("❌ [UPDATE-BIN] Failed to check active shift dependencies: %v", err)
+				http.Error(w, "Failed to check active shift dependencies", http.StatusInternalServerError)
+				return
 			} else if len(affectedShifts) > 0 {
 				log.Printf("🎯 [UPDATE-BIN] Found %d active shift task(s) affected by address change", len(affectedShifts))
 
 				// Group tasks by shift for notification
-				shiftTasksMap := make(map[string][]string)
 				for _, affected := range affectedShifts {
 					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
 
 					// Update the task's address and coordinates
-					_, updateErr := db.Exec(`
+					_, updateErr := tx.Exec(`
 						UPDATE route_tasks
 						SET address = $1,
 							latitude = $2,
@@ -690,36 +694,48 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 					`, req.CurrentStreet, req.Latitude, req.Longitude, time.Now().Unix(), affected.TaskID)
 
 					if updateErr != nil {
-						log.Printf("⚠️  [UPDATE-BIN] Failed to update route task %s: %v", affected.TaskID, updateErr)
-					} else {
-						log.Printf("✅ [UPDATE-BIN] Updated route task %s: %s → %s", affected.TaskID, affected.OldAddress, req.CurrentStreet)
+						log.Printf("❌ [UPDATE-BIN] Failed to update route task %s: %v", affected.TaskID, updateErr)
+						http.Error(w, "Failed to update route task", http.StatusInternalServerError)
+						return
 					}
-				}
-
-				// Notify each affected shift
-				for shiftID, taskIDs := range shiftTasksMap {
-					notifyErr := NotifyDriverOfRouteUpdate(
-						db,
-						centrifugoClient,
-						shiftID,
-						"address_changed",
-						map[string]interface{}{
-							"bin_id":         id,
-							"bin_number":     req.BinNumber,
-							"old_address":    existing.CurrentStreet,
-							"new_address":    req.CurrentStreet,
-							"affected_tasks": taskIDs,
-						},
-					)
-
-					if notifyErr != nil {
-						log.Printf("⚠️  [UPDATE-BIN] Failed to notify driver for shift %s: %v", shiftID, notifyErr)
-					} else {
-						log.Printf("✅ [UPDATE-BIN] Notified driver for shift %s about address change", shiftID)
-					}
+					log.Printf("✅ [UPDATE-BIN] Updated route task %s: %s → %s", affected.TaskID, affected.OldAddress, req.CurrentStreet)
 				}
 			} else {
 				log.Printf("ℹ️  [UPDATE-BIN] No active shift dependencies found for this bin")
+			}
+		}
+
+		// Commit transaction — all writes above (bin update, check record,
+		// potential-location snapshot/status, no-go zone + incident, change log,
+		// route_task cascade) are now persisted atomically.
+		log.Printf("💾 [UPDATE-BIN] Committing transaction")
+		if err := tx.Commit(); err != nil {
+			log.Printf("❌ [UPDATE-BIN] Failed to commit transaction: %v", err)
+			http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("✅ [UPDATE-BIN] Transaction committed successfully")
+
+		// Notify each affected shift (post-commit, best-effort side effect)
+		for shiftID, taskIDs := range shiftTasksMap {
+			notifyErr := NotifyDriverOfRouteUpdate(
+				db,
+				centrifugoClient,
+				shiftID,
+				"address_changed",
+				map[string]interface{}{
+					"bin_id":         id,
+					"bin_number":     req.BinNumber,
+					"old_address":    existing.CurrentStreet,
+					"new_address":    req.CurrentStreet,
+					"affected_tasks": taskIDs,
+				},
+			)
+
+			if notifyErr != nil {
+				log.Printf("⚠️  [UPDATE-BIN] Failed to notify driver for shift %s: %v", shiftID, notifyErr)
+			} else {
+				log.Printf("✅ [UPDATE-BIN] Notified driver for shift %s about address change", shiftID)
 			}
 		}
 

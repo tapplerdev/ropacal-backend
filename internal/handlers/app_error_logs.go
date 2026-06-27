@@ -282,7 +282,7 @@ func ResolveAppErrorLog(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get user ID from context (set by auth middleware)
-		userClaims, ok := r.Context().Value("user").(*middleware.UserClaims)
+		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return

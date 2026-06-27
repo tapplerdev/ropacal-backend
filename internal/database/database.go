@@ -1,7 +1,6 @@
 package database
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 
@@ -43,13 +42,6 @@ func Connect(dbURL string) (*sqlx.DB, error) {
 	log.Println("✅ DATABASE CONNECTION SUCCESSFUL")
 	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	return db, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func Migrate(db *sqlx.DB) error {
@@ -980,12 +972,4 @@ func Migrate(db *sqlx.DB) error {
 
 	log.Println("✓ Database migrations completed")
 	return nil
-}
-
-// Helper functions for time conversion
-func TimeToUnix(t interface{}) sql.NullInt64 {
-	if t == nil {
-		return sql.NullInt64{Valid: false}
-	}
-	return sql.NullInt64{Int64: 0, Valid: false} // Will be set properly in handlers
 }

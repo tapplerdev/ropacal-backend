@@ -242,34 +242,34 @@ func UpdateRoute(db *sqlx.DB) http.HandlerFunc {
 		argCount := 1
 
 		if req.Name != nil {
-			updates = append(updates, "name = $"+string(rune('0'+argCount)))
+			updates = append(updates, fmt.Sprintf("name = $%d", argCount))
 			args = append(args, *req.Name)
 			argCount++
 		}
 		if req.Description != nil {
-			updates = append(updates, "description = $"+string(rune('0'+argCount)))
+			updates = append(updates, fmt.Sprintf("description = $%d", argCount))
 			args = append(args, *req.Description)
 			argCount++
 		}
 		if req.GeographicArea != nil {
-			updates = append(updates, "geographic_area = $"+string(rune('0'+argCount)))
+			updates = append(updates, fmt.Sprintf("geographic_area = $%d", argCount))
 			args = append(args, *req.GeographicArea)
 			argCount++
 		}
 		if req.SchedulePattern != nil {
-			updates = append(updates, "schedule_pattern = $"+string(rune('0'+argCount)))
+			updates = append(updates, fmt.Sprintf("schedule_pattern = $%d", argCount))
 			args = append(args, *req.SchedulePattern)
 			argCount++
 		}
 		if req.EstimatedDurationHours != nil {
-			updates = append(updates, "estimated_duration_hours = $"+string(rune('0'+argCount)))
+			updates = append(updates, fmt.Sprintf("estimated_duration_hours = $%d", argCount))
 			args = append(args, *req.EstimatedDurationHours)
 			argCount++
 		}
 
 		// Update bin_ids if provided
 		if req.BinIDs != nil {
-			updates = append(updates, "bin_count = $"+string(rune('0'+argCount)))
+			updates = append(updates, fmt.Sprintf("bin_count = $%d", argCount))
 			args = append(args, len(req.BinIDs))
 			argCount++
 
@@ -294,7 +294,7 @@ func UpdateRoute(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Always update updated_at
-		updates = append(updates, "updated_at = $"+string(rune('0'+argCount)))
+		updates = append(updates, fmt.Sprintf("updated_at = $%d", argCount))
 		args = append(args, now)
 		argCount++
 
@@ -303,7 +303,7 @@ func UpdateRoute(db *sqlx.DB) http.HandlerFunc {
 
 		// Execute update if there are changes
 		if len(updates) > 1 { // More than just updated_at
-			query := "UPDATE routes SET " + joinStrings(updates, ", ") + " WHERE id = $" + string(rune('0'+argCount))
+			query := "UPDATE routes SET " + strings.Join(updates, ", ") + fmt.Sprintf(" WHERE id = $%d", argCount)
 			_, err = tx.Exec(query, args...)
 			if err != nil {
 				http.Error(w, "Failed to update route", http.StatusInternalServerError)
@@ -576,7 +576,14 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("🌐 Calling Mapbox Optimization API...")
 
 		// Make request to Mapbox
-		resp, err := http.Get(mapboxURL)
+		mapboxReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, mapboxURL, nil)
+		if err != nil {
+			log.Printf("❌ Failed to build Mapbox request: %v", err)
+			http.Error(w, "Failed to call Mapbox API", http.StatusInternalServerError)
+			return
+		}
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(mapboxReq)
 		if err != nil {
 			log.Printf("❌ Mapbox API error: %v", err)
 			http.Error(w, "Failed to call Mapbox API", http.StatusInternalServerError)
@@ -737,18 +744,6 @@ func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
 	return earthRadius * c
 }
 
-// Helper function to join strings
-func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	result := strs[0]
-	for _, s := range strs[1:] {
-		result += sep + s
-	}
-	return result
-}
-
 // TestHereOptimization - Test endpoint for HERE Waypoints Sequence API with raw coordinates
 // This endpoint doesn't require database bins - just send coordinates directly
 func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
@@ -858,7 +853,14 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 				params.Get("end"))
 		}
 
-		resp, err := http.Get(fullURL)
+		hereReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fullURL, nil)
+		if err != nil {
+			log.Printf("❌ Failed to build HERE request: %v", err)
+			http.Error(w, "Failed to call HERE API", http.StatusInternalServerError)
+			return
+		}
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(hereReq)
 		if err != nil {
 			log.Printf("❌ HERE API error: %v", err)
 			http.Error(w, "Failed to call HERE API", http.StatusInternalServerError)
@@ -1087,7 +1089,14 @@ func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("🔗 Coordinates: %s", coordinates)
 
 		// Make request to Mapbox
-		resp, err := http.Get(mapboxURL)
+		mapboxReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, mapboxURL, nil)
+		if err != nil {
+			log.Printf("❌ Failed to build Mapbox request: %v", err)
+			http.Error(w, "Failed to call Mapbox API", http.StatusInternalServerError)
+			return
+		}
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(mapboxReq)
 		if err != nil {
 			log.Printf("❌ Mapbox API error: %v", err)
 			http.Error(w, "Failed to call Mapbox API", http.StatusInternalServerError)

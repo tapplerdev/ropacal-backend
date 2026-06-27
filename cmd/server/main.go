@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/handlers"
@@ -214,8 +215,23 @@ func main() {
 	r.Use(chimiddleware.RealIP)
 
 	// CORS
+	// Allowed origins are configurable via the ALLOWED_ORIGINS env var
+	// (comma-separated list, e.g. "https://app.example.com,https://admin.example.com").
+	// Falls back to "*" (allow all) when the var is unset, preserving prior behavior.
+	allowedOrigins := []string{"*"}
+	if raw := os.Getenv("ALLOWED_ORIGINS"); raw != "" {
+		var origins []string
+		for _, o := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(o); trimmed != "" {
+				origins = append(origins, trimmed)
+			}
+		}
+		if len(origins) > 0 {
+			allowedOrigins = origins
+		}
+	}
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization"},
 		ExposedHeaders:   []string{"Link"},
@@ -306,9 +322,8 @@ func main() {
 		r.Get("/routes/{id}", handlers.GetRoute(db))
 		r.Post("/routes", handlers.CreateRoute(db))
 		r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
-		r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))   // Testing endpoint for HERE Maps API
+		r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))     // Testing endpoint for HERE Maps API
 		r.Post("/routes/test-mapbox-optimization", handlers.TestMapboxOptimization(db)) // Testing endpoint for Mapbox API v1
-		r.Get("/routes/test-mapbox-v2-access", handlers.TestMapboxOptimizationAccess()) // Test Mapbox Optimization v2 Beta access
 		r.Patch("/routes/{id}", handlers.UpdateRoute(db))
 		r.Delete("/routes/{id}", handlers.DeleteRoute(db))
 		r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))

@@ -118,6 +118,11 @@ type ortoolsResponse struct {
 func (o *ORToolsOptimizer) OptimizeRoute(req *RouteRequest) (*RouteResponse, error) {
 	log.Printf("🔧 [OR-Tools] Building optimization request...")
 
+	// Guard: a vehicle is required to build tasks and the vehicle payload below.
+	if req == nil || len(req.Vehicles) == 0 {
+		return nil, fmt.Errorf("OR-Tools optimization requires at least one vehicle")
+	}
+
 	// Step 1: Collect all unique locations
 	locations, locIDToIdx := o.collectLocations(req)
 	log.Printf("📍 [OR-Tools] Collected %d unique locations", len(locations))
@@ -397,8 +402,12 @@ func (o *ORToolsOptimizer) callService(req ortoolsRequest) (*ortoolsResponse, er
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	firstRouteStops := 0
+	if len(ortoolsResp.Routes) > 0 {
+		firstRouteStops = len(ortoolsResp.Routes[0].Stops)
+	}
 	log.Printf("📥 [OR-Tools] Response: feasible=%v, %d stops, %d dropped, %dms",
-		ortoolsResp.Feasible, len(ortoolsResp.Routes[0].Stops), len(ortoolsResp.Dropped), ortoolsResp.SolverRuntimeMs)
+		ortoolsResp.Feasible, firstRouteStops, len(ortoolsResp.Dropped), ortoolsResp.SolverRuntimeMs)
 
 	return &ortoolsResp, nil
 }

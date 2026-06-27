@@ -175,6 +175,7 @@ func filterCandidates(
 	minGapMiles float64,
 	placementMode string,
 	useV2 bool,
+	perBinFillRate map[string]float64,
 ) []candidate {
 	var filtered []candidate
 	binCities := map[string]bool{}
@@ -253,7 +254,7 @@ func filterCandidates(
 		// Update candidate with nearest bin info
 		c.NearestBinNum = nearestNum
 		c.NearestBinDist = math.Round(nearestDist*10) / 10
-		if rate, ok := perBinFillRateGlobal[nearestID]; ok && rate > 0 {
+		if rate, ok := perBinFillRate[nearestID]; ok && rate > 0 {
 			c.NearestFillRate = rate
 		}
 
@@ -299,9 +300,6 @@ func filterCandidates(
 	log.Printf("📋 [Filter] %d → %d candidates after filtering (mode=%s)", len(candidates), len(filtered), placementMode)
 	return filtered
 }
-
-// perBinFillRateGlobal is set during toolRecommendLocations and used by filterCandidates
-var perBinFillRateGlobal map[string]float64
 
 func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, error) {
 	count := 10
@@ -396,7 +394,6 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	for _, r := range binRates {
 		perBinFillRate[r.BinID] = r.AvgRate
 	}
-	perBinFillRateGlobal = perBinFillRate // make available to filterCandidates
 
 	// Also compute per-zip average fill rate (from all bins, including retired)
 	type zipRate struct {
@@ -676,7 +673,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	for _, pl := range existingPotentials {
 		potFilters = append(potFilters, potentialLocFilter{Latitude: pl.Latitude, Longitude: pl.Longitude})
 	}
-	allCandidates := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2)
+	allCandidates := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2, perBinFillRate)
 	log.Printf("⏱️ [Timing] Filter: %v, %d → %d candidates", time.Since(tFilter), dedupCount, len(allCandidates))
 
 	if len(allCandidates) == 0 {

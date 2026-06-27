@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -203,60 +204,40 @@ func GetBinsWithPriority(db *sqlx.DB) http.HandlerFunc {
 		switch sortBy {
 		case "priority":
 			// Sort by priority score descending
-			for i := 0; i < len(binsWithPriority); i++ {
-				for j := i + 1; j < len(binsWithPriority); j++ {
-					if binsWithPriority[i].PriorityScore < binsWithPriority[j].PriorityScore {
-						binsWithPriority[i], binsWithPriority[j] = binsWithPriority[j], binsWithPriority[i]
-					}
-				}
-			}
+			sort.Slice(binsWithPriority, func(i, j int) bool {
+				return binsWithPriority[i].PriorityScore > binsWithPriority[j].PriorityScore
+			})
 		case "bin_number":
 			// Sort by bin number ascending
-			for i := 0; i < len(binsWithPriority); i++ {
-				for j := i + 1; j < len(binsWithPriority); j++ {
-					if binsWithPriority[i].BinNumber > binsWithPriority[j].BinNumber {
-						binsWithPriority[i], binsWithPriority[j] = binsWithPriority[j], binsWithPriority[i]
-					}
-				}
-			}
+			sort.Slice(binsWithPriority, func(i, j int) bool {
+				return binsWithPriority[i].BinNumber < binsWithPriority[j].BinNumber
+			})
 		case "fill_percentage":
 			// Sort by fill percentage descending (nulls last)
-			for i := 0; i < len(binsWithPriority); i++ {
-				for j := i + 1; j < len(binsWithPriority); j++ {
-					iFill := 0
-					jFill := 0
-					if binsWithPriority[i].FillPercentage != nil {
-						iFill = *binsWithPriority[i].FillPercentage
-					}
-					if binsWithPriority[j].FillPercentage != nil {
-						jFill = *binsWithPriority[j].FillPercentage
-					}
-					if iFill < jFill {
-						binsWithPriority[i], binsWithPriority[j] = binsWithPriority[j], binsWithPriority[i]
-					}
+			sort.Slice(binsWithPriority, func(i, j int) bool {
+				iFill := 0
+				jFill := 0
+				if binsWithPriority[i].FillPercentage != nil {
+					iFill = *binsWithPriority[i].FillPercentage
 				}
-			}
+				if binsWithPriority[j].FillPercentage != nil {
+					jFill = *binsWithPriority[j].FillPercentage
+				}
+				return iFill > jFill
+			})
 		case "days_since_check":
 			// Sort by days since check descending (nulls first = never checked)
-			for i := 0; i < len(binsWithPriority); i++ {
-				for j := i + 1; j < len(binsWithPriority); j++ {
-					iDays := 0
-					jDays := 0
-					if binsWithPriority[i].DaysSinceCheck != nil {
-						iDays = *binsWithPriority[i].DaysSinceCheck
-					} else {
-						iDays = 999999 // Never checked = highest
-					}
-					if binsWithPriority[j].DaysSinceCheck != nil {
-						jDays = *binsWithPriority[j].DaysSinceCheck
-					} else {
-						jDays = 999999
-					}
-					if iDays < jDays {
-						binsWithPriority[i], binsWithPriority[j] = binsWithPriority[j], binsWithPriority[i]
-					}
+			sort.Slice(binsWithPriority, func(i, j int) bool {
+				iDays := 999999 // Never checked = highest
+				jDays := 999999
+				if binsWithPriority[i].DaysSinceCheck != nil {
+					iDays = *binsWithPriority[i].DaysSinceCheck
 				}
-			}
+				if binsWithPriority[j].DaysSinceCheck != nil {
+					jDays = *binsWithPriority[j].DaysSinceCheck
+				}
+				return iDays > jDays
+			})
 		}
 
 		// Apply limit
@@ -282,7 +263,12 @@ func RetireBin(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		userID, _ := r.Context().Value("user_id").(string)
+		userClaims, ok := middleware.GetUserFromContext(r)
+		if !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		userID := userClaims.UserID
 
 		var req struct {
 			Reason         *string `json:"reason"`
