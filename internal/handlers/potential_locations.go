@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services/centrifugo"
@@ -161,8 +162,7 @@ func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 
 		// Read raw JSON to detect if it's array or object
 		var rawMessage json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&rawMessage); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+		if !decodeJSON(w, r, &rawMessage) {
 			return
 		}
 
@@ -435,10 +435,12 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, redisClient *redis.Client, wsHub
 			return
 		}
 
-		// Parse optional request body
+		// Parse optional request body. The body is optional here, so a decode
+		// error (including io.EOF for an empty body) is intentionally ignored —
+		// do NOT use decodeJSON, which would 400 a valid body-less request.
 		var req models.ConvertToBinRequest
 		if r.Body != nil {
-			json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewDecoder(r.Body).Decode(&req)
 		}
 		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Request body parsed: bin_number=%v, fill_percentage=%v", req.BinNumber, req.FillPercentage)
 
@@ -808,7 +810,7 @@ func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 				log.Printf("⚠️ [NEARBY-POTENTIAL-LOCATIONS] Row scan error: %v", err)
 				continue
 			}
-			dist := haversineMeters(*binLat, *binLng, loc.Latitude, loc.Longitude)
+			dist := geo.HaversineMeters(*binLat, *binLng, loc.Latitude, loc.Longitude)
 			loc.DistanceMeters = math.Round(dist*10) / 10
 
 			// Only filter by distance if max_distance is provided
@@ -854,16 +856,4 @@ func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	}
-}
-
-// haversineMeters returns the great-circle distance in metres between two lat/lng points.
-func haversineMeters(lat1, lng1, lat2, lng2 float64) float64 {
-	const earthRadius = 6371000.0
-	φ1 := lat1 * math.Pi / 180
-	φ2 := lat2 * math.Pi / 180
-	Δφ := (lat2 - lat1) * math.Pi / 180
-	Δλ := (lng2 - lng1) * math.Pi / 180
-	a := math.Sin(Δφ/2)*math.Sin(Δφ/2) +
-		math.Cos(φ1)*math.Cos(φ2)*math.Sin(Δλ/2)*math.Sin(Δλ/2)
-	return 2 * earthRadius * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }

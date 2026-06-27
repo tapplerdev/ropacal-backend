@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"time"
 
+	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -89,17 +89,17 @@ func (m *StaleShiftMonitor) checkStaleShifts() {
 	// Only check active shifts (not paused — driver intentionally paused)
 	// First: auto-end any shifts where ready_to_end_at expired (driver was at warehouse, GPS stopped)
 	var readyToEndShifts []struct {
-		ID             string `db:"id"`
-		DriverID       string `db:"driver_id"`
-		DriverName     string `db:"driver_name"`
-		ReadyToEndAt   int64  `db:"ready_to_end_at"`
-		StartTime      *int64 `db:"start_time"`
-		TotalBins      int    `db:"total_bins"`
-		CompletedBins  int    `db:"completed_bins"`
-		TotalPauseSeconds int `db:"total_pause_seconds"`
-		RouteID        *string `db:"route_id"`
-		CreatedAt      int64  `db:"created_at"`
-		DriverEmail    string `db:"driver_email"`
+		ID                string  `db:"id"`
+		DriverID          string  `db:"driver_id"`
+		DriverName        string  `db:"driver_name"`
+		ReadyToEndAt      int64   `db:"ready_to_end_at"`
+		StartTime         *int64  `db:"start_time"`
+		TotalBins         int     `db:"total_bins"`
+		CompletedBins     int     `db:"completed_bins"`
+		TotalPauseSeconds int     `db:"total_pause_seconds"`
+		RouteID           *string `db:"route_id"`
+		CreatedAt         int64   `db:"created_at"`
+		DriverEmail       string  `db:"driver_email"`
 	}
 	m.db.Select(&readyToEndShifts, `
 		SELECT s.id, s.driver_id, s.ready_to_end_at, s.start_time, s.total_bins, s.completed_bins,
@@ -222,22 +222,6 @@ func (m *StaleShiftMonitor) checkStaleShifts() {
 	}
 }
 
-// haversineMeters returns distance in meters between two lat/lng points.
-func haversineMetersMonitor(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadius = 6371000.0 // meters
-	dLat := (lat2 - lat1) * 3.141592653589793 / 180
-	dLon := (lon2 - lon1) * 3.141592653589793 / 180
-	lat1r := lat1 * 3.141592653589793 / 180
-	lat2r := lat2 * 3.141592653589793 / 180
-	a := sin(dLat/2)*sin(dLat/2) + cos(lat1r)*cos(lat2r)*sin(dLon/2)*sin(dLon/2)
-	return earthRadius * 2 * atan2(sqrt(a), sqrt(1-a))
-}
-
-func sin(x float64) float64  { return math.Sin(x) }
-func cos(x float64) float64  { return math.Cos(x) }
-func sqrt(x float64) float64 { return math.Sqrt(x) }
-func atan2(y, x float64) float64 { return math.Atan2(y, x) }
-
 // checkInactiveShifts detects drivers who are stationary with no task activity for 2+ hours.
 func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
 	log.Printf("🔍 [InactiveCheck] Checking %d shifts for inactivity", len(shifts))
@@ -272,7 +256,7 @@ func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
 		maxDist := 0.0
 		for i := range snapshots {
 			for j := i + 1; j < len(snapshots); j++ {
-				d := haversineMetersMonitor(snapshots[i].Latitude, snapshots[i].Longitude,
+				d := geo.HaversineMeters(snapshots[i].Latitude, snapshots[i].Longitude,
 					snapshots[j].Latitude, snapshots[j].Longitude)
 				if d > maxDist {
 					maxDist = d
@@ -406,9 +390,9 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 		shift.DriverID,
 		shift.RouteID,
 		shift.StartTime,
-		now,             // end_time
+		now, // end_time
 		shift.CreatedAt,
-		now,             // ended_at
+		now, // ended_at
 		totalPause,
 		shift.TotalBins,
 		shift.CompletedBins,
@@ -416,8 +400,8 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 		incidentStats.TotalIncidents,
 		incidentStats.FieldObservations,
 		endReason, // end_reason
-		nil,                   // ended_by_user_id (system action)
-		nil,                   // end_reason_metadata
+		nil,       // ended_by_user_id (system action)
+		nil,       // end_reason_metadata
 		optMetaRaw,
 	)
 	if err != nil {
@@ -478,7 +462,7 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 	// Notify managers via Centrifugo
 	if m.centrifugoClient != nil {
 		m.centrifugoClient.PublishCompanyEvent(context.Background(), "shift_auto_ended", map[string]interface{}{
-				"shift_id":        shift.ID,
+			"shift_id":        shift.ID,
 			"driver_id":       shift.DriverID,
 			"driver_name":     shift.DriverName,
 			"end_reason":      "driver_disconnected",

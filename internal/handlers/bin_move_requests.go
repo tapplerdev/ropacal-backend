@@ -58,6 +58,22 @@ func calculateUrgency(status string, scheduledDate int64) string {
 	}
 }
 
+// scheduledUrgency computes the simplified two-state urgency value persisted to
+// the bin_move_requests.urgency column at create/update time: "urgent" when the
+// move is due within 24 hours, otherwise "scheduled". This intentionally uses a
+// narrower set of buckets than calculateUrgency (which also yields "overdue",
+// "soon", and "resolved"); the stored value is deliberately limited to the two
+// states used at write time. Centralized here so the create and update paths
+// stay in sync.
+func scheduledUrgency(scheduledDate int64) string {
+	now := time.Now().Unix()
+	hoursUntil := float64(scheduledDate-now) / 3600.0
+	if hoursUntil < 24 {
+		return "urgent"
+	}
+	return "scheduled"
+}
+
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
 func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
@@ -75,14 +91,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 
 		// Auto-calculate urgency from scheduled_date
-		now := time.Now().Unix()
-		hoursUntil := float64(req.ScheduledDate-now) / 3600.0
-		var urgency string
-		if hoursUntil < 24 {
-			urgency = "urgent"
-		} else {
-			urgency = "scheduled"
-		}
+		urgency := scheduledUrgency(req.ScheduledDate)
 
 		// Validate move_type (accept both 'store' and 'pickup_only' for backward compatibility)
 		if req.MoveType != "store" && req.MoveType != "pickup_only" && req.MoveType != "relocation" && req.MoveType != "redeployment" {
@@ -204,8 +213,9 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			originalAddress = fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.Zip)
 		}
 
-		// Generate ID (now already declared above for urgency calculation)
+		// Generate ID and timestamp for insert
 		id := uuid.New().String()
+		now := time.Now().Unix()
 
 		// Determine status and assignment type based on whether shift is assigned
 		status := "pending"
@@ -219,12 +229,12 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		// Create bin move request
 		// Note: For redeployment moves, original_latitude/longitude will be warehouse location (where in_storage bin currently is)
 		moveRequest := models.BinMoveRequest{
-			ID:                        id,
-			BinID:                     req.BinID,
-			ScheduledDate:             req.ScheduledDate,
-			Urgency:                   urgency, // Auto-calculated urgency
-			RequestedBy:               userID,
-			Status:                    status,
+			ID:            id,
+			BinID:         req.BinID,
+			ScheduledDate: req.ScheduledDate,
+			Urgency:       urgency, // Auto-calculated urgency
+			RequestedBy:   userID,
+			Status:        status,
 			OriginalLatitude: func() float64 {
 				if req.MoveType == "redeployment" && warehouseForMove != nil {
 					return warehouseForMove.Latitude
@@ -620,7 +630,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	now := time.Now().Unix()
 	isActiveShift := activeShift.Status == "active"
-	isFutureShift := activeShift.Status == "ready"  // FIX: "ready" is the correct status for future shifts
+	isFutureShift := activeShift.Status == "ready" // FIX: "ready" is the correct status for future shifts
 
 	log.Printf("   🔍 SHIFT STATUS DEBUG: status=%s, isActiveShift=%t, isFutureShift=%t", activeShift.Status, isActiveShift, isFutureShift)
 
@@ -1432,15 +1442,15 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 			NewLongitude  *float64 `json:"new_longitude,omitempty"`
 
 			// Assignment fields
-			AssignedShiftID       *string `json:"assigned_shift_id,omitempty"`
-			AssignedUserID        *string `json:"assigned_user_id,omitempty"`
-			AssignmentType        *string `json:"assignment_type,omitempty"` // "shift", "manual", or "" for unassigned
+			AssignedShiftID *string `json:"assigned_shift_id,omitempty"`
+			AssignedUserID  *string `json:"assigned_user_id,omitempty"`
+			AssignmentType  *string `json:"assignment_type,omitempty"` // "shift", "manual", or "" for unassigned
 
 			// Edge case handling
-			ClientUpdatedAt              *int64  `json:"client_updated_at,omitempty"`              // For optimistic locking
-			ConfirmActiveShiftChange     bool    `json:"confirm_active_shift_change"`              // User confirmed warning
-			InProgressAction             *string `json:"in_progress_action,omitempty"`             // "remove_from_route", "insert_after_current", "reoptimize_route"
-			InsertAfterWaypoint          *int    `json:"insert_after_waypoint,omitempty"`          // For manual insertion
+			ClientUpdatedAt          *int64  `json:"client_updated_at,omitempty"`     // For optimistic locking
+			ConfirmActiveShiftChange bool    `json:"confirm_active_shift_change"`     // User confirmed warning
+			InProgressAction         *string `json:"in_progress_action,omitempty"`    // "remove_from_route", "insert_after_current", "reoptimize_route"
+			InsertAfterWaypoint      *int    `json:"insert_after_waypoint,omitempty"` // For manual insertion
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -1565,18 +1575,11 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 			argCount++
 
 			// Recalculate urgency
-			hoursUntil := float64(*req.ScheduledDate-now) / 3600.0
-			var newUrgency string
-			if hoursUntil < 24 {
-				newUrgency = "urgent"
-			} else {
-				newUrgency = "scheduled"
-			}
+			newUrgency := scheduledUrgency(*req.ScheduledDate)
 			updates = append(updates, fmt.Sprintf("urgency = $%d", argCount))
 			args = append(args, newUrgency)
 			argCount++
 		}
-
 
 		if req.MoveType != nil {
 			updates = append(updates, fmt.Sprintf("move_type = $%d", argCount))
@@ -1970,7 +1973,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 							}
 						}
 
-					// If move_type changed from store → relocation, add dropoff task
+						// If move_type changed from store → relocation, add dropoff task
 					} else if moveTypeChanged && req.MoveType != nil && *req.MoveType == "relocation" && moveRequest.MoveType == "store" {
 						// Find the pickup task to get shift_id and sequence info
 						var pickupTask *struct {
@@ -2111,29 +2114,29 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 
 		log.Printf("[UPDATE MOVE] ✅ Successfully updated move request: %s", id)
 
-	// Re-optimize shift if move request was on an active shift and address/move_type changed
-	if moveRequest.AssignedShiftID != nil {
-		addressChanged := req.NewStreet != nil || req.NewCity != nil || req.NewZip != nil ||
-			req.NewLatitude != nil || req.NewLongitude != nil
-		moveTypeChanged := req.MoveType != nil && *req.MoveType != moveRequest.MoveType
+		// Re-optimize shift if move request was on an active shift and address/move_type changed
+		if moveRequest.AssignedShiftID != nil {
+			addressChanged := req.NewStreet != nil || req.NewCity != nil || req.NewZip != nil ||
+				req.NewLatitude != nil || req.NewLongitude != nil
+			moveTypeChanged := req.MoveType != nil && *req.MoveType != moveRequest.MoveType
 
-		if addressChanged || moveTypeChanged {
-			// Check if shift is active
-			var shiftStatus string
-			err := db.Get(&shiftStatus, `SELECT status FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID)
-			if err == nil && shiftStatus == "active" {
-				log.Printf("🔄 [UPDATE-MOVE] Triggering re-optimization for shift %s (manager-initiated change)", *moveRequest.AssignedShiftID)
-				if reoptErr := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); reoptErr != nil {
-					log.Printf("⚠️  [UPDATE-MOVE] Failed to re-optimize shift: %v", reoptErr)
-					// Don't fail the entire request if re-optimization fails
-				} else {
-					log.Printf("✅ [UPDATE-MOVE] Successfully re-optimized shift %s", *moveRequest.AssignedShiftID)
+			if addressChanged || moveTypeChanged {
+				// Check if shift is active
+				var shiftStatus string
+				err := db.Get(&shiftStatus, `SELECT status FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID)
+				if err == nil && shiftStatus == "active" {
+					log.Printf("🔄 [UPDATE-MOVE] Triggering re-optimization for shift %s (manager-initiated change)", *moveRequest.AssignedShiftID)
+					if reoptErr := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); reoptErr != nil {
+						log.Printf("⚠️  [UPDATE-MOVE] Failed to re-optimize shift: %v", reoptErr)
+						// Don't fail the entire request if re-optimization fails
+					} else {
+						log.Printf("✅ [UPDATE-MOVE] Successfully re-optimized shift %s", *moveRequest.AssignedShiftID)
+					}
 				}
 			}
 		}
-	}
 
-// Fetch updated move request to get new state for history logging
+		// Fetch updated move request to get new state for history logging
 		var updatedMove struct {
 			models.BinMoveRequest
 			AssignedUserName   *string `db:"assigned_user_name"`
@@ -2267,14 +2270,14 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 
 			// Build metadata JSON with old/new value comparisons
 			type ChangeDetail struct {
-				Field         string  `json:"field"`
-				Label         string  `json:"label"`
-				Old           *string `json:"old,omitempty"`
-				New           *string `json:"new,omitempty"`
-				OldFormatted  *string `json:"old_formatted,omitempty"`
-				NewFormatted  *string `json:"new_formatted,omitempty"`
-				OldTimestamp  *int64  `json:"old_timestamp,omitempty"`
-				NewTimestamp  *int64  `json:"new_timestamp,omitempty"`
+				Field        string  `json:"field"`
+				Label        string  `json:"label"`
+				Old          *string `json:"old,omitempty"`
+				New          *string `json:"new,omitempty"`
+				OldFormatted *string `json:"old_formatted,omitempty"`
+				NewFormatted *string `json:"new_formatted,omitempty"`
+				OldTimestamp *int64  `json:"old_timestamp,omitempty"`
+				NewTimestamp *int64  `json:"new_timestamp,omitempty"`
 			}
 
 			type MetadataStruct struct {
@@ -2364,9 +2367,9 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 				newLng := req.NewLongitude
 
 				latChanged := (oldLat == nil && newLat != nil) || (oldLat != nil && newLat == nil) ||
-							  (oldLat != nil && newLat != nil && *oldLat != *newLat)
+					(oldLat != nil && newLat != nil && *oldLat != *newLat)
 				lngChanged := (oldLng == nil && newLng != nil) || (oldLng != nil && newLng == nil) ||
-							  (oldLng != nil && newLng != nil && *oldLng != *newLng)
+					(oldLng != nil && newLng != nil && *oldLng != *newLng)
 
 				if latChanged || lngChanged {
 					// Get old address (stored as single formatted string in database)
@@ -2703,8 +2706,8 @@ func CancelBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 				"message": "Move request cancelled by manager",
 			})
 
-		// Soft delete route_tasks associated with this move request (for audit trail)
-		_, err = db.Exec(`
+			// Soft delete route_tasks associated with this move request (for audit trail)
+			_, err = db.Exec(`
 			UPDATE route_tasks
 			SET is_deleted = true,
 				deleted_at = $1,
@@ -2713,27 +2716,27 @@ func CancelBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 				updated_at = $1
 			WHERE move_request_id = $4 AND shift_id = $5 AND is_completed = 0 AND is_deleted = false
 		`, now, managerID, "move_request_cancelled", id, *moveRequest.AssignedShiftID)
-		if err != nil {
-			log.Printf("⚠️  Failed to soft delete route_tasks for cancelled move request: %v", err)
-		} else {
-			log.Printf("✅ Soft deleted route_tasks for cancelled move request %s from shift %s", id, *moveRequest.AssignedShiftID)
-		}
+			if err != nil {
+				log.Printf("⚠️  Failed to soft delete route_tasks for cancelled move request: %v", err)
+			} else {
+				log.Printf("✅ Soft deleted route_tasks for cancelled move request %s from shift %s", id, *moveRequest.AssignedShiftID)
+			}
 
-		// Notify driver that route has been updated
-		if err := NotifyDriverOfRouteUpdate(db, centrifugoClient, *moveRequest.AssignedShiftID, "move_request_cancelled", map[string]interface{}{
-			"move_request_id": id,
-			"reason":          "Move request was cancelled by manager",
-		}); err != nil {
-			log.Printf("⚠️  Failed to notify driver of route update: %v", err)
-		}
+			// Notify driver that route has been updated
+			if err := NotifyDriverOfRouteUpdate(db, centrifugoClient, *moveRequest.AssignedShiftID, "move_request_cancelled", map[string]interface{}{
+				"move_request_id": id,
+				"reason":          "Move request was cancelled by manager",
+			}); err != nil {
+				log.Printf("⚠️  Failed to notify driver of route update: %v", err)
+			}
 
-		// Re-optimize the shift (skip gates since this is manager-initiated)
-		if err := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); err != nil {
-			log.Printf("⚠️  Failed to re-optimize shift after move request cancellation: %v", err)
-			// Don't fail the entire request if re-optimization fails
-		} else {
-			log.Printf("✅ Successfully re-optimized shift %s after move request cancellation", *moveRequest.AssignedShiftID)
-		}
+			// Re-optimize the shift (skip gates since this is manager-initiated)
+			if err := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); err != nil {
+				log.Printf("⚠️  Failed to re-optimize shift after move request cancellation: %v", err)
+				// Don't fail the entire request if re-optimization fails
+			} else {
+				log.Printf("✅ Successfully re-optimized shift %s after move request cancellation", *moveRequest.AssignedShiftID)
+			}
 		}
 
 		// Publish move_request_cancelled to Centrifugo so all manager dashboards update
@@ -3101,11 +3104,11 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 
 			log.Printf("[MANUAL MOVE] ✅ Bin relocated to %s", *moveRequest.NewAddress)
 		}
-			// If this was a relocation/redeployment to a potential location, mark location as converted
-			if moveRequest.SourcePotentialLocationID != nil {
-				log.Printf("[MANUAL MOVE]    → Manual relocation to potential location - marking as converted")
-				
-				_, err = db.Exec(`
+		// If this was a relocation/redeployment to a potential location, mark location as converted
+		if moveRequest.SourcePotentialLocationID != nil {
+			log.Printf("[MANUAL MOVE]    → Manual relocation to potential location - marking as converted")
+
+			_, err = db.Exec(`
 					UPDATE potential_locations
 					SET converted_to_bin_id = $1,
 					    converted_at = $2,
@@ -3113,14 +3116,13 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 					    updated_at = $2
 					WHERE id = $4
 				`, moveRequest.BinID, now, userID, *moveRequest.SourcePotentialLocationID)
-				
-				if err != nil {
-					log.Printf("[MANUAL MOVE] ⚠️  Error converting potential location: %v", err)
-				} else {
-					log.Printf("[MANUAL MOVE] ✅ Potential location marked as converted")
-				}
-			}
 
+			if err != nil {
+				log.Printf("[MANUAL MOVE] ⚠️  Error converting potential location: %v", err)
+			} else {
+				log.Printf("[MANUAL MOVE] ✅ Potential location marked as converted")
+			}
+		}
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{

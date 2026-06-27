@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"ropacal-backend/internal/database"
+	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
@@ -29,24 +29,77 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// haversineDistanceKm calculates the distance between two GPS coordinates in kilometers
-func haversineDistanceKm(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadius = 6371.0 // Earth's radius in kilometers
+// shiftHistoryExec is satisfied by both *sqlx.DB and *sqlx.Tx, allowing
+// archiveShift to run against a plain connection or inside a transaction.
+type shiftHistoryExec interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
 
-	// Convert to radians
-	lat1Rad := lat1 * math.Pi / 180
-	lat2Rad := lat2 * math.Pi / 180
-	deltaLat := (lat2 - lat1) * math.Pi / 180
-	deltaLon := (lon2 - lon1) * math.Pi / 180
+// archiveShiftParams carries the per-call values for a shift_history insert.
+// optMeta is passed in (rather than derived) so each call site preserves its
+// exact source — marshaled struct metadata vs. raw bytes re-read from the DB.
+type archiveShiftParams struct {
+	ID                  string
+	DriverID            string
+	RouteID             interface{}
+	StartTime           interface{}
+	EndTime             interface{}
+	CreatedAt           interface{}
+	EndedAt             interface{}
+	TotalPauseSeconds   interface{}
+	TotalBins           int
+	CompletedBins       int
+	IncidentsReported   int
+	FieldObservations   int
+	EndReason           string
+	EndedByUserID       interface{}
+	EndReasonMetadata   interface{}
+	OptMeta             interface{}
+	OnConflictDoNothing bool
+}
 
-	// Haversine formula
-	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
-		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
-			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
+// completionRate computes the percentage of bins completed for a shift,
+// guarding against division by zero.
+func completionRate(completedBins, totalBins int) float64 {
+	if totalBins > 0 {
+		return (float64(completedBins) / float64(totalBins)) * 100
+	}
+	return 0.0
+}
 
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return earthRadius * c
+// archiveShift performs the canonical 17-column shift_history insert. It is the
+// single source of truth for archiving a shift; all end/cancel paths route
+// through it so the column set never drifts again.
+func archiveShift(exec shiftHistoryExec, p archiveShiftParams) (sql.Result, error) {
+	query := `INSERT INTO shift_history (
+		id, driver_id, route_id, start_time, end_time, created_at, ended_at,
+		total_pause_seconds, total_bins, completed_bins, completion_rate,
+		incidents_reported, field_observations,
+		end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
+	if p.OnConflictDoNothing {
+		query += " ON CONFLICT (id) DO NOTHING"
+	}
+	return exec.Exec(
+		query,
+		p.ID,
+		p.DriverID,
+		p.RouteID,
+		p.StartTime,
+		p.EndTime,
+		p.CreatedAt,
+		p.EndedAt,
+		p.TotalPauseSeconds,
+		p.TotalBins,
+		p.CompletedBins,
+		completionRate(p.CompletedBins, p.TotalBins),
+		p.IncidentsReported,
+		p.FieldObservations,
+		p.EndReason,
+		p.EndedByUserID,
+		p.EndReasonMetadata,
+		p.OptMeta,
+	)
 }
 
 // GetCurrentShift returns the current active shift for the driver
@@ -203,7 +256,7 @@ func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
 				"total_bins":          shift.TotalBins,
 				"completed_bins":      shift.CompletedBins,
 				"truck_bin_capacity":  shift.TruckBinCapacity,
-				"tasks":                bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
+				"tasks":               bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
 				"created_at":          shift.CreatedAt,
 				"updated_at":          shift.UpdatedAt,
 			},
@@ -310,7 +363,7 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 
 		type ShiftResponse struct {
 			ShiftWithDriver
-			ActiveTaskCount         int      `json:"active_task_count"` // Count of non-deleted tasks
+			ActiveTaskCount         int      `json:"active_task_count"`                   // Count of non-deleted tasks
 			EstimatedCompletionTime *int64   `json:"estimated_completion_time,omitempty"` // Unix timestamp
 			TotalDistanceMiles      *float64 `json:"total_distance_miles,omitempty"`
 		}
@@ -336,8 +389,8 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 
 			// Create response with computed fields
 			shiftResp := ShiftResponse{
-				ShiftWithDriver:  shift,
-				ActiveTaskCount:  activeTaskCount,
+				ShiftWithDriver: shift,
+				ActiveTaskCount: activeTaskCount,
 			}
 
 			// Add computed fields if optimization metadata exists
@@ -474,29 +527,29 @@ func GetManagerShiftHistory(db *sqlx.DB) http.HandlerFunc {
 		args = append(args, limit, offset)
 
 		type ShiftHistoryRow struct {
-			ID                    string   `db:"id" json:"id"`
-			DriverID              string   `db:"driver_id" json:"driver_id"`
-			DriverName            string   `db:"driver_name" json:"driver_name"`
-			DriverEmail           string   `db:"driver_email" json:"driver_email"`
-			RouteID               *string  `db:"route_id" json:"route_id"`
-			StartTime             *int64   `db:"start_time" json:"start_time"`
-			EndTime               *int64   `db:"end_time" json:"end_time"`
-			CreatedAt             int64    `db:"created_at" json:"created_at"`
-			EndedAt               int64    `db:"ended_at" json:"ended_at"`
-			TotalPauseSeconds     int      `db:"total_pause_seconds" json:"total_pause_seconds"`
-			TotalBins             int      `db:"total_bins" json:"total_bins"`
-			CompletedBins         int      `db:"completed_bins" json:"completed_bins"`
-			CompletionRate        float64  `db:"completion_rate" json:"completion_rate"`
-			IncidentsReported     int      `db:"incidents_reported" json:"incidents_reported"`
-			FieldObservations     int      `db:"field_observations" json:"field_observations"`
-			EndReason             string   `db:"end_reason" json:"end_reason"`
-			CollectionsCompleted  int64    `db:"collections_completed" json:"collections_completed"`
-			CollectionsSkipped    int64    `db:"collections_skipped" json:"collections_skipped"`
-			PlacementsCompleted   int64    `db:"placements_completed" json:"placements_completed"`
-			PlacementsSkipped     int64    `db:"placements_skipped" json:"placements_skipped"`
-			MoveRequestsCompleted int64    `db:"move_requests_completed" json:"move_requests_completed"`
-			TotalSkipped          int64                      `db:"total_skipped" json:"total_skipped"`
-			WarehouseStops        int64                      `db:"warehouse_stops" json:"warehouse_stops"`
+			ID                    string                       `db:"id" json:"id"`
+			DriverID              string                       `db:"driver_id" json:"driver_id"`
+			DriverName            string                       `db:"driver_name" json:"driver_name"`
+			DriverEmail           string                       `db:"driver_email" json:"driver_email"`
+			RouteID               *string                      `db:"route_id" json:"route_id"`
+			StartTime             *int64                       `db:"start_time" json:"start_time"`
+			EndTime               *int64                       `db:"end_time" json:"end_time"`
+			CreatedAt             int64                        `db:"created_at" json:"created_at"`
+			EndedAt               int64                        `db:"ended_at" json:"ended_at"`
+			TotalPauseSeconds     int                          `db:"total_pause_seconds" json:"total_pause_seconds"`
+			TotalBins             int                          `db:"total_bins" json:"total_bins"`
+			CompletedBins         int                          `db:"completed_bins" json:"completed_bins"`
+			CompletionRate        float64                      `db:"completion_rate" json:"completion_rate"`
+			IncidentsReported     int                          `db:"incidents_reported" json:"incidents_reported"`
+			FieldObservations     int                          `db:"field_observations" json:"field_observations"`
+			EndReason             string                       `db:"end_reason" json:"end_reason"`
+			CollectionsCompleted  int64                        `db:"collections_completed" json:"collections_completed"`
+			CollectionsSkipped    int64                        `db:"collections_skipped" json:"collections_skipped"`
+			PlacementsCompleted   int64                        `db:"placements_completed" json:"placements_completed"`
+			PlacementsSkipped     int64                        `db:"placements_skipped" json:"placements_skipped"`
+			MoveRequestsCompleted int64                        `db:"move_requests_completed" json:"move_requests_completed"`
+			TotalSkipped          int64                        `db:"total_skipped" json:"total_skipped"`
+			WarehouseStops        int64                        `db:"warehouse_stops" json:"warehouse_stops"`
 			OptimizationMetadata  *models.OptimizationMetadata `db:"optimization_metadata" json:"optimization_metadata,omitempty"`
 		}
 
@@ -560,16 +613,16 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		type TaskRow struct {
-			ID                  string   `db:"id"                    json:"id"`
-			SequenceOrder       int      `db:"sequence_order"        json:"sequence_order"`
-			TaskType            string   `db:"task_type"             json:"task_type"`
-			IsCompleted         int      `db:"is_completed"          json:"is_completed"`
-			Skipped             bool     `db:"skipped"               json:"skipped"`
-			CompletedAt         *int64   `db:"completed_at"          json:"completed_at"`
-			Address             *string  `db:"address"               json:"address"`
-			Latitude            *float64 `db:"latitude"              json:"latitude"`
-			Longitude           *float64 `db:"longitude"             json:"longitude"`
-			TaskData            *string  `db:"task_data"             json:"task_data"`
+			ID            string   `db:"id"                    json:"id"`
+			SequenceOrder int      `db:"sequence_order"        json:"sequence_order"`
+			TaskType      string   `db:"task_type"             json:"task_type"`
+			IsCompleted   int      `db:"is_completed"          json:"is_completed"`
+			Skipped       bool     `db:"skipped"               json:"skipped"`
+			CompletedAt   *int64   `db:"completed_at"          json:"completed_at"`
+			Address       *string  `db:"address"               json:"address"`
+			Latitude      *float64 `db:"latitude"              json:"latitude"`
+			Longitude     *float64 `db:"longitude"             json:"longitude"`
+			TaskData      *string  `db:"task_data"             json:"task_data"`
 			// Collection / bin fields
 			BinID               *string  `db:"bin_id"                json:"bin_id"`
 			BinNumber           *int     `db:"bin_number"            json:"bin_number"`
@@ -583,23 +636,23 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 			AfterPhotoLatitude  *float64 `db:"after_photo_latitude"  json:"after_photo_latitude"`
 			AfterPhotoLongitude *float64 `db:"after_photo_longitude" json:"after_photo_longitude"`
 			// Placement fields
-			PotentialLocationID *string  `db:"potential_location_id" json:"potential_location_id"`
-			NewBinNumber        *int     `db:"new_bin_number"        json:"new_bin_number"`
-			PlacementAddress    *string  `db:"placement_address"     json:"placement_address"`
-			PlacementCreatedBinID *string `db:"placement_created_bin_id" json:"placement_created_bin_id"`
-			PlacementCreatedBinNumber *int `db:"placement_created_bin_number" json:"placement_created_bin_number"`
+			PotentialLocationID       *string `db:"potential_location_id" json:"potential_location_id"`
+			NewBinNumber              *int    `db:"new_bin_number"        json:"new_bin_number"`
+			PlacementAddress          *string `db:"placement_address"     json:"placement_address"`
+			PlacementCreatedBinID     *string `db:"placement_created_bin_id" json:"placement_created_bin_id"`
+			PlacementCreatedBinNumber *int    `db:"placement_created_bin_number" json:"placement_created_bin_number"`
 			// Move request fields
-			MoveRequestID       *string  `db:"move_request_id"       json:"move_request_id"`
-			MoveType            *string  `db:"move_type"             json:"move_type"`
-			DestinationAddress  *string  `db:"destination_address"   json:"destination_address"`
+			MoveRequestID      *string `db:"move_request_id"       json:"move_request_id"`
+			MoveType           *string `db:"move_type"             json:"move_type"`
+			DestinationAddress *string `db:"destination_address"   json:"destination_address"`
 			// Warehouse fields
-			WarehouseAction     *string  `db:"warehouse_action"      json:"warehouse_action"`
-			BinsToLoad          *int     `db:"bins_to_load"          json:"bins_to_load"`
+			WarehouseAction *string `db:"warehouse_action"      json:"warehouse_action"`
+			BinsToLoad      *int    `db:"bins_to_load"          json:"bins_to_load"`
 			// Service fields
-			TaskLabel           *string  `db:"task_label"            json:"task_label"`
-			TaskDescription     *string  `db:"task_description"      json:"task_description"`
-			CompletionNotes     *string  `db:"completion_notes"      json:"completion_notes"`
-			PhotoRequired       bool     `db:"photo_required"        json:"photo_required"`
+			TaskLabel       *string `db:"task_label"            json:"task_label"`
+			TaskDescription *string `db:"task_description"      json:"task_description"`
+			CompletionNotes *string `db:"completion_notes"      json:"completion_notes"`
+			PhotoRequired   bool    `db:"photo_required"        json:"photo_required"`
 		}
 
 		query := `
@@ -910,24 +963,11 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 				totalPause += endNow - *existingShift.PauseStartTime
 			}
 
-			// Calculate completion rate for history
-			completionRate := 0.0
-			if existingShift.TotalBins > 0 {
-				completionRate = (float64(existingShift.CompletedBins) / float64(existingShift.TotalBins)) * 100
-			}
-
 			// Determine end reason - auto-ended because driver started new shift
 			endReason := "manual_end"
 			if existingShift.CompletedBins >= existingShift.TotalBins {
 				endReason = "completed"
 			}
-
-			// Insert into shift_history
-			historyQuery := `INSERT INTO shift_history (
-			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
-			total_pause_seconds, total_bins, completed_bins, completion_rate,
-			end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
 
 			// Get optimization metadata JSON from the shift
 			var optMeta interface{}
@@ -937,24 +977,24 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 				}
 			}
 
-			_, histErr := db.Exec(
-				historyQuery,
-				existingShift.ID,
-				existingShift.DriverID,
-				existingShift.RouteID,
-				existingShift.StartTime,
-				endNow,
-				existingShift.CreatedAt,
-				endNow,
-				totalPause,
-				existingShift.TotalBins,
-				existingShift.CompletedBins,
-				completionRate,
-				endReason,
-				nil, // Driver action
-				nil, // No metadata
-				optMeta,
-			)
+			_, histErr := archiveShift(db, archiveShiftParams{
+				ID:                existingShift.ID,
+				DriverID:          existingShift.DriverID,
+				RouteID:           existingShift.RouteID,
+				StartTime:         existingShift.StartTime,
+				EndTime:           endNow,
+				CreatedAt:         existingShift.CreatedAt,
+				EndedAt:           endNow,
+				TotalPauseSeconds: totalPause,
+				TotalBins:         existingShift.TotalBins,
+				CompletedBins:     existingShift.CompletedBins,
+				IncidentsReported: 0,
+				FieldObservations: 0,
+				EndReason:         endReason,
+				EndedByUserID:     nil, // Driver action
+				EndReasonMetadata: nil, // No metadata
+				OptMeta:           optMeta,
+			})
 			if histErr != nil {
 				log.Printf("❌ Error saving auto-ended shift to history: %v", histErr)
 				// Continue anyway
@@ -996,268 +1036,267 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			return
 		}
 
+		// Smart Route Optimization Logic
+		// If lock_route_order is true, skip optimization (use manager's exact task order)
+		// If lock_route_order is false, run full route optimization with dynamic warehouse insertion
+		if shift.LockRouteOrder {
+			log.Printf("🔒 Route order is locked - skipping optimization and using manager's exact task sequence")
+		} else {
+			log.Printf("🚀 Route order unlocked - performing smart optimization with dynamic warehouse insertion")
 
-	// Smart Route Optimization Logic
-	// If lock_route_order is true, skip optimization (use manager's exact task order)
-	// If lock_route_order is false, run full route optimization with dynamic warehouse insertion
-	if shift.LockRouteOrder {
-		log.Printf("🔒 Route order is locked - skipping optimization and using manager's exact task sequence")
-	} else {
-		log.Printf("🚀 Route order unlocked - performing smart optimization with dynamic warehouse insertion")
+			// Get driver's CURRENT location from Redis (published via Centrifugo)
+			var driverLocation struct {
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			}
 
-		// Get driver's CURRENT location from Redis (published via Centrifugo)
-		var driverLocation struct {
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
+			if redisClient == nil {
+				log.Printf("❌ Redis client not available - cannot retrieve location")
+				utils.RespondError(w, http.StatusInternalServerError, "Location service unavailable")
+				return
+			}
+
+			ctx := context.Background()
+			locationJSON, locationErr := redisClient.GetDriverLocation(ctx, userClaims.UserID)
+
+			if locationErr != nil {
+				log.Printf("❌ Driver location not available in Redis: %v", locationErr)
+				log.Printf("   This means the driver hasn't published their GPS location via the mobile app yet.")
+				log.Printf("   The mobile app publishes location to Centrifugo approximately every 1 second when GPS is enabled.")
+				utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
+				return
+			}
+
+			// DEBUG: Log raw Redis data to diagnose unexpected coordinates
+			log.Printf("🔍 [DEBUG] Raw Redis data for driver %s: %s", userClaims.UserID, locationJSON)
+
+			// Parse location JSON from Redis
+			if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
+				log.Printf("❌ Failed to parse location JSON from Redis: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to parse location data")
+				return
+			}
+
+			log.Printf("✅ Got driver location from Redis: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+
+			// Validate warehouse coordinates (required for standard shifts, optional for custom)
+			if shift.ShiftType != "custom" && (shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil) {
+				log.Printf("❌ Warehouse coordinates not set for shift")
+				utils.RespondError(w, http.StatusInternalServerError, "Warehouse location not configured")
+				return
+			}
+
+			// Run Mapbox v2 route optimization (capacity-aware, automatic warehouse trips)
+			capacity := 4 // Default capacity
+			if shift.TruckBinCapacity != nil {
+				capacity = *shift.TruckBinCapacity
+			}
+
+			// For custom shifts with no warehouse, use 0 capacity (no bin constraints)
+			warehouseLat := 0.0
+			warehouseLon := 0.0
+			warehouseAddr := ""
+			if shift.WarehouseLatitude != nil {
+				warehouseLat = *shift.WarehouseLatitude
+			}
+			if shift.WarehouseLongitude != nil {
+				warehouseLon = *shift.WarehouseLongitude
+			}
+			if shift.WarehouseAddress != nil {
+				warehouseAddr = *shift.WarehouseAddress
+			}
+
+			err = optimizeRouteWithMapbox(
+				db,
+				shift.ID,
+				capacity,
+				driverLocation.Latitude,
+				driverLocation.Longitude,
+				warehouseLat,
+				warehouseLon,
+				warehouseAddr,
+				req.BinsPreloaded,
+				true,                // isFirstOptimization = true (shift starting)
+				shift.StartLatitude, // Custom start location (nil for standard shifts)
+				shift.StartLongitude,
+				shift.StartAddress,
+				shift.EndLatitude, // Custom end location (nil for standard shifts)
+				shift.EndLongitude,
+				shift.EndAddress,
+			)
+
+			if err != nil {
+				log.Printf("❌ Mapbox v2 route optimization failed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Route optimization failed")
+				return
+			}
+
+			log.Printf("✅ Mapbox v2 route optimization complete")
 		}
 
-		if redisClient == nil {
-			log.Printf("❌ Redis client not available - cannot retrieve location")
-			utils.RespondError(w, http.StatusInternalServerError, "Location service unavailable")
-			return
+		// Calculate preloaded bins count
+		preloadedBins := 0
+		if req.BinsPreloaded {
+			var count int
+			err = db.Get(&count, `SELECT COUNT(*) FROM route_tasks WHERE shift_id = $1 AND task_type = 'placement' AND is_deleted = false`, shift.ID)
+			if err == nil {
+				preloadedBins = count
+			}
+			log.Printf("📦 Preloaded bins saved: %d", preloadedBins)
 		}
 
-		ctx := context.Background()
-		locationJSON, locationErr := redisClient.GetDriverLocation(ctx, userClaims.UserID)
-
-		if locationErr != nil {
-			log.Printf("❌ Driver location not available in Redis: %v", locationErr)
-			log.Printf("   This means the driver hasn't published their GPS location via the mobile app yet.")
-			log.Printf("   The mobile app publishes location to Centrifugo approximately every 1 second when GPS is enabled.")
-			utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
-			return
-		}
-
-		// DEBUG: Log raw Redis data to diagnose unexpected coordinates
-		log.Printf("🔍 [DEBUG] Raw Redis data for driver %s: %s", userClaims.UserID, locationJSON)
-
-		// Parse location JSON from Redis
-		if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
-			log.Printf("❌ Failed to parse location JSON from Redis: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to parse location data")
-			return
-		}
-
-		log.Printf("✅ Got driver location from Redis: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
-
-		// Validate warehouse coordinates (required for standard shifts, optional for custom)
-		if shift.ShiftType != "custom" && (shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil) {
-			log.Printf("❌ Warehouse coordinates not set for shift")
-			utils.RespondError(w, http.StatusInternalServerError, "Warehouse location not configured")
-			return
-		}
-
-		// Run Mapbox v2 route optimization (capacity-aware, automatic warehouse trips)
-		capacity := 4 // Default capacity
-		if shift.TruckBinCapacity != nil {
-			capacity = *shift.TruckBinCapacity
-		}
-
-		// For custom shifts with no warehouse, use 0 capacity (no bin constraints)
-		warehouseLat := 0.0
-		warehouseLon := 0.0
-		warehouseAddr := ""
-		if shift.WarehouseLatitude != nil {
-			warehouseLat = *shift.WarehouseLatitude
-		}
-		if shift.WarehouseLongitude != nil {
-			warehouseLon = *shift.WarehouseLongitude
-		}
-		if shift.WarehouseAddress != nil {
-			warehouseAddr = *shift.WarehouseAddress
-		}
-
-		err = optimizeRouteWithMapbox(
-			db,
-			shift.ID,
-			capacity,
-			driverLocation.Latitude,
-			driverLocation.Longitude,
-			warehouseLat,
-			warehouseLon,
-			warehouseAddr,
-			req.BinsPreloaded,
-			true, // isFirstOptimization = true (shift starting)
-			shift.StartLatitude, // Custom start location (nil for standard shifts)
-			shift.StartLongitude,
-			shift.StartAddress,
-			shift.EndLatitude,   // Custom end location (nil for standard shifts)
-			shift.EndLongitude,
-			shift.EndAddress,
-		)
-
-		if err != nil {
-			log.Printf("❌ Mapbox v2 route optimization failed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Route optimization failed")
-			return
-		}
-
-		log.Printf("✅ Mapbox v2 route optimization complete")
-	}
-
-	// Calculate preloaded bins count
-	preloadedBins := 0
-	if req.BinsPreloaded {
-		var count int
-		err = db.Get(&count, `SELECT COUNT(*) FROM route_tasks WHERE shift_id = $1 AND task_type = 'placement' AND is_deleted = false`, shift.ID)
-		if err == nil {
-			preloadedBins = count
-		}
-		log.Printf("📦 Preloaded bins saved: %d", preloadedBins)
-	}
-
-	// Update shift to active
-	now := time.Now().Unix()
-	updateQuery := `UPDATE shifts
+		// Update shift to active
+		now := time.Now().Unix()
+		updateQuery := `UPDATE shifts
 					SET status = 'active',
 						start_time = $1,
 						updated_at = $2,
 						preloaded_bins = $3
 					WHERE id = $4`
 
-	_, err = db.Exec(updateQuery, now, now, preloadedBins, shift.ID)
-	if err != nil {
-		log.Printf("❌ Error starting shift: %v", err)
-		utils.RespondError(w, http.StatusInternalServerError, "Failed to start shift")
-		return
-	}
+		_, err = db.Exec(updateQuery, now, now, preloadedBins, shift.ID)
+		if err != nil {
+			log.Printf("❌ Error starting shift: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to start shift")
+			return
+		}
 
-	// Update all assigned move requests for this shift to in_progress
-	updateMovesQuery := `UPDATE bin_move_requests
+		// Update all assigned move requests for this shift to in_progress
+		updateMovesQuery := `UPDATE bin_move_requests
 						 SET status = 'in_progress', updated_at = $1
 						 WHERE assigned_shift_id = $2
 						 AND status = 'assigned'`
-	result, err := db.Exec(updateMovesQuery, now, shift.ID)
-	if err != nil {
-		log.Printf("⚠️ Error updating move requests to in_progress: %v", err)
-		// Don't fail the request - continue
-	} else {
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected > 0 {
-			log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
+		result, err := db.Exec(updateMovesQuery, now, shift.ID)
+		if err != nil {
+			log.Printf("⚠️ Error updating move requests to in_progress: %v", err)
+			// Don't fail the request - continue
+		} else {
+			rowsAffected, _ := result.RowsAffected()
+			if rowsAffected > 0 {
+				log.Printf("✅ Updated %d move request(s) to in_progress", rowsAffected)
 
-			// Broadcast move request status update to dashboard
-			moveReqData := map[string]interface{}{
-				"shift_id":    shift.ID,
-				"new_status":  "in_progress",
-				"count":       rowsAffected,
-				"updated_at":  now,
-			}
-			hub.BroadcastToRole("admin", map[string]interface{}{
-				"type": "move_request_status_updated",
-				"data": moveReqData,
-			})
-			hub.BroadcastToRole("manager", map[string]interface{}{
-				"type": "move_request_status_updated",
-				"data": moveReqData,
-			})
-			log.Printf("📡 Broadcast move_request_status_updated to managers: %d move requests → in_progress", rowsAffected)
+				// Broadcast move request status update to dashboard
+				moveReqData := map[string]interface{}{
+					"shift_id":   shift.ID,
+					"new_status": "in_progress",
+					"count":      rowsAffected,
+					"updated_at": now,
+				}
+				hub.BroadcastToRole("admin", map[string]interface{}{
+					"type": "move_request_status_updated",
+					"data": moveReqData,
+				})
+				hub.BroadcastToRole("manager", map[string]interface{}{
+					"type": "move_request_status_updated",
+					"data": moveReqData,
+				})
+				log.Printf("📡 Broadcast move_request_status_updated to managers: %d move requests → in_progress", rowsAffected)
 
-			// Publish to Centrifugo
-			if centrifugoClient != nil {
-				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_status_updated", moveReqData); pubErr != nil {
-					log.Printf("⚠️  Failed to publish move_request_status_updated to Centrifugo: %v", pubErr)
+				// Publish to Centrifugo
+				if centrifugoClient != nil {
+					if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_status_updated", moveReqData); pubErr != nil {
+						log.Printf("⚠️  Failed to publish move_request_status_updated to Centrifugo: %v", pubErr)
+					}
 				}
 			}
 		}
-	}
 
-	// Get updated shift
-	db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
+		// Get updated shift
+		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shift.ID)
 
-	log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
-	log.Printf("📤 RESPONSE: 200 OK - Returning immediately to mobile")
-	log.Printf("   Shift ID: %s", shift.ID)
-	log.Printf("   Status: %s", shift.Status)
-	log.Printf("   Start Time: %v", shift.StartTime)
-	log.Printf("   Route: %v", shift.RouteID)
+		log.Printf("✅ Shift started: %s (Driver: %s)", shift.ID, userClaims.Email)
+		log.Printf("📤 RESPONSE: 200 OK - Returning immediately to mobile")
+		log.Printf("   Shift ID: %s", shift.ID)
+		log.Printf("   Status: %s", shift.Status)
+		log.Printf("   Start Time: %v", shift.StartTime)
+		log.Printf("   Route: %v", shift.RouteID)
 
-	// Return HTTP response IMMEDIATELY (don't wait for broadcasts)
-	utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    shift,
-	})
-
-	// Do WebSocket broadcasts in background (async - don't block HTTP response)
-	go func() {
-		log.Printf("📡 [ASYNC] Starting background broadcasts for shift %s", shift.ID)
-
-		// Get route bins with details for WebSocket broadcast
-		bins, err := getShiftTasksWithDetails(db, shift.ID)
-		if err != nil {
-			log.Printf("❌ [ASYNC] Error fetching route bins for WebSocket: %v", err)
-			bins = []models.ShiftBinWithDetails{} // Empty array on error
-		}
-
-		// Broadcast WebSocket update to driver (include tasks!)
-		shiftUpdateData := map[string]interface{}{
-			"id":                  shift.ID,
-			"driver_id":           shift.DriverID,
-			"route_id":            shift.RouteID,
-			"status":              shift.Status,
-			"start_time":          shift.StartTime,
-			"end_time":            shift.EndTime,
-			"total_pause_seconds": shift.TotalPauseSeconds,
-			"pause_start_time":    shift.PauseStartTime,
-			"total_bins":          shift.TotalBins,
-			"completed_bins":      shift.CompletedBins,
-			"tasks":               bins,
-			"created_at":          shift.CreatedAt,
-			"updated_at":          shift.UpdatedAt,
-		}
-		hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
-			"type": "shift_update",
-			"data": shiftUpdateData,
+		// Return HTTP response IMMEDIATELY (don't wait for broadcasts)
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    shift,
 		})
 
-		// Also publish via Centrifugo shift channel
-		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishShiftUpdate(context.Background(), shift.ID, map[string]interface{}{
+		// Do WebSocket broadcasts in background (async - don't block HTTP response)
+		go func() {
+			log.Printf("📡 [ASYNC] Starting background broadcasts for shift %s", shift.ID)
+
+			// Get route bins with details for WebSocket broadcast
+			bins, err := getShiftTasksWithDetails(db, shift.ID)
+			if err != nil {
+				log.Printf("❌ [ASYNC] Error fetching route bins for WebSocket: %v", err)
+				bins = []models.ShiftBinWithDetails{} // Empty array on error
+			}
+
+			// Broadcast WebSocket update to driver (include tasks!)
+			shiftUpdateData := map[string]interface{}{
+				"id":                  shift.ID,
+				"driver_id":           shift.DriverID,
+				"route_id":            shift.RouteID,
+				"status":              shift.Status,
+				"start_time":          shift.StartTime,
+				"end_time":            shift.EndTime,
+				"total_pause_seconds": shift.TotalPauseSeconds,
+				"pause_start_time":    shift.PauseStartTime,
+				"total_bins":          shift.TotalBins,
+				"completed_bins":      shift.CompletedBins,
+				"tasks":               bins,
+				"created_at":          shift.CreatedAt,
+				"updated_at":          shift.UpdatedAt,
+			}
+			hub.BroadcastToUser(userClaims.UserID, map[string]interface{}{
 				"type": "shift_update",
 				"data": shiftUpdateData,
-			}); pubErr != nil {
-				log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+			})
+
+			// Also publish via Centrifugo shift channel
+			if centrifugoClient != nil {
+				if pubErr := centrifugoClient.PublishShiftUpdate(context.Background(), shift.ID, map[string]interface{}{
+					"type": "shift_update",
+					"data": shiftUpdateData,
+				}); pubErr != nil {
+					log.Printf("⚠️  Failed to publish shift_update to Centrifugo: %v", pubErr)
+				}
 			}
-		}
 
-		// Broadcast shift state change to all managers
-		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Printf("📡 [ASYNC] BROADCASTING driver_shift_change TO MANAGERS")
-		log.Printf("   Driver ID: %s", shift.DriverID)
-		log.Printf("   Driver Email: %s", userClaims.Email)
-		log.Printf("   Status: %s", shift.Status)
-		log.Printf("   Shift ID: %s", shift.ID)
+			// Broadcast shift state change to all managers
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Printf("📡 [ASYNC] BROADCASTING driver_shift_change TO MANAGERS")
+			log.Printf("   Driver ID: %s", shift.DriverID)
+			log.Printf("   Driver Email: %s", userClaims.Email)
+			log.Printf("   Status: %s", shift.Status)
+			log.Printf("   Shift ID: %s", shift.ID)
 
-		broadcastData := map[string]interface{}{
-			"type": "driver_shift_change",
-			"data": map[string]interface{}{
-				"driver_id": shift.DriverID,
-				"status":    shift.Status,
-				"shift_id":  shift.ID,
-			},
-		}
-		log.Printf("   Broadcast payload: %+v", broadcastData)
-
-		hub.BroadcastToRole("admin", broadcastData)
-		hub.BroadcastToRole("manager", broadcastData)
-		log.Printf("   ✅ [ASYNC] BroadcastToRole('admin' + 'manager') called")
-
-		// Also publish via Centrifugo for mobile app notification pipeline
-		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "driver_shift_change", map[string]interface{}{
-				"driver_id": shift.DriverID,
-				"status":    shift.Status,
-				"shift_id":  shift.ID,
-			}); pubErr != nil {
-				log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
-			} else {
-				log.Printf("📡 Published driver_shift_change via Centrifugo (start)")
+			broadcastData := map[string]interface{}{
+				"type": "driver_shift_change",
+				"data": map[string]interface{}{
+					"driver_id": shift.DriverID,
+					"status":    shift.Status,
+					"shift_id":  shift.ID,
+				},
 			}
-		}
+			log.Printf("   Broadcast payload: %+v", broadcastData)
 
-		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Printf("✅ [ASYNC] Background broadcasts complete for shift %s", shift.ID)
-	}()
+			hub.BroadcastToRole("admin", broadcastData)
+			hub.BroadcastToRole("manager", broadcastData)
+			log.Printf("   ✅ [ASYNC] BroadcastToRole('admin' + 'manager') called")
+
+			// Also publish via Centrifugo for mobile app notification pipeline
+			if centrifugoClient != nil {
+				if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "driver_shift_change", map[string]interface{}{
+					"driver_id": shift.DriverID,
+					"status":    shift.Status,
+					"shift_id":  shift.ID,
+				}); pubErr != nil {
+					log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
+				} else {
+					log.Printf("📡 Published driver_shift_change via Centrifugo (start)")
+				}
+			}
+
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Printf("✅ [ASYNC] Background broadcasts complete for shift %s", shift.ID)
+		}()
 	}
 }
 
@@ -1524,33 +1563,24 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 			}
 		}
 
-		historyQuery := `INSERT INTO shift_history (
-			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
-			total_pause_seconds, total_bins, completed_bins, completion_rate,
-			incidents_reported, field_observations,
-			end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
-
-		_, err = db.Exec(
-			historyQuery,
-			shift.ID,
-			shift.DriverID,
-			shift.RouteID,
-			shift.StartTime,
-			endTime, // end_time
-			shift.CreatedAt,
-			now,        // ended_at (when history record created)
-			totalPause, // total_pause_seconds
-			shift.TotalBins,
-			shift.CompletedBins,
-			completionRate,
-			incidentStats.TotalIncidents,    // NEW: incidents_reported
-			incidentStats.FieldObservations, // NEW: field_observations
-			endReason,
-			nil, // ended_by_user_id (NULL - driver action)
-			nil, // end_reason_metadata (NULL for basic driver ends)
-			optMeta,
-		)
+		_, err = archiveShift(db, archiveShiftParams{
+			ID:                shift.ID,
+			DriverID:          shift.DriverID,
+			RouteID:           shift.RouteID,
+			StartTime:         shift.StartTime,
+			EndTime:           endTime, // end_time
+			CreatedAt:         shift.CreatedAt,
+			EndedAt:           now,        // ended_at (when history record created)
+			TotalPauseSeconds: totalPause, // total_pause_seconds
+			TotalBins:         shift.TotalBins,
+			CompletedBins:     shift.CompletedBins,
+			IncidentsReported: incidentStats.TotalIncidents,    // incidents_reported
+			FieldObservations: incidentStats.FieldObservations, // field_observations
+			EndReason:         endReason,
+			EndedByUserID:     nil, // ended_by_user_id (NULL - driver action)
+			EndReasonMetadata: nil, // end_reason_metadata (NULL for basic driver ends)
+			OptMeta:           optMeta,
+		})
 		if err != nil {
 			log.Printf("❌ Error inserting shift history: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to save shift history")
@@ -1580,11 +1610,11 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 		// Update incomplete move requests back to pending and clear assignment
 		// First, fetch the affected move requests so we can log history
 		type MoveRequestInfo struct {
-			ID                 string  `db:"id"`
-			AssignmentType     *string `db:"assignment_type"`
-			AssignedUserID     *string `db:"assigned_user_id"`
-			AssignedUserName   *string `db:"assigned_user_name"`
-			AssignedShiftID    *string `db:"assigned_shift_id"`
+			ID               string  `db:"id"`
+			AssignmentType   *string `db:"assignment_type"`
+			AssignedUserID   *string `db:"assigned_user_id"`
+			AssignedUserName *string `db:"assigned_user_name"`
+			AssignedShiftID  *string `db:"assigned_shift_id"`
 		}
 		var affectedMoveRequests []MoveRequestInfo
 		err = db.Select(&affectedMoveRequests, `
@@ -1743,18 +1773,18 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 		// Parse request body
 		var req struct {
-			TaskID                string     `json:"task_id"`                      // ID of route_tasks record (identifies specific waypoint)
-			BinID                 string  `json:"bin_id"`                            // DEPRECATED: Use task_id instead
-			UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"` // Now optional
-			PhotoUrl              *string `json:"photo_url,omitempty"`               // "Before" photo — bin contents before collection
-			AfterPhotoUrl         *string `json:"after_photo_url,omitempty"`          // "After" photo — bin empty after collection
+			TaskID                string   `json:"task_id"`                           // ID of route_tasks record (identifies specific waypoint)
+			BinID                 string   `json:"bin_id"`                            // DEPRECATED: Use task_id instead
+			UpdatedFillPercentage *int     `json:"updated_fill_percentage,omitempty"` // Now optional
+			PhotoUrl              *string  `json:"photo_url,omitempty"`               // "Before" photo — bin contents before collection
+			AfterPhotoUrl         *string  `json:"after_photo_url,omitempty"`         // "After" photo — bin empty after collection
 			PhotoLatitude         *float64 `json:"photo_latitude,omitempty"`          // EXIF GPS from before photo
 			PhotoLongitude        *float64 `json:"photo_longitude,omitempty"`         // EXIF GPS from before photo
 			AfterPhotoLatitude    *float64 `json:"after_photo_latitude,omitempty"`    // EXIF GPS from after photo
 			AfterPhotoLongitude   *float64 `json:"after_photo_longitude,omitempty"`   // EXIF GPS from after photo
-			MoveRequestID         *string `json:"move_request_id,omitempty"` // Links check to move request
-			NewBinNumber          int     `json:"new_bin_number"`                // REQUIRED: Driver-provided bin number for placements
-			CompletionNotes       *string `json:"completion_notes,omitempty"`     // Driver notes for service tasks
+			MoveRequestID         *string  `json:"move_request_id,omitempty"`         // Links check to move request
+			NewBinNumber          int      `json:"new_bin_number"`                    // REQUIRED: Driver-provided bin number for placements
+			CompletionNotes       *string  `json:"completion_notes,omitempty"`        // Driver notes for service tasks
 
 			// Incident reporting fields (all optional)
 			HasIncident         bool    `json:"has_incident"`
@@ -2294,31 +2324,31 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				log.Printf("[DIAGNOSTIC]    Latitude: %v, Longitude: %v", bin.Latitude, bin.Longitude)
 			}
 
-		// relocation_request is an operational note, not a location safety signal — skip zone creation
-		if err == nil && bin.Latitude != nil && bin.Longitude != nil && *req.IncidentType != "relocation_request" {
-			binIDCopy := binIDForCheck
-			shiftIDCopy := shift.ID
-			zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
-			driverShiftSource := "driver_shift"
-			incidentID, incidentErr := createZoneAndIncident(
-				db,
-				centrifugoClient,
-				*bin.Latitude, *bin.Longitude,
-				zoneName,
-				*req.IncidentType,
-				&binIDCopy,
-				userClaims.UserID,
-				req.IncidentDescription,
-				req.IncidentPhotoUrl,
-				&shiftIDCopy,
-				checkID,
-				nil, nil,
-				false,
-				now,
-				&driverShiftSource, // source
-				nil,                // moveRequestID
-			)
-			if incidentErr != nil {
+			// relocation_request is an operational note, not a location safety signal — skip zone creation
+			if err == nil && bin.Latitude != nil && bin.Longitude != nil && *req.IncidentType != "relocation_request" {
+				binIDCopy := binIDForCheck
+				shiftIDCopy := shift.ID
+				zoneName := fmt.Sprintf("%s - %s", bin.CurrentStreet, bin.City)
+				driverShiftSource := "driver_shift"
+				incidentID, incidentErr := createZoneAndIncident(
+					db,
+					centrifugoClient,
+					*bin.Latitude, *bin.Longitude,
+					zoneName,
+					*req.IncidentType,
+					&binIDCopy,
+					userClaims.UserID,
+					req.IncidentDescription,
+					req.IncidentPhotoUrl,
+					&shiftIDCopy,
+					checkID,
+					nil, nil,
+					false,
+					now,
+					&driverShiftSource, // source
+					nil,                // moveRequestID
+				)
+				if incidentErr != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error creating zone/incident: %v", incidentErr)
 				} else {
 					createdIncidentID = &incidentID
@@ -2330,25 +2360,25 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				log.Printf("[DIAGNOSTIC] ⚠️  Could not create incident: bin has no coordinates (lat: %v, lng: %v)", bin.Latitude, bin.Longitude)
 			}
 
-		// If the incident type is "missing", flip the bin status and broadcast in real-time
-		if *req.IncidentType == "missing" {
-			if _, updateErr := db.Exec(
-				`UPDATE bins SET status = 'missing', updated_at = $1 WHERE id = $2`,
-				now, binIDForCheck,
-			); updateErr != nil {
-				log.Printf("[DIAGNOSTIC] ⚠️  Failed to mark bin %s as missing: %v", binIDForCheck, updateErr)
-			} else {
-				log.Printf("[DIAGNOSTIC] 🔍 Bin %s marked as missing", binIDForCheck)
-				if centrifugoClient != nil {
-					var updatedBin models.Bin
-					if fetchErr := db.Get(&updatedBin, "SELECT * FROM bins WHERE id = $1", binIDForCheck); fetchErr == nil {
-						if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_updated", updatedBin); pubErr != nil {
-							log.Printf("[DIAGNOSTIC] ⚠️  Centrifugo bin_updated publish failed: %v", pubErr)
+			// If the incident type is "missing", flip the bin status and broadcast in real-time
+			if *req.IncidentType == "missing" {
+				if _, updateErr := db.Exec(
+					`UPDATE bins SET status = 'missing', updated_at = $1 WHERE id = $2`,
+					now, binIDForCheck,
+				); updateErr != nil {
+					log.Printf("[DIAGNOSTIC] ⚠️  Failed to mark bin %s as missing: %v", binIDForCheck, updateErr)
+				} else {
+					log.Printf("[DIAGNOSTIC] 🔍 Bin %s marked as missing", binIDForCheck)
+					if centrifugoClient != nil {
+						var updatedBin models.Bin
+						if fetchErr := db.Get(&updatedBin, "SELECT * FROM bins WHERE id = $1", binIDForCheck); fetchErr == nil {
+							if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_updated", updatedBin); pubErr != nil {
+								log.Printf("[DIAGNOSTIC] ⚠️  Centrifugo bin_updated publish failed: %v", pubErr)
+							}
 						}
 					}
 				}
 			}
-		}
 		}
 
 		// Update shift completed_bins count (only for bin tasks, not warehouse stops)
@@ -2381,7 +2411,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			bins = []models.ShiftBinWithDetails{}
 		}
 		log.Printf("✅ Fetched %d tasks", len(bins))
-
 
 		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
 		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
@@ -3336,7 +3365,6 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centri
 			bins = []models.ShiftBinWithDetails{}
 		}
 
-
 		// Calculate LOGICAL bin counts (treating pickup+dropoff as 1)
 		logicalTotal, logicalCompleted := calculateLogicalBinCounts(bins)
 
@@ -3611,10 +3639,6 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 			cancelNow := time.Now().Unix()
 
 			// Archive to shift_history first
-			completionRate := 0.0
-			if shift.TotalBins > 0 {
-				completionRate = (float64(shift.CompletedBins) / float64(shift.TotalBins)) * 100
-			}
 			var optMetaBytes []byte
 			db.Get(&optMetaBytes, `SELECT optimization_metadata FROM shifts WHERE id = $1`, shiftID)
 			var optMeta interface{}
@@ -3623,21 +3647,25 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 				optMeta = &raw
 			}
 
-			_, histErr := db.Exec(`
-				INSERT INTO shift_history (
-					id, driver_id, route_id, start_time, end_time, created_at, ended_at,
-					total_pause_seconds, total_bins, completed_bins, completion_rate,
-					incidents_reported, field_observations,
-					end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-				ON CONFLICT (id) DO NOTHING
-			`,
-				shift.ID, shift.DriverID, shift.RouteID,
-				shift.StartTime, cancelNow, shift.CreatedAt, cancelNow,
-				shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
-				0, 0, // incidents, field observations
-				"manager_cancelled", userClaims.UserID, nil, optMeta,
-			)
+			_, histErr := archiveShift(db, archiveShiftParams{
+				ID:                  shift.ID,
+				DriverID:            shift.DriverID,
+				RouteID:             shift.RouteID,
+				StartTime:           shift.StartTime,
+				EndTime:             cancelNow,
+				CreatedAt:           shift.CreatedAt,
+				EndedAt:             cancelNow,
+				TotalPauseSeconds:   shift.TotalPauseSeconds,
+				TotalBins:           shift.TotalBins,
+				CompletedBins:       shift.CompletedBins,
+				IncidentsReported:   0, // incidents
+				FieldObservations:   0, // field observations
+				EndReason:           "manager_cancelled",
+				EndedByUserID:       userClaims.UserID,
+				EndReasonMetadata:   nil,
+				OptMeta:             optMeta,
+				OnConflictDoNothing: true,
+			})
 			if histErr != nil {
 				log.Printf("⚠️  Failed to archive cancelled shift: %v", histErr)
 			}
@@ -4036,8 +4064,8 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					if task.MoveRequestID != nil && !loggedMoveRequests[*task.MoveRequestID] {
 						// Get move request assignment details BEFORE unassigning (for history logging)
 						var moveReq struct {
-							AssignmentType *string `db:"assignment_type"`
-							AssignedUserID *string `db:"assigned_user_id"`
+							AssignmentType  *string `db:"assignment_type"`
+							AssignedUserID  *string `db:"assigned_user_id"`
 							AssignedShiftID *string `db:"assigned_shift_id"`
 						}
 						err = tx.Get(&moveReq, `SELECT assignment_type, assigned_user_id, assigned_shift_id FROM bin_move_requests WHERE id = $1`, *task.MoveRequestID)
@@ -4135,9 +4163,15 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			}
 			tx.Select(&existingTasks, `SELECT bin_id, move_request_id, potential_location_id FROM route_tasks WHERE shift_id = $1 AND is_deleted = false`, shiftID)
 			for _, et := range existingTasks {
-				if et.BinID != nil { existingBinIDs[*et.BinID] = true }
-				if et.MoveRequestID != nil { existingMoveRequestIDs[*et.MoveRequestID] = true }
-				if et.PotentialLocationID != nil { existingPotentialLocationIDs[*et.PotentialLocationID] = true }
+				if et.BinID != nil {
+					existingBinIDs[*et.BinID] = true
+				}
+				if et.MoveRequestID != nil {
+					existingMoveRequestIDs[*et.MoveRequestID] = true
+				}
+				if et.PotentialLocationID != nil {
+					existingPotentialLocationIDs[*et.PotentialLocationID] = true
+				}
 			}
 
 			skippedCount := 0
@@ -4201,13 +4235,13 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 
 					// Fetch bin details
 					var bin struct {
-						ID            string   `db:"id"`
-						BinNumber     int      `db:"bin_number"`
-						Latitude      float64  `db:"latitude"`
-						Longitude     float64  `db:"longitude"`
-						CurrentStreet string   `db:"current_street"`
-						City          string   `db:"city"`
-						ZipCode       string   `db:"zip"`
+						ID             string  `db:"id"`
+						BinNumber      int     `db:"bin_number"`
+						Latitude       float64 `db:"latitude"`
+						Longitude      float64 `db:"longitude"`
+						CurrentStreet  string  `db:"current_street"`
+						City           string  `db:"city"`
+						ZipCode        string  `db:"zip"`
 						FillPercentage int     `db:"fill_percentage"`
 					}
 					err = tx.Get(&bin, `SELECT id, bin_number, latitude, longitude, current_street, city, zip, fill_percentage FROM bins WHERE id = $1`, *addReq.BinID)
@@ -4270,11 +4304,11 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					}
 					// Fetch move request details
 					var moveReq struct {
-						ID         string   `db:"id"`
-						BinID      string   `db:"bin_id"`
-						Latitude   *float64 `db:"original_latitude"`
-						Longitude  *float64 `db:"original_longitude"`
-						Address    *string  `db:"original_address"`
+						ID            string   `db:"id"`
+						BinID         string   `db:"bin_id"`
+						Latitude      *float64 `db:"original_latitude"`
+						Longitude     *float64 `db:"original_longitude"`
+						Address       *string  `db:"original_address"`
 						DestLatitude  *float64 `db:"new_latitude"`
 						DestLongitude *float64 `db:"new_longitude"`
 						DestAddress   *string  `db:"new_address"`
@@ -4363,41 +4397,41 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			log.Printf("✅ Added %d tasks", addedCount)
 		}
 
-	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	// STEP 3.5: Recalculate total_bins if tasks were added/removed
-	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	if addedCount > 0 || removedCount > 0 {
-		log.Printf("🔢 Recalculating total_bins after task changes...")
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		// STEP 3.5: Recalculate total_bins if tasks were added/removed
+		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+		if addedCount > 0 || removedCount > 0 {
+			log.Printf("🔢 Recalculating total_bins after task changes...")
 
-		// Count active (non-deleted, non-warehouse_stop) tasks
-		var newTotalBins int
-		err = tx.Get(&newTotalBins, `
+			// Count active (non-deleted, non-warehouse_stop) tasks
+			var newTotalBins int
+			err = tx.Get(&newTotalBins, `
 			SELECT COUNT(*)
 			FROM route_tasks
 			WHERE shift_id = $1
 			  AND is_deleted = FALSE
 			  AND task_type != 'warehouse_stop'
 		`, shiftID)
-		if err != nil {
-			log.Printf("❌ Error counting tasks: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to recalculate total_bins")
-			return
-		}
+			if err != nil {
+				log.Printf("❌ Error counting tasks: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to recalculate total_bins")
+				return
+			}
 
-		// Update shifts.total_bins
-		_, err = tx.Exec(`
+			// Update shifts.total_bins
+			_, err = tx.Exec(`
 			UPDATE shifts
 			SET total_bins = $1, updated_at = $2
 			WHERE id = $3
 		`, newTotalBins, now, shiftID)
-		if err != nil {
-			log.Printf("❌ Error updating total_bins: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to update total_bins")
-			return
-		}
+			if err != nil {
+				log.Printf("❌ Error updating total_bins: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to update total_bins")
+				return
+			}
 
-		log.Printf("✅ Updated total_bins: %d", newTotalBins)
-	}
+			log.Printf("✅ Updated total_bins: %d", newTotalBins)
+		}
 
 		// Commit transaction
 		if err = tx.Commit(); err != nil {
@@ -4416,10 +4450,6 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 				log.Printf("🚫 All tasks removed from shift %s via PATCH — auto-cancelling", shiftID)
 				cancelNow := time.Now().Unix()
 
-				completionRate := 0.0
-				if shift.TotalBins > 0 {
-					completionRate = (float64(shift.CompletedBins) / float64(shift.TotalBins)) * 100
-				}
 				var optMetaBytes []byte
 				db.Get(&optMetaBytes, `SELECT optimization_metadata FROM shifts WHERE id = $1`, shiftID)
 				var optMeta interface{}
@@ -4428,20 +4458,25 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					optMeta = &raw
 				}
 
-				db.Exec(`
-					INSERT INTO shift_history (
-						id, driver_id, route_id, start_time, end_time, created_at, ended_at,
-						total_pause_seconds, total_bins, completed_bins, completion_rate,
-						incidents_reported, field_observations,
-						end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-					ON CONFLICT (id) DO NOTHING
-				`,
-					shift.ID, shift.DriverID, shift.RouteID,
-					shift.StartTime, cancelNow, shift.CreatedAt, cancelNow,
-					shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
-					0, 0, "manager_cancelled", userClaims.UserID, nil, optMeta,
-				)
+				_, _ = archiveShift(db, archiveShiftParams{
+					ID:                  shift.ID,
+					DriverID:            shift.DriverID,
+					RouteID:             shift.RouteID,
+					StartTime:           shift.StartTime,
+					EndTime:             cancelNow,
+					CreatedAt:           shift.CreatedAt,
+					EndedAt:             cancelNow,
+					TotalPauseSeconds:   shift.TotalPauseSeconds,
+					TotalBins:           shift.TotalBins,
+					CompletedBins:       shift.CompletedBins,
+					IncidentsReported:   0,
+					FieldObservations:   0,
+					EndReason:           "manager_cancelled",
+					EndedByUserID:       userClaims.UserID,
+					EndReasonMetadata:   nil,
+					OptMeta:             optMeta,
+					OnConflictDoNothing: true,
+				})
 				db.Exec(`UPDATE shifts SET status = 'cancelled', end_time = $1, pause_start_time = NULL, updated_at = $1 WHERE id = $2`, cancelNow, shiftID)
 				shift.Status = "cancelled"
 				log.Printf("✅ Shift %s auto-cancelled and archived (0 tasks remain)", shiftID)
@@ -4503,10 +4538,10 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			// Publish shift_edited event to current/new driver
 			newDriverChannel := fmt.Sprintf("shift:updates:%s", shiftID)
 			editedEvent := map[string]interface{}{
-				"type":    "shift_edited",
-				"shift_id": shiftID,
-				"changes":  changes,
-				"reason":   req.Reason,
+				"type":         "shift_edited",
+				"shift_id":     shiftID,
+				"changes":      changes,
+				"reason":       req.Reason,
 				"manager_name": userClaims.Email,
 			}
 			if pubErr := centrifugoClient.PublishToChannel(r.Context(), newDriverChannel, editedEvent); pubErr != nil {
@@ -4562,10 +4597,10 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			"message": "Shift updated successfully",
 			"changes": changes,
 			"shift": map[string]interface{}{
-				"id":     shift.ID,
-				"status": shift.Status,
+				"id":        shift.ID,
+				"status":    shift.Status,
 				"driver_id": shift.DriverID,
-				"tasks":  tasks,
+				"tasks":     tasks,
 			},
 		})
 
@@ -4903,11 +4938,11 @@ func CheckShiftDriverProximity(db *sqlx.DB, redisClient *redis.Client) http.Hand
 
 		// Get current task (first uncompleted task for this shift)
 		var currentTask struct {
-			ID        string   `db:"id"`
-			Address   *string  `db:"address"`
-			BinNumber *int     `db:"bin_number"`
-			Latitude  float64  `db:"latitude"`
-			Longitude float64  `db:"longitude"`
+			ID        string  `db:"id"`
+			Address   *string `db:"address"`
+			BinNumber *int    `db:"bin_number"`
+			Latitude  float64 `db:"latitude"`
+			Longitude float64 `db:"longitude"`
 		}
 		err = db.Get(&currentTask, `
 			SELECT id, address, bin_number, latitude, longitude
@@ -4939,7 +4974,7 @@ func CheckShiftDriverProximity(db *sqlx.DB, redisClient *redis.Client) http.Hand
 		}
 
 		// Calculate distance using haversine formula
-		distanceKm := haversineDistanceKm(
+		distanceKm := geo.HaversineKm(
 			driverLoc.Latitude, driverLoc.Longitude,
 			currentTask.Latitude, currentTask.Longitude,
 		)
@@ -4957,13 +4992,13 @@ func CheckShiftDriverProximity(db *sqlx.DB, redisClient *redis.Client) http.Hand
 
 		// Build response
 		response := map[string]interface{}{
-			"is_nearby":              isNearby,
-			"driver_distance_miles":  distanceMiles,
-			"location_age_seconds":   locationAge,
-			"current_task_id":        currentTask.ID,
-			"current_task_address":   currentTask.Address,
+			"is_nearby":               isNearby,
+			"driver_distance_miles":   distanceMiles,
+			"location_age_seconds":    locationAge,
+			"current_task_id":         currentTask.ID,
+			"current_task_address":    currentTask.Address,
 			"current_task_bin_number": currentTask.BinNumber,
-			"driver_name":            driverName,
+			"driver_name":             driverName,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -5284,7 +5319,7 @@ func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMServic
 				"route_id":          req.RouteID,
 				"status":            shift.Status,
 				"total_bins":        totalBins,
-				"tasks":              bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
+				"tasks":             bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
 				"notification_sent": notificationSent,
 			},
 		})
@@ -5797,43 +5832,29 @@ func GetAllDrivers(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 
 // Helper Functions for Incident Reporting and No-Go Zones
 
-// calculateZoneDistance calculates the distance in meters between two coordinates (Haversine)
+// calculateZoneDistance calculates the distance in meters between two coordinates (Haversine).
 func calculateZoneDistance(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadiusMeters = 6371000 // Earth's radius in meters
-
-	// Convert degrees to radians
-	lat1Rad := lat1 * (3.141592653589793 / 180)
-	lat2Rad := lat2 * (3.141592653589793 / 180)
-	deltaLatRad := (lat2 - lat1) * (3.141592653589793 / 180)
-	deltaLonRad := (lon2 - lon1) * (3.141592653589793 / 180)
-
-	// Haversine formula
-	a := math.Sin(deltaLatRad/2)*math.Sin(deltaLatRad/2) +
-		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
-			math.Sin(deltaLonRad/2)*math.Sin(deltaLonRad/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return earthRadiusMeters * c
+	return geo.HaversineMeters(lat1, lon1, lat2, lon2)
 }
 
 // handleMoveRequestCompletion handles move request completion logic
 func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, req struct {
-	TaskID                string     `json:"task_id"`
-	BinID                 string  `json:"bin_id"`
-	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
-	PhotoUrl              *string `json:"photo_url,omitempty"`
-	AfterPhotoUrl         *string `json:"after_photo_url,omitempty"`
+	TaskID                string   `json:"task_id"`
+	BinID                 string   `json:"bin_id"`
+	UpdatedFillPercentage *int     `json:"updated_fill_percentage,omitempty"`
+	PhotoUrl              *string  `json:"photo_url,omitempty"`
+	AfterPhotoUrl         *string  `json:"after_photo_url,omitempty"`
 	PhotoLatitude         *float64 `json:"photo_latitude,omitempty"`
 	PhotoLongitude        *float64 `json:"photo_longitude,omitempty"`
 	AfterPhotoLatitude    *float64 `json:"after_photo_latitude,omitempty"`
 	AfterPhotoLongitude   *float64 `json:"after_photo_longitude,omitempty"`
-	MoveRequestID         *string `json:"move_request_id,omitempty"`
-	NewBinNumber          int     `json:"new_bin_number"`
-	CompletionNotes       *string `json:"completion_notes,omitempty"`
-	HasIncident           bool    `json:"has_incident"`
-	IncidentType          *string `json:"incident_type,omitempty"`
-	IncidentPhotoUrl      *string `json:"incident_photo_url,omitempty"`
-	IncidentDescription   *string `json:"incident_description,omitempty"`
+	MoveRequestID         *string  `json:"move_request_id,omitempty"`
+	NewBinNumber          int      `json:"new_bin_number"`
+	CompletionNotes       *string  `json:"completion_notes,omitempty"`
+	HasIncident           bool     `json:"has_incident"`
+	IncidentType          *string  `json:"incident_type,omitempty"`
+	IncidentPhotoUrl      *string  `json:"incident_photo_url,omitempty"`
+	IncidentDescription   *string  `json:"incident_description,omitempty"`
 }, now int64) error {
 	log.Printf("[MOVE] 🚚 Handling move request completion")
 	log.Printf("[MOVE]    Type: %s", moveRequest.MoveType)
@@ -6150,11 +6171,11 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		// 2. Return all in_progress move requests to pending
 		// First, fetch the affected move requests so we can log history
 		type MoveRequestInfo struct {
-			ID                 string  `db:"id"`
-			AssignmentType     *string `db:"assignment_type"`
-			AssignedUserID     *string `db:"assigned_user_id"`
-			AssignedUserName   *string `db:"assigned_user_name"`
-			AssignedShiftID    *string `db:"assigned_shift_id"`
+			ID               string  `db:"id"`
+			AssignmentType   *string `db:"assignment_type"`
+			AssignedUserID   *string `db:"assigned_user_id"`
+			AssignedUserName *string `db:"assigned_user_name"`
+			AssignedShiftID  *string `db:"assigned_shift_id"`
 		}
 		var affectedMoveRequests []MoveRequestInfo
 		err = tx.Select(&affectedMoveRequests, `
@@ -6218,32 +6239,31 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		// 3. route_tasks are preserved for shift history audit trail
 
 		// 4. Insert into shift_history so this cancellation appears in history tab
-		var completionRate float64
-		if shift.TotalBins > 0 {
-			completionRate = float64(shift.CompletedBins) / float64(shift.TotalBins) * 100
-		}
 		var cancelOptMeta interface{}
 		if shift.OptimizationMetadata != nil {
 			if b, e := json.Marshal(shift.OptimizationMetadata); e == nil {
 				cancelOptMeta = b
 			}
 		}
-		_, err = tx.Exec(`
-			INSERT INTO shift_history (
-				id, driver_id, route_id, start_time, end_time, created_at, ended_at,
-				total_pause_seconds, total_bins, completed_bins, completion_rate,
-				incidents_reported, field_observations,
-				end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-			ON CONFLICT (id) DO NOTHING
-		`,
-			shift.ID, shift.DriverID, shift.RouteID,
-			shift.StartTime, now, shift.CreatedAt, now,
-			shift.TotalPauseSeconds, shift.TotalBins, shift.CompletedBins, completionRate,
-			0, 0,
-			"manager_cancelled", userClaims.UserID, nil,
-			cancelOptMeta,
-		)
+		_, err = archiveShift(tx, archiveShiftParams{
+			ID:                  shift.ID,
+			DriverID:            shift.DriverID,
+			RouteID:             shift.RouteID,
+			StartTime:           shift.StartTime,
+			EndTime:             now,
+			CreatedAt:           shift.CreatedAt,
+			EndedAt:             now,
+			TotalPauseSeconds:   shift.TotalPauseSeconds,
+			TotalBins:           shift.TotalBins,
+			CompletedBins:       shift.CompletedBins,
+			IncidentsReported:   0,
+			FieldObservations:   0,
+			EndReason:           "manager_cancelled",
+			EndedByUserID:       userClaims.UserID,
+			EndReasonMetadata:   nil,
+			OptMeta:             cancelOptMeta,
+			OnConflictDoNothing: true,
+		})
 		if err != nil {
 			log.Printf("⚠️  Error inserting shift history on cancel: %v", err)
 			// Don't fail the cancellation — history is best-effort
@@ -6465,32 +6485,31 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 
 		// 4. Insert each shift into shift_history
 		for _, s := range shifts {
-			var cr float64
-			if s.TotalBins > 0 {
-				cr = float64(s.CompletedBins) / float64(s.TotalBins) * 100
-			}
 			var bulkOptMeta interface{}
 			if s.OptimizationMetadata != nil {
 				if b, e := json.Marshal(s.OptimizationMetadata); e == nil {
 					bulkOptMeta = b
 				}
 			}
-			_, histErr := tx.Exec(`
-				INSERT INTO shift_history (
-					id, driver_id, route_id, start_time, end_time, created_at, ended_at,
-					total_pause_seconds, total_bins, completed_bins, completion_rate,
-					incidents_reported, field_observations,
-					end_reason, ended_by_user_id, end_reason_metadata, optimization_metadata
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-				ON CONFLICT (id) DO NOTHING
-			`,
-				s.ID, s.DriverID, s.RouteID,
-				s.StartTime, now, s.CreatedAt, now,
-				s.TotalPauseSeconds, s.TotalBins, s.CompletedBins, cr,
-				0, 0,
-				"manager_cancelled", userClaims.UserID, nil,
-				bulkOptMeta,
-			)
+			_, histErr := archiveShift(tx, archiveShiftParams{
+				ID:                  s.ID,
+				DriverID:            s.DriverID,
+				RouteID:             s.RouteID,
+				StartTime:           s.StartTime,
+				EndTime:             now,
+				CreatedAt:           s.CreatedAt,
+				EndedAt:             now,
+				TotalPauseSeconds:   s.TotalPauseSeconds,
+				TotalBins:           s.TotalBins,
+				CompletedBins:       s.CompletedBins,
+				IncidentsReported:   0,
+				FieldObservations:   0,
+				EndReason:           "manager_cancelled",
+				EndedByUserID:       userClaims.UserID,
+				EndReasonMetadata:   nil,
+				OptMeta:             bulkOptMeta,
+				OnConflictDoNothing: true,
+			})
 			if histErr != nil {
 				log.Printf("⚠️  Error inserting history for shift %s: %v", s.ID, histErr)
 			}
@@ -6880,6 +6899,7 @@ func min(a, b int) int {
 	}
 	return b
 }
+
 // optimizeRouteWithMapbox optimizes a shift's route using Mapbox Optimization v2 API
 // This replaces the old segmented HERE Maps optimization with intelligent capacity-aware routing
 // isFirstOptimization: true = shift starting (UPDATE tasks), false = mid-shift reoptimization (DELETE+CREATE tasks)
@@ -6952,9 +6972,21 @@ func optimizeRouteWithMapbox(
 		if task.TaskType == "placement" {
 			log.Printf("🎯 [PLACEMENT TASK #%d] ID=%s, PotentialLocationID=%v, Lat=%.6f, Lon=%.6f, Address=%v",
 				i+1, task.ID,
-				func() string { if task.PotentialLocationID != nil { return *task.PotentialLocationID } else { return "nil" } }(),
+				func() string {
+					if task.PotentialLocationID != nil {
+						return *task.PotentialLocationID
+					} else {
+						return "nil"
+					}
+				}(),
 				task.Latitude, task.Longitude,
-				func() string { if task.Address != nil { return *task.Address } else { return "nil" } }(),
+				func() string {
+					if task.Address != nil {
+						return *task.Address
+					} else {
+						return "nil"
+					}
+				}(),
 			)
 		}
 	}
@@ -7112,9 +7144,9 @@ func optimizeRouteWithMapbox(
 		case "collection":
 			if task.BinID != nil && task.Latitude != 0 && task.Longitude != 0 {
 				collection := optimization.Collection{
-					ID:             task.ID,
-					BinID:          *task.BinID,
-					BinNumber:      getIntValue(task.BinNumber),
+					ID:        task.ID,
+					BinID:     *task.BinID,
+					BinNumber: getIntValue(task.BinNumber),
 					Location: optimization.Location{
 						ID:        *task.BinID,
 						Name:      fmt.Sprintf("Bin #%d", getIntValue(task.BinNumber)),
@@ -7793,11 +7825,11 @@ func NotifyDriverOfRouteUpdate(
 
 	// Build notification payload
 	payload := map[string]interface{}{
-		"type":         "route_updated",
-		"change_type":  changeType,
-		"details":      changeDetails,
+		"type":          "route_updated",
+		"change_type":   changeType,
+		"details":       changeDetails,
 		"updated_tasks": tasks,
-		"timestamp":    time.Now().Unix(),
+		"timestamp":     time.Now().Unix(),
 	}
 
 	// Publish to shift-specific channel

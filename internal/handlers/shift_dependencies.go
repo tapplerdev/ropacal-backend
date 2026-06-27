@@ -15,30 +15,129 @@ import (
 
 // ActiveShiftDependency represents a dependency on an active shift
 type ActiveShiftDependency struct {
-	ShiftID      string   `json:"shift_id"`
-	ShiftDate    string   `json:"shift_date_iso"`
-	DriverID     string   `json:"driver_id"`
-	DriverName   string   `json:"driver_name"`
-	Status       string   `json:"status"`
+	ShiftID       string         `json:"shift_id"`
+	ShiftDate     string         `json:"shift_date_iso"`
+	DriverID      string         `json:"driver_id"`
+	DriverName    string         `json:"driver_name"`
+	Status        string         `json:"status"`
 	AffectedTasks []AffectedTask `json:"affected_tasks"`
 
 	// Proximity information (for warning about driver being nearby)
-	CurrentTaskID         *string  `json:"current_task_id,omitempty"`
-	CurrentTaskAddress    *string  `json:"current_task_address,omitempty"`
-	CurrentTaskBinNumber  *int     `json:"current_task_bin_number,omitempty"`
-	DriverDistanceMiles   *float64 `json:"driver_distance_miles,omitempty"`
-	LocationAgeSeconds    *int64   `json:"location_age_seconds,omitempty"`
-	IsDriverNearby        bool     `json:"is_driver_nearby"`
+	CurrentTaskID        *string  `json:"current_task_id,omitempty"`
+	CurrentTaskAddress   *string  `json:"current_task_address,omitempty"`
+	CurrentTaskBinNumber *int     `json:"current_task_bin_number,omitempty"`
+	DriverDistanceMiles  *float64 `json:"driver_distance_miles,omitempty"`
+	LocationAgeSeconds   *int64   `json:"location_age_seconds,omitempty"`
+	IsDriverNearby       bool     `json:"is_driver_nearby"`
 }
 
 // AffectedTask represents a task that would be affected by the change
 type AffectedTask struct {
-	TaskID       string `json:"task_id"`
-	TaskType     string `json:"task_type"`
-	SequenceOrder int   `json:"sequence_order"`
-	Address      string `json:"address"`
-	BinID        *string `json:"bin_id,omitempty"`
+	TaskID        string  `json:"task_id"`
+	TaskType      string  `json:"task_type"`
+	SequenceOrder int     `json:"sequence_order"`
+	Address       string  `json:"address"`
+	BinID         *string `json:"bin_id,omitempty"`
 	MoveRequestID *string `json:"move_request_id,omitempty"`
+}
+
+// queryActiveShiftDependencies runs the shared active-shift dependency query and
+// groups the resulting tasks by shift. filterClause is the parameterized SQL
+// predicate selecting the relevant route_tasks (e.g. "rt.bin_id = $1"); arg is
+// the single bind value for that clause. enrichTask, when non-nil, is invoked
+// for each scanned task so callers can attach entity-specific fields (e.g. the
+// originating bin or move-request ID). The returned map is keyed by shift ID.
+func queryActiveShiftDependencies(
+	w http.ResponseWriter,
+	db *sqlx.DB,
+	filterClause string,
+	arg interface{},
+	enrichTask func(task *AffectedTask),
+) (map[string]*ActiveShiftDependency, bool) {
+	query := `
+		SELECT
+			s.id as shift_id,
+			s.shift_date_iso,
+			s.driver_id,
+			u.name as driver_name,
+			s.status,
+			rt.id as task_id,
+			rt.task_type,
+			rt.sequence_order,
+			rt.address
+		FROM route_tasks rt
+		JOIN shifts s ON rt.shift_id = s.id
+		JOIN users u ON s.driver_id = u.id
+		WHERE ` + filterClause + `
+		  AND rt.is_completed = 0
+		  AND s.status IN ('active', 'scheduled')
+		ORDER BY s.shift_date_iso ASC, rt.sequence_order ASC
+	`
+
+	rows, err := db.Query(query, arg)
+	if err != nil {
+		http.Error(w, "Failed to check dependencies", http.StatusInternalServerError)
+		return nil, false
+	}
+	defer rows.Close()
+
+	// Group tasks by shift
+	shiftMap := make(map[string]*ActiveShiftDependency)
+
+	for rows.Next() {
+		var (
+			shiftID       string
+			shiftDateISO  string
+			driverID      string
+			driverName    string
+			status        string
+			taskID        string
+			taskType      string
+			sequenceOrder int
+			address       string
+		)
+
+		if err := rows.Scan(&shiftID, &shiftDateISO, &driverID, &driverName, &status,
+			&taskID, &taskType, &sequenceOrder, &address); err != nil {
+			continue
+		}
+
+		// Get or create shift dependency
+		if _, exists := shiftMap[shiftID]; !exists {
+			shiftMap[shiftID] = &ActiveShiftDependency{
+				ShiftID:       shiftID,
+				ShiftDate:     shiftDateISO,
+				DriverID:      driverID,
+				DriverName:    driverName,
+				Status:        status,
+				AffectedTasks: []AffectedTask{},
+			}
+		}
+
+		// Add task to shift
+		task := AffectedTask{
+			TaskID:        taskID,
+			TaskType:      taskType,
+			SequenceOrder: sequenceOrder,
+			Address:       address,
+		}
+		if enrichTask != nil {
+			enrichTask(&task)
+		}
+		shiftMap[shiftID].AffectedTasks = append(shiftMap[shiftID].AffectedTasks, task)
+	}
+
+	return shiftMap, true
+}
+
+// dependenciesFromShiftMap flattens the shift map into a non-nil slice so the
+// JSON response is always an array rather than null.
+func dependenciesFromShiftMap(shiftMap map[string]*ActiveShiftDependency) []ActiveShiftDependency {
+	dependencies := []ActiveShiftDependency{}
+	for _, dep := range shiftMap {
+		dependencies = append(dependencies, *dep)
+	}
+	return dependencies
 }
 
 // CheckBinDependencies checks if a bin is referenced in any active shifts
@@ -47,78 +146,11 @@ func CheckBinDependencies(db *sqlx.DB, redisClient *redis.Client) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		binID := chi.URLParam(r, "id")
 
-		var dependencies []ActiveShiftDependency
-
-		// Query for active shifts with tasks referencing this bin
-		query := `
-			SELECT
-				s.id as shift_id,
-				s.shift_date_iso,
-				s.driver_id,
-				u.name as driver_name,
-				s.status,
-				rt.id as task_id,
-				rt.task_type,
-				rt.sequence_order,
-				rt.address
-			FROM route_tasks rt
-			JOIN shifts s ON rt.shift_id = s.id
-			JOIN users u ON s.driver_id = u.id
-			WHERE rt.bin_id = $1
-			  AND rt.is_completed = 0
-			  AND s.status IN ('active', 'scheduled')
-			ORDER BY s.shift_date_iso ASC, rt.sequence_order ASC
-		`
-
-		rows, err := db.Query(query, binID)
-		if err != nil {
-			http.Error(w, "Failed to check dependencies", http.StatusInternalServerError)
+		shiftMap, ok := queryActiveShiftDependencies(w, db, "rt.bin_id = $1", binID, func(task *AffectedTask) {
+			task.BinID = &binID
+		})
+		if !ok {
 			return
-		}
-		defer rows.Close()
-
-		// Group tasks by shift
-		shiftMap := make(map[string]*ActiveShiftDependency)
-
-		for rows.Next() {
-			var (
-				shiftID       string
-				shiftDateISO  string
-				driverID      string
-				driverName    string
-				status        string
-				taskID        string
-				taskType      string
-				sequenceOrder int
-				address       string
-			)
-
-			err := rows.Scan(&shiftID, &shiftDateISO, &driverID, &driverName, &status,
-				&taskID, &taskType, &sequenceOrder, &address)
-			if err != nil {
-				continue
-			}
-
-			// Get or create shift dependency
-			if _, exists := shiftMap[shiftID]; !exists {
-				shiftMap[shiftID] = &ActiveShiftDependency{
-					ShiftID:    shiftID,
-					ShiftDate:  shiftDateISO,
-					DriverID:   driverID,
-					DriverName: driverName,
-					Status:     status,
-					AffectedTasks: []AffectedTask{},
-				}
-			}
-
-			// Add task to shift
-			shiftMap[shiftID].AffectedTasks = append(shiftMap[shiftID].AffectedTasks, AffectedTask{
-				TaskID:       taskID,
-				TaskType:     taskType,
-				SequenceOrder: sequenceOrder,
-				Address:      address,
-				BinID:        &binID,
-			})
 		}
 
 		// Calculate proximity information for each shift
@@ -146,11 +178,11 @@ func CheckBinDependencies(db *sqlx.DB, redisClient *redis.Client) http.HandlerFu
 
 				// Get current task (first uncompleted task for this shift)
 				var currentTask struct {
-					ID        string   `db:"id"`
-					Address   *string  `db:"address"`
-					BinNumber *int     `db:"bin_number"`
-					Latitude  float64  `db:"latitude"`
-					Longitude float64  `db:"longitude"`
+					ID        string  `db:"id"`
+					Address   *string `db:"address"`
+					BinNumber *int    `db:"bin_number"`
+					Latitude  float64 `db:"latitude"`
+					Longitude float64 `db:"longitude"`
 				}
 				err = db.Get(&currentTask, `
 					SELECT id, address, bin_number, latitude, longitude
@@ -193,18 +225,8 @@ func CheckBinDependencies(db *sqlx.DB, redisClient *redis.Client) http.HandlerFu
 			}
 		}
 
-		// Convert map to slice
-		for _, dep := range shiftMap {
-			dependencies = append(dependencies, *dep)
-		}
-
-		// Return empty array if no dependencies
-		if dependencies == nil {
-			dependencies = []ActiveShiftDependency{}
-		}
-
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(dependencies)
+		json.NewEncoder(w).Encode(dependenciesFromShiftMap(shiftMap))
 	}
 }
 
@@ -214,92 +236,15 @@ func CheckMoveRequestDependencies(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		moveRequestID := chi.URLParam(r, "id")
 
-		var dependencies []ActiveShiftDependency
-
-		// Query for active shifts with tasks referencing this move request
-		query := `
-			SELECT
-				s.id as shift_id,
-				s.shift_date_iso,
-				s.driver_id,
-				u.name as driver_name,
-				s.status,
-				rt.id as task_id,
-				rt.task_type,
-				rt.sequence_order,
-				rt.address
-			FROM route_tasks rt
-			JOIN shifts s ON rt.shift_id = s.id
-			JOIN users u ON s.driver_id = u.id
-			WHERE rt.move_request_id = $1
-			  AND rt.is_completed = 0
-			  AND s.status IN ('active', 'scheduled')
-			ORDER BY s.shift_date_iso ASC, rt.sequence_order ASC
-		`
-
-		rows, err := db.Query(query, moveRequestID)
-		if err != nil {
-			http.Error(w, "Failed to check dependencies", http.StatusInternalServerError)
+		shiftMap, ok := queryActiveShiftDependencies(w, db, "rt.move_request_id = $1", moveRequestID, func(task *AffectedTask) {
+			task.MoveRequestID = &moveRequestID
+		})
+		if !ok {
 			return
-		}
-		defer rows.Close()
-
-		// Group tasks by shift
-		shiftMap := make(map[string]*ActiveShiftDependency)
-
-		for rows.Next() {
-			var (
-				shiftID       string
-				shiftDateISO  string
-				driverID      string
-				driverName    string
-				status        string
-				taskID        string
-				taskType      string
-				sequenceOrder int
-				address       string
-			)
-
-			err := rows.Scan(&shiftID, &shiftDateISO, &driverID, &driverName, &status,
-				&taskID, &taskType, &sequenceOrder, &address)
-			if err != nil {
-				continue
-			}
-
-			// Get or create shift dependency
-			if _, exists := shiftMap[shiftID]; !exists {
-				shiftMap[shiftID] = &ActiveShiftDependency{
-					ShiftID:    shiftID,
-					ShiftDate:  shiftDateISO,
-					DriverID:   driverID,
-					DriverName: driverName,
-					Status:     status,
-					AffectedTasks: []AffectedTask{},
-				}
-			}
-
-			// Add task to shift
-			shiftMap[shiftID].AffectedTasks = append(shiftMap[shiftID].AffectedTasks, AffectedTask{
-				TaskID:        taskID,
-				TaskType:      taskType,
-				SequenceOrder: sequenceOrder,
-				Address:       address,
-				MoveRequestID: &moveRequestID,
-			})
-		}
-
-		// Convert map to slice
-		for _, dep := range shiftMap {
-			dependencies = append(dependencies, *dep)
-		}
-
-		// Return empty array if no dependencies
-		if dependencies == nil {
-			dependencies = []ActiveShiftDependency{}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(dependencies)
+		json.NewEncoder(w).Encode(dependenciesFromShiftMap(shiftMap))
 	}
 }
 
@@ -309,91 +254,15 @@ func CheckPotentialLocationDependencies(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		potentialLocationID := chi.URLParam(r, "id")
 
-		var dependencies []ActiveShiftDependency
-
-		// Query for active shifts with placement tasks referencing this potential location
-		query := `
-			SELECT
-				s.id as shift_id,
-				s.shift_date_iso,
-				s.driver_id,
-				u.name as driver_name,
-				s.status,
-				rt.id as task_id,
-				rt.task_type,
-				rt.sequence_order,
-				rt.address
-			FROM route_tasks rt
-			JOIN shifts s ON rt.shift_id = s.id
-			JOIN users u ON s.driver_id = u.id
-			WHERE rt.potential_location_id = $1
-			  AND rt.task_type = 'placement'
-			  AND rt.is_completed = 0
-			  AND s.status IN ('active', 'scheduled')
-			ORDER BY s.shift_date_iso ASC, rt.sequence_order ASC
-		`
-
-		rows, err := db.Query(query, potentialLocationID)
-		if err != nil {
-			http.Error(w, "Failed to check dependencies", http.StatusInternalServerError)
+		// Only placement tasks reference a potential location.
+		shiftMap, ok := queryActiveShiftDependencies(w, db,
+			"rt.potential_location_id = $1 AND rt.task_type = 'placement'",
+			potentialLocationID, nil)
+		if !ok {
 			return
-		}
-		defer rows.Close()
-
-		// Group tasks by shift
-		shiftMap := make(map[string]*ActiveShiftDependency)
-
-		for rows.Next() {
-			var (
-				shiftID       string
-				shiftDateISO  string
-				driverID      string
-				driverName    string
-				status        string
-				taskID        string
-				taskType      string
-				sequenceOrder int
-				address       string
-			)
-
-			err := rows.Scan(&shiftID, &shiftDateISO, &driverID, &driverName, &status,
-				&taskID, &taskType, &sequenceOrder, &address)
-			if err != nil {
-				continue
-			}
-
-			// Get or create shift dependency
-			if _, exists := shiftMap[shiftID]; !exists {
-				shiftMap[shiftID] = &ActiveShiftDependency{
-					ShiftID:    shiftID,
-					ShiftDate:  shiftDateISO,
-					DriverID:   driverID,
-					DriverName: driverName,
-					Status:     status,
-					AffectedTasks: []AffectedTask{},
-				}
-			}
-
-			// Add task to shift
-			shiftMap[shiftID].AffectedTasks = append(shiftMap[shiftID].AffectedTasks, AffectedTask{
-				TaskID:       taskID,
-				TaskType:     taskType,
-				SequenceOrder: sequenceOrder,
-				Address:      address,
-			})
-		}
-
-		// Convert map to slice
-		for _, dep := range shiftMap {
-			dependencies = append(dependencies, *dep)
-		}
-
-		// Return empty array if no dependencies
-		if dependencies == nil {
-			dependencies = []ActiveShiftDependency{}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(dependencies)
+		json.NewEncoder(w).Encode(dependenciesFromShiftMap(shiftMap))
 	}
 }

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ropacal-backend/internal/geo"
 )
 
 type LocationRecommendation struct {
@@ -575,10 +577,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// ======================================================================
 	var expansionCount, gapCount int
 	if useV2 && placementMode == "expand" {
-		expansionCount = count    // all results from expansion
+		expansionCount = count // all results from expansion
 		gapCount = 0
 	} else if useV2 && placementMode == "infill" {
-		expansionCount = 0        // no expansion results
+		expansionCount = 0 // no expansion results
 		gapCount = count
 	} else {
 		expansionCount = int(math.Ceil(float64(count) * 0.3)) // default: 30% expansion
@@ -1059,7 +1061,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			incomeScore := 0.5
 			if income, ok := zipIncome[zip5fb]; ok && income > 0 {
 				incomeScore = float64(income) / 150000.0
-				if incomeScore > 1.5 { incomeScore = 1.5 }
+				if incomeScore > 1.5 {
+					incomeScore = 1.5
+				}
 			}
 			trafficNorm := math.Min(trafficJam, 10.0) / 10.0
 			finalScore = math.Round((densityScore*0.30+fillScore*0.20+trafficNorm*0.15+popScore*0.15+gapScore*0.10+incomeScore*0.10)*100) / 10
@@ -1945,11 +1949,7 @@ func getTrafficJamFactor(lat, lng float64) float64 {
 }
 
 func haversineDistMiles(lat1, lon1, lat2, lon2 float64) float64 {
-	const r = 3958.8
-	dLat := (lat2 - lat1) * math.Pi / 180
-	dLon := (lon2 - lon1) * math.Pi / 180
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) + math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*math.Sin(dLon/2)*math.Sin(dLon/2)
-	return r * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return geo.HaversineMiles(lat1, lon1, lat2, lon2)
 }
 
 func reverseGeocodeHERE(lat, lng float64) (string, string) {
@@ -2043,14 +2043,14 @@ func callGraphVennService(serviceURL string, bins []existingBin, perBinFillRate 
 	}
 
 	reqBody := map[string]any{
-		"demand_points":                  demandPoints,
-		"existing_bins":                  existBins,
-		"no_go_zones":                    noGoReqs,
-		"count":                          count * 2, // request 2x for filtering buffer
-		"radius_meters":                  400,
-		"min_distance_from_bins_meters":  500,
-		"strategy":                       "greedy",
-		"precision":                      3,
+		"demand_points":                 demandPoints,
+		"existing_bins":                 existBins,
+		"no_go_zones":                   noGoReqs,
+		"count":                         count * 2, // request 2x for filtering buffer
+		"radius_meters":                 400,
+		"min_distance_from_bins_meters": 500,
+		"strategy":                      "greedy",
+		"precision":                     3,
 	}
 
 	body, err := json.Marshal(reqBody)

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+
+	"ropacal-backend/internal/geo"
 )
 
 // RETIRED: Warehouse constants - now fetched from database config table
@@ -17,7 +19,9 @@ import (
 
 // GetWarehouseLocation fetches warehouse location from database config
 // Falls back to default San Jose location if not configured
-func GetWarehouseLocation(db interface{ QueryRow(query string, args ...interface{}) *sql.Row }) OptimizerLocation {
+func GetWarehouseLocation(db interface {
+	QueryRow(query string, args ...interface{}) *sql.Row
+}) OptimizerLocation {
 	var configValue []byte
 	err := db.QueryRow(`
 		SELECT value
@@ -29,7 +33,7 @@ func GetWarehouseLocation(db interface{ QueryRow(query string, args ...interface
 		// Fallback to default warehouse location if not found
 		log.Printf("⚠️  Failed to fetch warehouse from config (using default): %v", err)
 		return OptimizerLocation{
-			Latitude:  37.3009357,  // San Jose, CA
+			Latitude:  37.3009357, // San Jose, CA
 			Longitude: -121.9493848,
 		}
 	}
@@ -109,7 +113,7 @@ func (ro *RouteOptimizer) OptimizeRoute(
 
 		for i, bin := range remaining {
 			// Calculate straight-line distance (Haversine)
-			distance := haversineDistance(
+			distance := geo.HaversineKm(
 				current.Latitude,
 				current.Longitude,
 				bin.Latitude,
@@ -144,7 +148,7 @@ func (ro *RouteOptimizer) OptimizeRoute(
 	totalDistance := 0.0
 	routePoint := startLocation
 	for _, bin := range optimized {
-		distance := haversineDistance(
+		distance := geo.HaversineKm(
 			routePoint.Latitude,
 			routePoint.Longitude,
 			bin.Latitude,
@@ -165,24 +169,4 @@ func (ro *RouteOptimizer) OptimizeRoute(
 	}
 
 	return optimized
-}
-
-// haversineDistance calculates the distance between two GPS coordinates in kilometers
-func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadius = 6371.0 // Earth's radius in kilometers
-
-	// Convert to radians
-	lat1Rad := lat1 * math.Pi / 180
-	lat2Rad := lat2 * math.Pi / 180
-	deltaLat := (lat2 - lat1) * math.Pi / 180
-	deltaLon := (lon2 - lon1) * math.Pi / 180
-
-	// Haversine formula
-	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
-		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
-			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
-
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return earthRadius * c
 }

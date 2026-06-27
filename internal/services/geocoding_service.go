@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+
+	"ropacal-backend/internal/geo"
 )
 
 // HEREGeocodeResponse represents the response from HERE Geocoding API
@@ -171,8 +173,8 @@ func (gs *HEREGeocodingService) CompareCoordinates(oldLat, oldLng, newLat, newLn
 		return 0, false
 	}
 
-	// Calculate distance using haversine
-	distance := haversineDistance(oldLat, oldLng, newLat, newLng)
+	// Calculate distance using haversine (kilometers)
+	distance := geo.HaversineKm(oldLat, oldLng, newLat, newLng)
 
 	// Flag for review if moved more than 1km
 	needsReview := distance > 1.0

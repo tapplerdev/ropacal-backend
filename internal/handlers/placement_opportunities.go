@@ -40,11 +40,11 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 
 		// 1. Get all active bins grouped by city
 		type cityBinStats struct {
-			City       string  `db:"city"`
-			BinCount   int     `db:"bin_count"`
-			AvgFill    float64 `db:"avg_fill"`
-			CenterLat  float64 `db:"center_lat"`
-			CenterLng  float64 `db:"center_lng"`
+			City      string  `db:"city"`
+			BinCount  int     `db:"bin_count"`
+			AvgFill   float64 `db:"avg_fill"`
+			CenterLat float64 `db:"center_lat"`
+			CenterLng float64 `db:"center_lng"`
 		}
 		var cityStats []cityBinStats
 		err := db.Select(&cityStats, `
@@ -237,7 +237,7 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 			// Expansion cities: no proven demand, score conservatively
 			// Population-based estimate only — capped below proven-demand cities
 			popFactor := math.Min(float64(ec.Pop)/500000.0, 1.0) // larger city = more potential
-			score := math.Round(popFactor*30) / 10                // max 3.0 for expansion cities
+			score := math.Round(popFactor*30) / 10               // max 3.0 for expansion cities
 			recommended := int(math.Min(estimatedNeed, 5))
 
 			label := "moderate"

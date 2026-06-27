@@ -246,7 +246,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "keys-env-migration",
+			"version": "tier2-dry-consolidation",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -302,7 +302,7 @@ func main() {
 			r.Post("/bins", handlers.CreateBin(db, wsHub, centrifugoClient))
 			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
 			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub, centrifugoClient))
-			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db)) // Batch geocode all bins using HERE Maps
+			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db))                                  // Batch geocode all bins using HERE Maps
 			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db, redisClient)) // Check if bin is in active shifts
 		})
 
@@ -421,12 +421,12 @@ func main() {
 
 			// Task-based shift creation (agnostic shift builder)
 			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub, centrifugoClient, fcmService))
-			r.Get("/manager/shifts", handlers.GetAllShifts(db))                   // List all shifts with filtering (register first - exact match)
-			r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db))                    // Completed shift history with task stats
-			r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))     // Per-task granular breakdown for a shift
-			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                           // Get single shift (register after)
-			r.Get("/manager/shifts/{shiftId}/tasks/history", handlers.GetShiftTasksWithHistory(db)) // Get ALL tasks including deleted ones for audit trail
-			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db)) // Compare Mapbox v2 optimization
+			r.Get("/manager/shifts", handlers.GetAllShifts(db))                                                 // List all shifts with filtering (register first - exact match)
+			r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db))                               // Completed shift history with task stats
+			r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))                 // Per-task granular breakdown for a shift
+			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                                       // Get single shift (register after)
+			r.Get("/manager/shifts/{shiftId}/tasks/history", handlers.GetShiftTasksWithHistory(db))             // Get ALL tasks including deleted ones for audit trail
+			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db))              // Compare Mapbox v2 optimization
 			r.Get("/manager/shifts/{id}/driver-proximity", handlers.CheckShiftDriverProximity(db, redisClient)) // Check if driver is nearby current task
 
 			// One-time data migration endpoints (can be removed after use)
@@ -435,9 +435,9 @@ func main() {
 
 			// Bin move request management
 			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(db, wsHub, fcmService, centrifugoClient))
-r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))            // List all move requests (register first - exact match)
-			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))        // Get single move request (register after)
-			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db)) // Check if move request is in active shifts
+			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))                                              // List all move requests (register first - exact match)
+			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(db))                                          // Get single move request (register after)
+			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db))     // Check if move request is in active shifts
 			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db, redisClient, wsHub, centrifugoClient)) // Update move request
 			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService, centrifugoClient))
 			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, redisClient, wsHub, centrifugoClient))

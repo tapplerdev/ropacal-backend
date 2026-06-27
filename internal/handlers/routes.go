@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
 
@@ -724,24 +725,9 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// haversineDistance calculates the distance between two GPS coordinates in kilometers
+// haversineDistance calculates the distance between two GPS coordinates in kilometers.
 func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadius = 6371.0 // Earth's radius in kilometers
-
-	// Convert to radians
-	lat1Rad := lat1 * math.Pi / 180
-	lat2Rad := lat2 * math.Pi / 180
-	deltaLat := (lat2 - lat1) * math.Pi / 180
-	deltaLon := (lon2 - lon1) * math.Pi / 180
-
-	// Haversine formula
-	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
-		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
-			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
-
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return earthRadius * c
+	return geo.HaversineKm(lat1, lon1, lat2, lon2)
 }
 
 // TestHereOptimization - Test endpoint for HERE Waypoints Sequence API with raw coordinates
@@ -879,15 +865,15 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 		var hereResp struct {
 			Results []struct {
 				Waypoints []struct {
-					ID                string  `json:"id"`
-					Lat               float64 `json:"lat"`
-					Lng               float64 `json:"lng"`
-					Sequence          int     `json:"sequence"`
-					EstimatedArrival  string  `json:"estimatedArrival,omitempty"`
-					EstimatedDeparture string `json:"estimatedDeparture,omitempty"`
+					ID                 string  `json:"id"`
+					Lat                float64 `json:"lat"`
+					Lng                float64 `json:"lng"`
+					Sequence           int     `json:"sequence"`
+					EstimatedArrival   string  `json:"estimatedArrival,omitempty"`
+					EstimatedDeparture string  `json:"estimatedDeparture,omitempty"`
 				} `json:"waypoints"`
-				Distance      string `json:"distance"` // meters (string in v8)
-				Time          string `json:"time"`     // seconds (string in v8)
+				Distance         string `json:"distance"` // meters (string in v8)
+				Time             string `json:"time"`     // seconds (string in v8)
 				Interconnections []struct {
 					FromWaypoint string  `json:"fromWaypoint"`
 					ToWaypoint   string  `json:"toWaypoint"`
@@ -1231,11 +1217,11 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 
 		// Fetch all bins from database
 		type Bin struct {
-			ID            string         `db:"id"`
-			BinNumber     int            `db:"bin_number"`
-			CurrentStreet string         `db:"current_street"`
-			City          string         `db:"city"`
-			Zip           string         `db:"zip"`
+			ID            string          `db:"id"`
+			BinNumber     int             `db:"bin_number"`
+			CurrentStreet string          `db:"current_street"`
+			City          string          `db:"city"`
+			Zip           string          `db:"zip"`
 			Latitude      sql.NullFloat64 `db:"latitude"`
 			Longitude     sql.NullFloat64 `db:"longitude"`
 		}
@@ -1348,23 +1334,23 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 
 		// Build response
 		response := struct {
-			Success         bool                       `json:"success"`
-			Message         string                     `json:"message"`
-			TotalBins       int                        `json:"total_bins"`
-			GeocodeSuccess  int                        `json:"geocode_success"`
-			GeocodeFailed   int                        `json:"geocode_failed"`
-			FlaggedForReview int                        `json:"flagged_for_review"`
-			AutoUpdated     int                        `json:"auto_updated"`
-			Results         []services.GeocodeResult   `json:"results"`
+			Success          bool                     `json:"success"`
+			Message          string                   `json:"message"`
+			TotalBins        int                      `json:"total_bins"`
+			GeocodeSuccess   int                      `json:"geocode_success"`
+			GeocodeFailed    int                      `json:"geocode_failed"`
+			FlaggedForReview int                      `json:"flagged_for_review"`
+			AutoUpdated      int                      `json:"auto_updated"`
+			Results          []services.GeocodeResult `json:"results"`
 		}{
-			Success:         true,
-			Message:         "Batch geocoding completed",
-			TotalBins:       len(bins),
-			GeocodeSuccess:  len(bins) - errorCount,
-			GeocodeFailed:   errorCount,
+			Success:          true,
+			Message:          "Batch geocoding completed",
+			TotalBins:        len(bins),
+			GeocodeSuccess:   len(bins) - errorCount,
+			GeocodeFailed:    errorCount,
 			FlaggedForReview: flaggedCount,
-			AutoUpdated:     updatedCount,
-			Results:         results,
+			AutoUpdated:      updatedCount,
+			Results:          results,
 		}
 
 		w.Header().Set("Content-Type", "application/json")

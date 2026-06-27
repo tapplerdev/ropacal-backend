@@ -1,14 +1,12 @@
 package handlers
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,20 +17,6 @@ import (
 
 	"github.com/jmoiron/sqlx"
 )
-
-// haversineDistanceMiles returns the distance in miles between two lat/lon points.
-func haversineDistanceMiles(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadiusMiles = 3958.8
-	lat1Rad := lat1 * math.Pi / 180
-	lat2Rad := lat2 * math.Pi / 180
-	deltaLat := (lat2 - lat1) * math.Pi / 180
-	deltaLon := (lon2 - lon1) * math.Pi / 180
-	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
-		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
-			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return earthRadiusMiles * c
-}
 
 type smartBin struct {
 	ID                string  `db:"id" json:"id"`
@@ -207,22 +191,7 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// Step 4: Fetch warehouse location
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		var warehouseLat, warehouseLng float64
-		var warehouseJSON []byte
-		whErr := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&warehouseJSON)
-		if whErr == nil {
-			var wh struct {
-				Latitude  float64 `json:"latitude"`
-				Longitude float64 `json:"longitude"`
-			}
-			json.Unmarshal(warehouseJSON, &wh)
-			warehouseLat = wh.Latitude
-			warehouseLng = wh.Longitude
-		}
-		if warehouseLat == 0 {
-			warehouseLat = 37.6368013
-			warehouseLng = -122.1269379
-		}
+		warehouseLat, warehouseLng := fetchWarehouseLocation(db)
 		log.Printf("🏭 Warehouse: (%.6f, %.6f)", warehouseLat, warehouseLng)
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -242,106 +211,40 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 			coords[i+1] = fmt.Sprintf("%.6f,%.6f", b.Longitude, b.Latitude)
 		}
 
-		osrmURL := os.Getenv("OSRM_SERVER_URL")
-		if osrmURL == "" {
-			osrmURL = "http://router.project-osrm.org"
-		}
-		tableURL := fmt.Sprintf("%s/table/v1/driving/%s?annotations=duration,distance", osrmURL, strings.Join(coords, ";"))
-
 		log.Printf("🗺️  Calling OSRM Table API (%d locations)...", n)
-		osrmClient := &http.Client{Timeout: 30 * time.Second}
-		osrmResp, err := osrmClient.Get(tableURL)
+		distMatrix, durMatrix, err := fetchOSRMMatrices(coords)
 		if err != nil {
-			log.Printf("❌ OSRM request failed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch distance matrix from OSRM")
-			return
-		}
-		defer osrmResp.Body.Close()
-
-		osrmBody, _ := io.ReadAll(osrmResp.Body)
-		var osrmData struct {
-			Code      string      `json:"code"`
-			Durations [][]float64 `json:"durations"`
-			Distances [][]float64 `json:"distances"`
-		}
-		if err := json.Unmarshal(osrmBody, &osrmData); err != nil || osrmData.Code != "Ok" {
-			log.Printf("❌ OSRM response error: code=%s, err=%v", osrmData.Code, err)
+			if errors.Is(err, errOSRMRequest) {
+				log.Printf("❌ OSRM request failed: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch distance matrix from OSRM")
+				return
+			}
+			log.Printf("❌ OSRM response error: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "OSRM returned an error")
 			return
-		}
-
-		// Convert to int matrices
-		distMatrix := make([][]int, n)
-		durMatrix := make([][]int, n)
-		for i := 0; i < n; i++ {
-			distMatrix[i] = make([]int, n)
-			durMatrix[i] = make([]int, n)
-			for j := 0; j < n; j++ {
-				distMatrix[i][j] = int(osrmData.Distances[i][j])
-				durMatrix[i][j] = int(osrmData.Durations[i][j])
-			}
 		}
 		log.Printf("✅ OSRM matrix: %dx%d", n, n)
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// Step 6: Call OR-Tools multi-vehicle CVRP
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		type ortoolsLocation struct {
-			ID   string  `json:"id"`
-			Lat  float64 `json:"lat"`
-			Lon  float64 `json:"lon"`
-			Name string  `json:"name"`
-		}
-
 		ortoolsLocs := make([]ortoolsLocation, n)
 		ortoolsLocs[0] = ortoolsLocation{ID: "warehouse", Lat: warehouseLat, Lon: warehouseLng, Name: "Warehouse"}
 		for i, b := range bins {
 			ortoolsLocs[i+1] = ortoolsLocation{ID: b.ID, Lat: b.Latitude, Lon: b.Longitude, Name: fmt.Sprintf("Bin #%d", b.BinNumber)}
 		}
 
-		ortoolsReq := map[string]interface{}{
-			"locations":           ortoolsLocs,
-			"distance_matrix":    distMatrix,
-			"duration_matrix":    durMatrix,
-			"num_vehicles":       numVehicles,
-			"vehicle_capacity":   params.MaxBinsPerRoute,
-			"depot_index":        0,
-			"max_runtime_seconds": 30,
-		}
-
-		ortoolsServiceURL := os.Getenv("ORTOOLS_SERVICE_URL")
-		if ortoolsServiceURL == "" {
-			ortoolsServiceURL = "http://localhost:8000"
-		}
-
-		reqBody, _ := json.Marshal(ortoolsReq)
 		log.Printf("🚀 Calling OR-Tools CVRP: %d locations, %d vehicles, capacity %d", n, numVehicles, params.MaxBinsPerRoute)
 
-		ortoolsClient := &http.Client{Timeout: 60 * time.Second}
-		ortoolsHTTPResp, err := ortoolsClient.Post(ortoolsServiceURL+"/generate-templates", "application/json", bytes.NewReader(reqBody))
+		ortoolsResult, err := callORTools(ortoolsLocs, distMatrix, durMatrix, numVehicles, params.MaxBinsPerRoute)
 		if err != nil {
+			if errors.Is(err, errORToolsParse) {
+				log.Printf("❌ OR-Tools response parse error: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to parse optimizer response")
+				return
+			}
 			log.Printf("❌ OR-Tools request failed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to call route optimizer")
-			return
-		}
-		defer ortoolsHTTPResp.Body.Close()
-
-		ortoolsBody, _ := io.ReadAll(ortoolsHTTPResp.Body)
-		var ortoolsResult struct {
-			Routes []struct {
-				VehicleID     int   `json:"vehicle_id"`
-				StopIndices   []int `json:"stop_indices"`
-				TotalDistance  int   `json:"total_distance"`
-				TotalDuration int   `json:"total_duration"`
-			} `json:"routes"`
-			Unassigned     []int `json:"unassigned"`
-			Feasible       bool  `json:"feasible"`
-			SolverRuntimeMs int  `json:"solver_runtime_ms"`
-		}
-		if err := json.Unmarshal(ortoolsBody, &ortoolsResult); err != nil {
-			log.Printf("❌ OR-Tools response parse error: %v", err)
-			log.Printf("   Response body: %s", string(ortoolsBody))
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to parse optimizer response")
 			return
 		}
 		log.Printf("✅ OR-Tools returned %d routes in %dms (feasible=%v, unassigned=%d)",
@@ -462,15 +365,7 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 						break
 					}
 				}
-				dirLabels := []string{"South", "Central", "North"}
-				if len(lats) == 2 {
-					dirLabels = []string{"South", "North"}
-				} else if len(lats) > 3 {
-					dirLabels = nil
-					for k := 0; k < len(lats); k++ {
-						dirLabels = append(dirLabels, fmt.Sprintf("Area %d", k+1))
-					}
-				}
+				dirLabels := directionalSuffixes(len(lats))
 				if latIdx < len(dirLabels) {
 					name += " " + dirLabels[latIdx]
 				}
@@ -552,7 +447,7 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 				"analysis": map[string]interface{}{
 					"total_active_bins":    len(bins),
 					"bins_with_check_data": len(rateMap),
-					"tiers":               tierCounts,
+					"tiers":                tierCounts,
 					"optimizer": map[string]interface{}{
 						"solver_runtime_ms": ortoolsResult.SolverRuntimeMs,
 						"num_vehicles":      numVehicles,

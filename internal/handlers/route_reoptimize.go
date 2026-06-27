@@ -1,17 +1,16 @@
 package handlers
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
-	"time"
+
+	"ropacal-backend/internal/geo"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -27,17 +26,17 @@ type reoptBin struct {
 }
 
 type reoptRoute struct {
-	RouteID              string     `json:"route_id"`
-	Name                 string     `json:"name"`
-	SuggestedName        string     `json:"suggested_name"`
-	BinIDs               []string   `json:"bin_ids"`
-	Bins                 []reoptBin `json:"bins"`
-	BinCount             int        `json:"bin_count"`
-	EstDurationHours     float64    `json:"estimated_duration_hours"`
-	EstDistanceMiles     float64    `json:"estimated_distance_miles"`
-	AvgFill              float64    `json:"avg_fill"`
-	GeographicArea       string     `json:"geographic_area"`
-	SchedulePattern      string     `json:"schedule_pattern"`
+	RouteID          string     `json:"route_id"`
+	Name             string     `json:"name"`
+	SuggestedName    string     `json:"suggested_name"`
+	BinIDs           []string   `json:"bin_ids"`
+	Bins             []reoptBin `json:"bins"`
+	BinCount         int        `json:"bin_count"`
+	EstDurationHours float64    `json:"estimated_duration_hours"`
+	EstDistanceMiles float64    `json:"estimated_distance_miles"`
+	AvgFill          float64    `json:"avg_fill"`
+	GeographicArea   string     `json:"geographic_area"`
+	SchedulePattern  string     `json:"schedule_pattern"`
 }
 
 // SmartReoptimize takes existing route template IDs, fetches all active bins,
@@ -123,17 +122,7 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get warehouse location
-		var warehouseLat, warehouseLng float64 = 37.6368013, -122.1269379
-		var whJSON []byte
-		if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&whJSON); err == nil {
-			var wh struct {
-				Lat float64 `json:"latitude"`
-				Lng float64 `json:"longitude"`
-			}
-			if json.Unmarshal(whJSON, &wh) == nil {
-				warehouseLat, warehouseLng = wh.Lat, wh.Lng
-			}
-		}
+		warehouseLat, warehouseLng := fetchWarehouseLocation(db)
 
 		// Build OSRM distance/duration matrix
 		n := len(activeBins) + 1
@@ -143,44 +132,17 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			coords[i+1] = fmt.Sprintf("%.6f,%.6f", b.Longitude, b.Latitude)
 		}
 
-		osrmURL := os.Getenv("OSRM_SERVER_URL")
-		if osrmURL == "" {
-			osrmURL = "http://router.project-osrm.org"
-		}
-		tableURL := fmt.Sprintf("%s/table/v1/driving/%s?annotations=duration,distance", osrmURL, strings.Join(coords, ";"))
-
 		log.Printf("🗺️  [REOPT] Calling OSRM Table API (%d locations)...", n)
-		osrmClient := &http.Client{Timeout: 30 * time.Second}
-		osrmResp, err := osrmClient.Get(tableURL)
+		distMatrix, durMatrix, err := fetchOSRMMatrices(coords)
 		if err != nil {
-			log.Printf("❌ [REOPT] OSRM request failed: %v", err)
-			http.Error(w, `{"error":"OSRM request failed"}`, http.StatusInternalServerError)
-			return
-		}
-		defer osrmResp.Body.Close()
-
-		osrmBody, _ := io.ReadAll(osrmResp.Body)
-		var osrmData struct {
-			Code      string      `json:"code"`
-			Durations [][]float64 `json:"durations"`
-			Distances [][]float64 `json:"distances"`
-		}
-		if err := json.Unmarshal(osrmBody, &osrmData); err != nil || osrmData.Code != "Ok" {
+			if errors.Is(err, errOSRMRequest) {
+				log.Printf("❌ [REOPT] OSRM request failed: %v", err)
+				http.Error(w, `{"error":"OSRM request failed"}`, http.StatusInternalServerError)
+				return
+			}
 			log.Printf("❌ [REOPT] OSRM response error: %v", err)
 			http.Error(w, `{"error":"OSRM returned an error"}`, http.StatusInternalServerError)
 			return
-		}
-
-		// Convert to int matrices
-		distMatrix := make([][]int, n)
-		durMatrix := make([][]int, n)
-		for i := 0; i < n; i++ {
-			distMatrix[i] = make([]int, n)
-			durMatrix[i] = make([]int, n)
-			for j := 0; j < n; j++ {
-				distMatrix[i][j] = int(osrmData.Distances[i][j])
-				durMatrix[i][j] = int(osrmData.Durations[i][j])
-			}
 		}
 
 		// Calculate number of routes from bin count / max capacity
@@ -192,62 +154,24 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 		// e.g. 82 bins / 3 vehicles = 28 per route (not 32/32/18)
 		balancedCapacity := int(math.Ceil(float64(len(activeBins))/float64(numVehicles))) + 1
 
-		type ortoolsLoc struct {
-			ID   string  `json:"id"`
-			Lat  float64 `json:"lat"`
-			Lon  float64 `json:"lon"`
-			Name string  `json:"name"`
-		}
-		ortoolsLocs := make([]ortoolsLoc, n)
-		ortoolsLocs[0] = ortoolsLoc{ID: "warehouse", Lat: warehouseLat, Lon: warehouseLng, Name: "Warehouse"}
+		ortoolsLocs := make([]ortoolsLocation, n)
+		ortoolsLocs[0] = ortoolsLocation{ID: "warehouse", Lat: warehouseLat, Lon: warehouseLng, Name: "Warehouse"}
 		for i, b := range activeBins {
-			ortoolsLocs[i+1] = ortoolsLoc{ID: b.ID, Lat: b.Latitude, Lon: b.Longitude, Name: fmt.Sprintf("Bin #%d", b.BinNumber)}
+			ortoolsLocs[i+1] = ortoolsLocation{ID: b.ID, Lat: b.Latitude, Lon: b.Longitude, Name: fmt.Sprintf("Bin #%d", b.BinNumber)}
 		}
 
 		log.Printf("🤖 [REOPT] %d bins / %d max = %d vehicles, balanced capacity %d", len(activeBins), req.MaxBinsPerRoute, numVehicles, balancedCapacity)
-
-		ortoolsReq := map[string]interface{}{
-			"locations":           ortoolsLocs,
-			"distance_matrix":    distMatrix,
-			"duration_matrix":    durMatrix,
-			"num_vehicles":       numVehicles,
-			"vehicle_capacity":   balancedCapacity,
-			"depot_index":        0,
-			"max_runtime_seconds": 30,
-		}
-
-		ortoolsServiceURL := os.Getenv("ORTOOLS_SERVICE_URL")
-		if ortoolsServiceURL == "" {
-			ortoolsServiceURL = "http://localhost:8000"
-		}
-
-		reqBody, _ := json.Marshal(ortoolsReq)
 		log.Printf("🚀 [REOPT] Calling OR-Tools: %d bins, %d vehicles, capacity %d", len(activeBins), numVehicles, balancedCapacity)
 
-		ortoolsClient := &http.Client{Timeout: 60 * time.Second}
-		ortoolsHTTPResp, err := ortoolsClient.Post(ortoolsServiceURL+"/generate-templates", "application/json", bytes.NewReader(reqBody))
+		ortoolsResult, err := callORTools(ortoolsLocs, distMatrix, durMatrix, numVehicles, balancedCapacity)
 		if err != nil {
+			if errors.Is(err, errORToolsParse) {
+				log.Printf("❌ [REOPT] OR-Tools parse error: %v", err)
+				http.Error(w, `{"error":"failed to parse optimizer response"}`, http.StatusInternalServerError)
+				return
+			}
 			log.Printf("❌ [REOPT] OR-Tools request failed: %v", err)
 			http.Error(w, `{"error":"OR-Tools request failed"}`, http.StatusInternalServerError)
-			return
-		}
-		defer ortoolsHTTPResp.Body.Close()
-
-		ortoolsBody, _ := io.ReadAll(ortoolsHTTPResp.Body)
-		var ortoolsResult struct {
-			Routes []struct {
-				VehicleID     int   `json:"vehicle_id"`
-				StopIndices   []int `json:"stop_indices"`
-				TotalDistance  int   `json:"total_distance"`
-				TotalDuration int   `json:"total_duration"`
-			} `json:"routes"`
-			Unassigned      []int `json:"unassigned"`
-			Feasible        bool  `json:"feasible"`
-			SolverRuntimeMs int   `json:"solver_runtime_ms"`
-		}
-		if err := json.Unmarshal(ortoolsBody, &ortoolsResult); err != nil {
-			log.Printf("❌ [REOPT] OR-Tools parse error: %v, body: %s", err, string(ortoolsBody))
-			http.Error(w, `{"error":"failed to parse optimizer response"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -389,15 +313,7 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 				}
 			}
 			sort.Slice(entries, func(a, b int) bool { return entries[a].avgLat < entries[b].avgLat })
-			suffixes := []string{"South", "Central", "North"}
-			if len(entries) == 2 {
-				suffixes = []string{"South", "North"}
-			} else if len(entries) > 3 {
-				suffixes = nil
-				for j := range entries {
-					suffixes = append(suffixes, fmt.Sprintf("Area %d", j+1))
-				}
-			}
+			suffixes := directionalSuffixes(len(entries))
 			for j, e := range entries {
 				if e.idx < len(resultRoutes) {
 					resultRoutes[e.idx].SuggestedName = routeDominantCities[e.idx].baseName + " — " + suffixes[j]
@@ -411,7 +327,7 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			bestDist := math.MaxFloat64
 			for ri, rr := range resultRoutes {
 				for _, rb := range rr.Bins {
-					d := haversineDist(ub.Latitude, ub.Longitude, rb.Latitude, rb.Longitude)
+					d := geo.HaversineMiles(ub.Latitude, ub.Longitude, rb.Latitude, rb.Longitude)
 					if d < bestDist {
 						bestDist = d
 						bestRouteIdx = ri
@@ -453,13 +369,4 @@ func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
 			},
 		})
 	}
-}
-
-func haversineDist(lat1, lon1, lat2, lon2 float64) float64 {
-	R := 3958.8
-	dLat := (lat2 - lat1) * math.Pi / 180
-	dLon := (lon2 - lon1) * math.Pi / 180
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*math.Sin(dLon/2)*math.Sin(dLon/2)
-	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }

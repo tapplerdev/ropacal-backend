@@ -439,14 +439,14 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 				// Build conversion metadata with previous bin state
 				metadata := map[string]interface{}{
-					"is_new_bin":              false,
-					"created_via":             "bin_relocation",
-					"bin_id":                  id,
-					"bin_previous_address":    fmt.Sprintf("%s, %s, %s", existing.CurrentStreet, existing.City, existing.Zip),
-					"bin_previous_latitude":   existing.Latitude,
-					"bin_previous_longitude":  existing.Longitude,
-					"relocation_date":         nowUnix,
-					"relocation_by":           userID,
+					"is_new_bin":             false,
+					"created_via":            "bin_relocation",
+					"bin_id":                 id,
+					"bin_previous_address":   fmt.Sprintf("%s, %s, %s", existing.CurrentStreet, existing.City, existing.Zip),
+					"bin_previous_latitude":  existing.Latitude,
+					"bin_previous_longitude": existing.Longitude,
+					"relocation_date":        nowUnix,
+					"relocation_by":          userID,
 				}
 				metadataJSON, _ := json.Marshal(metadata)
 
@@ -597,9 +597,9 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 					&binIDCopy,
 					*userID,
 					&incidentDesc,
-					nil,  // photoURL
-					nil,  // shiftID
-					nil,  // checkID
+					nil,      // photoURL
+					nil,      // shiftID
+					nil,      // checkID
 					nil, nil, // reporter GPS
 					true, // isFieldObservation
 					nowUnix,
@@ -655,8 +655,8 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 			// Find active shifts with tasks for this bin
 			var affectedShifts []struct {
-				ShiftID string `db:"shift_id"`
-				TaskID  string `db:"task_id"`
+				ShiftID    string `db:"shift_id"`
+				TaskID     string `db:"task_id"`
 				OldAddress string `db:"old_address"`
 			}
 

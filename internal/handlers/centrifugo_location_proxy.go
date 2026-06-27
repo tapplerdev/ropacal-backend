@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -24,20 +24,20 @@ type LocationPublishProxyRequest struct {
 	Transport string                 `json:"transport"`
 	Protocol  string                 `json:"protocol"`
 	Encoding  string                 `json:"encoding"`
-	User      string                 `json:"user"`      // Driver ID
-	Channel   string                 `json:"channel"`  // driver:location:{driverId}
-	Data      map[string]interface{} `json:"data"`     // GPS data
+	User      string                 `json:"user"`    // Driver ID
+	Channel   string                 `json:"channel"` // driver:location:{driverId}
+	Data      map[string]interface{} `json:"data"`    // GPS data
 }
 
 // LocationData represents the GPS data structure
 type LocationData struct {
-	Latitude  float64  `json:"latitude"`
-	Longitude float64  `json:"longitude"`
-	Accuracy  float64  `json:"accuracy"`
-	Heading   float64  `json:"heading"`
-	Speed     float64  `json:"speed"`
-	ShiftID   *string  `json:"shift_id"`
-	Timestamp int64    `json:"timestamp"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Accuracy  float64 `json:"accuracy"`
+	Heading   float64 `json:"heading"`
+	Speed     float64 `json:"speed"`
+	ShiftID   *string `json:"shift_id"`
+	Timestamp int64   `json:"timestamp"`
 }
 
 // CentrifugoLocationPublishProxy handles location publish requests from drivers
@@ -59,7 +59,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		}
 
 		// log.Printf("📍 [LocationProxy] Received location from user=%s channel=%s",
-			// req.User, req.Channel)
+		// req.User, req.Channel)
 
 		// 1. Validate channel format: driver:location:{driverId}
 		parts := strings.Split(req.Channel, ":")
@@ -105,7 +105,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		}
 
 		// log.Printf("📍 [LocationProxy] Driver %s: lat=%.6f, lng=%.6f, accuracy=%.1fm",
-			// driverID, locationData.Latitude, locationData.Longitude, locationData.Accuracy)
+		// driverID, locationData.Latitude, locationData.Longitude, locationData.Accuracy)
 
 		// 4. Save ORIGINAL GPS to Redis (synchronous).
 		// Redis is the source of truth for live position (preflight, StartShift,
@@ -143,14 +143,14 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 				snappedLat = newLat
 				snappedLng = newLng
 				// log.Printf("🗺️  [LocationProxy] Snapped: (%.6f, %.6f) → (%.6f, %.6f)",
-					// locationData.Latitude, locationData.Longitude, snappedLat, snappedLng)
+				// locationData.Latitude, locationData.Longitude, snappedLat, snappedLng)
 			} else {
 				// log.Printf("✅ [LocationProxy] GPS accuracy good (%.1fm) - no snapping needed",
-					// locationData.Accuracy)
+				// locationData.Accuracy)
 			}
 		} else if locationData.Accuracy <= 15 {
 			// log.Printf("✅ [LocationProxy] GPS accuracy excellent (%.1fm) - skipping OSRM",
-				// locationData.Accuracy)
+			// locationData.Accuracy)
 		}
 
 		// 6. Return MODIFIED data to Centrifugo (it will broadcast this instead of original)
@@ -172,7 +172,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(CentrifugoPublishResponse{
 			Result: &CentrifugoPublishResult{
-				Data: modifiedData,
+				Data:        modifiedData,
 				SkipHistory: false, // Keep in channel history for recovery
 			},
 		})
@@ -291,7 +291,7 @@ func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, f
 	}
 
 	// 5. Calculate distance to warehouse
-	distance := haversineMetersProxy(driverLat, driverLon, *shift.WarehouseLatitude, *shift.WarehouseLongitude)
+	distance := geo.HaversineMeters(driverLat, driverLon, *shift.WarehouseLatitude, *shift.WarehouseLongitude)
 	if distance > warehouseProximityMeters {
 		return // Not close enough
 	}
@@ -316,10 +316,10 @@ func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, f
 	// Send Centrifugo event to driver
 	ctx := context.Background()
 	centrifugoClient.PublishDriverEvent(ctx, driverID, "shift_ready_to_end", map[string]interface{}{
-		"shift_id":         shiftID,
-		"distance_meters":  int(distance),
-		"completed_bins":   shift.CompletedBins,
-		"total_bins":       shift.TotalBins,
+		"shift_id":        shiftID,
+		"distance_meters": int(distance),
+		"completed_bins":  shift.CompletedBins,
+		"total_bins":      shift.TotalBins,
 	})
 
 	// Send FCM push notification
@@ -407,15 +407,4 @@ func proximityAutoEndShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcm
 			})
 		}
 	}
-}
-
-// haversineMetersProxy calculates distance between two GPS coordinates in meters.
-func haversineMetersProxy(lat1, lon1, lat2, lon2 float64) float64 {
-	const R = 6_371_000.0
-	rlat1 := lat1 * math.Pi / 180
-	rlat2 := lat2 * math.Pi / 180
-	dlat := (lat2 - lat1) * math.Pi / 180
-	dlon := (lon2 - lon1) * math.Pi / 180
-	a := math.Sin(dlat/2)*math.Sin(dlat/2) + math.Cos(rlat1)*math.Cos(rlat2)*math.Sin(dlon/2)*math.Sin(dlon/2)
-	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }

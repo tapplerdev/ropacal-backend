@@ -3,8 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"time"
+
+	"ropacal-backend/internal/geo"
 )
 
 // toolSearchBins searches bins by city, status, fill level, days since check
@@ -199,9 +200,9 @@ func (h *ChatHandler) toolGetBinCheckHistory(params map[string]any) (string, err
 	}
 
 	type checkRow struct {
-		FillPercentage int    `db:"fill_percentage" json:"fill_percentage"`
-		CheckedOn      int64  `db:"checked_on" json:"checked_on"`
-		CheckedOnDate  string `json:"checked_on_date"`
+		FillPercentage int     `db:"fill_percentage" json:"fill_percentage"`
+		CheckedOn      int64   `db:"checked_on" json:"checked_on"`
+		CheckedOnDate  string  `json:"checked_on_date"`
 		PhotoURL       *string `db:"photo_url" json:"photo_url,omitempty"`
 	}
 
@@ -473,15 +474,7 @@ func (h *ChatHandler) toolGetCensusIncome(params map[string]any) (string, error)
 	return string(b), nil
 }
 
-// haversineMetersChat calculates distance in meters between two coordinates
+// haversineMetersChat calculates distance in meters between two coordinates.
 func haversineMetersChat(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadius = 6371000
-	dLat := (lat2 - lat1) * math.Pi / 180
-	dLon := (lon2 - lon1) * math.Pi / 180
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
-			math.Sin(dLon/2)*math.Sin(dLon/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return earthRadius * c
+	return geo.HaversineMeters(lat1, lon1, lat2, lon2)
 }
-

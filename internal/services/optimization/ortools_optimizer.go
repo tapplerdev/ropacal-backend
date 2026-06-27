@@ -103,15 +103,15 @@ type ortoolsStop struct {
 type ortoolsRoute struct {
 	VehicleID     string        `json:"vehicle_id"`
 	Stops         []ortoolsStop `json:"stops"`
-	TotalDistance  int           `json:"total_distance"`
+	TotalDistance int           `json:"total_distance"`
 	TotalDuration int           `json:"total_duration"`
 }
 
 type ortoolsResponse struct {
-	Routes         []ortoolsRoute `json:"routes"`
-	Dropped        []string       `json:"dropped"`
-	Feasible       bool           `json:"feasible"`
-	SolverRuntimeMs int           `json:"solver_runtime_ms"`
+	Routes          []ortoolsRoute `json:"routes"`
+	Dropped         []string       `json:"dropped"`
+	Feasible        bool           `json:"feasible"`
+	SolverRuntimeMs int            `json:"solver_runtime_ms"`
 }
 
 // OptimizeRoute optimizes the route using OR-Tools via the Python microservice
@@ -431,7 +431,7 @@ func (o *ORToolsOptimizer) buildRouteResponse(ortoolsResp *ortoolsResponse, req 
 			VehicleID:     route.VehicleID,
 			VehicleName:   route.VehicleID,
 			Stops:         make([]OptimizedStop, 0),
-			TotalDistance:  float64(route.TotalDistance),
+			TotalDistance: float64(route.TotalDistance),
 			TotalDuration: route.TotalDuration,
 		}
 

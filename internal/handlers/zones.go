@@ -62,7 +62,7 @@ type ZoneIncidentResponse struct {
 	VerifiedByUserID   *string  `json:"verified_by_user_id,omitempty"`
 	VerifiedAtISO      *string  `json:"verified_at_iso,omitempty"`
 	Status             string   `json:"status"`
-	Source             *string  `json:"source,omitempty"` // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
+	Source             *string  `json:"source,omitempty"`          // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
 	MoveRequestID      *string  `json:"move_request_id,omitempty"` // Links back to the move request that triggered this incident
 }
 
@@ -823,17 +823,17 @@ func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Clien
 			lat, lng,
 			zoneName,
 			req.IncidentType,
-			req.BinID,               // nil for address-only
+			req.BinID, // nil for address-only
 			userClaims.UserID,
 			req.Description,
 			req.PhotoURL,
-			nil,                     // shiftID — managers don't have shifts
-			nil,                     // checkID — not from a bin check
-			nil, nil,                // reporter GPS (manager is in office)
-			true,                    // isFieldObservation — manager-logged
+			nil,      // shiftID — managers don't have shifts
+			nil,      // checkID — not from a bin check
+			nil, nil, // reporter GPS (manager is in office)
+			true, // isFieldObservation — manager-logged
 			now,
-			&managerReportSource,    // source
-			nil,                     // moveRequestID — not from a move request
+			&managerReportSource, // source
+			nil,                  // moveRequestID — not from a move request
 		)
 		if err != nil {
 			log.Printf("❌ [CreateManagerIncidentReport] %v", err)
@@ -896,12 +896,12 @@ func UpdateNoGoZone(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.Handl
 		}
 
 		var req struct {
-			Name             *string  `json:"name"`
-			CenterLatitude   *float64 `json:"center_latitude"`
-			CenterLongitude  *float64 `json:"center_longitude"`
-			RadiusMeters     *int     `json:"radius_meters"`
-			Status           *string  `json:"status"`
-			ResolutionNotes  *string  `json:"resolution_notes"`
+			Name            *string  `json:"name"`
+			CenterLatitude  *float64 `json:"center_latitude"`
+			CenterLongitude *float64 `json:"center_longitude"`
+			RadiusMeters    *int     `json:"radius_meters"`
+			Status          *string  `json:"status"`
+			ResolutionNotes *string  `json:"resolution_notes"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1066,15 +1066,15 @@ func GetNearbyIncidents(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		type IncidentRow struct {
-			ID              string   `db:"id" json:"id"`
-			ZoneID          string   `db:"zone_id" json:"zone_id"`
-			IncidentType    string   `db:"incident_type" json:"incident_type"`
-			Description     *string  `db:"description" json:"description"`
-			ReportedAt      int64    `db:"reported_at" json:"reported_at"`
-			BinNumber       *int     `db:"bin_number" json:"bin_number"`
-			CenterLatitude  float64  `db:"center_latitude" json:"-"`
-			CenterLongitude float64  `db:"center_longitude" json:"-"`
-			Address         *string  `db:"zone_name" json:"address"`
+			ID              string  `db:"id" json:"id"`
+			ZoneID          string  `db:"zone_id" json:"zone_id"`
+			IncidentType    string  `db:"incident_type" json:"incident_type"`
+			Description     *string `db:"description" json:"description"`
+			ReportedAt      int64   `db:"reported_at" json:"reported_at"`
+			BinNumber       *int    `db:"bin_number" json:"bin_number"`
+			CenterLatitude  float64 `db:"center_latitude" json:"-"`
+			CenterLongitude float64 `db:"center_longitude" json:"-"`
+			Address         *string `db:"zone_name" json:"address"`
 		}
 
 		var rows []IncidentRow

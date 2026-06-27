@@ -3,8 +3,9 @@ package roads
 import (
 	"fmt"
 	"log"
-	"math"
 	"sync"
+
+	"ropacal-backend/internal/geo"
 )
 
 // LocationOptimizer handles position delta filtering and accuracy-based optimization
@@ -96,7 +97,7 @@ func (o *LocationOptimizer) ShouldProcessByDelta(driverID string, lat, lng float
 	}
 
 	// Calculate distance from last significant position
-	distance := haversineDistance(last.Latitude, last.Longitude, lat, lng)
+	distance := geo.HaversineMeters(last.Latitude, last.Longitude, lat, lng)
 
 	// Calculate time since last broadcast (milliseconds → seconds)
 	timeSinceLastBroadcast := float64(timestamp-last.Timestamp) / 1000.0
@@ -140,26 +141,6 @@ func (o *LocationOptimizer) ClearDriver(driverID string) {
 	defer o.mutex.Unlock()
 
 	delete(o.lastPositions, driverID)
-}
-
-// haversineDistance calculates the distance between two GPS coordinates in meters
-func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadius = 6371000.0 // Earth's radius in meters
-
-	// Convert to radians
-	lat1Rad := lat1 * math.Pi / 180
-	lat2Rad := lat2 * math.Pi / 180
-	deltaLat := (lat2 - lat1) * math.Pi / 180
-	deltaLon := (lon2 - lon1) * math.Pi / 180
-
-	// Haversine formula
-	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
-		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
-			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
-
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return earthRadius * c
 }
 
 // Statistics recording methods

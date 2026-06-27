@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
+	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -202,7 +202,7 @@ func (m *AirtagMonitor) checkDrift() {
 			continue
 		}
 
-		distance := haversineMeters(*bin.Latitude, *bin.Longitude, at.Latitude, at.Longitude)
+		distance := geo.HaversineMeters(*bin.Latitude, *bin.Longitude, at.Latitude, at.Longitude)
 
 		if distance > threshold {
 			log.Printf("🚨 [AirtagMonitor] Bin %d drifted %.0fm (status: %s)", bin.BinNumber, distance, bin.Status)
@@ -440,18 +440,6 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 
 		log.Printf("📢 [AirtagMonitor] Alert sent: %s — %s", title, body)
 	}
-}
-
-func haversineMeters(lat1, lng1, lat2, lng2 float64) float64 {
-	const R = 6_371_000.0 // Earth radius in meters
-	rlat1 := lat1 * math.Pi / 180
-	rlat2 := lat2 * math.Pi / 180
-	dlat := (lat2 - lat1) * math.Pi / 180
-	dlng := (lng2 - lng1) * math.Pi / 180
-
-	a := math.Sin(dlat/2)*math.Sin(dlat/2) +
-		math.Cos(rlat1)*math.Cos(rlat2)*math.Sin(dlng/2)*math.Sin(dlng/2)
-	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
 // formatDistance renders meters as miles if >= 1 mile, otherwise as meters.
