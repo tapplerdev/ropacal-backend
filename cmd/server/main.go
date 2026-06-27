@@ -246,7 +246,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "tier3-incr1-shiftstore",
+			"version": "tier3-incr2-shiftdetails",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -367,7 +367,7 @@ func main() {
 
 			// Shift history
 			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
-			r.Get("/driver/shift-details", handlers.GetShiftDetails(db))
+			r.Get("/driver/shift-details", handlers.GetShiftDetails(handlers.NewSQLShiftStore(db)))
 			r.Get("/driver/shift-move-requests", handlers.GetShiftMoveRequests(db))
 
 			// Location tracking (sent every 10 seconds during active shift)

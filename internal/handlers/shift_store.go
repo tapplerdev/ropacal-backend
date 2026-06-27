@@ -21,6 +21,9 @@ type ShiftStore interface {
 	// (any date) or a ready shift scheduled for today or earlier. Returns
 	// sql.ErrNoRows when the driver has no current shift.
 	CurrentByDriver(ctx context.Context, driverID, today string) (*models.Shift, error)
+	// ByIDForDriver returns a specific shift owned by the given driver (the
+	// driver_id scope enforces ownership). Returns an error if not found.
+	ByIDForDriver(ctx context.Context, shiftID, driverID string) (*models.Shift, error)
 	// TasksWithDetails returns the legacy bin-detail view for a shift.
 	TasksWithDetails(ctx context.Context, shiftID string) ([]models.ShiftBinWithDetails, error)
 	// Tasks returns the route_tasks for a shift.
@@ -39,6 +42,25 @@ type currentShiftResponse struct {
 	EndTime           *int64             `json:"end_time"`
 	ID                string             `json:"id"`
 	PauseStartTime    *int64             `json:"pause_start_time"`
+	RouteID           *string            `json:"route_id"`
+	StartTime         *int64             `json:"start_time"`
+	Status            models.ShiftStatus `json:"status"`
+	Tasks             []models.RouteTask `json:"tasks"`
+	TotalBins         int                `json:"total_bins"`
+	TotalPauseSeconds int                `json:"total_pause_seconds"`
+	UpdatedAt         int64              `json:"updated_at"`
+}
+
+// shiftDetailsResponse is the typed `data` payload of GET /api/driver/shift-details.
+// NOTE: deliberately distinct from currentShiftResponse — this endpoint omits
+// pause_start_time (12 keys, not 13). Alphabetical order + no omitempty keep the
+// JSON byte-identical to the previous map output.
+type shiftDetailsResponse struct {
+	CompletedBins     int                `json:"completed_bins"`
+	CreatedAt         int64              `json:"created_at"`
+	DriverID          string             `json:"driver_id"`
+	EndTime           *int64             `json:"end_time"`
+	ID                string             `json:"id"`
 	RouteID           *string            `json:"route_id"`
 	StartTime         *int64             `json:"start_time"`
 	Status            models.ShiftStatus `json:"status"`
@@ -76,6 +98,14 @@ const currentShiftQuery = `SELECT * FROM shifts
 func (s *sqlShiftStore) CurrentByDriver(ctx context.Context, driverID, today string) (*models.Shift, error) {
 	var shift models.Shift
 	if err := s.db.GetContext(ctx, &shift, currentShiftQuery, driverID, today); err != nil {
+		return nil, err
+	}
+	return &shift, nil
+}
+
+func (s *sqlShiftStore) ByIDForDriver(ctx context.Context, shiftID, driverID string) (*models.Shift, error) {
+	var shift models.Shift
+	if err := s.db.GetContext(ctx, &shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, driverID); err != nil {
 		return nil, err
 	}
 	return &shift, nil

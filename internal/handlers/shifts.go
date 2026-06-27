@@ -4676,7 +4676,7 @@ func GetDriverShiftHistoryByID(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetShiftDetails returns detailed information about a specific shift including all bins
-func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
+func GetShiftDetails(store ShiftStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("📥 REQUEST: GET /api/driver/shift-details")
 
@@ -4695,48 +4695,44 @@ func GetShiftDetails(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 		log.Printf("   Shift ID: %s", shiftID)
 
-		// Get shift details
-		var shift models.Shift
-		err := db.Get(&shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, userClaims.UserID)
+		ctx := r.Context()
+
+		shift, err := store.ByIDForDriver(ctx, shiftID, userClaims.UserID)
 		if err != nil {
 			log.Printf("❌ Error fetching shift: %v", err)
 			utils.RespondError(w, http.StatusNotFound, "Shift not found")
 			return
 		}
 
-		// Get all bins with details for this shift
-		bins, err := getShiftTasksWithDetails(db, shiftID)
-		if err != nil {
+		// Legacy bin-detail view — not in the response, and (unlike GetCurrentShift)
+		// a failure is non-fatal here. Fetch only for parity with prior behavior.
+		if _, err := store.TasksWithDetails(ctx, shiftID); err != nil {
 			log.Printf("❌ Error fetching route bins: %v", err)
-			bins = []models.ShiftBinWithDetails{} // Return empty array on error
 		}
 
-		// Also get tasks from route_tasks table (new task-based system)
-		tasks, err := database.GetShiftTasks(db, shiftID)
+		tasks, err := store.Tasks(ctx, shiftID)
 		if err != nil {
 			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
 			tasks = []models.RouteTask{} // Empty tasks array on error
 		}
 
-		log.Printf("✅ Shift found with %d bins, %d tasks", len(bins), len(tasks))
-		log.Printf("📤 RESPONSE: 200 OK")
+		log.Printf("📤 RESPONSE: 200 OK — shift %s, %d tasks", shift.ID, len(tasks))
 
-		// Return shift with bins array
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
-			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
-				"tasks":               tasks, // New task-based field
+			"data": shiftDetailsResponse{
+				CompletedBins:     shift.CompletedBins,
+				CreatedAt:         shift.CreatedAt,
+				DriverID:          shift.DriverID,
+				EndTime:           shift.EndTime,
+				ID:                shift.ID,
+				RouteID:           shift.RouteID,
+				StartTime:         shift.StartTime,
+				Status:            shift.Status,
+				Tasks:             tasks,
+				TotalBins:         shift.TotalBins,
+				TotalPauseSeconds: shift.TotalPauseSeconds,
+				UpdatedAt:         shift.UpdatedAt,
 			},
 		})
 	}

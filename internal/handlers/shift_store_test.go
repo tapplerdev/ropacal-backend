@@ -25,6 +25,9 @@ type fakeShiftStore struct {
 func (f fakeShiftStore) CurrentByDriver(_ context.Context, _, _ string) (*models.Shift, error) {
 	return f.shift, f.shiftErr
 }
+func (f fakeShiftStore) ByIDForDriver(_ context.Context, _, _ string) (*models.Shift, error) {
+	return f.shift, f.shiftErr
+}
 func (f fakeShiftStore) TasksWithDetails(_ context.Context, _ string) ([]models.ShiftBinWithDetails, error) {
 	return f.bins, f.binsErr
 }
@@ -113,5 +116,60 @@ func TestGetCurrentShift_Unauthorized(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", rec.Code)
+	}
+}
+
+// withDriverDetails returns a shift-details request (carries shift_id + auth).
+func withDriverDetails(driverID, shiftID string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/driver/shift-details?shift_id="+shiftID, nil)
+	claims := middleware.UserClaims{UserID: driverID, Email: "driver@test", Role: "driver"}
+	return req.WithContext(context.WithValue(req.Context(), middleware.UserContextKey, claims))
+}
+
+func TestGetShiftDetails_Found(t *testing.T) {
+	h := GetShiftDetails(fakeShiftStore{
+		shift: &models.Shift{ID: "s1", DriverID: "d1", Status: "active"},
+		tasks: []models.RouteTask{},
+	})
+	rec := httptest.NewRecorder()
+	h(rec, withDriverDetails("d1", "s1"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !resp.Success || resp.Data["id"] != "s1" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	// shift-details must NOT include pause_start_time (distinct from current).
+	if _, has := resp.Data["pause_start_time"]; has {
+		t.Fatalf("shift-details must omit pause_start_time, got keys %v", resp.Data)
+	}
+}
+
+func TestGetShiftDetails_NotFound(t *testing.T) {
+	h := GetShiftDetails(fakeShiftStore{shiftErr: sql.ErrNoRows})
+	rec := httptest.NewRecorder()
+	h(rec, withDriverDetails("d1", "missing"))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+}
+
+func TestGetShiftDetails_MissingShiftID(t *testing.T) {
+	h := GetShiftDetails(fakeShiftStore{})
+	req := httptest.NewRequest(http.MethodGet, "/api/driver/shift-details", nil)
+	claims := middleware.UserClaims{UserID: "d1", Role: "driver"}
+	req = req.WithContext(context.WithValue(req.Context(), middleware.UserContextKey, claims))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for missing shift_id, got %d", rec.Code)
 	}
 }
