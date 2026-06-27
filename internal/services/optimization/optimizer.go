@@ -11,9 +11,11 @@ type Optimizer interface {
 	Name() string
 }
 
-// NewOptimizer creates an optimizer based on environment configuration
-// Set OPTIMIZER_TYPE="mapbox" (only Mapbox is supported)
-// Note: Google and HERE optimizers are available in code but commented out
+// NewOptimizer creates an optimizer based on environment configuration.
+// The active optimizer is OR-Tools (set OPTIMIZER_TYPE="ortools"), which is also
+// the default when OPTIMIZER_TYPE is unset/invalid. Mapbox is retained ONLY for
+// VRP comparison/testing and must not be used for live routing. Google and HERE
+// optimizers exist in code but are commented out below.
 func NewOptimizer() Optimizer {
 	optimizerType := os.Getenv("OPTIMIZER_TYPE")
 
@@ -36,9 +38,10 @@ func NewOptimizer() Optimizer {
 	// 	log.Printf("✅ Using HERE Maps Optimization")
 	// 	return NewHereOptimizer()
 	default:
-		// Default to Mapbox (only supported optimizer)
-		log.Printf("⚠️  OPTIMIZER_TYPE not set or invalid, defaulting to Mapbox")
-		return NewMapboxOptimizer()
+		// Default to OR-Tools (the active optimizer). Never silently fall back to
+		// Mapbox, which is comparison-only.
+		log.Printf("⚠️  OPTIMIZER_TYPE not set or invalid (%q), defaulting to OR-Tools", optimizerType)
+		return NewORToolsOptimizer()
 	}
 }
 

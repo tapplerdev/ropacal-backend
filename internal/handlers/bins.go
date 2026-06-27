@@ -11,6 +11,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
@@ -117,6 +118,21 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		fillPercentage := 0
 		if req.FillPercentage != nil {
 			fillPercentage = *req.FillPercentage
+		}
+
+		// Geocode the address when coordinates aren't supplied, so a bin is never
+		// created without a routable location (the dashboard's coordinate inputs are
+		// optional). Best-effort: if geocoding fails we still create the bin, and it
+		// can be backfilled later via the batch-geocode endpoint.
+		if req.Latitude == nil || req.Longitude == nil {
+			geocoder := services.NewHEREGeocodingService(HereAPIKey)
+			if lat, lng, gErr := geocoder.GeocodeAddress(req.CurrentStreet, req.City, req.Zip); gErr == nil {
+				req.Latitude = &lat
+				req.Longitude = &lng
+				log.Printf("[CREATE-BIN] Geocoded \"%s, %s %s\" -> (%.6f, %.6f)", req.CurrentStreet, req.City, req.Zip, lat, lng)
+			} else {
+				log.Printf("⚠️  [CREATE-BIN] Geocoding failed for \"%s, %s %s\": %v (creating without coordinates)", req.CurrentStreet, req.City, req.Zip, gErr)
+			}
 		}
 
 		// Insert bin

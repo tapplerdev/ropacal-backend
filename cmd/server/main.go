@@ -413,6 +413,10 @@ func main() {
 			r.Use(middleware.RequireRole("admin"))
 
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService, centrifugoClient))
+			// Cancel is an action (state transition), so POST is the correct verb.
+			// PUT is kept temporarily for backward-compat until the dashboard ships
+			// its POST switch; remove the PUT line after that deploys.
+			r.Post("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
 			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
 			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService, centrifugoClient))
 			r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, redisClient, centrifugoClient, fcmService)) // Comprehensive shift editing
