@@ -5007,8 +5007,8 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 					logicalCompleted++
 				}
 			}
-		} else {
-			// Regular collection bin
+		} else if bin.StopType != "warehouse_stop" && bin.StopType != "service" {
+			// Regular bin task (collection, placement, etc.) — exclude warehouse/service
 			logicalTotal++
 			if bin.IsCompleted == 1 {
 				logicalCompleted++
