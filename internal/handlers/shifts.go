@@ -5439,7 +5439,7 @@ func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 
 // UpdateLocation handles driver location updates (POST /api/driver/location)
 // Called every 10 seconds when driver is on active shift
-func UpdateLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func UpdateLocation(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -5536,6 +5536,29 @@ func UpdateLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 		}
 
 		log.Printf("✅ Updated driver_current_location (original GPS for audit)")
+
+		// Step 2.5: Save ORIGINAL GPS to Redis so the HTTP path is a true peer of
+		// the Centrifugo publish-proxy path. Redis is the live source of truth that
+		// preflight, StartShift, and the dashboard read — without this, a location
+		// arriving via HTTP (e.g. when Centrifugo is down) reaches Postgres but
+		// stays invisible to the live system for up to 30s (next batch flush).
+		// Same JSON shape the proxy writes (see LocationData in centrifugo_location_proxy.go).
+		if redisClient != nil {
+			locData := LocationData{
+				Latitude:  req.Latitude,
+				Longitude: req.Longitude,
+				Accuracy:  accuracyValue,
+				Heading:   getFloat64Value(req.Heading),
+				Speed:     getFloat64Value(req.Speed),
+				ShiftID:   req.ShiftID,
+				Timestamp: req.Timestamp,
+			}
+			if locationJSON, mErr := json.Marshal(locData); mErr == nil {
+				if rErr := redisClient.SaveDriverLocation(r.Context(), userClaims.UserID, string(locationJSON)); rErr != nil {
+					log.Printf("⚠️  Failed to save location to Redis: %v", rErr)
+				}
+			}
+		}
 
 		// Step 3: Insert into driver_locations (historical log - optional)
 		// Note: This table may not exist in your schema, commenting out for now

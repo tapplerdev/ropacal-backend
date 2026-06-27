@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -32,6 +33,15 @@ func main() {
 		log.Printf("⚠️  Warning: .env file not found: %v", err)
 	} else {
 		log.Println("✅ .env file loaded successfully (overriding system env vars)")
+	}
+
+	// Warn (non-fatal) if third-party API keys are missing from the environment.
+	// These power HERE geocoding/optimization and Mapbox route optimization; an
+	// empty value means those calls fail at runtime rather than failing loudly here.
+	for _, key := range []string{"HERE_API_KEY", "HERE_APP_ID", "MAPBOX_ACCESS_TOKEN"} {
+		if os.Getenv(key) == "" {
+			log.Printf("⚠️  %s is not set — features depending on it will fail", key)
+		}
 	}
 
 	// Get database URL
@@ -213,9 +223,20 @@ func main() {
 		MaxAge:           300,
 	}))
 
-	// Health check
+	// Health check. Reports a deploy marker (to confirm which build is live) and
+	// booleans for whether the third-party API keys are present in the env
+	// (booleans only — never the key values).
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("OK"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "ok",
+			"version": "keys-env-migration",
+			"config": map[string]bool{
+				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
+				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
+				"mapbox_access_token": os.Getenv("MAPBOX_ACCESS_TOKEN") != "",
+			},
+		})
 	})
 
 	// Authentication routes (no auth required)
@@ -335,7 +356,7 @@ func main() {
 			r.Get("/driver/shift-move-requests", handlers.GetShiftMoveRequests(db))
 
 			// Location tracking (sent every 10 seconds during active shift)
-			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub, centrifugoClient))
+			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub, redisClient, centrifugoClient))
 
 			// OSRM test endpoint (for testing snap-to-roads integration)
 			r.Post("/test/osrm", handlers.TestOSRM(db, wsHub))

@@ -107,17 +107,18 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		// log.Printf("📍 [LocationProxy] Driver %s: lat=%.6f, lng=%.6f, accuracy=%.1fm",
 			// driverID, locationData.Latitude, locationData.Longitude, locationData.Accuracy)
 
-		// 4. Save ORIGINAL GPS to Redis (non-blocking)
+		// 4. Save ORIGINAL GPS to Redis (synchronous).
+		// Redis is the source of truth for live position (preflight, StartShift,
+		// and the dashboard all read it). The write is sub-millisecond, so we do
+		// it inline rather than in a fire-and-forget goroutine — that way a failed
+		// write surfaces in logs instead of silently dropping the location while
+		// the handler still returns success.
 		if redisClient != nil {
 			ctx := context.Background()
-			go func() {
-				locationJSON, _ := json.Marshal(locationData)
-				if err := redisClient.SaveDriverLocation(ctx, driverID, string(locationJSON)); err != nil {
-					log.Printf("⚠️  [LocationProxy] Failed to save to Redis: %v", err)
-				} else {
-					// log.Printf("✅ [LocationProxy] Saved to Redis: driver:%s", driverID)
-				}
-			}()
+			locationJSON, _ := json.Marshal(locationData)
+			if err := redisClient.SaveDriverLocation(ctx, driverID, string(locationJSON)); err != nil {
+				log.Printf("⚠️  [LocationProxy] Failed to save to Redis: %v", err)
+			}
 		}
 
 		// 4.5 Check warehouse proximity for auto-end (non-blocking)

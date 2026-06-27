@@ -22,10 +22,11 @@ import (
 	"github.com/lib/pq"
 )
 
-// HERE Maps API credentials
-const (
-	HereAppID  = "Ne2aZIKc9CIno1Fw4RyB"
-	HereAPIKey = "0kdpGpu5ZODbrzc6QDiPmSarJSD_6BpqyCdm3ghNuzc"
+// HERE Maps API credentials (sourced from the environment; set HERE_APP_ID
+// and HERE_API_KEY in Railway / local .env — never hardcode).
+var (
+	HereAppID  = os.Getenv("HERE_APP_ID")
+	HereAPIKey = os.Getenv("HERE_API_KEY")
 )
 
 // GetRoutes returns all route blueprints
@@ -565,7 +566,7 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		// source=first: start at warehouse (first coordinate)
 		// destination=last: end at warehouse (last coordinate)
 		// roundtrip=false: we explicitly added warehouse at both ends
-		mapboxToken := "pk.eyJ1IjoiYmlubHl5YWkiLCJhIjoiY21pNzN4bzlhMDVheTJpcHdqd2FtYjhpeSJ9.sQM8WHE2C9zWH0xG107xhw"
+		mapboxToken := os.Getenv("MAPBOX_ACCESS_TOKEN")
 		mapboxURL := fmt.Sprintf(
 			"https://api.mapbox.com/optimized-trips/v1/mapbox/driving/%s?source=first&destination=last&roundtrip=false&overview=full&geometries=geojson&access_token=%s",
 			coordinates,
@@ -1075,7 +1076,7 @@ func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
 		// Add warehouse at the end for explicit round trip
 		coordinates += fmt.Sprintf(";%.6f,%.6f", warehouseLoc.Longitude, warehouseLoc.Latitude)
 
-		mapboxToken := "pk.eyJ1IjoiYmlubHl5YWkiLCJhIjoiY21pNzN4bzlhMDVheTJpcHdqd2FtYjhpeSJ9.sQM8WHE2C9zWH0xG107xhw"
+		mapboxToken := os.Getenv("MAPBOX_ACCESS_TOKEN")
 		mapboxURL := fmt.Sprintf(
 			"https://api.mapbox.com/optimized-trips/v1/mapbox/driving/%s?source=first&destination=last&roundtrip=false&overview=full&geometries=geojson&access_token=%s",
 			coordinates,
