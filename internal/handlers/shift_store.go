@@ -27,6 +27,27 @@ type ShiftStore interface {
 	Tasks(ctx context.Context, shiftID string) ([]models.RouteTask, error)
 }
 
+// currentShiftResponse is the typed `data` payload of GET /api/driver/shift/current.
+// It replaces an ad-hoc map[string]interface{} so the response shape is
+// compile-checked and documented in one place. Fields are declared in the same
+// (alphabetical) order the map serialized them, and use NO omitempty, so the JSON
+// is byte-identical to the previous output — nullable fields still emit as null.
+type currentShiftResponse struct {
+	CompletedBins     int                `json:"completed_bins"`
+	CreatedAt         int64              `json:"created_at"`
+	DriverID          string             `json:"driver_id"`
+	EndTime           *int64             `json:"end_time"`
+	ID                string             `json:"id"`
+	PauseStartTime    *int64             `json:"pause_start_time"`
+	RouteID           *string            `json:"route_id"`
+	StartTime         *int64             `json:"start_time"`
+	Status            models.ShiftStatus `json:"status"`
+	Tasks             []models.RouteTask `json:"tasks"`
+	TotalBins         int                `json:"total_bins"`
+	TotalPauseSeconds int                `json:"total_pause_seconds"`
+	UpdatedAt         int64              `json:"updated_at"`
+}
+
 // sqlShiftStore is the Postgres-backed ShiftStore.
 type sqlShiftStore struct {
 	db *sqlx.DB

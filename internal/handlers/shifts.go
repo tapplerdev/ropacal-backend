@@ -156,20 +156,20 @@ func GetCurrentShift(store ShiftStore) http.HandlerFunc {
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
-			"data": map[string]interface{}{
-				"id":                  shift.ID,
-				"driver_id":           shift.DriverID,
-				"route_id":            shift.RouteID,
-				"status":              shift.Status,
-				"start_time":          shift.StartTime,
-				"end_time":            shift.EndTime,
-				"total_pause_seconds": shift.TotalPauseSeconds,
-				"pause_start_time":    shift.PauseStartTime,
-				"total_bins":          shift.TotalBins,
-				"completed_bins":      shift.CompletedBins,
-				"tasks":               tasks, // New task-based field
-				"created_at":          shift.CreatedAt,
-				"updated_at":          shift.UpdatedAt,
+			"data": currentShiftResponse{
+				CompletedBins:     shift.CompletedBins,
+				CreatedAt:         shift.CreatedAt,
+				DriverID:          shift.DriverID,
+				EndTime:           shift.EndTime,
+				ID:                shift.ID,
+				PauseStartTime:    shift.PauseStartTime,
+				RouteID:           shift.RouteID,
+				StartTime:         shift.StartTime,
+				Status:            shift.Status,
+				Tasks:             tasks,
+				TotalBins:         shift.TotalBins,
+				TotalPauseSeconds: shift.TotalPauseSeconds,
+				UpdatedAt:         shift.UpdatedAt,
 			},
 		})
 	}
