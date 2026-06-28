@@ -52,8 +52,8 @@ type RoutePlanner interface {
     AddService(ext sqlx.Ext, shiftID string, svc ServiceTask) error
 
     RemoveTasks(ext sqlx.Ext, sel Selector, reason, by string) error // the ONE audited soft-delete
-    Resequence(ext sqlx.Ext, shiftID string) error                   // the ONLY writer of sequence_order
-    ReplaceRoute(ext sqlx.Ext, shiftID string, optimized []Task) error // post-optimization delete-all + re-insert
+    Resequence(ext sqlx.Ext, shiftID string) error                   // the ONLY writer of sequence_order; ORDER-PRESERVING renumber (never a re-sort)
+    ReplaceRoute(ext sqlx.Ext, shiftID string, optimized []Task) error // post-optimization delete-all + re-insert (persists the optimizer's order)
 
     SyncBinTasks(ext sqlx.Ext, binID string) error             // bins.go edge
     SyncPlacement(ext sqlx.Ext, potentialLocationID string) error // potential_locations.go edge
@@ -91,8 +91,17 @@ Internally backed by **one typed task writer** (one INSERT, one column list).
 - **Driver-facing task JSON (`GetShiftTasksDetailed`) + Centrifugo payloads stay
   byte-identical** (golden-diff every slice). The app contract is sacred.
 - Route mutations stay **synchronous + in the caller's tx**. No event bus.
-- After any mutation, exactly one `Resequence` pass owns `sequence_order`
-  (preserving the pickup-before-dropoff invariant).
+- **`Resequence` is an order-*preserving* renumber, never a re-sort.** It takes the
+  tasks in their current relative order and normalizes the integers to dense `1..N`
+  — closing soft-delete gaps and breaking duplicate/collision deterministically —
+  **without ever moving one task past another.** It owns the *numbering*, not the
+  *order*.
+- **The optimizer owns order; `RoutePlanner` owns persistence.** OR-Tools is fed the
+  pickup→dropoff precedence constraint, so its returned sequence already guarantees
+  pickup-before-dropoff and *is authoritative* — we persist it `1..N` and ship it to
+  the driver as-is; we never re-sort it. Between optimizations, manual inserts keep
+  pickup<dropoff by placing the dropoff **adjacent after** its pickup (insertion
+  logic, not `Resequence`).
 
 ## Boundary with optimization (keep it)
 The optimizer (OR-Tools is the *active* one; Mapbox is comparison — see
