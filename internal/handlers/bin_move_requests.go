@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -971,7 +972,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 // GetBinMoveRequest returns a single move request by ID
 // GET /api/manager/bins/move-requests/:id
-func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
+func GetBinMoveRequest(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		log.Printf("🔍 [GET_MOVE_REQUEST] Fetching move request ID: %s", id)
@@ -982,14 +983,13 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Fetch move request
+		// Fetch the move request through the domain Store. The bin + driver reads
+		// below stay on db: they cross into the bin/shift domains, which the
+		// move-request Store does not own.
 		log.Printf("   [STEP 1] Querying bin_move_requests table...")
-		var moveRequest models.BinMoveRequest
-		err := db.Get(&moveRequest, `
-			SELECT * FROM bin_move_requests WHERE id = $1
-		`, id)
+		moveRequest, err := store.ByID(id)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, moverequest.ErrNotFound) {
 				log.Printf("❌ [GET_MOVE_REQUEST] Move request not found in database: %s", id)
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
