@@ -2571,7 +2571,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 
 // CancelBinMoveRequest cancels a pending move request
 // PUT /api/manager/bins/move-requests/:id/cancel
-func CancelBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -2579,15 +2579,10 @@ func CancelBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 			return
 		}
 
-		// Fetch move request to check status
-		var moveRequest models.BinMoveRequest
-		err := db.Get(&moveRequest, `
-			SELECT id, bin_id, status, assigned_shift_id
-			FROM bin_move_requests
-			WHERE id = $1
-		`, id)
+		// Fetch via the domain Store.
+		moveRequest, err := store.ByID(id)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, moverequest.ErrNotFound) {
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
 			}
@@ -2616,13 +2611,8 @@ func CancelBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 
 		now := time.Now().Unix()
 
-		// Update move request status to cancelled
-		_, err = db.Exec(`
-			UPDATE bin_move_requests
-			SET status = 'cancelled', updated_at = $1
-			WHERE id = $2
-		`, now, id)
-		if err != nil {
+		// Mark cancelled (domain owns the transition).
+		if err = moverequest.Cancel(db, id, now); err != nil {
 			log.Printf("Error cancelling move request: %v", err)
 			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
 			return

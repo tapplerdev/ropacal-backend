@@ -125,3 +125,14 @@ func AssignToDriver(ext sqlx.Ext, id, userID string, now int64) error {
 		WHERE id = $3`, userID, now, id)
 	return err
 }
+
+// Cancel marks a move as cancelled (a terminal state). Runs inside the caller's
+// transaction or on the pool (ext); the caller handles the cross-domain effects
+// of cancelling (freeing the bin, detaching route_tasks, re-optimizing, notifying).
+func Cancel(ext sqlx.Ext, id string, now int64) error {
+	_, err := ext.Exec(`
+		UPDATE bin_move_requests
+		SET status = 'cancelled', updated_at = $1
+		WHERE id = $2`, now, id)
+	return err
+}
