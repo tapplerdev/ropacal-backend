@@ -523,7 +523,10 @@ func Migrate(db *sqlx.DB) error {
 			scheduled_date BIGINT NOT NULL,
 			urgency TEXT NOT NULL CHECK(urgency IN ('urgent', 'scheduled')),
 			requested_by TEXT NOT NULL,
-			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'completed', 'cancelled')),
+			-- 'assigned' = claimed by a driver (manual) or a not-yet-active shift.
+			-- The live prod table doesn't enforce this CHECK (predates 'assigned'),
+			-- but a fresh DB must allow it or the manual-assign flow breaks on deploy.
+			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'assigned', 'in_progress', 'completed', 'cancelled')),
 			original_latitude DOUBLE PRECISION NOT NULL,
 			original_longitude DOUBLE PRECISION NOT NULL,
 			original_address TEXT NOT NULL,

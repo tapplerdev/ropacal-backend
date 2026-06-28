@@ -83,7 +83,10 @@ func (m *MoveRequestMonitor) checkMoveRequests() {
 		SELECT bmr.id, bmr.bin_id, b.bin_number, bmr.scheduled_date, bmr.status
 		FROM bin_move_requests bmr
 		JOIN bins b ON bmr.bin_id = b.id
-		WHERE bmr.status IN ('pending', 'in_progress')
+		-- 'assigned' = claimed by a driver (manual) or a not-yet-active shift, but
+		-- not in_progress. It must be watched too, or those moves get no overdue/
+		-- due-soon alerts and silently rot in a driver's backlog.
+		WHERE bmr.status IN ('pending', 'assigned', 'in_progress')
 	`)
 	if err != nil {
 		log.Printf("❌ [MoveRequestMonitor] Failed to query move requests: %v", err)

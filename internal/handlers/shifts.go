@@ -3505,13 +3505,35 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 			// Unassign underlying resources
 			switch task.TaskType {
 			case models.TaskTypePickup, models.TaskTypeDropoff:
-				// Unassign move request
+				// Unassign move request and return it to the pending pool.
+				// BUG FIX: previously this cleared the shift/user but left
+				// status='in_progress', orphaning the move (unassigned yet not in
+				// the pending pool, so it could never be picked up again). Now it
+				// goes back to 'pending' like every other detach path, and logs the
+				// unassignment for the audit trail (matching UpdateShift).
 				if task.MoveRequestID != nil {
 					log.Printf("   Unassigning move request %s", *task.MoveRequestID)
+
+					// Capture assignment details before clearing them (for history).
+					var mrDetails struct {
+						AssignmentType  *string `db:"assignment_type"`
+						AssignedUserID  *string `db:"assigned_user_id"`
+						AssignedShiftID *string `db:"assigned_shift_id"`
+					}
+					_ = tx.Get(&mrDetails, `SELECT assignment_type, assigned_user_id, assigned_shift_id FROM bin_move_requests WHERE id = $1`, *task.MoveRequestID)
+					var assignedUserName *string
+					if mrDetails.AssignedUserID != nil {
+						var name string
+						if e := tx.Get(&name, `SELECT name FROM users WHERE id = $1`, *mrDetails.AssignedUserID); e == nil {
+							assignedUserName = &name
+						}
+					}
+
 					_, err = tx.Exec(`
 						UPDATE bin_move_requests
 						SET assigned_shift_id = NULL,
 							assigned_user_id = NULL,
+							status = 'pending',
 							updated_at = $1
 						WHERE id = $2
 					`, now, *task.MoveRequestID)
@@ -3519,6 +3541,10 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 						log.Printf("❌ Error unassigning move request: %v", err)
 						utils.RespondError(w, http.StatusInternalServerError, "Failed to unassign move request")
 						return
+					}
+
+					if logErr := helpers.LogMoveRequestUnassigned(tx, *task.MoveRequestID, userClaims.UserID, userClaims.Email, mrDetails.AssignmentType, mrDetails.AssignedUserID, assignedUserName, mrDetails.AssignedShiftID); logErr != nil {
+						log.Printf("⚠️  Failed to log move request unassignment: %v", logErr)
 					}
 				}
 
