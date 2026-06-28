@@ -9,6 +9,7 @@ import (
 
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/helpers"
+	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
 
@@ -376,8 +377,18 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 		optMetaRaw = &raw
 	}
 
+	// Archive + end + release as ONE transaction. A torn sequence here (a process
+	// kill between the archive and the status update) would otherwise leave a
+	// half-ended shift with no rollback. Notifications fire only after commit.
+	tx, err := m.db.Beginx()
+	if err != nil {
+		log.Printf("❌ [StaleShiftMonitor] Failed to begin tx for shift %s: %v", shift.ID[:12], err)
+		return
+	}
+	defer tx.Rollback() // no-op once Commit succeeds; rolls back on any early return
+
 	// Archive to shift_history
-	_, err = m.db.Exec(`
+	_, err = tx.Exec(`
 		INSERT INTO shift_history (
 			id, driver_id, route_id, start_time, end_time, created_at, ended_at,
 			total_pause_seconds, total_bins, completed_bins, completion_rate,
@@ -410,7 +421,7 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 	}
 
 	// Update shift status
-	_, err = m.db.Exec(`
+	_, err = tx.Exec(`
 		UPDATE shifts SET status = 'ended', end_time = $1, pause_start_time = NULL, updated_at = $2
 		WHERE id = $3
 	`, now, now, shift.ID)
@@ -419,41 +430,29 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 		return
 	}
 
-	// Return incomplete move requests to pending
-	type MoveRequestInfo struct {
-		ID               string  `db:"id"`
-		AssignmentType   *string `db:"assignment_type"`
-		AssignedUserID   *string `db:"assigned_user_id"`
-		AssignedUserName *string `db:"assigned_user_name"`
-		AssignedShiftID  *string `db:"assigned_shift_id"`
+	// Release incomplete moves to the driver's BACKLOG via the shared helper — the
+	// same rule as the manual End/Cancel paths (auto-end is still an end). This
+	// previously dumped moves to the unassigned pool ('pending'), inconsistent with
+	// the backlog model, and also missed 'assigned' (not-yet-started) moves.
+	released, relErr := moverequest.ReleaseFromShift(tx, []string{shift.ID}, now)
+	if relErr != nil {
+		log.Printf("⚠️  [StaleShiftMonitor] Failed to release move requests: %v", relErr)
 	}
-	var affectedMoveRequests []MoveRequestInfo
-	m.db.Select(&affectedMoveRequests, `
-		SELECT mr.id, mr.assignment_type, mr.assigned_user_id, mr.assigned_shift_id,
-		       u.name as assigned_user_name
-		FROM bin_move_requests mr
-		LEFT JOIN users u ON mr.assigned_user_id = u.id
-		WHERE mr.assigned_shift_id = $1 AND mr.status = 'in_progress'
-	`, shift.ID)
-
-	result, err := m.db.Exec(`
-		UPDATE bin_move_requests
-		SET status = 'pending', assigned_shift_id = NULL, updated_at = $1
-		WHERE assigned_shift_id = $2 AND status = 'in_progress'
-	`, now, shift.ID)
-	if err != nil {
-		log.Printf("⚠️  [StaleShiftMonitor] Failed to return move requests: %v", err)
-	} else {
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected > 0 {
-			log.Printf("📝 [StaleShiftMonitor] Returned %d move request(s) to pending", rowsAffected)
-			for _, mr := range affectedMoveRequests {
-				helpers.LogMoveRequestUnassigned(
-					m.db, mr.ID, "system", "system",
-					mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
-				)
-			}
+	for _, mr := range released {
+		if logErr := helpers.LogMoveRequestUnassigned(
+			tx, mr.ID, "system", "system",
+			mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
+		); logErr != nil {
+			log.Printf("⚠️  [StaleShiftMonitor] Failed to log unassignment for %s: %v", mr.ID, logErr)
 		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		log.Printf("❌ [StaleShiftMonitor] Failed to commit auto-end for shift %s: %v", shift.ID[:12], err)
+		return
+	}
+	if len(released) > 0 {
+		log.Printf("📝 [StaleShiftMonitor] Returned %d move request(s) to driver backlog", len(released))
 	}
 
 	log.Printf("✅ [StaleShiftMonitor] Shift %s auto-ended — driver: %s, completed: %d/%d (%.0f%%)",
