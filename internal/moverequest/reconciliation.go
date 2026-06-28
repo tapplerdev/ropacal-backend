@@ -93,9 +93,14 @@ func ReleaseFromShift(ext sqlx.Ext, shiftIDs []string, now int64) ([]ReleasedMov
 // It runs inside the caller's transaction (ext); the caller remains responsible
 // for cross-domain cleanup (the shift's route_tasks / total_bins) and history.
 func ClearAssignment(ext sqlx.Ext, id string, now int64) error {
+	// assignment_type must be NULL (not ''), both to match the model's documented
+	// "NULL for unassigned" semantics and because the column has a
+	// CHECK(assignment_type IN ('shift','manual')) — '' violates it and 500s the
+	// request (a long-standing bug: clear-assignment never actually worked). NULL
+	// satisfies the CHECK.
 	_, err := ext.Exec(`
 		UPDATE bin_move_requests
-		SET assignment_type  = '',
+		SET assignment_type  = NULL,
 		    assigned_shift_id = NULL,
 		    assigned_user_id  = NULL,
 		    status            = 'pending',
