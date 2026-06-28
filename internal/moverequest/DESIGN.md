@@ -45,7 +45,7 @@ Key rules (already shipped this session):
 ```
 internal/moverequest/
   move.go     // MoveRequest + typed Status (+ transition helpers) — later phase
-  urgency.go  // Urgency(scheduledDate) — consolidates calculateUrgency
+  urgency.go  // Urgency(status,date,now) + ScheduledUrgency(date,now) — DONE
   store.go    // Store interface (consumer-defined) + sqlStore (*sqlx.DB)
   service.go  // Service: Schedule, AssignToShift, AssignToDriver, ReleaseFromShift,
               //          ClearAssignment, Cancel, CompleteManually, FindOverdue/NotifyOverdue

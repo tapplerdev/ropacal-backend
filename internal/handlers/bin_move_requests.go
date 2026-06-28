@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -35,45 +36,6 @@ func stringPtrEqual(a, b *string) bool {
 	return *a == *b
 }
 
-// calculateUrgency determines the urgency level based on status and scheduled date
-// Returns "resolved" for completed/cancelled moves, otherwise calculates time-based urgency
-func calculateUrgency(status string, scheduledDate int64) string {
-	// If move is completed or cancelled, urgency is "resolved"
-	if status == "completed" || status == "cancelled" {
-		return "resolved"
-	}
-
-	// Otherwise calculate urgency based on time until scheduled date
-	now := time.Now().Unix()
-	hoursUntil := float64(scheduledDate-now) / 3600.0
-
-	if hoursUntil < 0 {
-		return "overdue"
-	} else if hoursUntil < 24 {
-		return "urgent"
-	} else if hoursUntil < 72 {
-		return "soon"
-	} else {
-		return "scheduled"
-	}
-}
-
-// scheduledUrgency computes the simplified two-state urgency value persisted to
-// the bin_move_requests.urgency column at create/update time: "urgent" when the
-// move is due within 24 hours, otherwise "scheduled". This intentionally uses a
-// narrower set of buckets than calculateUrgency (which also yields "overdue",
-// "soon", and "resolved"); the stored value is deliberately limited to the two
-// states used at write time. Centralized here so the create and update paths
-// stay in sync.
-func scheduledUrgency(scheduledDate int64) string {
-	now := time.Now().Unix()
-	hoursUntil := float64(scheduledDate-now) / 3600.0
-	if hoursUntil < 24 {
-		return "urgent"
-	}
-	return "scheduled"
-}
-
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
 func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
@@ -91,7 +53,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 		}
 
 		// Auto-calculate urgency from scheduled_date
-		urgency := scheduledUrgency(req.ScheduledDate)
+		urgency := moverequest.ScheduledUrgency(req.ScheduledDate, time.Now().Unix())
 
 		// Validate move_type (accept both 'store' and 'pickup_only' for backward compatibility)
 		if req.MoveType != "store" && req.MoveType != "pickup_only" && req.MoveType != "relocation" && req.MoveType != "redeployment" {
@@ -1045,7 +1007,7 @@ func GetBinMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("✅ [STEP 2] Response built successfully")
 
 		// Override urgency with smart calculation (resolved for completed/cancelled)
-		response.Urgency = calculateUrgency(moveRequest.Status, moveRequest.ScheduledDate)
+		response.Urgency = moverequest.Urgency(moveRequest.Status, moveRequest.ScheduledDate, time.Now().Unix())
 
 		// Fetch associated bin details
 		log.Printf("   [STEP 3] Fetching bin details for BinID: %s", moveRequest.BinID)
@@ -1173,7 +1135,7 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 			responses[i] = mr.ToBinMoveRequestResponse()
 
 			// Override urgency with smart calculation (resolved for completed/cancelled)
-			responses[i].Urgency = calculateUrgency(mr.Status, mr.ScheduledDate)
+			responses[i].Urgency = moverequest.Urgency(mr.Status, mr.ScheduledDate, time.Now().Unix())
 
 			// Fetch bin details
 			var bin models.Bin
@@ -1326,7 +1288,7 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 			responses[i] = mr.ToBinMoveRequestResponse()
 
 			// Override urgency with smart calculation (resolved for completed/cancelled)
-			responses[i].Urgency = calculateUrgency(mr.Status, mr.ScheduledDate)
+			responses[i].Urgency = moverequest.Urgency(mr.Status, mr.ScheduledDate, time.Now().Unix())
 
 			// Fetch bin details
 			var bin models.Bin
@@ -1575,7 +1537,7 @@ func UpdateBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 			argCount++
 
 			// Recalculate urgency
-			newUrgency := scheduledUrgency(*req.ScheduledDate)
+			newUrgency := moverequest.ScheduledUrgency(*req.ScheduledDate, time.Now().Unix())
 			updates = append(updates, fmt.Sprintf("urgency = $%d", argCount))
 			args = append(args, newUrgency)
 			argCount++
