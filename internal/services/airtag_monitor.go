@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"ropacal-backend/internal/geo"
@@ -106,16 +107,18 @@ func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *cen
 }
 
 // Start begins the background monitoring goroutine.
-func (m *AirtagMonitor) Start() {
+func (m *AirtagMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Printf("📡 [AirtagMonitor] Starting drift monitor (3-minute intervals, reads from DB)")
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		// Check immediately on startup
 		m.checkDrift()
 
 		for {
 			select {
-			case <-m.stopChan:
+			case <-ctx.Done():
 				log.Println("🛑 [AirtagMonitor] Stopping...")
 				return
 			case <-m.ticker.C:

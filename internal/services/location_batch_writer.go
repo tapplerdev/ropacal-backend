@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	"ropacal-backend/internal/services/redis"
@@ -31,13 +32,15 @@ func NewLocationBatchWriter(db *sqlx.DB, redisClient *redis.Client) *LocationBat
 }
 
 // Start begins the background batch writing process
-func (w *LocationBatchWriter) Start() {
+func (w *LocationBatchWriter) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Println("📊 [BatchWriter] Starting location batch writer (30-second intervals)")
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			select {
-			case <-w.stopChan:
+			case <-ctx.Done():
 				log.Println("🛑 [BatchWriter] Stopping...")
 				return
 			case <-w.ticker.C:

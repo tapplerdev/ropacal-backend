@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/handlers"
@@ -166,38 +172,45 @@ func main() {
 	osrmClient := roads.NewOSRMClient()
 	log.Println("✅ OSRM client initialized")
 
+	// Shutdown context: cancelled on SIGINT/SIGTERM. Every background worker
+	// selects on shutdownCtx.Done() to stop accepting new ticks, and registers
+	// with workerWG so main can wait for in-flight ticks to finish before exit.
+	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	var workerWG sync.WaitGroup
+
 	// Start background location batch writer (writes Redis → PostgreSQL every 30s)
 	if redisClient != nil {
 		batchWriter := services.NewLocationBatchWriter(db, redisClient)
-		batchWriter.Start()
+		batchWriter.Start(shutdownCtx, &workerWG)
 		log.Println("✅ Location batch writer started (30-second intervals)")
 	}
 
 	// Start daily digest scheduler (sends at 8 AM & 2 PM)
 	digestScheduler := services.NewDigestScheduler(db, fcmService, centrifugoClient)
-	digestScheduler.Start()
+	digestScheduler.Start(shutdownCtx, &workerWG)
 	log.Println("✅ Daily digest scheduler started (hourly check, sends at 8 AM & 2 PM)")
 
 	// Start AirTag drift monitor (checks every 5 minutes)
 	airtagMonitor := services.NewAirtagMonitor(db, fcmService, centrifugoClient)
-	airtagMonitor.Start()
+	airtagMonitor.Start(shutdownCtx, &workerWG)
 	log.Println("✅ AirTag drift monitor started (5-minute intervals)")
 
 	// Start move request monitor (checks for overdue/due-soon moves)
 	moveRequestMonitor := services.NewMoveRequestMonitor(db, fcmService, centrifugoClient)
-	moveRequestMonitor.Start()
+	moveRequestMonitor.Start(shutdownCtx, &workerWG)
 	log.Println("✅ Move request monitor started (15-minute intervals)")
 
 	// Start stale shift monitor (auto-ends shifts with no GPS updates)
 	if redisClient != nil {
 		staleShiftMonitor := services.NewStaleShiftMonitor(db, redisClient, fcmService, centrifugoClient)
-		staleShiftMonitor.Start()
+		staleShiftMonitor.Start(shutdownCtx, &workerWG)
 		log.Println("✅ Stale shift monitor started (checks for disconnected drivers)")
 	}
 
 	// Start AI Operations Agent (generates recommendations every 30 min)
 	aiAgent := services.NewAIOperationsAgent(db, fcmService, centrifugoClient)
-	aiAgent.Start()
+	aiAgent.Start(shutdownCtx, &workerWG)
 	log.Println("✅ AI Operations Agent started (30-minute cycles)")
 
 	// Initialize WebSocket hub
@@ -246,7 +259,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "moverequest-domain-phase1",
+			"version": "graceful-shutdown-tx",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -547,13 +560,38 @@ func main() {
 	log.Println("🔌 Ready to accept requests!")
 	log.Println("═══════════════════════════════════════════════════════════════════")
 
-	// Start server
-	if err := http.ListenAndServe(":"+port, r); err != nil {
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Println("❌ FATAL ERROR: Server failed to start")
-		log.Printf("   Error: %v", err)
-		log.Printf("   Port: %s", port)
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Fatal(err)
+	// Start the server in its own goroutine so main can wait for a shutdown signal.
+	srv := &http.Server{Addr: ":" + port, Handler: r}
+	go func() {
+		// ErrServerClosed is the normal result of srv.Shutdown, not a failure.
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Println("❌ FATAL ERROR: Server failed to start")
+			log.Printf("   Error: %v", err)
+			log.Printf("   Port: %s", port)
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Fatal(err)
+		}
+	}()
+
+	// Block until SIGINT/SIGTERM. A second signal restores the default behaviour
+	// (force-quit), so an operator can always interrupt a slow drain.
+	<-shutdownCtx.Done()
+	stopSignals()
+	log.Println("🛑 Shutdown signal received — draining...")
+
+	// Phase 1: stop accepting new connections, let in-flight requests finish.
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancelDrain()
+	if err := srv.Shutdown(drainCtx); err != nil {
+		log.Printf("⚠️  HTTP drain did not finish cleanly: %v", err)
+	} else {
+		log.Println("✅ HTTP server drained")
 	}
+
+	// Phase 2: wait for background workers to finish their current tick. They
+	// already saw shutdownCtx cancel above, so this only waits out an in-progress
+	// run (e.g. a shift auto-end), which is now transactional and safe to await.
+	workerWG.Wait()
+	log.Println("✅ Background workers stopped — clean exit")
 }

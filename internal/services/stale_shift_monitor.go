@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"ropacal-backend/internal/geo"
@@ -61,16 +62,18 @@ func NewStaleShiftMonitor(db *sqlx.DB, redisClient *redis.Client, fcmService *FC
 }
 
 // Start begins the background monitoring goroutine.
-func (m *StaleShiftMonitor) Start() {
+func (m *StaleShiftMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Printf("📋 [StaleShiftMonitor] Starting stale shift monitor (threshold=%s, interval=%s)", StaleThreshold, StaleCheckInterval)
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		// Check immediately on startup
 		m.checkStaleShifts()
 
 		for {
 			select {
-			case <-m.stopChan:
+			case <-ctx.Done():
 				log.Println("🛑 [StaleShiftMonitor] Stopping...")
 				return
 			case <-m.ticker.C:

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"sync"
 	"time"
 
 	"ropacal-backend/internal/services/centrifugo"
@@ -42,16 +43,18 @@ func NewMoveRequestMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient
 }
 
 // Start begins the background monitoring goroutine.
-func (m *MoveRequestMonitor) Start() {
+func (m *MoveRequestMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Println("📋 [MoveRequestMonitor] Starting move request monitor (checks for overdue/due-soon)")
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		// Check immediately on startup
 		m.checkMoveRequests()
 
 		for {
 			select {
-			case <-m.stopChan:
+			case <-ctx.Done():
 				log.Println("🛑 [MoveRequestMonitor] Stopping...")
 				return
 			case <-m.ticker.C:

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ropacal-backend/internal/services/centrifugo"
@@ -53,15 +54,17 @@ func NewDigestScheduler(db *sqlx.DB, fcmService *FCMService, centrifugoClient *c
 }
 
 // Start begins the background scheduler goroutine.
-func (s *DigestScheduler) Start() {
+func (s *DigestScheduler) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Println("📬 [DailyReport] Starting daily report scheduler (minute-level check)")
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		s.checkAndSend()
 
 		for {
 			select {
-			case <-s.stopChan:
+			case <-ctx.Done():
 				log.Println("🛑 [DailyReport] Stopping...")
 				return
 			case <-s.ticker.C:
@@ -194,12 +197,12 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 	overdueCount, urgentCount, soonCount := 0, 0, 0
 
 	type snapshotItem struct {
-		BinNumber       int     `json:"bin_number"`
-		Address         string  `json:"address"`
-		Status          string  `json:"status"`
-		DaysOverdue     int     `json:"days_overdue,omitempty"`
-		HoursUntil      int     `json:"hours_until,omitempty"`
-		MoveRequestID   string  `json:"move_request_id"`
+		BinNumber     int    `json:"bin_number"`
+		Address       string `json:"address"`
+		Status        string `json:"status"`
+		DaysOverdue   int    `json:"days_overdue,omitempty"`
+		HoursUntil    int    `json:"hours_until,omitempty"`
+		MoveRequestID string `json:"move_request_id"`
 	}
 
 	var overdueItems, upcomingItems []snapshotItem
@@ -314,17 +317,17 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 
 	// Rich payload for DB storage (JSONB — no size limit)
 	richData := map[string]interface{}{
-		"type":             "daily_move_report",
-		"overdue_count":    overdueCount,
-		"urgent_count":     urgentCount,
-		"soon_count":       soonCount,
-		"warehouse_count":  warehouseCount,
-		"overdue_items":    overdueItems,
-		"upcoming_items":   upcomingItems,
-		"warehouse_items":  warehouseSnapshot,
-		"report_date":      today,
-		"deep_link":        "/manager/move-requests",
-		"subtitle":         "Daily Report",
+		"type":            "daily_move_report",
+		"overdue_count":   overdueCount,
+		"urgent_count":    urgentCount,
+		"soon_count":      soonCount,
+		"warehouse_count": warehouseCount,
+		"overdue_items":   overdueItems,
+		"upcoming_items":  upcomingItems,
+		"warehouse_items": warehouseSnapshot,
+		"report_date":     today,
+		"deep_link":       "/manager/move-requests",
+		"subtitle":        "Daily Report",
 	}
 
 	// Flat payload for FCM push (must be map[string]string, <4KB)
@@ -414,11 +417,11 @@ func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, 
 
 	// Query active bins (skip missing, retired, in_storage)
 	type binRow struct {
-		ID            string  `db:"id"`
-		BinNumber     int     `db:"bin_number"`
-		Address       string  `db:"address"`
-		LastCheckedAt *int64  `db:"last_checked_at"`
-		CreatedAt     int64   `db:"created_at"`
+		ID            string `db:"id"`
+		BinNumber     int    `db:"bin_number"`
+		Address       string `db:"address"`
+		LastCheckedAt *int64 `db:"last_checked_at"`
+		CreatedAt     int64  `db:"created_at"`
 	}
 	var bins []binRow
 	err = s.db.Select(&bins, `

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -37,7 +38,7 @@ func NewAIOperationsAgent(db *sqlx.DB, fcmService *FCMService, centrifugoClient 
 	}
 }
 
-func (a *AIOperationsAgent) Start() {
+func (a *AIOperationsAgent) Start(ctx context.Context, wg *sync.WaitGroup) {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		log.Println("⚠️ [AIAgent] ANTHROPIC_API_KEY not set — agent disabled")
 		return
@@ -45,14 +46,21 @@ func (a *AIOperationsAgent) Start() {
 
 	log.Println("🤖 [AIAgent] Starting AI Operations Agent (30-minute cycle)")
 
+	wg.Add(1)
 	go func() {
-		// Run first cycle after a 2-minute delay (let other services init)
-		time.Sleep(2 * time.Minute)
+		defer wg.Done()
+		// Run first cycle after a 2-minute delay (let other services init), but
+		// bail immediately if we're already shutting down.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Minute):
+		}
 		a.runCycle()
 
 		for {
 			select {
-			case <-a.stopChan:
+			case <-ctx.Done():
 				log.Println("🤖 [AIAgent] Stopping...")
 				return
 			case <-a.ticker.C:
@@ -100,12 +108,12 @@ func (a *AIOperationsAgent) runCycle() {
 // checkCriticalBins finds bins estimated to be at 90%+ fill with no active shift covering them
 func (a *AIOperationsAgent) checkCriticalBins() {
 	type criticalBin struct {
-		ID              string  `db:"id"`
-		BinNumber       int     `db:"bin_number"`
-		CurrentStreet   string  `db:"current_street"`
-		City            string  `db:"city"`
-		FillPercentage  int     `db:"fill_percentage"`
-		LastCheckedAt   *int64  `db:"last_checked_at"`
+		ID               string `db:"id"`
+		BinNumber        int    `db:"bin_number"`
+		CurrentStreet    string `db:"current_street"`
+		City             string `db:"city"`
+		FillPercentage   int    `db:"fill_percentage"`
+		LastCheckedAt    *int64 `db:"last_checked_at"`
 		AvgDailyFillRate float64
 	}
 
@@ -180,10 +188,10 @@ func (a *AIOperationsAgent) checkCriticalBins() {
 // checkStaleBins finds bins not checked in 30+ days with 0% fill
 func (a *AIOperationsAgent) checkStaleBins() {
 	type staleBin struct {
-		ID            string `db:"id"`
-		BinNumber     int    `db:"bin_number"`
-		CurrentStreet string `db:"current_street"`
-		City          string `db:"city"`
+		ID             string  `db:"id"`
+		BinNumber      int     `db:"bin_number"`
+		CurrentStreet  string  `db:"current_street"`
+		City           string  `db:"city"`
 		DaysSinceCheck float64 `db:"days_since_check"`
 	}
 
@@ -215,9 +223,9 @@ func (a *AIOperationsAgent) checkStaleBins() {
 // checkRoutePerformance checks shift history for underperforming routes
 func (a *AIOperationsAgent) checkRoutePerformance() {
 	type routePerf struct {
-		RouteID        *string `db:"route_id"`
-		AvgCompletion  float64 `db:"avg_completion"`
-		ShiftCount     int     `db:"shift_count"`
+		RouteID       *string `db:"route_id"`
+		AvgCompletion float64 `db:"avg_completion"`
+		ShiftCount    int     `db:"shift_count"`
 	}
 
 	var routes []routePerf
