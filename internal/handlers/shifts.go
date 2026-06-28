@@ -3461,14 +3461,14 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 			// Unassign underlying resources
 			switch task.TaskType {
 			case models.TaskTypePickup, models.TaskTypeDropoff:
-				// Unassign move request and return it to the pending pool.
-				// BUG FIX: previously this cleared the shift/user but left
-				// status='in_progress', orphaning the move (unassigned yet not in
-				// the pending pool, so it could never be picked up again). Now it
-				// goes back to 'pending' like every other detach path, and logs the
-				// unassignment for the audit trail (matching UpdateShift).
+				// Detach the move from the shift and return it to that shift
+				// driver's backlog (status='assigned', assignment_type='manual',
+				// assigned_user_id = the shift's driver), matching the shift-level
+				// release rule in releaseShiftMoveRequests. (Previously this left
+				// status='in_progress' with no shift, orphaning the move.) Use the
+				// clear-assignment endpoint to drop it all the way to the pool.
 				if task.MoveRequestID != nil {
-					log.Printf("   Unassigning move request %s", *task.MoveRequestID)
+					log.Printf("   Releasing move request %s to driver backlog", *task.MoveRequestID)
 
 					// Capture assignment details before clearing them (for history).
 					var mrDetails struct {
@@ -3486,16 +3486,18 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 					}
 
 					_, err = tx.Exec(`
-						UPDATE bin_move_requests
+						UPDATE bin_move_requests AS mr
 						SET assigned_shift_id = NULL,
-							assigned_user_id = NULL,
-							status = 'pending',
-							updated_at = $1
-						WHERE id = $2
-					`, now, *task.MoveRequestID)
+							assigned_user_id   = s.driver_id,
+							assignment_type    = 'manual',
+							status             = 'assigned',
+							updated_at         = $1
+						FROM shifts s
+						WHERE mr.id = $2 AND s.id = $3
+					`, now, *task.MoveRequestID, shiftID)
 					if err != nil {
-						log.Printf("❌ Error unassigning move request: %v", err)
-						utils.RespondError(w, http.StatusInternalServerError, "Failed to unassign move request")
+						log.Printf("❌ Error releasing move request: %v", err)
+						utils.RespondError(w, http.StatusInternalServerError, "Failed to release move request")
 						return
 					}
 
@@ -6101,71 +6103,24 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 			return
 		}
 
-		// 2. Return all in_progress move requests to pending
-		// First, fetch the affected move requests so we can log history
-		type MoveRequestInfo struct {
-			ID               string  `db:"id"`
-			AssignmentType   *string `db:"assignment_type"`
-			AssignedUserID   *string `db:"assigned_user_id"`
-			AssignedUserName *string `db:"assigned_user_name"`
-			AssignedShiftID  *string `db:"assigned_shift_id"`
+		// 2. Release the shift's incomplete moves to the driver's backlog (shared
+		// helper — same release rule as EndShift), then log the cancellation in
+		// each move's history.
+		released, relErr := releaseShiftMoveRequests(tx, []string{shiftID}, now)
+		if relErr != nil {
+			log.Printf("⚠️  Error releasing move requests on cancel: %v", relErr)
 		}
-		var affectedMoveRequests []MoveRequestInfo
-		err = tx.Select(&affectedMoveRequests, `
-			SELECT mr.id, mr.assignment_type, mr.assigned_user_id, mr.assigned_shift_id,
-			       u.name as assigned_user_name
-			FROM bin_move_requests mr
-			LEFT JOIN users u ON mr.assigned_user_id = u.id
-			WHERE mr.assigned_shift_id = $1
-			AND mr.status = 'in_progress'
-		`, shiftID)
-		if err != nil {
-			log.Printf("⚠️  Error fetching move requests for history logging: %v", err)
-		}
-
-		// Update move requests to pending
-		result, err := tx.Exec(`
-			UPDATE bin_move_requests
-			SET status = 'pending',
-			    assigned_shift_id = NULL,
-			    updated_at = $1
-			WHERE assigned_shift_id = $2
-			AND status = 'in_progress'
-		`, now, shiftID)
-		if err != nil {
-			log.Printf("⚠️  Error returning move requests to pending: %v", err)
-			// Don't fail - continue
-		} else {
-			rowsAffected, _ := result.RowsAffected()
-			if rowsAffected > 0 {
-				log.Printf("✅ Returned %d move request(s) to pending status", rowsAffected)
-
-				// Log history for each unassigned move request
-				for _, mr := range affectedMoveRequests {
-					metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manager_cancelled","cancelled_by":"%s"}`, shiftID, userClaims.UserID)
-					logErr := helpers.LogMoveRequestUnassigned(
-						tx,
-						mr.ID,
-						userClaims.UserID,
-						userClaims.Email,
-						mr.AssignmentType,
-						mr.AssignedUserID,
-						mr.AssignedUserName,
-						mr.AssignedShiftID,
-					)
-					if logErr != nil {
-						log.Printf("⚠️  Failed to log move request unassignment history for %s: %v", mr.ID, logErr)
-					} else {
-						log.Printf("📝 Logged unassignment history for move request %s (shift cancelled by manager)", mr.ID)
-					}
-
-					// Also log in notes field with more context
-					notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND created_at = (SELECT MAX(created_at) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
-					_, noteErr := tx.Exec(notesQuery, "Shift cancelled by manager", metadata, mr.ID)
-					if noteErr != nil {
-						log.Printf("⚠️  Failed to update history notes for %s: %v", mr.ID, noteErr)
-					}
-				}
+		for _, mr := range released {
+			metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manager_cancelled","cancelled_by":"%s"}`, shiftID, userClaims.UserID)
+			if logErr := helpers.LogMoveRequestUnassigned(
+				tx, mr.ID, userClaims.UserID, userClaims.Email,
+				mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
+			); logErr != nil {
+				log.Printf("⚠️  Failed to log move request unassignment history for %s: %v", mr.ID, logErr)
+			}
+			notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND created_at = (SELECT MAX(created_at) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
+			if _, noteErr := tx.Exec(notesQuery, "Shift cancelled by manager", metadata, mr.ID); noteErr != nil {
+				log.Printf("⚠️  Failed to update history notes for %s: %v", mr.ID, noteErr)
 			}
 		}
 

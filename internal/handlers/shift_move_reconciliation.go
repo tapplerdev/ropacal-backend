@@ -5,8 +5,7 @@ import (
 )
 
 // ReleasedMoveRequest carries a move-request's pre-release assignment details, so
-// callers can log unassignment history after the move has been returned to the
-// pending pool.
+// callers can log the unassignment-from-shift history after release.
 type ReleasedMoveRequest struct {
 	ID               string  `db:"id"`
 	AssignmentType   *string `db:"assignment_type"`
@@ -15,15 +14,24 @@ type ReleasedMoveRequest struct {
 	AssignedShiftID  *string `db:"assigned_shift_id"`
 }
 
-// releaseShiftMoveRequests returns every in_progress move-request assigned to any of
-// the given shifts back to the pending pool (status='pending', assigned_shift_id
-// cleared) and returns their pre-release details so the caller can log history.
+// releaseShiftMoveRequests detaches every not-yet-completed move-request from the
+// given shifts and returns each one to its shift driver's personal BACKLOG
+// (status='assigned', assignment_type='manual', assigned_user_id = the shift's
+// driver, assigned_shift_id cleared). The driver is derived from the shift itself
+// at release time, so this never needs the assign flow to pre-record an owner.
 //
-// This is the uniform, bug-prone core that EndShift / CancelShift /
-// CancelAllActiveShifts each had copy-pasted. Each caller keeps its own divergent
-// post-steps (history notes wording, and EndShift's route_task soft-delete) using
-// the returned slice — so behavior is preserved while the release itself lives in
-// one place and can't drift.
+// This is the single source of truth for the release rule, shared by
+// EndShift / CancelShift / CancelAllActiveShifts. Each caller keeps its own
+// post-steps (history-note wording, EndShift's route_task soft-delete) using the
+// returned slice.
+//
+// Both 'assigned' (on a ready/not-yet-active shift) and 'in_progress' (active
+// shift) moves are released — a move tied to a shift that goes away must not be
+// orphaned regardless of which state it was in.
+//
+// To send a move all the way back to the unassigned pool (drop the driver too),
+// use the explicit clear-assignment endpoint — that is the deliberate escape
+// hatch; automatic release always preserves driver ownership.
 //
 // ext is an sqlx.Ext, satisfied by both *sqlx.DB and *sqlx.Tx, so callers using a
 // transaction (Cancel*) and callers on the bare pool (End) both work.
@@ -39,7 +47,7 @@ func releaseShiftMoveRequests(ext sqlx.Ext, shiftIDs []string, now int64) ([]Rel
 		       u.name AS assigned_user_name
 		FROM bin_move_requests mr
 		LEFT JOIN users u ON mr.assigned_user_id = u.id
-		WHERE mr.assigned_shift_id IN (?) AND mr.status = 'in_progress'`, shiftIDs)
+		WHERE mr.assigned_shift_id IN (?) AND mr.status IN ('assigned', 'in_progress')`, shiftIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -50,13 +58,20 @@ func releaseShiftMoveRequests(ext sqlx.Ext, shiftIDs []string, now int64) ([]Rel
 		return nil, err
 	}
 
-	// Return them to the pending pool. Matches the prior behavior of all three
-	// callers: clears assigned_shift_id and flips to pending (assigned_user_id is
-	// intentionally left untouched, as before).
+	// Return each move to its shift driver's backlog. UPDATE ... FROM shifts pulls
+	// the correct driver per move, so this is one statement for single- and
+	// multi-shift (CancelAll) callers alike.
 	updQuery, updArgs, err := sqlx.In(`
-		UPDATE bin_move_requests
-		SET status = 'pending', assigned_shift_id = NULL, updated_at = ?
-		WHERE assigned_shift_id IN (?) AND status = 'in_progress'`, now, shiftIDs)
+		UPDATE bin_move_requests AS mr
+		SET assigned_shift_id = NULL,
+		    assigned_user_id   = s.driver_id,
+		    assignment_type    = 'manual',
+		    status             = 'assigned',
+		    updated_at         = ?
+		FROM shifts s
+		WHERE mr.assigned_shift_id = s.id
+		  AND mr.assigned_shift_id IN (?)
+		  AND mr.status IN ('assigned', 'in_progress')`, now, shiftIDs)
 	if err != nil {
 		return nil, err
 	}
