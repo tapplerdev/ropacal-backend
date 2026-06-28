@@ -65,7 +65,12 @@ internal/moverequest/
 - **Phase 2 — `Store` seam + urgency.** Consumer-defined `Store`, DB-free tests;
   consolidate `Urgency`.
 - **Phase 3 — `Service` + thin handlers.** Migrate handlers one-per-commit to
-  delegate; switch the monitor to `Service.FindOverdue/NotifyOverdue`.
+  delegate; switch the monitor to the domain.
+  - ✅ `Service` + `ClassifyActionable` (pure, unit-tested) + `Store.ActiveWithBin`;
+    MoveRequestMonitor now delegates the overdue/due-soon query+classification to
+    `Service.FindActionable` (watcher keeps only settings/policy + alert fan-out).
+  - ⏳ remaining: migrate write handlers (assign/clear/cancel/schedule) to the
+    `Service`; fold in the alert fan-out + dedup if it earns it.
 - **Phase 4 — history + ride-alongs.** Fold in history logging; do the
   move-request PUT→PATCH/POST verb fixes (lockstep with the dashboard).
 

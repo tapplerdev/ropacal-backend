@@ -24,6 +24,9 @@ var ErrNotFound = errors.New("move request not found")
 type Store interface {
 	// ByID returns the move-request with the given id, or ErrNotFound.
 	ByID(id string) (*models.BinMoveRequest, error)
+	// ActiveWithBin returns every not-yet-completed move (pending/assigned/
+	// in_progress) joined with its bin number — the watcher's working set.
+	ActiveWithBin() ([]ActionableMove, error)
 }
 
 // sqlStore is the production Store backed by a PostgreSQL pool.
@@ -41,4 +44,16 @@ func (s *sqlStore) ByID(id string) (*models.BinMoveRequest, error) {
 		return nil, err
 	}
 	return &mr, nil
+}
+
+func (s *sqlStore) ActiveWithBin() ([]ActionableMove, error) {
+	// 'assigned' (claimed by a driver/not-yet-active shift, but not in_progress)
+	// must be included, or backlog moves get no overdue/due-soon alerts.
+	var moves []ActionableMove
+	err := s.db.Select(&moves, `
+		SELECT bmr.id, bmr.bin_id, b.bin_number, bmr.scheduled_date, bmr.status
+		FROM bin_move_requests bmr
+		JOIN bins b ON bmr.bin_id = b.id
+		WHERE bmr.status IN ('pending', 'assigned', 'in_progress')`)
+	return moves, err
 }

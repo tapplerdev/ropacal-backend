@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -21,14 +22,6 @@ type MoveRequestMonitor struct {
 	centrifugoClient *centrifugo.Client
 	ticker           *time.Ticker
 	stopChan         chan bool
-}
-
-type moveRequestRow struct {
-	ID            string `db:"id"`
-	BinID         string `db:"bin_id"`
-	BinNumber     int    `db:"bin_number"`
-	ScheduledDate int64  `db:"scheduled_date"`
-	Status        string `db:"status"`
 }
 
 // NewMoveRequestMonitor creates a new monitor that checks every 15 minutes (configurable via settings).
@@ -80,41 +73,23 @@ func (m *MoveRequestMonitor) checkMoveRequests() {
 		return
 	}
 
-	// Query active move requests with bin_number
-	var moves []moveRequestRow
-	err := m.db.Select(&moves, `
-		SELECT bmr.id, bmr.bin_id, b.bin_number, bmr.scheduled_date, bmr.status
-		FROM bin_move_requests bmr
-		JOIN bins b ON bmr.bin_id = b.id
-		-- 'assigned' = claimed by a driver (manual) or a not-yet-active shift, but
-		-- not in_progress. It must be watched too, or those moves get no overdue/
-		-- due-soon alerts and silently rot in a driver's backlog.
-		WHERE bmr.status IN ('pending', 'assigned', 'in_progress')
-	`)
+	dueSoonThreshold := float64(settings.DueSoonHoursBefore)
+
+	// The domain owns "what's overdue / due soon" (query + classification); the
+	// watcher owns the alert policy (which buckets are enabled) and the fan-out.
+	overdueAlerts, dueSoonAlerts, err := moverequest.NewService(moverequest.NewSQLStore(m.db)).FindActionable(dueSoonThreshold)
 	if err != nil {
-		log.Printf("❌ [MoveRequestMonitor] Failed to query move requests: %v", err)
+		log.Printf("❌ [MoveRequestMonitor] Failed to load move requests: %v", err)
 		return
 	}
-
-	if len(moves) == 0 {
-		return
+	if !settings.OverdueMoveAlertsEnabled {
+		overdueAlerts = nil
+	}
+	if !settings.DueSoonAlertsEnabled {
+		dueSoonAlerts = nil
 	}
 
 	now := time.Now().Unix()
-	dueSoonThreshold := float64(settings.DueSoonHoursBefore)
-
-	var overdueAlerts []moveRequestRow
-	var dueSoonAlerts []moveRequestRow
-
-	for _, move := range moves {
-		hoursUntil := float64(move.ScheduledDate-now) / 3600.0
-
-		if hoursUntil < 0 && settings.OverdueMoveAlertsEnabled {
-			overdueAlerts = append(overdueAlerts, move)
-		} else if hoursUntil >= 0 && hoursUntil < dueSoonThreshold && settings.DueSoonAlertsEnabled {
-			dueSoonAlerts = append(dueSoonAlerts, move)
-		}
-	}
 
 	// Send overdue alerts (with dedup — don't re-alert for the same move within 24h)
 	for _, move := range overdueAlerts {
