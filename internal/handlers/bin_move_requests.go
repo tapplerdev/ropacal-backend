@@ -2860,7 +2860,7 @@ func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 
 // ManuallyCompleteMoveRequest marks a move request as manually completed
 // PUT /api/manager/bins/move-requests/:id/complete-manually
-func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
+func ManuallyCompleteMoveRequest(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -2876,11 +2876,10 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 		}
 		userID := userClaims.UserID
 
-		// Fetch move request
-		var moveRequest models.BinMoveRequest
-		err := db.Get(&moveRequest, `SELECT * FROM bin_move_requests WHERE id = $1`, id)
+		// Fetch via the domain Store.
+		moveRequest, err := store.ByID(id)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, moverequest.ErrNotFound) {
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
 			}
@@ -2903,13 +2902,8 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 
 		now := time.Now().Unix()
 
-		// Mark move request as completed
-		_, err = db.Exec(`
-			UPDATE bin_move_requests
-			SET status = 'completed', completed_at = $1, updated_at = $1
-			WHERE id = $2
-		`, now, moveRequest.ID)
-		if err != nil {
+		// Mark completed (domain owns the transition).
+		if err = moverequest.Complete(db, moveRequest.ID, now); err != nil {
 			log.Printf("Error completing move request: %v", err)
 			http.Error(w, "Failed to complete move request", http.StatusInternalServerError)
 			return

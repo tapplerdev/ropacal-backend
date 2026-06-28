@@ -136,3 +136,14 @@ func Cancel(ext sqlx.Ext, id string, now int64) error {
 		WHERE id = $2`, now, id)
 	return err
 }
+
+// Complete marks a move as completed (terminal), stamping completed_at. Runs in
+// the caller's transaction or on the pool (ext); the caller applies the resulting
+// bin state (retire / store / relocate) and history.
+func Complete(ext sqlx.Ext, id string, now int64) error {
+	_, err := ext.Exec(`
+		UPDATE bin_move_requests
+		SET status = 'completed', completed_at = $1, updated_at = $1
+		WHERE id = $2`, now, id)
+	return err
+}

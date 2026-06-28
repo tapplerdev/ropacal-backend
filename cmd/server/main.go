@@ -260,7 +260,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "moverequest-phase3-cancel",
+			"version": "moverequest-phase3-complete",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -461,7 +461,7 @@ func main() {
 			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient))
 			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(moverequest.NewSQLStore(db), db))
 			r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(moverequest.NewSQLStore(db), db))
-			r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(db))
+			r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(moverequest.NewSQLStore(db), db))
 			r.Get("/manager/bins/move-requests/{id}/history", handlers.GetMoveRequestHistory(db)) // Get audit trail
 
 			// Bin check recommendations (7-day stale bin flagging)
