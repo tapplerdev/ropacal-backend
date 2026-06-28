@@ -6345,28 +6345,10 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 			return
 		}
 
-		// 2. Return all in_progress move requests to pending
-		moveQuery, moveArgs, err := sqlx.In(`
-			UPDATE bin_move_requests
-			SET status = 'pending',
-			    assigned_shift_id = NULL,
-			    updated_at = ?
-			WHERE assigned_shift_id IN (?)
-			AND status = 'in_progress'
-		`, now, shiftIDs)
-		if err != nil {
-			log.Printf("⚠️  Error building move request query: %v", err)
-		} else {
-			moveQuery = tx.Rebind(moveQuery)
-			result, err := tx.Exec(moveQuery, moveArgs...)
-			if err != nil {
-				log.Printf("⚠️  Error returning move requests to pending: %v", err)
-			} else {
-				rowsAffected, _ := result.RowsAffected()
-				if rowsAffected > 0 {
-					log.Printf("✅ Returned %d move request(s) to pending status", rowsAffected)
-				}
-			}
+		// 2. Release each shift's incomplete moves to that shift driver's backlog
+		// (shared helper — same rule as End/Cancel, and handles the bulk shiftIDs).
+		if _, relErr := releaseShiftMoveRequests(tx, shiftIDs, now); relErr != nil {
+			log.Printf("⚠️  Error releasing move requests on cancel-all: %v", relErr)
 		}
 
 		// 3. route_tasks are preserved for shift history audit trail
