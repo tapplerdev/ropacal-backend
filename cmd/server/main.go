@@ -260,7 +260,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "moverequest-phase3-respdriver",
+			"version": "moverequest-phase3-create",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -452,7 +452,7 @@ func main() {
 			r.Post("/manager/bins/fix-status", handlers.FixBinStatus(db))
 
 			// Bin move request management
-			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(db, wsHub, fcmService, centrifugoClient))
+			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
 			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))                                              // List all move requests (register first - exact match)
 			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(moverequest.NewSQLStore(db), db))             // Get single move request (register after)
 			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db))     // Check if move request is in active shifts

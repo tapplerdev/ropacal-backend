@@ -18,6 +18,7 @@ func (f *fakeStore) ActiveWithBin() ([]ActionableMove, error)    { return f.acti
 func (f *fakeStore) ResponsibleDriver(*models.BinMoveRequest) (string, string, error) {
 	return "", "", nil
 }
+func (f *fakeStore) Create(*models.BinMoveRequest, *string) error { return nil }
 
 func ids(ms []ActionableMove) []string {
 	out := make([]string, len(ms))

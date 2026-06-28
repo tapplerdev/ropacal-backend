@@ -39,7 +39,7 @@ func stringPtrEqual(a, b *string) bool {
 
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
-func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req models.CreateBinMoveRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -225,31 +225,8 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 			UpdatedAt:                 now,
 		}
 
-		// Insert into database
-		_, err = db.Exec(`
-			INSERT INTO bin_move_requests (
-				id, bin_id, scheduled_date, urgency, requested_by, status,
-				original_latitude, original_longitude, original_address,
-				new_latitude, new_longitude, new_address,
-				move_type, disposal_action, reason, notes,
-				source_potential_location_id,
-				assignment_type, assigned_shift_id,
-				created_at, updated_at,
-				reason_category, no_go_zone_id
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-		`,
-			moveRequest.ID, moveRequest.BinID, moveRequest.ScheduledDate,
-			moveRequest.Urgency, moveRequest.RequestedBy, moveRequest.Status,
-			moveRequest.OriginalLatitude, moveRequest.OriginalLongitude, moveRequest.OriginalAddress,
-			moveRequest.NewLatitude, moveRequest.NewLongitude, moveRequest.NewAddress,
-			moveRequest.MoveType, moveRequest.DisposalAction, moveRequest.Reason, moveRequest.Notes,
-			moveRequest.SourcePotentialLocationID,
-			moveRequest.AssignmentType, moveRequest.AssignedShiftID,
-			moveRequest.CreatedAt, moveRequest.UpdatedAt,
-			req.ReasonCategory, nil, // reason_category, no_go_zone_id (zone created after insert)
-		)
-		if err != nil {
+		// Insert via the domain Store (the lifecycle entry point).
+		if err = store.Create(&moveRequest, req.ReasonCategory); err != nil {
 			log.Printf("Error creating bin move request: %v", err)
 			http.Error(w, "Failed to create move request", http.StatusInternalServerError)
 			return

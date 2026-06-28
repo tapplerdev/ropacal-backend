@@ -24,6 +24,10 @@ var ErrNotFound = errors.New("move request not found")
 type Store interface {
 	// ByID returns the move-request with the given id, or ErrNotFound.
 	ByID(id string) (*models.BinMoveRequest, error)
+	// Create inserts a new move-request row (the lifecycle entry point). The
+	// reasonCategory is stored separately (it is not a model field); any no-go
+	// zone is linked by the caller after insert.
+	Create(m *models.BinMoveRequest, reasonCategory *string) error
 	// ActiveWithBin returns every not-yet-completed move (pending/assigned/
 	// in_progress) joined with its bin number — the watcher's working set.
 	ActiveWithBin() ([]ActionableMove, error)
@@ -49,6 +53,31 @@ func (s *sqlStore) ByID(id string) (*models.BinMoveRequest, error) {
 		return nil, err
 	}
 	return &mr, nil
+}
+
+func (s *sqlStore) Create(m *models.BinMoveRequest, reasonCategory *string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO bin_move_requests (
+			id, bin_id, scheduled_date, urgency, requested_by, status,
+			original_latitude, original_longitude, original_address,
+			new_latitude, new_longitude, new_address,
+			move_type, disposal_action, reason, notes,
+			source_potential_location_id,
+			assignment_type, assigned_shift_id,
+			created_at, updated_at,
+			reason_category, no_go_zone_id
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+		m.ID, m.BinID, m.ScheduledDate, m.Urgency, m.RequestedBy, m.Status,
+		m.OriginalLatitude, m.OriginalLongitude, m.OriginalAddress,
+		m.NewLatitude, m.NewLongitude, m.NewAddress,
+		m.MoveType, m.DisposalAction, m.Reason, m.Notes,
+		m.SourcePotentialLocationID,
+		m.AssignmentType, m.AssignedShiftID,
+		m.CreatedAt, m.UpdatedAt,
+		reasonCategory, nil, // no_go_zone_id linked after insert
+	)
+	return err
 }
 
 func (s *sqlStore) ResponsibleDriver(m *models.BinMoveRequest) (driverID, driverName string, err error) {
