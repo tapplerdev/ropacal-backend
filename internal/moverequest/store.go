@@ -27,6 +27,11 @@ type Store interface {
 	// ActiveWithBin returns every not-yet-completed move (pending/assigned/
 	// in_progress) joined with its bin number — the watcher's working set.
 	ActiveWithBin() ([]ActionableMove, error)
+	// ResponsibleDriver returns the driver id + name on the hook for a move:
+	// assigned_user_id (manual) or the shift's driver (shift-assigned). Both
+	// empty (nil error) when the move is in the pool. This is the single home for
+	// the "who owns this move" rule — derived live, so no denormalization drift.
+	ResponsibleDriver(m *models.BinMoveRequest) (driverID, driverName string, err error)
 }
 
 // sqlStore is the production Store backed by a PostgreSQL pool.
@@ -44,6 +49,20 @@ func (s *sqlStore) ByID(id string) (*models.BinMoveRequest, error) {
 		return nil, err
 	}
 	return &mr, nil
+}
+
+func (s *sqlStore) ResponsibleDriver(m *models.BinMoveRequest) (driverID, driverName string, err error) {
+	switch {
+	case m.AssignedUserID != nil && *m.AssignedUserID != "":
+		driverID = *m.AssignedUserID
+		err = s.db.QueryRow(`SELECT name FROM users WHERE id = $1`, driverID).Scan(&driverName)
+	case m.AssignedShiftID != nil && *m.AssignedShiftID != "":
+		err = s.db.QueryRow(
+			`SELECT u.id, u.name FROM shifts s JOIN users u ON s.driver_id = u.id WHERE s.id = $1`,
+			*m.AssignedShiftID,
+		).Scan(&driverID, &driverName)
+	}
+	return driverID, driverName, err
 }
 
 func (s *sqlStore) ActiveWithBin() ([]ActionableMove, error) {

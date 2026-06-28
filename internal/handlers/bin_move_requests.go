@@ -1045,24 +1045,12 @@ func GetBinMoveRequest(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 			log.Printf("   No new address to parse")
 		}
 
-		// Fetch assigned driver name if assigned to a shift
-		log.Printf("   [STEP 5] Checking for assigned driver...")
-		if moveRequest.AssignedShiftID != nil {
-			log.Printf("   AssignedShiftID: %s, querying driver name...", *moveRequest.AssignedShiftID)
-			var driverName string
-			err = db.Get(&driverName, `
-				SELECT u.name FROM shifts s
-				JOIN users u ON s.driver_id = u.id
-				WHERE s.id = $1
-			`, *moveRequest.AssignedShiftID)
-			if err == nil {
-				log.Printf("✅ [STEP 5] Driver name found: %s", driverName)
-				response.AssignedDriverName = &driverName
-			} else {
-				log.Printf("⚠️  [STEP 5] Could not fetch driver name: %v", err)
-			}
-		} else {
-			log.Printf("   No assigned shift")
+		// Resolve the responsible driver via the domain — one rule for both manual
+		// (assigned_user_id) and shift (the shift's driver); empty for pool moves.
+		if _, driverName, dErr := store.ResponsibleDriver(moveRequest); dErr == nil && driverName != "" {
+			response.AssignedDriverName = &driverName
+		} else if dErr != nil {
+			log.Printf("⚠️  [STEP 5] Could not resolve responsible driver: %v", dErr)
 		}
 
 		log.Printf("🎉 [GET_MOVE_REQUEST] Successfully prepared response for move request %s", id)

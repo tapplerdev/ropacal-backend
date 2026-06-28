@@ -15,6 +15,9 @@ type fakeStore struct {
 
 func (f *fakeStore) ByID(string) (*models.BinMoveRequest, error) { return nil, ErrNotFound }
 func (f *fakeStore) ActiveWithBin() ([]ActionableMove, error)    { return f.active, f.activeErr }
+func (f *fakeStore) ResponsibleDriver(*models.BinMoveRequest) (string, string, error) {
+	return "", "", nil
+}
 
 func ids(ms []ActionableMove) []string {
 	out := make([]string, len(ms))
