@@ -24,6 +24,9 @@ var ErrNotFound = errors.New("move request not found")
 type Store interface {
 	// ByID returns the move-request with the given id, or ErrNotFound.
 	ByID(id string) (*models.BinMoveRequest, error)
+	// EditByID returns a move plus the joined shift/bin context the editor needs
+	// (shift status/driver, waypoint count, bin number), or ErrNotFound.
+	EditByID(id string) (*EditView, error)
 	// Create inserts a new move-request row (the lifecycle entry point). The
 	// reasonCategory is stored separately (it is not a model field); any no-go
 	// zone is linked by the caller after insert.
@@ -36,6 +39,16 @@ type Store interface {
 	// empty (nil error) when the move is in the pool. This is the single home for
 	// the "who owns this move" rule — derived live, so no denormalization drift.
 	ResponsibleDriver(m *models.BinMoveRequest) (driverID, driverName string, err error)
+}
+
+// EditView is a move plus the joined shift/bin context the multi-field editor
+// (UpdateBinMoveRequest) needs in one read.
+type EditView struct {
+	models.BinMoveRequest
+	ShiftStatus     *string `db:"shift_status"`
+	ShiftDriverName *string `db:"shift_driver_name"`
+	TotalWaypoints  *int    `db:"total_waypoints"`
+	BinNumber       int     `db:"bin_number"`
 }
 
 // sqlStore is the production Store backed by a PostgreSQL pool.
@@ -53,6 +66,29 @@ func (s *sqlStore) ByID(id string) (*models.BinMoveRequest, error) {
 		return nil, err
 	}
 	return &mr, nil
+}
+
+func (s *sqlStore) EditByID(id string) (*EditView, error) {
+	var v EditView
+	err := s.db.Get(&v, `
+		SELECT
+			mr.*,
+			b.bin_number,
+			s.status as shift_status,
+			u.name as shift_driver_name,
+			(SELECT COUNT(*) FROM route_tasks WHERE shift_id = mr.assigned_shift_id) as total_waypoints
+		FROM bin_move_requests mr
+		LEFT JOIN bins b ON mr.bin_id = b.id
+		LEFT JOIN shifts s ON mr.assigned_shift_id = s.id
+		LEFT JOIN users u ON s.driver_id = u.id
+		WHERE mr.id = $1`, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &v, nil
 }
 
 func (s *sqlStore) Create(m *models.BinMoveRequest, reasonCategory *string) error {
