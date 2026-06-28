@@ -259,7 +259,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "graceful-shutdown-tx",
+			"version": "graceful-shutdown-redis-close",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -593,5 +593,17 @@ func main() {
 	// already saw shutdownCtx cancel above, so this only waits out an in-progress
 	// run (e.g. a shift auto-end), which is now transactional and safe to await.
 	workerWG.Wait()
-	log.Println("✅ Background workers stopped — clean exit")
+	log.Println("✅ Background workers stopped")
+
+	// Phase 3: release resources in reverse init order — Redis first (it was
+	// initialised after the DB), then the DB via its deferred Close() on return.
+	// Both happen only after HTTP + workers have drained, so nothing is mid-use.
+	if redisClient != nil {
+		if err := redisClient.Close(); err != nil {
+			log.Printf("⚠️  Redis close: %v", err)
+		} else {
+			log.Println("✅ Redis connection closed")
+		}
+	}
+	log.Println("✅ Clean exit")
 }
