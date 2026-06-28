@@ -126,6 +126,23 @@ func AssignToDriver(ext sqlx.Ext, id, userID string, now int64) error {
 	return err
 }
 
+// AssignToShift attaches a move to a shift: assignment_type 'shift', the given
+// shift, no manual user, and the caller-decided status ('in_progress' if the
+// shift is already active, else 'assigned'). Runs inside the caller's transaction
+// (ext); inserting the shift's route_tasks and re-optimizing are the caller's
+// cross-domain concern.
+func AssignToShift(ext sqlx.Ext, id, shiftID, status string, now int64) error {
+	_, err := ext.Exec(`
+		UPDATE bin_move_requests
+		SET assignment_type   = 'shift',
+		    assigned_shift_id  = $1,
+		    assigned_user_id   = NULL,
+		    status             = $2,
+		    updated_at         = $3
+		WHERE id = $4`, shiftID, status, now, id)
+	return err
+}
+
 // Cancel marks a move as cancelled (a terminal state). Runs inside the caller's
 // transaction or on the pool (ext); the caller handles the cross-domain effects
 // of cancelling (freeing the bin, detaching route_tasks, re-optimizing, notifying).

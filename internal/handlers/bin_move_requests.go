@@ -425,7 +425,7 @@ func ScheduleBinMove(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCM
 
 // AssignMoveToShift explicitly assigns a pending move request to a shift
 // POST /api/manager/bins/move-requests/:id/assign-to-shift
-func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func AssignMoveToShift(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		moveRequestID := chi.URLParam(r, "id")
 		log.Printf("🚚 [ASSIGN TO SHIFT] Starting assignment for move request: %s", moveRequestID)
@@ -445,13 +445,10 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		log.Printf("🚚 [ASSIGN TO SHIFT] Request body - ShiftID: %v, InsertAfterBinID: %v, InsertPosition: %v",
 			req.ShiftID, req.InsertAfterBinID, req.InsertPosition)
 
-		// Fetch move request
-		var moveRequest models.BinMoveRequest
-		err := db.Get(&moveRequest, `
-			SELECT * FROM bin_move_requests WHERE id = $1
-		`, moveRequestID)
+		// Fetch the move via the domain Store.
+		moveRequest, err := store.ByID(moveRequestID)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, moverequest.ErrNotFound) {
 				log.Printf("❌ [ASSIGN TO SHIFT] Move request not found: %s", moveRequestID)
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
@@ -498,7 +495,7 @@ func AssignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 
 		// Call the assignment logic
-		err = assignMoveToShift(db, wsHub, fcmService, centrifugoClient, moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition, managerID, managerName)
+		err = assignMoveToShift(db, wsHub, fcmService, centrifugoClient, *moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition, managerID, managerName)
 		if err != nil {
 			log.Printf("❌ [ASSIGN TO SHIFT] Error assigning move to shift: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -784,12 +781,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		log.Printf("   📊 Move request status: 'assigned' (shift is NOT active, status=%s)", activeShift.Status)
 	}
 
-	_, err = tx.Exec(`
-		UPDATE bin_move_requests
-		SET assignment_type = 'shift', assigned_shift_id = $1, assigned_user_id = NULL, status = $2, updated_at = $3
-		WHERE id = $4
-	`, activeShift.ID, moveRequestStatus, now, moveRequest.ID)
-	if err != nil {
+	if err = moverequest.AssignToShift(tx, moveRequest.ID, activeShift.ID, moveRequestStatus, now); err != nil {
 		return fmt.Errorf("failed to update move request: %w", err)
 	}
 
