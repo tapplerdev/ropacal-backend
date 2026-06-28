@@ -260,7 +260,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "moverequest-phase3-clear-fix",
+			"version": "moverequest-phase3-assign-user",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -459,7 +459,7 @@ func main() {
 			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(db, redisClient, wsHub, centrifugoClient)) // Update move request
 			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(db, wsHub, fcmService, centrifugoClient))
 			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(db, redisClient, wsHub, centrifugoClient))
-			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(db))
+			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(moverequest.NewSQLStore(db), db))
 			r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(moverequest.NewSQLStore(db), db))
 			r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(db))
 			r.Get("/manager/bins/move-requests/{id}/history", handlers.GetMoveRequestHistory(db)) // Get audit trail

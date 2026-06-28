@@ -108,3 +108,20 @@ func ClearAssignment(ext sqlx.Ext, id string, now int64) error {
 		WHERE id = $2`, now, id)
 	return err
 }
+
+// AssignToDriver puts a move on a specific driver's BACKLOG: assignment_type
+// 'manual', the given driver, no shift, status 'assigned'. This is the manual
+// counterpart to a shift assignment, and the same state a move returns to when
+// ReleaseFromShift fires. Runs inside the caller's transaction (ext); detaching
+// from any prior shift's route_tasks is the caller's cross-domain concern.
+func AssignToDriver(ext sqlx.Ext, id, userID string, now int64) error {
+	_, err := ext.Exec(`
+		UPDATE bin_move_requests
+		SET assignment_type   = 'manual',
+		    assigned_user_id   = $1,
+		    assigned_shift_id  = NULL,
+		    status             = 'assigned',
+		    updated_at         = $2
+		WHERE id = $3`, userID, now, id)
+	return err
+}

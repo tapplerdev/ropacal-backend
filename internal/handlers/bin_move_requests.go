@@ -2721,7 +2721,7 @@ func CancelBinMoveRequest(db *sqlx.DB, redisClient *redis.Client, wsHub *websock
 
 // AssignMoveToUser assigns a move request to a specific user for manual completion
 // PUT /api/manager/bins/move-requests/:id/assign-to-user
-func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
+func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		log.Printf("👤 [ASSIGN TO USER] Starting assignment for move request: %s", id)
@@ -2748,15 +2748,13 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Fetch move request to check status
-		var moveRequest models.BinMoveRequest
-		err := db.Get(&moveRequest, `
-			SELECT id, bin_id, status, assignment_type
-			FROM bin_move_requests
-			WHERE id = $1
-		`, id)
+		// Fetch via the domain Store. (The previous partial SELECT omitted
+		// assigned_shift_id, so the route_tasks cleanup below was dead code and a
+		// shift→user reassignment orphaned the old shift's task; SELECT * populates
+		// it, so that cleanup now runs correctly.)
+		moveRequest, err := store.ByID(id)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, moverequest.ErrNotFound) {
 				log.Printf("❌ [ASSIGN TO USER] Move request not found: %s", id)
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
@@ -2821,24 +2819,12 @@ func AssignMoveToUser(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		// Update move request - clear shift assignment and set user assignment
-		result, err := tx.Exec(`
-			UPDATE bin_move_requests
-			SET assignment_type = 'manual',
-			    assigned_user_id = $1,
-			    assigned_shift_id = NULL,
-			    status = 'assigned',
-			    updated_at = $2
-			WHERE id = $3
-		`, req.UserID, now, id)
-		if err != nil {
+		// Set the move on the driver's backlog (domain owns the transition).
+		if err = moverequest.AssignToDriver(tx, id, req.UserID, now); err != nil {
 			log.Printf("❌ [ASSIGN TO USER] Error updating move request: %v", err)
 			http.Error(w, "Failed to assign move request", http.StatusInternalServerError)
 			return
 		}
-
-		rowsAffected, _ := result.RowsAffected()
-		log.Printf("👤 [ASSIGN TO USER] Update result - Rows affected: %d", rowsAffected)
 
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
