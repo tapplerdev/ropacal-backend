@@ -1562,70 +1562,26 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 		}
 		log.Printf("✅ Shift ended successfully")
 
-		// Update incomplete move requests back to pending and clear assignment
-		// First, fetch the affected move requests so we can log history
-		type MoveRequestInfo struct {
-			ID               string  `db:"id"`
-			AssignmentType   *string `db:"assignment_type"`
-			AssignedUserID   *string `db:"assigned_user_id"`
-			AssignedUserName *string `db:"assigned_user_name"`
-			AssignedShiftID  *string `db:"assigned_shift_id"`
+		// Return incomplete move requests to the pending pool (shared helper) and
+		// log the unassignment history for each. (Was an inline SELECT + UPDATE
+		// copy-pasted across End/Cancel/CancelAll; the release now lives in
+		// releaseShiftMoveRequests so it can't drift between them.)
+		released, relErr := releaseShiftMoveRequests(db, []string{shift.ID}, now)
+		if relErr != nil {
+			log.Printf("⚠️ Error returning incomplete move requests to pending: %v", relErr)
 		}
-		var affectedMoveRequests []MoveRequestInfo
-		err = db.Select(&affectedMoveRequests, `
-			SELECT mr.id, mr.assignment_type, mr.assigned_user_id, mr.assigned_shift_id,
-			       u.name as assigned_user_name
-			FROM bin_move_requests mr
-			LEFT JOIN users u ON mr.assigned_user_id = u.id
-			WHERE mr.assigned_shift_id = $1
-			AND mr.status = 'in_progress'
-		`, shift.ID)
-		if err != nil {
-			log.Printf("⚠️ Error fetching move requests for history logging: %v", err)
-		}
-
-		// Update move requests to pending
-		updateMovesQuery := `UPDATE bin_move_requests
-							 SET status = 'pending',
-							     assigned_shift_id = NULL,
-							     updated_at = $1
-							 WHERE assigned_shift_id = $2
-							 AND status = 'in_progress'`
-		result, err := db.Exec(updateMovesQuery, now, shift.ID)
-		if err != nil {
-			log.Printf("⚠️ Error updating incomplete move requests: %v", err)
-			// Don't fail the request - continue
-		} else {
-			rowsAffected, _ := result.RowsAffected()
-			if rowsAffected > 0 {
-				log.Printf("✅ Updated %d incomplete move request(s) back to pending", rowsAffected)
-
-				// Log history for each unassigned move request
-				for _, mr := range affectedMoveRequests {
-					metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manual_end"}`, shift.ID)
-					logErr := helpers.LogMoveRequestUnassigned(
-						db,
-						mr.ID,
-						userClaims.UserID,
-						userClaims.Email,
-						mr.AssignmentType,
-						mr.AssignedUserID,
-						mr.AssignedUserName,
-						mr.AssignedShiftID,
-					)
-					if logErr != nil {
-						log.Printf("⚠️ Failed to log move request unassignment history for %s: %v", mr.ID, logErr)
-					} else {
-						log.Printf("📝 Logged unassignment history for move request %s (shift ended by driver)", mr.ID)
-					}
-
-					// Also log in notes field with more context
-					notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND created_at = (SELECT MAX(created_at) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
-					_, noteErr := db.Exec(notesQuery, "Shift ended before completing move request", metadata, mr.ID)
-					if noteErr != nil {
-						log.Printf("⚠️ Failed to update history notes for %s: %v", mr.ID, noteErr)
-					}
-				}
+		for _, mr := range released {
+			metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manual_end"}`, shift.ID)
+			if logErr := helpers.LogMoveRequestUnassigned(
+				db, mr.ID, userClaims.UserID, userClaims.Email,
+				mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
+			); logErr != nil {
+				log.Printf("⚠️ Failed to log move request unassignment history for %s: %v", mr.ID, logErr)
+			}
+			// Also annotate the notes field with end-specific context.
+			notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND created_at = (SELECT MAX(created_at) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
+			if _, noteErr := db.Exec(notesQuery, "Shift ended before completing move request", metadata, mr.ID); noteErr != nil {
+				log.Printf("⚠️ Failed to update history notes for %s: %v", mr.ID, noteErr)
 			}
 		}
 
