@@ -17,6 +17,7 @@ import (
 	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/optimization"
@@ -1566,7 +1567,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 		// log the unassignment history for each. (Was an inline SELECT + UPDATE
 		// copy-pasted across End/Cancel/CancelAll; the release now lives in
 		// releaseShiftMoveRequests so it can't drift between them.)
-		released, relErr := releaseShiftMoveRequests(db, []string{shift.ID}, now)
+		released, relErr := moverequest.ReleaseFromShift(db, []string{shift.ID}, now)
 		if relErr != nil {
 			log.Printf("⚠️ Error returning incomplete move requests to pending: %v", relErr)
 		}
@@ -6106,7 +6107,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		// 2. Release the shift's incomplete moves to the driver's backlog (shared
 		// helper — same release rule as EndShift), then log the cancellation in
 		// each move's history.
-		released, relErr := releaseShiftMoveRequests(tx, []string{shiftID}, now)
+		released, relErr := moverequest.ReleaseFromShift(tx, []string{shiftID}, now)
 		if relErr != nil {
 			log.Printf("⚠️  Error releasing move requests on cancel: %v", relErr)
 		}
@@ -6347,7 +6348,7 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 
 		// 2. Release each shift's incomplete moves to that shift driver's backlog
 		// (shared helper — same rule as End/Cancel, and handles the bulk shiftIDs).
-		if _, relErr := releaseShiftMoveRequests(tx, shiftIDs, now); relErr != nil {
+		if _, relErr := moverequest.ReleaseFromShift(tx, shiftIDs, now); relErr != nil {
 			log.Printf("⚠️  Error releasing move requests on cancel-all: %v", relErr)
 		}
 

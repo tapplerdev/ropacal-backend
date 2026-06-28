@@ -1,4 +1,4 @@
-package handlers
+package moverequest
 
 import (
 	"github.com/jmoiron/sqlx"
@@ -14,28 +14,28 @@ type ReleasedMoveRequest struct {
 	AssignedShiftID  *string `db:"assigned_shift_id"`
 }
 
-// releaseShiftMoveRequests detaches every not-yet-completed move-request from the
-// given shifts and returns each one to its shift driver's personal BACKLOG
+// ReleaseFromShift detaches every not-yet-completed move-request from the given
+// shifts and returns each to its shift driver's personal BACKLOG
 // (status='assigned', assignment_type='manual', assigned_user_id = the shift's
 // driver, assigned_shift_id cleared). The driver is derived from the shift itself
-// at release time, so this never needs the assign flow to pre-record an owner.
+// at release time, so the assign flow never needs to pre-record an owner.
 //
-// This is the single source of truth for the release rule, shared by
-// EndShift / CancelShift / CancelAllActiveShifts. Each caller keeps its own
-// post-steps (history-note wording, EndShift's route_task soft-delete) using the
-// returned slice.
+// This is the single source of truth for the release rule, called by the shift
+// lifecycle handlers (EndShift / CancelShift / CancelAllActiveShifts). Callers
+// keep their own post-steps (history-note wording, EndShift's route_task
+// soft-delete) using the returned slice.
 //
 // Both 'assigned' (on a ready/not-yet-active shift) and 'in_progress' (active
 // shift) moves are released — a move tied to a shift that goes away must not be
 // orphaned regardless of which state it was in.
 //
 // To send a move all the way back to the unassigned pool (drop the driver too),
-// use the explicit clear-assignment endpoint — that is the deliberate escape
+// use the explicit clear-assignment operation — that is the deliberate escape
 // hatch; automatic release always preserves driver ownership.
 //
 // ext is an sqlx.Ext, satisfied by both *sqlx.DB and *sqlx.Tx, so callers using a
 // transaction (Cancel*) and callers on the bare pool (End) both work.
-func releaseShiftMoveRequests(ext sqlx.Ext, shiftIDs []string, now int64) ([]ReleasedMoveRequest, error) {
+func ReleaseFromShift(ext sqlx.Ext, shiftIDs []string, now int64) ([]ReleasedMoveRequest, error) {
 	if len(shiftIDs) == 0 {
 		return nil, nil
 	}
