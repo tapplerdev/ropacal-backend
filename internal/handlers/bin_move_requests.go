@@ -3096,7 +3096,7 @@ func ManuallyCompleteMoveRequest(db *sqlx.DB) http.HandlerFunc {
 
 // ClearMoveAssignment removes all assignment from a move request (shift or user)
 // PUT /api/manager/bins/move-requests/:id/clear-assignment
-func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
+func ClearMoveAssignment(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		log.Printf("🔄 [CLEAR ASSIGNMENT] Starting for move request: %s", id)
@@ -3106,15 +3106,12 @@ func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Fetch move request to check current assignment
-		var moveRequest models.BinMoveRequest
-		err := db.Get(&moveRequest, `
-			SELECT id, bin_id, status, assignment_type, assigned_shift_id, assigned_user_id
-			FROM bin_move_requests
-			WHERE id = $1
-		`, id)
+		// Fetch the move via the domain Store. The shift cleanup (route_tasks /
+		// total_bins) below stays on db — that's shift-domain work this handler
+		// orchestrates around the move-request transition.
+		moveRequest, err := store.ByID(id)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, moverequest.ErrNotFound) {
 				log.Printf("❌ [CLEAR ASSIGNMENT] Move request not found: %s", id)
 				http.Error(w, "Move request not found", http.StatusNotFound)
 				return
@@ -3179,17 +3176,9 @@ func ClearMoveAssignment(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		// Clear all assignments and reset to pending
-		_, err = tx.Exec(`
-			UPDATE bin_move_requests
-			SET assignment_type = '',
-			    assigned_shift_id = NULL,
-			    assigned_user_id = NULL,
-			    status = 'pending',
-			    updated_at = $1
-			WHERE id = $2
-		`, now, id)
-		if err != nil {
+		// Clear all assignments and reset to the pending pool (domain owns this
+		// transition; the counterpart to ReleaseFromShift's backlog rule).
+		if err = moverequest.ClearAssignment(tx, id, now); err != nil {
 			log.Printf("❌ [CLEAR ASSIGNMENT] Error clearing assignment: %v", err)
 			http.Error(w, "Failed to clear assignment", http.StatusInternalServerError)
 			return

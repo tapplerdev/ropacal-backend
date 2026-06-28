@@ -186,7 +186,7 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 			   bmr.new_address
 		FROM bin_move_requests bmr
 		JOIN bins b ON bmr.bin_id = b.id
-		WHERE bmr.status IN ('pending', 'in_progress')
+		WHERE bmr.status IN ('pending', 'assigned', 'in_progress')
 		ORDER BY bmr.scheduled_date ASC
 	`)
 	if err != nil {

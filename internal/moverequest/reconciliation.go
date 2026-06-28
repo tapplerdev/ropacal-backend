@@ -82,3 +82,24 @@ func ReleaseFromShift(ext sqlx.Ext, shiftIDs []string, now int64) ([]ReleasedMov
 
 	return affected, nil
 }
+
+// ClearAssignment fully unassigns a move back to the pending POOL: it clears the
+// driver, shift, and assignment type and sets status='pending'. This is the
+// explicit, human-initiated "drop to pool" escape hatch — the counterpart to
+// ReleaseFromShift (the automatic shift-detach that *preserves* driver ownership
+// via the backlog). Keeping both transitions side by side is the whole point of
+// the domain owning the state machine.
+//
+// It runs inside the caller's transaction (ext); the caller remains responsible
+// for cross-domain cleanup (the shift's route_tasks / total_bins) and history.
+func ClearAssignment(ext sqlx.Ext, id string, now int64) error {
+	_, err := ext.Exec(`
+		UPDATE bin_move_requests
+		SET assignment_type  = '',
+		    assigned_shift_id = NULL,
+		    assigned_user_id  = NULL,
+		    status            = 'pending',
+		    updated_at        = $1
+		WHERE id = $2`, now, id)
+	return err
+}
