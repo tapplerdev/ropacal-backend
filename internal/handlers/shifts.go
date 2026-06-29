@@ -7241,10 +7241,20 @@ func optimizeRouteWithMapbox(
 	// Step 5: Handle existing tasks based on optimization type
 	now := time.Now().Unix()
 
+	// Persist the optimized order atomically. The optimizer HTTP call already ran
+	// above (outside any transaction); from here every route_tasks write goes
+	// through one tx, so a mid-persist failure rolls back instead of leaving a
+	// half-renumbered / partially-rewritten route. (Phase 4 slice 1.)
+	tx, txErr := db.Beginx()
+	if txErr != nil {
+		return fmt.Errorf("begin optimize persist: %w", txErr)
+	}
+	defer tx.Rollback()
+
 	if isFirstOptimization {
 		// FIRST OPTIMIZATION (shift start): Just update sequence_order, preserve task IDs
 		// But delete any existing warehouse_stop tasks — the optimizer will regenerate them
-		_, err = db.Exec(`
+		_, err = tx.Exec(`
 			UPDATE route_tasks
 			SET is_deleted = true, deleted_at = $1, deleted_by = 'system', deletion_reason = 'regenerated_on_optimization', updated_at = $1
 			WHERE shift_id = $2 AND task_type = 'warehouse_stop' AND is_deleted = false
@@ -7256,7 +7266,7 @@ func optimizeRouteWithMapbox(
 		}
 		// Auto-complete redeployment pickups when bins are preloaded (driver already has them)
 		if binsPreloaded {
-			res, pickupErr := db.Exec(`
+			res, pickupErr := tx.Exec(`
 				UPDATE route_tasks SET is_completed = 1, completed_at = $1, updated_at = $1
 				WHERE shift_id = $2 AND task_type = 'pickup' AND is_deleted = false AND is_completed = 0
 				  AND move_request_id IN (SELECT id FROM bin_move_requests WHERE move_type = 'redeployment')
@@ -7270,7 +7280,7 @@ func optimizeRouteWithMapbox(
 		log.Printf("✏️  [MAPBOX OPTIMIZER] First optimization - will UPDATE existing tasks (no deletion)")
 	} else {
 		// SUBSEQUENT OPTIMIZATION (mid-shift): Soft delete old tasks for audit trail
-		_, err = db.Exec(`
+		_, err = tx.Exec(`
 			UPDATE route_tasks
 			SET is_deleted = true,
 				deleted_at = $1,
@@ -7299,7 +7309,7 @@ func optimizeRouteWithMapbox(
 	existingTasksMap := make(map[string]*models.RouteTask) // key = bin_id or potential_location_id or move_request_id
 
 	if isFirstOptimization {
-		err = db.Select(&existingTasks, `
+		err = tx.Select(&existingTasks, `
 			SELECT * FROM route_tasks
 			WHERE shift_id = $1 AND is_deleted = false
 			ORDER BY sequence_order ASC
@@ -7537,7 +7547,7 @@ func optimizeRouteWithMapbox(
 					updated_at = $5
 				WHERE id = $6
 			`
-			_, err = db.Exec(updateQuery,
+			_, err = tx.Exec(updateQuery,
 				task.SequenceOrder,
 				task.Latitude,
 				task.Longitude,
@@ -7565,7 +7575,7 @@ func optimizeRouteWithMapbox(
 					latitude, longitude, address
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 			`
-			_, err = db.Exec(insertQuery,
+			_, err = tx.Exec(insertQuery,
 				task.ID, task.ShiftID, task.TaskType, task.SequenceOrder,
 				task.BinID, task.BinNumber, task.FillPercentage,
 				task.PotentialLocationID, task.NewBinNumber, task.PlacementSource,
@@ -7592,14 +7602,14 @@ func optimizeRouteWithMapbox(
 	var allActiveTasks []struct {
 		ID string `db:"id"`
 	}
-	err = db.Select(&allActiveTasks, `
+	err = tx.Select(&allActiveTasks, `
 		SELECT id FROM route_tasks
 		WHERE shift_id = $1 AND is_deleted = false
 		ORDER BY sequence_order ASC, created_at ASC
 	`, shiftID)
 	if err == nil {
 		for i, t := range allActiveTasks {
-			db.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID)
+			tx.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID)
 		}
 		log.Printf("🔢 Renumbered %d tasks (1-%d)", len(allActiveTasks), len(allActiveTasks))
 	}
@@ -7616,7 +7626,7 @@ func optimizeRouteWithMapbox(
 		WHERE shift_id = $1 AND is_deleted = false
 		ORDER BY sequence_order ASC
 	`
-	err = db.Select(&finalTasks, finalTasksQuery, shiftID)
+	err = tx.Select(&finalTasks, finalTasksQuery, shiftID)
 	if err != nil {
 		log.Printf("⚠️  Warning: Could not fetch final tasks for debug logging: %v", err)
 	} else {
@@ -7661,7 +7671,7 @@ func optimizeRouteWithMapbox(
 	if err != nil {
 		log.Printf("⚠️  Failed to marshal optimization metadata: %v", err)
 	} else {
-		_, err = db.Exec(`
+		_, err = tx.Exec(`
 			UPDATE shifts
 			SET optimization_metadata = $1
 			WHERE id = $2
@@ -7669,6 +7679,10 @@ func optimizeRouteWithMapbox(
 		if err != nil {
 			log.Printf("⚠️  Failed to save optimization metadata: %v", err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit optimize persist: %w", err)
 	}
 
 	log.Printf("✅ [MAPBOX OPTIMIZER] Route optimization complete!")
