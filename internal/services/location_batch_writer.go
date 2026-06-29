@@ -78,7 +78,11 @@ func (w *LocationBatchWriter) writeBatch() {
 	query := `
 		INSERT INTO driver_current_location
 		(driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+		-- timestamp = client GPS epoch ($8); updated_at = SERVER time, so it means
+		-- the same thing the HTTP UpdateLocation path writes. Freshness guards
+		-- (StartShift/preflight/stale_shift_monitor) compare against now() and must
+		-- not be fed a client phone clock.
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, EXTRACT(EPOCH FROM NOW())::BIGINT)
 		ON CONFLICT (driver_id) DO UPDATE SET
 			latitude = EXCLUDED.latitude,
 			longitude = EXCLUDED.longitude,

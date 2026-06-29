@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -738,14 +739,21 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 		message := ""
 		retryAfter := 2 // seconds
 
-		// Check 1: Verify location is in Redis
-		ctx := context.Background()
-		locationJSON, locationErr := redisClient.GetDriverLocation(ctx, userClaims.UserID)
-
-		if locationErr != nil {
-			log.Printf("❌ Location not cached in Redis: %v", locationErr)
+		// Check 1: Resolve location via the SAME resolver StartShift uses (Redis
+		// primary, durable driver_current_location fallback) — so the start-gate and
+		// the start action can never disagree on whether the driver is "located".
+		loc, locErr := resolveDriverStartLocation(r.Context(), db, redisClient, userClaims.UserID)
+		if locErr != nil {
+			switch {
+			case errors.Is(locErr, errDriverLocationStale):
+				message = "Location is stale - move to an open area"
+			case errors.Is(locErr, errNoDriverLocation):
+				message = "Location syncing - Please wait..."
+			default:
+				log.Printf("❌ Preflight location lookup error: %v", locErr)
+				message = "Location service unavailable - retrying..."
+			}
 			checks["location_cached"] = false
-			message = "Location syncing - Please wait..."
 
 			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 				"success":     true,
@@ -758,31 +766,12 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 		}
 
 		checks["location_cached"] = true
+		checks["location_source"] = loc.Source
 
-		// Check 2: Parse and validate GPS accuracy
-		var driverLocation models.DriverLocation
-		if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
-			log.Printf("❌ Failed to parse location JSON: %v", err)
-			message = "Invalid location data"
-
-			utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-				"success":     true,
-				"ready":       ready,
-				"checks":      checks,
-				"message":     message,
-				"retry_after": retryAfter,
-			})
-			return
-		}
-
-		// Check accuracy availability
-		accuracy := 0.0
-		if driverLocation.Accuracy != nil {
-			accuracy = *driverLocation.Accuracy
-		}
-
-		log.Printf("✅ Location cached: (%.6f, %.6f), accuracy: %.1fm",
-			driverLocation.Latitude, driverLocation.Longitude, accuracy)
+		// Check 2: GPS accuracy
+		accuracy := loc.Accuracy
+		log.Printf("✅ Location resolved via %s: (%.6f, %.6f), accuracy: %.1fm",
+			loc.Source, loc.Latitude, loc.Longitude, accuracy)
 
 		// Evaluate GPS quality based on accuracy
 		if accuracy <= 10 {
@@ -881,12 +870,97 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 			"placement_count":             placementCount,
 			"redeployment_count":          redeploymentCount,
 			"location": map[string]float64{
-				"latitude":  driverLocation.Latitude,
-				"longitude": driverLocation.Longitude,
+				"latitude":  loc.Latitude,
+				"longitude": loc.Longitude,
 				"accuracy":  accuracy,
 			},
 		})
 	}
+}
+
+// driverStartLocation is a resolved GPS fix used as a route's start point.
+type driverStartLocation struct {
+	Latitude  float64
+	Longitude float64
+	Accuracy  float64
+	Source    string // "redis" (live) or "durable" (driver_current_location fallback)
+}
+
+// Sentinel errors so callers map resolution outcomes to the right HTTP status:
+// errNoDriverLocation / errDriverLocationStale are client conditions (4xx);
+// any other returned error is a real infrastructure fault (5xx).
+var (
+	errNoDriverLocation    = errors.New("no driver location available")
+	errDriverLocationStale = errors.New("driver location too stale to trust")
+)
+
+// maxFallbackLocationAge bounds how old the durable driver_current_location
+// fallback may be. Redis' TTL is ~10 min; we allow a short tail past it.
+const maxFallbackLocationAge = int64(15 * 60)
+
+// isNullIsland reports whether a fix is the (0,0) sentinel that mobile GPS stacks
+// emit for "no fix yet" — a valid coordinate on paper, but garbage as a route
+// start point (it lands in the Atlantic off west Africa).
+func isNullIsland(lat, lng float64) bool {
+	const eps = 1e-6
+	return lat > -eps && lat < eps && lng > -eps && lng < eps
+}
+
+// resolveDriverStartLocation returns the driver's current GPS fix for optimizing
+// a shift's route. Primary source is Redis (the live cache fed by the Centrifugo
+// publish-proxy AND the HTTP UpdateLocation path); on a Redis miss it falls back
+// to the durable driver_current_location row (also written by UpdateLocation),
+// guarded on freshness. A null-island (0,0) fix is rejected as "no GPS". Both
+// StartShift and PreflightCheck call this so the start-gate and the start action
+// can never disagree on what "located" means. Returns errNoDriverLocation /
+// errDriverLocationStale for client conditions, or a wrapped error for real
+// faults (the caller maps to 4xx vs 5xx).
+func resolveDriverStartLocation(ctx context.Context, db *sqlx.DB, redisClient *redis.Client, driverID string) (driverStartLocation, error) {
+	var loc driverStartLocation
+
+	// Primary: Redis (live).
+	if redisClient != nil {
+		if raw, rErr := redisClient.GetDriverLocation(ctx, driverID); rErr == nil {
+			var rl models.DriverLocation
+			if jErr := json.Unmarshal([]byte(raw), &rl); jErr != nil {
+				return loc, fmt.Errorf("parse redis location: %w", jErr)
+			}
+			loc = driverStartLocation{Latitude: rl.Latitude, Longitude: rl.Longitude, Source: "redis"}
+			if rl.Accuracy != nil {
+				loc.Accuracy = *rl.Accuracy
+			}
+			if isNullIsland(loc.Latitude, loc.Longitude) {
+				return loc, errNoDriverLocation
+			}
+			return loc, nil
+		}
+	}
+
+	// Fallback: the durable copy, freshness-guarded.
+	var fb struct {
+		Latitude  float64  `db:"latitude"`
+		Longitude float64  `db:"longitude"`
+		Accuracy  *float64 `db:"accuracy"`
+		UpdatedAt int64    `db:"updated_at"`
+	}
+	if err := db.GetContext(ctx, &fb, `SELECT latitude, longitude, accuracy, updated_at FROM driver_current_location WHERE driver_id = $1`, driverID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return loc, errNoDriverLocation
+		}
+		return loc, fmt.Errorf("read driver_current_location: %w", err)
+	}
+	// age<0 guards against clock skew making a stale fix look fresh.
+	if age := time.Now().Unix() - fb.UpdatedAt; age < 0 || age > maxFallbackLocationAge {
+		return loc, errDriverLocationStale
+	}
+	loc = driverStartLocation{Latitude: fb.Latitude, Longitude: fb.Longitude, Source: "durable"}
+	if fb.Accuracy != nil {
+		loc.Accuracy = *fb.Accuracy
+	}
+	if isNullIsland(loc.Latitude, loc.Longitude) {
+		return loc, errNoDriverLocation
+	}
+	return loc, nil
 }
 
 // StartShift starts an assigned shift
@@ -1020,40 +1094,26 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 		} else {
 			log.Printf("🚀 Route order unlocked - performing smart optimization with dynamic warehouse insertion")
 
-			// Get driver's CURRENT location from Redis (published via Centrifugo)
+			// Resolve the driver's GPS start point (Redis primary, durable DB fallback,
+			// freshness- and null-island-guarded — see resolveDriverStartLocation).
 			var driverLocation struct {
-				Latitude  float64 `json:"latitude"`
-				Longitude float64 `json:"longitude"`
+				Latitude  float64
+				Longitude float64
 			}
-
-			if redisClient == nil {
-				log.Printf("❌ Redis client not available - cannot retrieve location")
-				utils.RespondError(w, http.StatusInternalServerError, "Location service unavailable")
+			loc, locErr := resolveDriverStartLocation(r.Context(), db, redisClient, userClaims.UserID)
+			if locErr != nil {
+				if errors.Is(locErr, errNoDriverLocation) || errors.Is(locErr, errDriverLocationStale) {
+					log.Printf("❌ No usable GPS to start shift: %v", locErr)
+					utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
+				} else {
+					log.Printf("❌ Location service error starting shift: %v", locErr)
+					utils.RespondError(w, http.StatusInternalServerError, "Location service unavailable")
+				}
 				return
 			}
-
-			ctx := context.Background()
-			locationJSON, locationErr := redisClient.GetDriverLocation(ctx, userClaims.UserID)
-
-			if locationErr != nil {
-				log.Printf("❌ Driver location not available in Redis: %v", locationErr)
-				log.Printf("   This means the driver hasn't published their GPS location via the mobile app yet.")
-				log.Printf("   The mobile app publishes location to Centrifugo approximately every 1 second when GPS is enabled.")
-				utils.RespondError(w, http.StatusBadRequest, "Please enable GPS to start shift")
-				return
-			}
-
-			// DEBUG: Log raw Redis data to diagnose unexpected coordinates
-			log.Printf("🔍 [DEBUG] Raw Redis data for driver %s: %s", userClaims.UserID, locationJSON)
-
-			// Parse location JSON from Redis
-			if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
-				log.Printf("❌ Failed to parse location JSON from Redis: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to parse location data")
-				return
-			}
-
-			log.Printf("✅ Got driver location from Redis: (%.6f, %.6f)", driverLocation.Latitude, driverLocation.Longitude)
+			driverLocation.Latitude = loc.Latitude
+			driverLocation.Longitude = loc.Longitude
+			log.Printf("✅ Driver start location via %s: (%.6f, %.6f)", loc.Source, loc.Latitude, loc.Longitude)
 
 			// Validate warehouse coordinates (required for standard shifts, optional for custom)
 			if shift.ShiftType != "custom" && (shift.WarehouseLatitude == nil || shift.WarehouseLongitude == nil) {
