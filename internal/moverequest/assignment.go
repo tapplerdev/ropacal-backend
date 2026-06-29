@@ -25,6 +25,17 @@ type AssignmentChange struct {
 	UserID  string // set when Kind == AssignToDriverKind
 }
 
+// StatusForAssignment is the status a move takes when attached to a shift: an
+// ACTIVE shift means the work is in progress; a ready/future shift means merely
+// assigned. This is the derivation the handler used to do via a post-write
+// re-read; AssignToShift takes this as its caller-decided status.
+func StatusForAssignment(shiftActive bool) Status {
+	if shiftActive {
+		return StatusInProgress
+	}
+	return StatusAssigned
+}
+
 // nonEmpty reports whether a request pointer field carries a real value (provided
 // and not the empty string). A nil pointer means "field not provided" (no change);
 // a pointer to "" means an explicit clear.
