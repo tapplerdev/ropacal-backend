@@ -2459,83 +2459,92 @@ func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 
 		now := time.Now().Unix()
 
+		// Resolve manager name up front for the post-commit history log (a read).
+		var managerName string
+		if nErr := db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID); nErr != nil {
+			log.Printf("Warning: Failed to fetch manager name for history: %v", nErr)
+			managerName = "Unknown Manager"
+		}
+
+		// Atomic core: cancel the move, revert the bin, and soft-delete THIS move's
+		// incomplete tasks on its shift — all-or-nothing.
+		//
+		// Previously this ran on the bare pool and HARD-deleted route_tasks by
+		// (shift_id, bin_id) BEFORE the scoped soft-delete. That was wrong twice over:
+		// (a) it wiped EVERY task for that bin on the shift — e.g. an unrelated
+		// collection of the same bin — not just the move's; and (b) it ran first, so
+		// the audited soft-delete that followed matched zero rows and no audit trail
+		// survived a cancel. Now there is a single, move-scoped, audited removal via
+		// itinerary.RemoveByIDs, inside one transaction.
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("Error starting cancel transaction: %v", err)
+			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+
 		// Mark cancelled (domain owns the transition).
-		if err = moverequest.Cancel(db, id, now); err != nil {
+		if err = moverequest.Cancel(tx, id, now); err != nil {
 			log.Printf("Error cancelling move request: %v", err)
 			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
 			return
 		}
 
-		// Log history: move request cancelled by manager
-		var managerName string
-		err = db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID)
-		if err != nil {
-			log.Printf("Warning: Failed to fetch manager name for history: %v", err)
-			managerName = "Unknown Manager"
-		}
-		reason := "Cancelled by manager"
-		err = moverequest.LogCancelled(db, id, managerID, managerName, &reason)
-		if err != nil {
-			log.Printf("Warning: Failed to log move request cancellation: %v", err)
+		// Revert bin status back to active.
+		if _, err = tx.Exec(`UPDATE bins SET status = 'active', updated_at = $1 WHERE id = $2`, now, moveRequest.BinID); err != nil {
+			log.Printf("Error reverting bin status on cancel: %v", err)
+			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
+			return
 		}
 
-		// Update bin status back to active
-		_, err = db.Exec(`
-			UPDATE bins
-			SET status = 'active', updated_at = $1
-			WHERE id = $2
-		`, now, moveRequest.BinID)
-		if err != nil {
-			log.Printf("Warning: Failed to update bin status: %v", err)
-		}
-
-		// If move was assigned to a shift, remove it from route_tasks
+		// Soft-delete only THIS move's incomplete tasks on its shift (audited).
 		if moveRequest.AssignedShiftID != nil {
-			_, err = db.Exec(`
-				DELETE FROM route_tasks
-				WHERE shift_id = $1 AND bin_id = $2
-			`, *moveRequest.AssignedShiftID, moveRequest.BinID)
-			if err != nil {
-				log.Printf("Warning: Failed to remove bin from shift: %v", err)
+			var taskIDs []string
+			if selErr := tx.Select(&taskIDs, `SELECT id FROM route_tasks WHERE move_request_id = $1 AND shift_id = $2 AND is_completed = 0 AND is_deleted = false`, id, *moveRequest.AssignedShiftID); selErr != nil {
+				log.Printf("Error selecting move tasks to remove on cancel: %v", selErr)
+				http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
+				return
 			}
+			if err = itinerary.RemoveByIDs(tx, taskIDs, managerID, "move_request_cancelled", now); err != nil {
+				log.Printf("Error soft-deleting move tasks on cancel: %v", err)
+				http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
+				return
+			}
+		}
 
-			// Send WebSocket update to driver
+		if err = tx.Commit(); err != nil {
+			log.Printf("Error committing cancel transaction: %v", err)
+			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
+			return
+		}
+
+		// ---- post-commit side effects (the cancel already succeeded; best-effort) ----
+
+		reason := "Cancelled by manager"
+		if logErr := moverequest.LogCancelled(db, id, managerID, managerName, &reason); logErr != nil {
+			log.Printf("Warning: Failed to log move request cancellation: %v", logErr)
+		}
+
+		if moveRequest.AssignedShiftID != nil {
+			// Notify driver (WebSocket + Centrifugo route update).
 			wsHub.BroadcastToUser(*moveRequest.AssignedShiftID, map[string]interface{}{
 				"type":    "move_request_cancelled",
 				"bin_id":  moveRequest.BinID,
 				"message": "Move request cancelled by manager",
 			})
-
-			// Soft delete route_tasks associated with this move request (for audit trail)
-			_, err = db.Exec(`
-			UPDATE route_tasks
-			SET is_deleted = true,
-				deleted_at = $1,
-				deleted_by = $2,
-				deletion_reason = $3,
-				updated_at = $1
-			WHERE move_request_id = $4 AND shift_id = $5 AND is_completed = 0 AND is_deleted = false
-		`, now, managerID, "move_request_cancelled", id, *moveRequest.AssignedShiftID)
-			if err != nil {
-				log.Printf("⚠️  Failed to soft delete route_tasks for cancelled move request: %v", err)
-			} else {
-				log.Printf("✅ Soft deleted route_tasks for cancelled move request %s from shift %s", id, *moveRequest.AssignedShiftID)
-			}
-
-			// Notify driver that route has been updated
-			if err := NotifyDriverOfRouteUpdate(db, centrifugoClient, *moveRequest.AssignedShiftID, "move_request_cancelled", map[string]interface{}{
+			if notifyErr := NotifyDriverOfRouteUpdate(db, centrifugoClient, *moveRequest.AssignedShiftID, "move_request_cancelled", map[string]interface{}{
 				"move_request_id": id,
 				"reason":          "Move request was cancelled by manager",
-			}); err != nil {
-				log.Printf("⚠️  Failed to notify driver of route update: %v", err)
+			}); notifyErr != nil {
+				log.Printf("⚠️  Failed to notify driver of route update: %v", notifyErr)
 			}
 
-			// Re-optimize the shift (skip gates since this is manager-initiated)
-			if err := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); err != nil {
-				log.Printf("⚠️  Failed to re-optimize shift after move request cancellation: %v", err)
-				// Don't fail the entire request if re-optimization fails
+			// Re-optimize the shift (manager-initiated → skip gates).
+			if reoptErr := ReoptimizeActiveShift(db, redisClient, *moveRequest.AssignedShiftID, centrifugoClient, true); reoptErr != nil {
+				log.Printf("⚠️  Failed to re-optimize shift after move request cancellation: %v", reoptErr)
 			} else {
-				log.Printf("✅ Successfully re-optimized shift %s after move request cancellation", *moveRequest.AssignedShiftID)
+				log.Printf("✅ Re-optimized shift %s after move request cancellation", *moveRequest.AssignedShiftID)
 			}
 		}
 
