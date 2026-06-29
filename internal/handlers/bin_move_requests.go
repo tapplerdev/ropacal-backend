@@ -51,9 +51,10 @@ func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub,
 		// Auto-calculate urgency from scheduled_date
 		urgency := moverequest.ScheduledUrgency(req.ScheduledDate, time.Now().Unix())
 
-		// Validate move_type (accept both 'store' and 'pickup_only' for backward compatibility)
-		if req.MoveType != "store" && req.MoveType != "pickup_only" && req.MoveType != "relocation" && req.MoveType != "redeployment" {
-			http.Error(w, "Invalid move_type: must be 'store', 'relocation', or 'redeployment'", http.StatusBadRequest)
+		// Validate move_type at the boundary (typed; single source of truth shared
+		// with UpdateBinMoveRequest).
+		if _, err := moverequest.ParseMoveType(req.MoveType); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 

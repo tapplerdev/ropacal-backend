@@ -59,6 +59,15 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			return
 		}
 
+		// Validate move_type at the boundary (typed → clean 400, not a 500 at the
+		// DB CHECK and not a silent passthrough). One source of truth: moverequest.ParseMoveType.
+		if req.MoveType != nil {
+			if _, err := moverequest.ParseMoveType(*req.MoveType); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
 		// Get authenticated user (manager making the update)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
