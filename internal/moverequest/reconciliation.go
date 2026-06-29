@@ -83,14 +83,16 @@ func ReleaseFromShift(ext sqlx.Ext, shiftIDs []string, now int64) ([]ReleasedMov
 	return affected, nil
 }
 
-// guardedTransition runs a status-changing UPDATE that fires only when the move
-// is NOT already in a terminal state (completed/cancelled), and returns
-// ErrInvalidTransition when it isn't applied (already terminal, or absent). This
-// is the single enforcement point that makes illegal transitions structurally
-// impossible in the domain rather than relying on callers to pre-check. The
-// `set` clause uses ? placeholders; Rebind adapts them to the driver. Runs in the
-// caller's ext (pool or tx). Terminal-state membership is derived from the typed
-// Status constants so the taxonomy has one source of truth.
+// guardedTransition is the one place that changes a move request's status. It
+// only makes the change if the move isn't already finished — i.e. not
+// 'completed' or 'cancelled'. If the move is already finished (or doesn't exist),
+// it changes nothing and returns ErrInvalidTransition. Keeping this check in one
+// spot means a bad change — like completing a move that was already cancelled —
+// is blocked here, instead of trusting every caller to check first.
+//
+// `set` is the columns to change (written with ? placeholders); the helper adds
+// the "only if not finished" check and the move id. Works on a plain DB
+// connection or inside a transaction (ext).
 func guardedTransition(ext sqlx.Ext, id, set string, args ...interface{}) error {
 	q := "UPDATE bin_move_requests SET " + set + " WHERE id = ? AND status NOT IN (?, ?)"
 	args = append(args, id, string(StatusCompleted), string(StatusCancelled))
