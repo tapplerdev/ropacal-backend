@@ -172,12 +172,6 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			fieldEdits.NewAddress = &addr
 		}
 
-		// updates[] accumulates ONLY assignment SETs (assignment block below); the
-		// combined UPDATE at the end writes updated_at + any assignment changes.
-		updates := []string{"updated_at = $1"}
-		args := []interface{}{now}
-		argCount := 2
-
 		// ═══════════════════════════════════════════════════════════════════
 		// ASSIGNMENT HANDLING (Shift/User reassignment)
 		// ═══════════════════════════════════════════════════════════════════
@@ -199,259 +193,77 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			return
 		}
 
-		// Track if assignment changed (for WebSocket notification)
 		assignmentChanged := false
 		affectedDriverIDs := []string{}
 
-		// HANDLE IN-PROGRESS ACTION (driver is at location)
-		if isInProgress && req.InProgressAction != nil {
-			log.Printf("[IN-PROGRESS EDIT] Handling action: %s", *req.InProgressAction)
-
-			switch *req.InProgressAction {
-			case "remove_from_route":
-				// Remove from route_tasks, reset to pending
-				if moveRequest.AssignedShiftID != nil {
-					_, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
-						*moveRequest.AssignedShiftID, moveRequest.BinID)
-					if err != nil {
-						log.Printf("Error removing from route_tasks: %v", err)
-						http.Error(w, "Failed to remove from driver's route", http.StatusInternalServerError)
-						return
-					}
-
-					_, err = tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
-						now, *moveRequest.AssignedShiftID)
-					if err != nil {
-						log.Printf("Error updating shift total_bins: %v", err)
-					}
-
-					log.Printf("[IN-PROGRESS EDIT] ✅ Removed bin from driver's route")
-					assignmentChanged = true
-					if moveRequest.AssignedUserID != nil {
-						affectedDriverIDs = append(affectedDriverIDs, *moveRequest.AssignedUserID)
-					}
-				}
-
-				// Clear assignment, return to pending
-				updates = append(updates, fmt.Sprintf("assigned_shift_id = NULL, assigned_user_id = NULL, assignment_type = NULL, status = 'pending'"))
-
-			case "insert_after_current":
-				// Keep on route, adjust waypoint order
-				log.Printf("[IN-PROGRESS EDIT] Inserting after current waypoint")
-				// Implementation: Re-order waypoints (complex, may need route optimization logic)
-				// For now, just log - full implementation would update waypoint_order in route_tasks
-
-			case "reoptimize_route":
-				// Trigger route re-optimization
-				log.Printf("[IN-PROGRESS EDIT] Triggering route re-optimization")
-				// Implementation: Call route optimization service
-				// For now, just log - full implementation would recalculate optimal waypoint order
+		// Resolve the assignment intent (exactly ONE coherent change) and route it
+		// through the guarded domain transitions — replacing the old fragment-append
+		// SETs, the combined UPDATE, and the post-write status re-read/fixup. Each
+		// transition sets the assignment columns AND status atomically + coherently
+		// (AssignToShift nulls the user; ClearAssignment is a real unassign). An
+		// in-progress move only changes assignment via the explicit remove_from_route.
+		var assignChange moverequest.AssignmentChange
+		if isInProgress {
+			if req.InProgressAction != nil && *req.InProgressAction == "remove_from_route" {
+				assignChange = moverequest.AssignmentChange{Kind: moverequest.AssignUnassignKind}
 			}
+		} else {
+			assignChange = moverequest.PlanAssignment(
+				moveRequest.AssignedShiftID, moveRequest.AssignedUserID,
+				req.AssignedShiftID, req.AssignedUserID, req.AssignmentType,
+			)
 		}
 
-		// HANDLE ASSIGNMENT CHANGES (for non-in-progress moves)
-		if !isInProgress {
-			// Remove from old shift if changing
-			if moveRequest.AssignedShiftID != nil && req.AssignedShiftID != nil && *req.AssignedShiftID != *moveRequest.AssignedShiftID {
-				_, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
-					*moveRequest.AssignedShiftID, moveRequest.BinID)
-				if err == nil {
-					_, err = tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
-						now, *moveRequest.AssignedShiftID)
-				}
-				log.Printf("[REASSIGNMENT] Removed from old shift: %s", *moveRequest.AssignedShiftID)
-				assignmentChanged = true
-			}
+		if assignChange.Kind != moverequest.AssignNoChange {
+			assignmentChanged = true
 
-			// Add assignment fields to update (treat empty strings as NULL)
-			if req.AssignedShiftID != nil {
-				if *req.AssignedShiftID == "" {
-					updates = append(updates, "assigned_shift_id = NULL")
-					// Only mark as changed if it was previously set
-					if moveRequest.AssignedShiftID != nil {
-						assignmentChanged = true
-					}
-				} else {
-					updates = append(updates, fmt.Sprintf("assigned_shift_id = $%d", argCount))
-					args = append(args, *req.AssignedShiftID)
-					argCount++
-					// Only mark as changed if the value is different
-					if !stringPtrEqual(moveRequest.AssignedShiftID, req.AssignedShiftID) {
-						assignmentChanged = true
-					}
+			// Leaving a shift → detach this move's route_tasks, decrement the shift's
+			// bin count, and remember the old driver to notify post-commit.
+			if moveRequest.AssignedShiftID != nil {
+				if _, derr := tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
+					*moveRequest.AssignedShiftID, moveRequest.BinID); derr != nil {
+					log.Printf("Error detaching route_tasks on reassignment: %v", derr)
+					http.Error(w, "Failed to update assignment", http.StatusInternalServerError)
+					return
+				}
+				if _, derr := tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
+					now, *moveRequest.AssignedShiftID); derr != nil {
+					log.Printf("Warning: failed to decrement old shift total_bins: %v", derr)
+				}
+				var oldDriverID string
+				if derr := db.Get(&oldDriverID, `SELECT driver_id FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID); derr == nil {
+					affectedDriverIDs = append(affectedDriverIDs, oldDriverID)
 				}
 			}
 
-			if req.AssignedUserID != nil {
-				if *req.AssignedUserID == "" {
-					updates = append(updates, "assigned_user_id = NULL")
-					// Only mark as changed if it was previously set
-					if moveRequest.AssignedUserID != nil {
-						assignmentChanged = true
-					}
-				} else {
-					updates = append(updates, fmt.Sprintf("assigned_user_id = $%d", argCount))
-					args = append(args, *req.AssignedUserID)
-					argCount++
-					affectedDriverIDs = append(affectedDriverIDs, *req.AssignedUserID)
-					// Only mark as changed if the value is different
-					if !stringPtrEqual(moveRequest.AssignedUserID, req.AssignedUserID) {
-						assignmentChanged = true
-					}
+			switch assignChange.Kind {
+			case moverequest.AssignToShiftKind:
+				// Active target shift → in_progress, else assigned.
+				var shiftStatus string
+				if derr := tx.Get(&shiftStatus, `SELECT status FROM shifts WHERE id = $1`, assignChange.ShiftID); derr != nil {
+					log.Printf("Error reading target shift status: %v", derr)
+					http.Error(w, "Failed to assign to shift", http.StatusInternalServerError)
+					return
 				}
-			}
-
-			// Determine final assignment state (after potential updates)
-			finalShiftID := moveRequest.AssignedShiftID
-			finalUserID := moveRequest.AssignedUserID
-			if req.AssignedShiftID != nil {
-				if *req.AssignedShiftID == "" {
-					finalShiftID = nil
-				} else {
-					finalShiftID = req.AssignedShiftID
+				st := moverequest.StatusForAssignment(shiftStatus == "active")
+				if aerr := moverequest.AssignToShift(tx, id, assignChange.ShiftID, string(st), now); aerr != nil {
+					log.Printf("Error assigning move to shift: %v", aerr)
+					http.Error(w, "Failed to assign to shift", http.StatusInternalServerError)
+					return
 				}
-			}
-			if req.AssignedUserID != nil {
-				if *req.AssignedUserID == "" {
-					finalUserID = nil
-				} else {
-					finalUserID = req.AssignedUserID
+			case moverequest.AssignToDriverKind:
+				affectedDriverIDs = append(affectedDriverIDs, assignChange.UserID)
+				if aerr := moverequest.AssignToDriver(tx, id, assignChange.UserID, now); aerr != nil {
+					log.Printf("Error assigning move to driver: %v", aerr)
+					http.Error(w, "Failed to assign to driver", http.StatusInternalServerError)
+					return
 				}
-			}
-
-			// If both assignments are being cleared, also clear assignment_type
-			isUnassigning := (finalShiftID == nil || (finalShiftID != nil && *finalShiftID == "")) &&
-				(finalUserID == nil || (finalUserID != nil && *finalUserID == ""))
-
-			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			log.Printf("🔍 [UNASSIGNMENT DETECTION]")
-			log.Printf("   isUnassigning: %v", isUnassigning)
-			log.Printf("   finalShiftID: %v", finalShiftID)
-			log.Printf("   finalUserID: %v", finalUserID)
-			log.Printf("   moveRequest.AssignedShiftID: %v", moveRequest.AssignedShiftID)
-			log.Printf("   moveRequest.Status: %s", moveRequest.Status)
-			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-			if isUnassigning {
-				// Remove from route_tasks if previously assigned to a shift
-				if moveRequest.AssignedShiftID != nil {
-					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-					log.Printf("⭕ [UNASSIGNMENT] Starting shift removal")
-					log.Printf("   Move Request ID: %s", id)
-					log.Printf("   Old Shift ID: %s", *moveRequest.AssignedShiftID)
-					log.Printf("   Bin ID: %s", moveRequest.BinID)
-
-					_, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
-						*moveRequest.AssignedShiftID, moveRequest.BinID)
-					if err == nil {
-						log.Printf("   ✅ Removed bin from route_tasks")
-						_, err = tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
-							now, *moveRequest.AssignedShiftID)
-						if err == nil {
-							log.Printf("   ✅ Updated shift total_bins count")
-						} else {
-							log.Printf("   ⚠️  Failed to update shift count: %v", err)
-						}
-					} else {
-						log.Printf("   ❌ Failed to remove from route_tasks: %v", err)
-					}
-
-					log.Printf("[UNASSIGNMENT] Removed from route_tasks for shift: %s", *moveRequest.AssignedShiftID)
-					assignmentChanged = true
-
-					// Track affected driver for WebSocket notification
-					log.Printf("   Fetching driver ID for WebSocket notification...")
-					var driverID string
-					err = db.Get(&driverID, `SELECT driver_id FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID)
-					if err == nil {
-						affectedDriverIDs = append(affectedDriverIDs, driverID)
-						log.Printf("   ✅ Driver ID found: %s", driverID)
-						log.Printf("   Driver will receive WebSocket notification")
-					} else {
-						log.Printf("   ❌ Failed to fetch driver ID: %v", err)
-					}
-					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-				} else {
-					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-					log.Printf("⚠️  [UNASSIGNMENT] No shift assignment to remove")
-					log.Printf("   Move request was not assigned to a shift")
-					log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			case moverequest.AssignUnassignKind:
+				if aerr := moverequest.ClearAssignment(tx, id, now); aerr != nil {
+					log.Printf("Error unassigning move: %v", aerr)
+					http.Error(w, "Failed to unassign move", http.StatusInternalServerError)
+					return
 				}
-
-				// Clear assignment_type and set status to pending when unassigning
-				updates = append(updates, "assignment_type = NULL, status = 'pending'")
-				log.Printf("[UNASSIGNMENT] Clearing assignment_type and setting status to pending")
-			} else if req.AssignmentType != nil {
-				// Only update assignment_type if provided and not unassigning
-				// Treat empty string as NULL
-				if *req.AssignmentType == "" {
-					updates = append(updates, "assignment_type = NULL")
-				} else {
-					updates = append(updates, fmt.Sprintf("assignment_type = $%d", argCount))
-					args = append(args, *req.AssignmentType)
-					argCount++
-				}
-			}
-		}
-
-		// Add ID parameter at the end
-		args = append(args, id)
-
-		// Execute update
-		query := fmt.Sprintf("UPDATE bin_move_requests SET %s WHERE id = $%d",
-			strings.Join(updates, ", "), argCount)
-
-		_, err = tx.Exec(query, args...)
-		if err != nil {
-			log.Printf("Error updating move request: %v", err)
-			http.Error(w, "Failed to update move request", http.StatusInternalServerError)
-			return
-		}
-
-		// CRITICAL FIX: After updating, check if move request should have correct status
-		// This ensures status matches the assignment state and shift status
-		var finalShiftID, finalUserID *string
-		var shiftStatus *string
-		err = tx.QueryRow(`
-			SELECT
-				mr.assigned_shift_id,
-				mr.assigned_user_id,
-				s.status as shift_status
-			FROM bin_move_requests mr
-			LEFT JOIN shifts s ON mr.assigned_shift_id = s.id
-			WHERE mr.id = $1
-		`, id).Scan(&finalShiftID, &finalUserID, &shiftStatus)
-		if err != nil {
-			log.Printf("Error checking final assignment status: %v", err)
-			http.Error(w, "Failed to verify assignment status", http.StatusInternalServerError)
-			return
-		}
-
-		// Set status based on assignment and shift state
-		// Only update status if it's not already in_progress or completed
-		if (finalShiftID != nil || finalUserID != nil) && moveRequest.Status != "in_progress" && moveRequest.Status != "completed" {
-			var newStatus string
-
-			// If assigned to an ACTIVE shift, status should be "in_progress"
-			// If assigned to a future/scheduled shift, status should be "assigned"
-			if finalShiftID != nil && shiftStatus != nil && *shiftStatus == "active" {
-				newStatus = "in_progress"
-				log.Printf("[UPDATE MOVE] Move request assigned to ACTIVE shift, setting status to 'in_progress'")
-			} else {
-				newStatus = "assigned"
-				log.Printf("[UPDATE MOVE] Move request has assignment (shift: %v, user: %v, shift_status: %v), setting status to 'assigned'",
-					finalShiftID, finalUserID, shiftStatus)
-			}
-
-			_, err = tx.Exec(`
-				UPDATE bin_move_requests
-				SET status = $1
-				WHERE id = $2
-			`, newStatus, id)
-			if err != nil {
-				log.Printf("Error setting status to %s: %v", newStatus, err)
-				http.Error(w, "Failed to update status", http.StatusInternalServerError)
-				return
 			}
 		}
 
