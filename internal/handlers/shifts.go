@@ -901,6 +901,10 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 			// A hard error here aborts the whole end via the transaction below.
 			log.Printf("⚠️ Error soft deleting incomplete move tasks from shift: %v", err)
 		}
+		// Stale tasks removed — recompute the shift's counts from route_tasks.
+		if err = itinerary.RecomputeShiftCounts(tx, shift.ID, now); err != nil {
+			log.Printf("⚠️ Error recomputing shift counts on end: %v", err)
+		}
 
 		if err = tx.Commit(); err != nil {
 			log.Printf("❌ Error committing shift end: %v", err)

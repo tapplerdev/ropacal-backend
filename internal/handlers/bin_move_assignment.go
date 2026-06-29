@@ -267,7 +267,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	// Assemble the move's stops (pickup [+ dropoff]) at the insert position — the
 	// itinerary domain owns route_tasks writes (was inline INSERTs here).
-	binsAdded, err := itinerary.AddMove(tx, activeShift.ID, itinerary.MovePlacement{
+	_, err = itinerary.AddMove(tx, activeShift.ID, itinerary.MovePlacement{
 		InsertSeq:      insertSequenceOrder,
 		MoveRequestID:  moveRequest.ID,
 		BinID:          moveRequest.BinID,
@@ -335,13 +335,8 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 	}
 
-	// Update shift total_bins count
-	_, err = tx.Exec(`
-		UPDATE shifts
-		SET total_bins = total_bins + $1, updated_at = $2
-		WHERE id = $3
-	`, binsAdded, now, activeShift.ID)
-	if err != nil {
+	// Recompute the shift's counts from route_tasks (single source of truth) — replaces the +binsAdded.
+	if err = itinerary.RecomputeShiftCounts(tx, activeShift.ID, now); err != nil {
 		return fmt.Errorf("failed to update shift: %w", err)
 	}
 
@@ -567,13 +562,8 @@ func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 				return
 			}
 
-			// Update shift total_bins count
-			_, err = tx.Exec(`
-				UPDATE shifts
-				SET total_bins = total_bins - 1, updated_at = $1
-				WHERE id = $2
-			`, now, *moveRequest.AssignedShiftID)
-			if err != nil {
+			// Recompute the old shift's counts from route_tasks — replaces the -1.
+			if err = itinerary.RecomputeShiftCounts(tx, *moveRequest.AssignedShiftID, now); err != nil {
 				log.Printf("❌ [ASSIGN TO USER] Failed to update shift count: %v", err)
 			}
 		}
@@ -699,13 +689,8 @@ func ClearMoveAssignment(store moverequest.Store, db *sqlx.DB) http.HandlerFunc 
 				return
 			}
 
-			// Update shift total_bins count
-			_, err = tx.Exec(`
-				UPDATE shifts
-				SET total_bins = total_bins - 1, updated_at = $1
-				WHERE id = $2
-			`, now, *moveRequest.AssignedShiftID)
-			if err != nil {
+			// Recompute the old shift's counts from route_tasks — replaces the -1.
+			if err = itinerary.RecomputeShiftCounts(tx, *moveRequest.AssignedShiftID, now); err != nil {
 				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to update shift count: %v", err)
 			}
 		}

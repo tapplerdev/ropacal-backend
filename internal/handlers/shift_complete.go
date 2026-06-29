@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
@@ -645,23 +646,11 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			}
 		}
 
-		// Update shift completed_bins count (only for bin tasks, not warehouse stops)
-		if taskType != "warehouse_stop" {
-			log.Printf("🔄 Updating shift completed_bins count (shift_id=%s, task_type=%s)", shift.ID, taskType)
-			shiftQuery := `UPDATE shifts
-						   SET completed_bins = completed_bins + 1,
-							   updated_at = $1
-						   WHERE id = $2`
-
-			_, err = db.Exec(shiftQuery, now, shift.ID)
-			if err != nil {
-				log.Printf("❌ Error updating shift: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
-				return
-			}
-			log.Printf("✅ Shift completed_bins incremented")
-		} else {
-			log.Printf("⏭️  Skipping completed_bins increment for warehouse_stop task")
+		// Recompute the shift's counts from route_tasks (single source of truth) now
+		// that this task's completion is persisted — replaces the hand-rolled +1 that
+		// drifts. RecomputeShiftCounts handles warehouse exclusion itself.
+		if rerr := itinerary.RecomputeShiftCounts(db, shift.ID, now); rerr != nil {
+			log.Printf("⚠️  Failed to recompute shift counts: %v", rerr)
 		}
 
 		// Get updated shift

@@ -213,8 +213,8 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 		if assignChange.Kind != moverequest.AssignNoChange {
 			assignmentChanged = true
 
-			// Leaving a shift → detach this move's route_tasks, decrement the shift's
-			// bin count, and remember the old driver to notify post-commit.
+			// Leaving a shift → detach this move's route_tasks, recompute the shift's
+			// bin count from route_tasks, and remember the old driver to notify post-commit.
 			if moveRequest.AssignedShiftID != nil {
 				if _, derr := tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
 					*moveRequest.AssignedShiftID, moveRequest.BinID); derr != nil {
@@ -222,9 +222,8 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					http.Error(w, "Failed to update assignment", http.StatusInternalServerError)
 					return
 				}
-				if _, derr := tx.Exec(`UPDATE shifts SET total_bins = total_bins - 1, updated_at = $1 WHERE id = $2`,
-					now, *moveRequest.AssignedShiftID); derr != nil {
-					log.Printf("Warning: failed to decrement old shift total_bins: %v", derr)
+				if derr := itinerary.RecomputeShiftCounts(tx, *moveRequest.AssignedShiftID, now); derr != nil {
+					log.Printf("Warning: failed to recompute old shift counts: %v", derr)
 				}
 				var oldDriverID string
 				if derr := db.Get(&oldDriverID, `SELECT driver_id FROM shifts WHERE id = $1`, *moveRequest.AssignedShiftID); derr == nil {
@@ -310,6 +309,10 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					log.Printf("Error reconciling route_tasks: %v", err)
 					http.Error(w, "Failed to update the driver's route", http.StatusInternalServerError)
 					return
+				}
+				// Reconcile changed this shift's route_tasks — recompute its stored counts.
+				if rerr := itinerary.RecomputeShiftCounts(tx, *effectiveShiftID, now); rerr != nil {
+					log.Printf("Warning: failed to recompute shift counts after reconcile: %v", rerr)
 				}
 			}
 		}

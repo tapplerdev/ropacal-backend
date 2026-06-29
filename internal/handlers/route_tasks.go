@@ -7,9 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/jmoiron/sqlx"
 	"ropacal-backend/internal/database"
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
@@ -17,6 +16,9 @@ import (
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/jmoiron/sqlx"
 )
 
 // GetShiftTasks retrieves all tasks for a shift
@@ -442,13 +444,8 @@ func CompleteRouteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centri
 			return
 		}
 
-		// Update shift completed_bins count
-		_, err = db.Exec(
-			"UPDATE shifts SET completed_bins = completed_bins + 1, updated_at = $1 WHERE id = $2",
-			time.Now().Unix(),
-			task.ShiftID,
-		)
-		if err != nil {
+		// Recompute the shift's counts from route_tasks (single source of truth) — replaces the +1.
+		if err = itinerary.RecomputeShiftCounts(db, task.ShiftID, time.Now().Unix()); err != nil {
 			log.Printf("❌ Error updating shift: %v", err)
 		}
 

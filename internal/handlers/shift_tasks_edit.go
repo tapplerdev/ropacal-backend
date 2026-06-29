@@ -1033,34 +1033,14 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 		if addedCount > 0 || removedCount > 0 {
 			log.Printf("🔢 Recalculating total_bins after task changes...")
 
-			// Count active (non-deleted, non-warehouse_stop) tasks
-			var newTotalBins int
-			err = tx.Get(&newTotalBins, `
-			SELECT COUNT(*)
-			FROM route_tasks
-			WHERE shift_id = $1
-			  AND is_deleted = FALSE
-			  AND task_type != 'warehouse_stop'
-		`, shiftID)
-			if err != nil {
-				log.Printf("❌ Error counting tasks: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to recalculate total_bins")
-				return
-			}
-
-			// Update shifts.total_bins
-			_, err = tx.Exec(`
-			UPDATE shifts
-			SET total_bins = $1, updated_at = $2
-			WHERE id = $3
-		`, newTotalBins, now, shiftID)
-			if err != nil {
+			// Recompute the shift's counts from route_tasks (single source of truth,
+			// logical bins) — replaces an ad-hoc raw COUNT that set only total_bins.
+			if err = itinerary.RecomputeShiftCounts(tx, shiftID, now); err != nil {
 				log.Printf("❌ Error updating total_bins: %v", err)
 				utils.RespondError(w, http.StatusInternalServerError, "Failed to update total_bins")
 				return
 			}
-
-			log.Printf("✅ Updated total_bins: %d", newTotalBins)
+			log.Printf("✅ Recomputed shift counts")
 		}
 
 		// Commit transaction

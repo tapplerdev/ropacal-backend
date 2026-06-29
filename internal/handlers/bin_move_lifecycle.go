@@ -111,6 +111,12 @@ func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 				http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
 				return
 			}
+			// Removed this move's tasks — recompute the shift's counts from route_tasks.
+			if err = itinerary.RecomputeShiftCounts(tx, *moveRequest.AssignedShiftID, now); err != nil {
+				log.Printf("Error recomputing shift counts on cancel: %v", err)
+				http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		if err = tx.Commit(); err != nil {
