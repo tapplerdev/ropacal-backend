@@ -263,12 +263,25 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			}
 		}
 
+		// The shift the move is on AFTER this edit's assignment change. Reconcile and
+		// its notify must target the move's CURRENT shift, not the pre-edit one: a
+		// reassignment detached the old shift's tasks above, and an unassign leaves
+		// the move with no shift at all.
+		effectiveShiftID := moveRequest.AssignedShiftID
+		switch assignChange.Kind {
+		case moverequest.AssignToShiftKind:
+			sid := assignChange.ShiftID
+			effectiveShiftID = &sid
+		case moverequest.AssignToDriverKind, moverequest.AssignUnassignKind:
+			effectiveShiftID = nil
+		}
+
 		// Reconcile the move's route_tasks if its type or address changed — the
 		// itinerary domain owns these writes now. Runs regardless of centrifugo (the
 		// DB reconcile MUST happen; the old code wrongly gated it on the notify
 		// client); the driver notify fires post-commit below.
 		var reconcileOutcome itinerary.ReconcileOutcome
-		if moveRequest.AssignedShiftID != nil {
+		if effectiveShiftID != nil {
 			addressChanged := req.NewStreet != nil || req.NewCity != nil || req.NewZip != nil ||
 				req.NewLatitude != nil || req.NewLongitude != nil
 			moveTypeChanged := req.MoveType != nil && *req.MoveType != moveRequest.MoveType
@@ -287,7 +300,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					}
 					dest = &itinerary.MoveDestination{Address: addr, Lat: *req.NewLatitude, Lng: *req.NewLongitude}
 				}
-				reconcileOutcome, err = itinerary.ReconcileMove(tx, *moveRequest.AssignedShiftID, id,
+				reconcileOutcome, err = itinerary.ReconcileMove(tx, *effectiveShiftID, id,
 					moveRequest.MoveType, newType, addressChanged, dest, managerUserID, now)
 				if err != nil {
 					if errors.Is(err, itinerary.ErrMissingDestination) {
@@ -311,13 +324,13 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 		log.Printf("[UPDATE MOVE] ✅ Successfully updated move request: %s", id)
 
 		// Notify the driver if the route's drop-off changed (post-commit, best-effort).
-		if moveRequest.AssignedShiftID != nil && centrifugoClient != nil &&
+		if effectiveShiftID != nil && centrifugoClient != nil &&
 			(reconcileOutcome.DropoffRemoved || reconcileOutcome.DropoffAdded || reconcileOutcome.AddressUpdated) {
 			event := "move_type_changed"
 			if reconcileOutcome.AddressUpdated && !reconcileOutcome.DropoffRemoved && !reconcileOutcome.DropoffAdded {
 				event = "move_request_address_changed"
 			}
-			if notifyErr := NotifyDriverOfRouteUpdate(db, centrifugoClient, *moveRequest.AssignedShiftID, event, map[string]interface{}{
+			if notifyErr := NotifyDriverOfRouteUpdate(db, centrifugoClient, *effectiveShiftID, event, map[string]interface{}{
 				"move_request_id": id,
 				"bin_number":      moveRequest.BinNumber,
 				"dropoff_removed": reconcileOutcome.DropoffRemoved,
