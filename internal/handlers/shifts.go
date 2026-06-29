@@ -1122,20 +1122,17 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centri
 		// Previous behavior: Skipped tasks counted toward completed_bins
 		// New behavior: Only truly completed tasks count toward completed_bins
 		// This prevents premature shift auto-end when drivers skip remaining tasks.
-		log.Printf("⏭️  Skipped %d task(s) - NOT incrementing completed_bins (skipped tasks don't count as completed)", tasksSkipped)
+		log.Printf("⏭️  Skipped %d task(s) - recomputing shift counts (a skip is processed, counts toward progress)", tasksSkipped)
 
-		// Only update the shift's updated_at timestamp
-		_, err = tx.Exec(`
-			UPDATE shifts
-			SET updated_at = $1
-			WHERE id = $2
-		`, now, shift.ID)
-		if err != nil {
+		// Recompute the shift's counts from route_tasks: a skipped task is processed
+		// (is_completed=1) and now advances progress, so the stored columns must follow
+		// — otherwise the manager view lags the driver's until the next completion.
+		if err = itinerary.RecomputeShiftCounts(tx, shift.ID, now); err != nil {
 			log.Printf("❌ Error updating shift: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
 			return
 		}
-		log.Printf("✅ Shift updated for skip (completed_bins unchanged)")
+		log.Printf("✅ Shift counts recomputed after skip")
 
 		// Commit transaction
 		if err = tx.Commit(); err != nil {
