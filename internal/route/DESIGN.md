@@ -52,8 +52,14 @@ type RoutePlanner interface {
     AddService(ext sqlx.Ext, shiftID string, svc ServiceTask) error
 
     RemoveTasks(ext sqlx.Ext, sel Selector, reason, by string) error // the ONE audited soft-delete
-    Resequence(ext sqlx.Ext, shiftID string) error                   // the ONLY writer of sequence_order; ORDER-PRESERVING renumber (never a re-sort)
-    ReplaceRoute(ext sqlx.Ext, shiftID string, optimized []Task) error // post-optimization delete-all + re-insert (persists the optimizer's order)
+    Resequence(ext sqlx.Ext, shiftID string) error                   // ORDER-PRESERVING dense renumber (close gaps / break collisions); never re-sorts
+    ApplyOrder(ext sqlx.Ext, shiftID string, orderedTaskIDs []string) error // writes the OPTIMIZER'S decided order (1..N) — the only "imposes order" writer
+    ReplaceRoute(ext sqlx.Ext, shiftID string, optimized []Task) error // post-optimization delete-all + re-insert, then ApplyOrder
+
+    // Resequence + ApplyOrder are the ONLY writers of sequence_order. They are
+    // distinct: Resequence keeps current relative order (for post-manual-edit
+    // normalization); ApplyOrder stamps the optimizer's result (the optimizer
+    // owns order — see invariants).
 
     SyncBinTasks(ext sqlx.Ext, binID string) error             // bins.go edge
     SyncPlacement(ext sqlx.Ext, potentialLocationID string) error // potential_locations.go edge
@@ -71,10 +77,19 @@ Internally backed by **one typed task writer** (one INSERT, one column list).
 ## Phased plan (each shippable, golden-diff + live-verify, deploy, soak)
 - **Phase 0 — spec.** This doc. Also add an idempotent `CREATE TABLE route_tasks`
   DDL to `database.go` so the schema is canonical (no behavior change).
-- **Phase 1 — package + single writer + `Resequence`.** Introduce `internal/route`,
-  the one typed INSERT, and `Resequence`; route the optimizer's renumber loops + the
-  `assignMoveToShift` sequence-shift through it. **Highest-value correctness win
-  first** (kills the ~7-writer hazard).
+- **Phase 1 — package + single writer + the two sequence_order primitives.**
+  Introduce `internal/route`, the one typed INSERT, plus `Resequence`
+  (order-preserving) and `ApplyOrder` (optimizer-order). **Ground-truth site map
+  (investigated 2026-06-28) — 5 `sequence_order` writers:**
+  - `shifts.go:3031`, `:3074` (ReoptimizeActiveShift), `:6723` (segment optimizer),
+    `:7588` (Mapbox path) — all **impose the optimizer's order** → migrate to
+    `ApplyOrder` (these are NOT `Resequence`; the earlier "route renumber loops
+    through Resequence" wording was wrong — the optimizer owns order).
+  - `bin_move_requests.go:649` (`assignMoveToShift` `+binsAdded` bump to make room
+    for a manual insert) — the manual-edit path; normalize with `Resequence`.
+  The `"duplicate sequence_order detected"` guard fires from the **collision**
+  between the manual bump and the optimizer numbering; making both go through the
+  two single-writers is the correctness win.
 - **Phase 2 — `AddMove`.** Migrate `assignMoveToShift`'s relocation→pickup+dropoff +
   the `UpdateBinMoveRequest` move-type cascade. (This is the clean home the
   moverequest kernel was missing.)
