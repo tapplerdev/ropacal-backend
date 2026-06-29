@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/pkg/utils"
@@ -136,12 +137,17 @@ func GetCurrentShift(store ShiftStore) http.HandlerFunc {
 			tasks = []models.RouteTask{} // Empty tasks array on error
 		}
 
-		log.Printf("📤 RESPONSE: 200 OK — shift %s status %s, %d tasks", shift.ID, shift.Status, len(tasks))
+		// Derive the progress counts from route_tasks (the source of truth) rather
+		// than the stored shifts.total_bins/completed_bins columns, which drift
+		// (hand-adjusted ±1 across handlers). Same semantics, can't go stale.
+		counts := itinerary.CountStops(tasks)
+
+		log.Printf("📤 RESPONSE: 200 OK — shift %s status %s, %d tasks (%d/%d bins)", shift.ID, shift.Status, len(tasks), counts.CompletedBins, counts.TotalBins)
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": currentShiftResponse{
-				CompletedBins:     shift.CompletedBins,
+				CompletedBins:     counts.CompletedBins,
 				CreatedAt:         shift.CreatedAt,
 				DriverID:          shift.DriverID,
 				EndTime:           shift.EndTime,
@@ -151,7 +157,7 @@ func GetCurrentShift(store ShiftStore) http.HandlerFunc {
 				StartTime:         shift.StartTime,
 				Status:            shift.Status,
 				Tasks:             tasks,
-				TotalBins:         shift.TotalBins,
+				TotalBins:         counts.TotalBins,
 				TotalPauseSeconds: shift.TotalPauseSeconds,
 				UpdatedAt:         shift.UpdatedAt,
 			},
@@ -822,12 +828,15 @@ func GetShiftDetails(store ShiftStore) http.HandlerFunc {
 			tasks = []models.RouteTask{} // Empty tasks array on error
 		}
 
-		log.Printf("📤 RESPONSE: 200 OK — shift %s, %d tasks", shift.ID, len(tasks))
+		// Derived counts (see GetCurrentShift) — drift-proof, same semantics.
+		counts := itinerary.CountStops(tasks)
+
+		log.Printf("📤 RESPONSE: 200 OK — shift %s, %d tasks (%d/%d bins)", shift.ID, len(tasks), counts.CompletedBins, counts.TotalBins)
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": shiftDetailsResponse{
-				CompletedBins:     shift.CompletedBins,
+				CompletedBins:     counts.CompletedBins,
 				CreatedAt:         shift.CreatedAt,
 				DriverID:          shift.DriverID,
 				EndTime:           shift.EndTime,
@@ -836,7 +845,7 @@ func GetShiftDetails(store ShiftStore) http.HandlerFunc {
 				StartTime:         shift.StartTime,
 				Status:            shift.Status,
 				Tasks:             tasks,
-				TotalBins:         shift.TotalBins,
+				TotalBins:         counts.TotalBins,
 				TotalPauseSeconds: shift.TotalPauseSeconds,
 				UpdatedAt:         shift.UpdatedAt,
 			},

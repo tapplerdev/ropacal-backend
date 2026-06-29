@@ -175,6 +175,9 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_shift_bins_shift_id ON shift_bins(shift_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_shift_bins_bin_id ON shift_bins(bin_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_shift_bins_shift_seq ON shift_bins(shift_id, sequence_order)`,
+		// route_tasks is queried by shift_id in ~27 places (every shift read, reconcile,
+		// task fetch) and had no index — this covers all of them plus the derived counts.
+		`CREATE INDEX IF NOT EXISTS idx_route_tasks_shift_seq ON route_tasks(shift_id, sequence_order)`,
 		`CREATE INDEX IF NOT EXISTS idx_driver_current_location_shift_id ON driver_current_location(shift_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_driver_current_location_is_connected ON driver_current_location(is_connected)`,
 
