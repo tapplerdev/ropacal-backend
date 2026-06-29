@@ -43,12 +43,14 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 	var out ReconcileOutcome
 
 	var tasks []struct {
-		ID       string `db:"id"`
-		TaskType string `db:"task_type"`
-		Seq      int    `db:"sequence_order"`
+		ID        string  `db:"id"`
+		TaskType  string  `db:"task_type"`
+		Seq       int     `db:"sequence_order"`
+		BinID     *string `db:"bin_id"`
+		BinNumber *int    `db:"bin_number"`
 	}
 	if err := sqlx.Select(ext, &tasks, ext.Rebind(`
-		SELECT id, task_type, sequence_order
+		SELECT id, task_type, sequence_order, bin_id, bin_number
 		FROM route_tasks
 		WHERE move_request_id = ? AND shift_id = ? AND is_completed = 0 AND is_deleted = false`),
 		moveReqID, shiftID); err != nil {
@@ -78,9 +80,11 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 			return out, ErrMissingDestination
 		}
 		pickupSeq, found := 0, false
+		var binID *string
+		var binNumber *int
 		for _, t := range tasks {
 			if t.TaskType == "pickup" {
-				pickupSeq, found = t.Seq, true
+				pickupSeq, binID, binNumber, found = t.Seq, t.BinID, t.BinNumber, true
 				break
 			}
 		}
@@ -95,14 +99,19 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 			shiftID, pickupSeq+1); err != nil {
 			return out, fmt.Errorf("reconcile: open room for dropoff: %w", err)
 		}
+		// Mirror AddMove's drop-off columns so every NOT NULL column is satisfied
+		// (bin_id/bin_number from the pickup; latitude/longitude = the destination).
 		if _, err := ext.Exec(ext.Rebind(`
 			INSERT INTO route_tasks (
-				id, shift_id, move_request_id, task_type, sequence_order,
-				address, destination_address, destination_latitude, destination_longitude,
-				is_completed, created_at, updated_at
-			) VALUES (?, ?, ?, 'dropoff', ?, ?, ?, ?, ?, 0, ?, ?)`),
-			uuid.New().String(), shiftID, moveReqID, pickupSeq+1,
-			dest.Address, dest.Address, dest.Lat, dest.Lng, now, now); err != nil {
+				id, shift_id, bin_id, bin_number, sequence_order, task_type,
+				latitude, longitude, address,
+				destination_latitude, destination_longitude, destination_address,
+				move_request_id, move_type, is_completed, created_at
+			) VALUES (?, ?, ?, ?, ?, 'dropoff', ?, ?, ?, ?, ?, ?, ?, 'relocation', 0, ?)`),
+			uuid.New().String(), shiftID, binID, binNumber, pickupSeq+1,
+			dest.Lat, dest.Lng, dest.Address,
+			dest.Lat, dest.Lng, dest.Address,
+			moveReqID, now); err != nil {
 			return out, fmt.Errorf("reconcile: insert dropoff: %w", err)
 		}
 		out.DropoffAdded = true
