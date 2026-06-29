@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
@@ -629,122 +630,42 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	// 3. Insert move request bin at determined position
 	// Determine how many waypoints to add (pickup only, or pickup + dropoff)
-	binsAdded := 1
-	if moveRequest.MoveType == "relocation" {
-		binsAdded = 2
-		log.Printf("   Relocation move - will add both pickup and dropoff waypoints")
-	} else {
-		log.Printf("   Store move - will add pickup waypoint only")
-	}
-
 	tx, err := db.Beginx()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Shift all tasks after insert position up by binsAdded
-	_, err = tx.Exec(`
-		UPDATE route_tasks
-		SET sequence_order = sequence_order + $1
-		WHERE shift_id = $2 AND sequence_order >= $3
-	`, binsAdded, activeShift.ID, insertSequenceOrder)
-	if err != nil {
-		return fmt.Errorf("failed to shift sequence order: %w", err)
+	// Resolve relocation destination coordinates for the dropoff.
+	var dropoffLat, dropoffLng float64
+	var dropoffAddr string
+	if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+		dropoffLat = *moveRequest.NewLatitude
+		dropoffLng = *moveRequest.NewLongitude
+	}
+	if moveRequest.NewAddress != nil {
+		dropoffAddr = *moveRequest.NewAddress
 	}
 
-	// Insert pickup waypoint for move request
-	pickupSeq := insertSequenceOrder
-	pickupID := uuid.New().String()
-	log.Printf("   🔍 DEBUG: About to insert PICKUP - insertSequenceOrder=%d, pickupSeq=%d", insertSequenceOrder, pickupSeq)
-	log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, task_type=pickup, move_request_id=%s",
-		activeShift.ID, moveRequest.BinID, pickupSeq, moveRequest.ID)
-
-	// For pickup, use bin's current location
-	pickupAddress := bin.CurrentStreet
-	moveTypeStr := string(moveRequest.MoveType)
-	_, err = tx.Exec(`
-		INSERT INTO route_tasks (
-			id, shift_id, bin_id, bin_number, sequence_order, task_type,
-			latitude, longitude, address, fill_percentage,
-			move_request_id, move_type,
-			is_completed, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, $13)
-	`, pickupID, activeShift.ID, moveRequest.BinID, bin.BinNumber, pickupSeq, "pickup",
-		bin.Latitude, bin.Longitude, pickupAddress, bin.FillPercentage,
-		moveRequest.ID, moveTypeStr, now)
+	// Assemble the move's stops (pickup [+ dropoff]) at the insert position — the
+	// itinerary domain owns route_tasks writes (was inline INSERTs here).
+	binsAdded, err := itinerary.AddMove(tx, activeShift.ID, itinerary.MovePlacement{
+		InsertSeq:      insertSequenceOrder,
+		MoveRequestID:  moveRequest.ID,
+		BinID:          moveRequest.BinID,
+		BinNumber:      bin.BinNumber,
+		FillPercentage: bin.FillPercentage,
+		MoveType:       string(moveRequest.MoveType),
+		PickupLat:      bin.Latitude,
+		PickupLng:      bin.Longitude,
+		PickupAddress:  bin.CurrentStreet,
+		DropoffLat:     dropoffLat,
+		DropoffLng:     dropoffLng,
+		DropoffAddress: dropoffAddr,
+		Now:            now,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to insert pickup waypoint: %w", err)
-	}
-	log.Printf("   ✅ Inserted pickup waypoint at sequence %d", pickupSeq)
-
-	// For relocation moves, also insert dropoff waypoint immediately after pickup
-	if moveRequest.MoveType == "relocation" {
-		dropoffSeq := insertSequenceOrder + 1
-		dropoffID := uuid.New().String()
-		log.Printf("   🔍 DEBUG: About to insert DROPOFF - insertSequenceOrder=%d, dropoffSeq=%d", insertSequenceOrder, dropoffSeq)
-		log.Printf("   🔍 DEBUG: INSERT params: shift_id=%s, bin_id=%s, sequence=%d, task_type=dropoff, move_request_id=%s",
-			activeShift.ID, moveRequest.BinID, dropoffSeq, moveRequest.ID)
-
-		// For dropoff, use destination location
-		// Destination coordinates should be in NewLatitude/NewLongitude fields
-		var dropoffLat, dropoffLng float64
-		var dropoffAddr string
-		if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
-			dropoffLat = *moveRequest.NewLatitude
-			dropoffLng = *moveRequest.NewLongitude
-		}
-		if moveRequest.NewAddress != nil {
-			dropoffAddr = *moveRequest.NewAddress
-		}
-
-		_, err = tx.Exec(`
-			INSERT INTO route_tasks (
-				id, shift_id, bin_id, bin_number, sequence_order, task_type,
-				latitude, longitude, address,
-				destination_latitude, destination_longitude, destination_address,
-				move_request_id, move_type,
-				is_completed, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0, $15)
-		`, dropoffID, activeShift.ID, moveRequest.BinID, bin.BinNumber, dropoffSeq, "dropoff",
-			dropoffLat, dropoffLng, dropoffAddr,
-			dropoffLat, dropoffLng, dropoffAddr,
-			moveRequest.ID, moveTypeStr, now)
-		if err != nil {
-			return fmt.Errorf("failed to insert dropoff waypoint: %w", err)
-		}
-		log.Printf("   ✅ Inserted dropoff waypoint at sequence %d", dropoffSeq)
-
-		// Verify both waypoints have different sequence_order values
-		var actualPickupSeq, actualDropoffSeq int
-		err = tx.Get(&actualPickupSeq, `
-			SELECT sequence_order FROM route_tasks
-			WHERE shift_id = $1 AND move_request_id = $2 AND task_type = 'pickup'
-		`, activeShift.ID, moveRequest.ID)
-		if err != nil {
-			log.Printf("   ⚠️  Warning: Could not verify pickup sequence_order: %v", err)
-		}
-
-		err = tx.Get(&actualDropoffSeq, `
-			SELECT sequence_order FROM route_tasks
-			WHERE shift_id = $1 AND move_request_id = $2 AND task_type = 'dropoff'
-		`, activeShift.ID, moveRequest.ID)
-		if err != nil {
-			log.Printf("   ⚠️  Warning: Could not verify dropoff sequence_order: %v", err)
-		}
-
-		log.Printf("   🔍 VERIFICATION: Expected pickup=%d, actual=%d | Expected dropoff=%d, actual=%d",
-			pickupSeq, actualPickupSeq, dropoffSeq, actualDropoffSeq)
-
-		if actualPickupSeq == actualDropoffSeq {
-			log.Printf("   ❌ ERROR: Pickup and dropoff have SAME sequence_order: %d", actualPickupSeq)
-			return fmt.Errorf("duplicate sequence_order detected: both pickup and dropoff at %d", actualPickupSeq)
-		}
-		if actualPickupSeq >= actualDropoffSeq {
-			log.Printf("   ❌ ERROR: Pickup sequence (%d) >= Dropoff sequence (%d)", actualPickupSeq, actualDropoffSeq)
-			return fmt.Errorf("invalid sequence order: pickup at %d, dropoff at %d", actualPickupSeq, actualDropoffSeq)
-		}
-		log.Printf("   ✅ VALIDATION PASSED: Pickup (%d) < Dropoff (%d)", actualPickupSeq, actualDropoffSeq)
+		return err
 	}
 
 	// Update move request to assign it to this shift (clear any previous user assignment)
