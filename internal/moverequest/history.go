@@ -1,23 +1,28 @@
 package moverequest
 
 import (
-	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
+	"encoding/json"
 	"log"
 	"ropacal-backend/internal/models"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 )
 
 // LogCreated logs when a move request is created
 func LogCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, moveType string, destinationAddress *string) error {
 	historyID := uuid.New().String()
 
-	// Build metadata JSON with move type and destination address
-	metadata := `{"move_type":"` + moveType + `"`
+	// Build metadata JSON via json.Marshal so a quote/backslash in an address can't
+	// produce invalid JSON (the old string-concat did). map[string]string always
+	// marshals, so the error is genuinely impossible here.
+	meta := map[string]string{"move_type": moveType}
 	if destinationAddress != nil {
-		metadata += `,"destination_address":"` + *destinationAddress + `"`
+		meta["destination_address"] = *destinationAddress
 	}
-	metadata += `}`
+	metadataBytes, _ := json.Marshal(meta)
+	metadata := string(metadataBytes)
 
 	query := `
 		INSERT INTO move_request_history (

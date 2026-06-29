@@ -1,7 +1,11 @@
 // Package itinerary owns a shift's executed route_tasks: assembly, sequencing,
-// and the task-type taxonomy. It is the single writer of route_tasks; the
-// optimizer decides order and hands it an ordered list (ApplyOrder), while
-// manual edits tidy numbering without re-sorting (Resequence). See DESIGN.md.
+// and the task-type taxonomy. It is BECOMING the single writer of route_tasks —
+// the audited removal (RemoveByIDs), move assembly (AddMove), and renumbering
+// (Resequence) are consolidated here, but the optimizer-persist extraction
+// (ApplyOrder) is still in progress, so handlers retain some direct route_tasks
+// writes today. The optimizer decides order and (will) hand it an ordered list
+// via ApplyOrder; manual edits tidy numbering without re-sorting (Resequence).
+// See DESIGN.md for the phased migration.
 package itinerary
 
 import "fmt"

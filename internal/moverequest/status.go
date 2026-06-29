@@ -3,6 +3,14 @@
 // DESIGN.md for the full state machine and migration plan.
 package moverequest
 
+import "errors"
+
+// ErrInvalidTransition is returned by a transition attempted from a terminal
+// state (completed/cancelled). It makes the illegal transitions the state machine
+// forbids structurally impossible at the domain level — the UPDATE simply does
+// not fire — rather than relying on every caller to pre-check status.
+var ErrInvalidTransition = errors.New("moverequest: illegal status transition (move already terminal)")
+
 // Status is a move-request's lifecycle state.
 type Status string
 

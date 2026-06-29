@@ -83,6 +83,27 @@ func ReleaseFromShift(ext sqlx.Ext, shiftIDs []string, now int64) ([]ReleasedMov
 	return affected, nil
 }
 
+// guardedTransition runs a status-changing UPDATE that fires only when the move
+// is NOT already in a terminal state (completed/cancelled), and returns
+// ErrInvalidTransition when it isn't applied (already terminal, or absent). This
+// is the single enforcement point that makes illegal transitions structurally
+// impossible in the domain rather than relying on callers to pre-check. The
+// `set` clause uses ? placeholders; Rebind adapts them to the driver. Runs in the
+// caller's ext (pool or tx). Terminal-state membership is derived from the typed
+// Status constants so the taxonomy has one source of truth.
+func guardedTransition(ext sqlx.Ext, id, set string, args ...interface{}) error {
+	q := "UPDATE bin_move_requests SET " + set + " WHERE id = ? AND status NOT IN (?, ?)"
+	args = append(args, id, string(StatusCompleted), string(StatusCancelled))
+	res, err := ext.Exec(ext.Rebind(q), args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrInvalidTransition
+	}
+	return nil
+}
+
 // ClearAssignment fully unassigns a move back to the pending POOL: it clears the
 // driver, shift, and assignment type and sets status='pending'. This is the
 // explicit, human-initiated "drop to pool" escape hatch — the counterpart to
@@ -98,15 +119,9 @@ func ClearAssignment(ext sqlx.Ext, id string, now int64) error {
 	// CHECK(assignment_type IN ('shift','manual')) — '' violates it and 500s the
 	// request (a long-standing bug: clear-assignment never actually worked). NULL
 	// satisfies the CHECK.
-	_, err := ext.Exec(`
-		UPDATE bin_move_requests
-		SET assignment_type  = NULL,
-		    assigned_shift_id = NULL,
-		    assigned_user_id  = NULL,
-		    status            = 'pending',
-		    updated_at        = $1
-		WHERE id = $2`, now, id)
-	return err
+	return guardedTransition(ext, id,
+		"assignment_type = NULL, assigned_shift_id = NULL, assigned_user_id = NULL, status = 'pending', updated_at = ?",
+		now)
 }
 
 // AssignToDriver puts a move on a specific driver's BACKLOG: assignment_type
@@ -115,15 +130,9 @@ func ClearAssignment(ext sqlx.Ext, id string, now int64) error {
 // ReleaseFromShift fires. Runs inside the caller's transaction (ext); detaching
 // from any prior shift's route_tasks is the caller's cross-domain concern.
 func AssignToDriver(ext sqlx.Ext, id, userID string, now int64) error {
-	_, err := ext.Exec(`
-		UPDATE bin_move_requests
-		SET assignment_type   = 'manual',
-		    assigned_user_id   = $1,
-		    assigned_shift_id  = NULL,
-		    status             = 'assigned',
-		    updated_at         = $2
-		WHERE id = $3`, userID, now, id)
-	return err
+	return guardedTransition(ext, id,
+		"assignment_type = 'manual', assigned_user_id = ?, assigned_shift_id = NULL, status = 'assigned', updated_at = ?",
+		userID, now)
 }
 
 // AssignToShift attaches a move to a shift: assignment_type 'shift', the given
@@ -132,35 +141,21 @@ func AssignToDriver(ext sqlx.Ext, id, userID string, now int64) error {
 // (ext); inserting the shift's route_tasks and re-optimizing are the caller's
 // cross-domain concern.
 func AssignToShift(ext sqlx.Ext, id, shiftID, status string, now int64) error {
-	_, err := ext.Exec(`
-		UPDATE bin_move_requests
-		SET assignment_type   = 'shift',
-		    assigned_shift_id  = $1,
-		    assigned_user_id   = NULL,
-		    status             = $2,
-		    updated_at         = $3
-		WHERE id = $4`, shiftID, status, now, id)
-	return err
+	return guardedTransition(ext, id,
+		"assignment_type = 'shift', assigned_shift_id = ?, assigned_user_id = NULL, status = ?, updated_at = ?",
+		shiftID, status, now)
 }
 
 // Cancel marks a move as cancelled (a terminal state). Runs inside the caller's
 // transaction or on the pool (ext); the caller handles the cross-domain effects
 // of cancelling (freeing the bin, detaching route_tasks, re-optimizing, notifying).
 func Cancel(ext sqlx.Ext, id string, now int64) error {
-	_, err := ext.Exec(`
-		UPDATE bin_move_requests
-		SET status = 'cancelled', updated_at = $1
-		WHERE id = $2`, now, id)
-	return err
+	return guardedTransition(ext, id, "status = 'cancelled', updated_at = ?", now)
 }
 
 // Complete marks a move as completed (terminal), stamping completed_at. Runs in
 // the caller's transaction or on the pool (ext); the caller applies the resulting
 // bin state (retire / store / relocate) and history.
 func Complete(ext sqlx.Ext, id string, now int64) error {
-	_, err := ext.Exec(`
-		UPDATE bin_move_requests
-		SET status = 'completed', completed_at = $1, updated_at = $1
-		WHERE id = $2`, now, id)
-	return err
+	return guardedTransition(ext, id, "status = 'completed', completed_at = ?, updated_at = ?", now, now)
 }
