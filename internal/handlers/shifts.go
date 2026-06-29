@@ -1596,25 +1596,24 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 			}
 		}
 
-		// Soft delete incomplete move request tasks from route_tasks (for audit trail)
-		deleteTasksQuery := `UPDATE route_tasks
-								 SET is_deleted = true,
-								 	 deleted_at = $1,
-								 	 deleted_by = $2,
-								 	 deletion_reason = $3,
-								 	 updated_at = $1
-								 WHERE shift_id = $4
-								 AND is_completed = 0
-								 AND is_deleted = false
-								 AND bin_id IN (
-									SELECT bin_id FROM bin_move_requests
-									WHERE assigned_shift_id IS NULL
-									AND status = 'pending'
-								 )`
-		_, err = tx.Exec(deleteTasksQuery, now, userClaims.UserID, "shift_ended_before_completion", shift.ID)
-		if err != nil {
+		// Soft-delete this shift's incomplete tasks for moves that were just released
+		// (now off any shift). The select-then-remove keeps the audited soft-delete in
+		// itinerary.RemoveByIDs. #16 fix: the old subquery keyed on status='pending',
+		// but the backlog model releases moves to status='assigned' (ReleaseFromShift
+		// above), so those tasks never got cleaned — include both.
+		var staleTaskIDs []string
+		if selErr := tx.Select(&staleTaskIDs, `
+			SELECT id FROM route_tasks
+			WHERE shift_id = $1 AND is_completed = 0 AND is_deleted = false
+			  AND bin_id IN (
+				SELECT bin_id FROM bin_move_requests
+				WHERE assigned_shift_id IS NULL AND status IN ('pending', 'assigned')
+			  )`, shift.ID); selErr != nil {
+			log.Printf("⚠️ Error selecting incomplete move tasks to clean: %v", selErr)
+		}
+		if err = itinerary.RemoveByIDs(tx, staleTaskIDs, userClaims.UserID, "shift_ended_before_completion", now); err != nil {
 			// A hard error here aborts the whole end via the transaction below.
-			log.Printf("⚠️ Error soft deleting incomplete move bins from shift: %v", err)
+			log.Printf("⚠️ Error soft deleting incomplete move tasks from shift: %v", err)
 		}
 
 		if err = tx.Commit(); err != nil {
