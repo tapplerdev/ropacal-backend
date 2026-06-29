@@ -33,13 +33,15 @@ type StopCounts struct {
 // fetched (no extra query). The slice is expected to already exclude soft-deleted
 // rows (GetShiftTasks filters is_deleted = false).
 //
-// "Done" is is_completed==1 AND not skipped: SkipTask sets is_completed=1 to take a
-// task off the driver's queue, but a skip is not a completion (a skipped bin was not
-// collected), so it stays in the total and out of completed. Skips are tracked
-// separately via the per-task skipped flag.
+// "Done" is is_completed==1, which a skip also sets: a skipped task is PROCESSED
+// (the driver gave a reason and moved on, isn't coming back), so it counts toward
+// progress — otherwise one skip would freeze the bar below 100% and the shift could
+// never complete. This matches the driver's existing live bar. Collection
+// PERFORMANCE (collected-vs-skipped) is a separate metric derived from the per-task
+// skipped flag (total_skipped), not the progress bar.
 func CountStops(tasks []models.RouteTask) StopCounts {
 	var c StopCounts
-	done := func(t models.RouteTask) bool { return t.IsCompleted == 1 && !t.Skipped }
+	done := func(t models.RouteTask) bool { return t.IsCompleted == 1 }
 
 	// Stops: every task is a place the driver visits.
 	for _, t := range tasks {

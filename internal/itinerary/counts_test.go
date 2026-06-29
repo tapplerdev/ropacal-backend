@@ -50,15 +50,15 @@ func TestCountStops_RelocationCompleteWhenBothLegsDone(t *testing.T) {
 	}
 }
 
-// A skipped task carries is_completed=1 but must NOT count as completed.
-func TestCountStops_SkippedNotCompleted(t *testing.T) {
+// A skipped task is PROCESSED — it counts toward progress so the shift can complete.
+func TestCountStops_SkippedCountsAsProcessed(t *testing.T) {
 	tasks := []models.RouteTask{
-		{TaskType: models.TaskTypeCollection, IsCompleted: 1},                // done
-		{TaskType: models.TaskTypeCollection, IsCompleted: 1, Skipped: true}, // skipped → not done
+		{TaskType: models.TaskTypeCollection, IsCompleted: 1},                // collected
+		{TaskType: models.TaskTypeCollection, IsCompleted: 1, Skipped: true}, // skipped → processed, counts
 		{TaskType: models.TaskTypeCollection, IsCompleted: 0},                // pending
 	}
 	got := CountStops(tasks)
-	want := StopCounts{TotalBins: 3, CompletedBins: 1, TotalStops: 3, CompletedStops: 1}
+	want := StopCounts{TotalBins: 3, CompletedBins: 2, TotalStops: 3, CompletedStops: 2}
 	if got != want {
 		t.Fatalf("CountStops(skipped) = %+v, want %+v", got, want)
 	}
