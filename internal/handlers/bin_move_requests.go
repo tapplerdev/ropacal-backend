@@ -1748,24 +1748,16 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 
 					// If move_type changed from relocation → store, soft delete dropoff tasks
 					if moveTypeChanged && req.MoveType != nil && *req.MoveType == "store" {
+						var dropoffIDs []string
 						for _, task := range affectedTasks {
 							if task.TaskType == "dropoff" {
-								_, deleteErr := tx.Exec(`
-									UPDATE route_tasks
-									SET is_deleted = true,
-										deleted_at = $1,
-										deleted_by = $2,
-										deletion_reason = $3,
-										updated_at = $1
-									WHERE id = $4 AND is_deleted = false
-								`, now, managerUserID, "move_type_changed_to_store", task.TaskID)
-
-								if deleteErr != nil {
-									log.Printf("⚠️  [UPDATE-MOVE] Failed to soft delete dropoff task %s: %v", task.TaskID, deleteErr)
-								} else {
-									log.Printf("✅ [UPDATE-MOVE] Soft deleted dropoff task %s (move_type → store)", task.TaskID)
-								}
+								dropoffIDs = append(dropoffIDs, task.TaskID)
 							}
+						}
+						if deleteErr := itinerary.RemoveByIDs(tx, dropoffIDs, managerUserID, "move_type_changed_to_store", now); deleteErr != nil {
+							log.Printf("⚠️  [UPDATE-MOVE] Failed to soft delete dropoff tasks: %v", deleteErr)
+						} else if len(dropoffIDs) > 0 {
+							log.Printf("✅ [UPDATE-MOVE] Soft deleted %d dropoff task(s) (move_type → store)", len(dropoffIDs))
 						}
 
 						// Notify driver that dropoff task was removed

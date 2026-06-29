@@ -3840,17 +3840,22 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 				updateArgs = append(updateArgs, nil)
 				argIndex++
 
-				// Soft-delete completed and skipped tasks — new driver only gets remaining work
-				completedRemoved, delErr := tx.Exec(`
-					UPDATE route_tasks
-					SET is_deleted = true, deleted_at = $1, deletion_reason = 'completed_before_reassign'
-					WHERE shift_id = $2 AND is_deleted = false AND (is_completed = 1 OR skipped = true)
-				`, now, shiftID)
-				if delErr != nil {
+				// Soft-delete completed and skipped tasks — new driver only gets remaining
+				// work. Select-then-remove keeps the reassign-specific predicate here and
+				// routes the audited deletion through the itinerary primitive (which also
+				// stamps deleted_by, unlike the original).
+				var doneTaskIDs []string
+				if selErr := tx.Select(&doneTaskIDs, `
+					SELECT id FROM route_tasks
+					WHERE shift_id = $1 AND is_deleted = false AND (is_completed = 1 OR skipped = true)
+				`, shiftID); selErr != nil {
+					log.Printf("⚠️  Failed to select completed tasks on reassign: %v", selErr)
+				}
+				if delErr := itinerary.RemoveByIDs(tx, doneTaskIDs, userClaims.UserID, "completed_before_reassign", now); delErr != nil {
 					log.Printf("⚠️  Failed to remove completed tasks on reassign: %v", delErr)
-				} else if rows, _ := completedRemoved.RowsAffected(); rows > 0 {
-					log.Printf("🗑️  Removed %d completed/skipped tasks for reassignment", rows)
-					changes["completed_tasks_removed"] = rows
+				} else if len(doneTaskIDs) > 0 {
+					log.Printf("🗑️  Removed %d completed/skipped tasks for reassignment", len(doneTaskIDs))
+					changes["completed_tasks_removed"] = len(doneTaskIDs)
 				}
 			}
 		}
@@ -3972,17 +3977,8 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 
 				log.Printf("   Removing task: %s (type=%s)", task.ID, task.TaskType)
 
-				// Mark as deleted
-				_, err = tx.Exec(`
-					UPDATE route_tasks
-					SET is_deleted = true,
-						deleted_at = $1,
-						deleted_by = $2,
-						deletion_reason = $3,
-						updated_at = $1
-					WHERE id = $4
-				`, now, userClaims.UserID, req.Reason, actualTaskID)
-				if err != nil {
+				// Mark as deleted (audited soft-delete via the itinerary primitive)
+				if err = itinerary.RemoveByIDs(tx, []string{actualTaskID}, userClaims.UserID, req.Reason, now); err != nil {
 					log.Printf("❌ Error marking task as deleted: %v", err)
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to remove task")
 					return
