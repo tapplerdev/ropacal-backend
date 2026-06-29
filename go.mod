@@ -3,6 +3,8 @@ module ropacal-backend
 go 1.25.4
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
+	github.com/anthropics/anthropic-sdk-go v1.50.1
 	github.com/centrifugal/gocent/v3 v3.4.0
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-chi/cors v1.2.2
@@ -19,7 +21,6 @@ require (
 
 require (
 	cloud.google.com/go/compute/metadata v0.6.0 // indirect
-	github.com/anthropics/anthropic-sdk-go v1.50.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
