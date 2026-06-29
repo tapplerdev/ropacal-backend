@@ -14,7 +14,6 @@ import (
 
 	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/geo"
-	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
@@ -1583,7 +1582,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 		}
 		for _, mr := range released {
 			metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manual_end"}`, shift.ID)
-			if logErr := helpers.LogMoveRequestUnassigned(
+			if logErr := moverequest.LogUnassigned(
 				tx, mr.ID, userClaims.UserID, userClaims.Email,
 				mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
 			); logErr != nil {
@@ -3518,7 +3517,7 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 						return
 					}
 
-					if logErr := helpers.LogMoveRequestUnassigned(tx, *task.MoveRequestID, userClaims.UserID, userClaims.Email, mrDetails.AssignmentType, mrDetails.AssignedUserID, assignedUserName, mrDetails.AssignedShiftID); logErr != nil {
+					if logErr := moverequest.LogUnassigned(tx, *task.MoveRequestID, userClaims.UserID, userClaims.Email, mrDetails.AssignmentType, mrDetails.AssignedUserID, assignedUserName, mrDetails.AssignedShiftID); logErr != nil {
 						log.Printf("⚠️  Failed to log move request unassignment: %v", logErr)
 					}
 				}
@@ -4058,7 +4057,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						log.Printf("✅ Unassigned move request %s (status → pending)", *task.MoveRequestID)
 
 						// Log history entry
-						err = helpers.LogMoveRequestUnassigned(
+						err = moverequest.LogUnassigned(
 							tx,
 							*task.MoveRequestID,
 							userClaims.UserID,
@@ -5830,7 +5829,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 			log.Printf("Warning: Failed to fetch driver name for history: %v", err)
 			driverName = "Unknown Driver"
 		}
-		err = helpers.LogMoveRequestCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName)
+		err = moverequest.LogCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request completion: %v", err)
 		}
@@ -6129,7 +6128,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		}
 		for _, mr := range released {
 			metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manager_cancelled","cancelled_by":"%s"}`, shiftID, userClaims.UserID)
-			if logErr := helpers.LogMoveRequestUnassigned(
+			if logErr := moverequest.LogUnassigned(
 				tx, mr.ID, userClaims.UserID, userClaims.Email,
 				mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
 			); logErr != nil {

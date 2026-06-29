@@ -10,9 +10,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 	"ropacal-backend/internal/database"
-	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
@@ -306,7 +306,7 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 					// Log assignment history
 					log.Printf("      📝 Logging assignment to history...")
 					assignmentType := "shift"
-					err = helpers.LogMoveRequestAssigned(db, moveReqID, managerID, managerName,
+					err = moverequest.LogAssigned(db, moveReqID, managerID, managerName,
 						assignmentType, &req.DriverID, &driverName, &shiftID)
 					if err != nil {
 						log.Printf("      ⚠️  WARNING: Failed to log assignment history: %v", err)

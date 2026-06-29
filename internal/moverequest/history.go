@@ -1,4 +1,4 @@
-package helpers
+package moverequest
 
 import (
 	"github.com/google/uuid"
@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// LogMoveRequestCreated logs when a move request is created
-func LogMoveRequestCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, moveType string, destinationAddress *string) error {
+// LogCreated logs when a move request is created
+func LogCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, moveType string, destinationAddress *string) error {
 	historyID := uuid.New().String()
 
 	// Build metadata JSON with move type and destination address
@@ -43,8 +43,8 @@ func LogMoveRequestCreated(db *sqlx.DB, moveRequestID string, actorID string, ac
 	return err
 }
 
-// LogMoveRequestAssigned logs when a move request is assigned
-func LogMoveRequestAssigned(db *sqlx.DB, moveRequestID string, actorID string, actorName string, assignmentType string, assignedUserID *string, assignedUserName *string, assignedShiftID *string) error {
+// LogAssigned logs when a move request is assigned
+func LogAssigned(db *sqlx.DB, moveRequestID string, actorID string, actorName string, assignmentType string, assignedUserID *string, assignedUserName *string, assignedShiftID *string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -76,8 +76,8 @@ func LogMoveRequestAssigned(db *sqlx.DB, moveRequestID string, actorID string, a
 	return err
 }
 
-// LogMoveRequestReassigned logs when a move request is reassigned
-func LogMoveRequestReassigned(db *sqlx.DB, moveRequestID string, actorID string, actorName string,
+// LogReassigned logs when a move request is reassigned
+func LogReassigned(db *sqlx.DB, moveRequestID string, actorID string, actorName string,
 	previousAssignmentType *string, newAssignmentType *string,
 	previousAssignedUserID *string, newAssignedUserID *string,
 	previousAssignedUserName *string, newAssignedUserName *string,
@@ -121,8 +121,8 @@ func LogMoveRequestReassigned(db *sqlx.DB, moveRequestID string, actorID string,
 	return err
 }
 
-// LogMoveRequestUnassigned logs when a move request is unassigned
-func LogMoveRequestUnassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName string,
+// LogUnassigned logs when a move request is unassigned
+func LogUnassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName string,
 	previousAssignmentType *string, previousAssignedUserID *string, previousAssignedUserName *string, previousAssignedShiftID *string) error {
 
 	historyID := uuid.New().String()
@@ -156,8 +156,8 @@ func LogMoveRequestUnassigned(db sqlx.Ext, moveRequestID string, actorID string,
 	return err
 }
 
-// LogMoveRequestCompleted logs when a move request is completed
-func LogMoveRequestCompleted(db *sqlx.DB, moveRequestID string, actorID string, actorName string) error {
+// LogCompleted logs when a move request is completed
+func LogCompleted(db *sqlx.DB, moveRequestID string, actorID string, actorName string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -189,8 +189,8 @@ func LogMoveRequestCompleted(db *sqlx.DB, moveRequestID string, actorID string, 
 	return err
 }
 
-// LogMoveRequestCancelled logs when a move request is cancelled
-func LogMoveRequestCancelled(db *sqlx.DB, moveRequestID string, actorID string, actorName string, reason *string) error {
+// LogCancelled logs when a move request is cancelled
+func LogCancelled(db *sqlx.DB, moveRequestID string, actorID string, actorName string, reason *string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -223,8 +223,8 @@ func LogMoveRequestCancelled(db *sqlx.DB, moveRequestID string, actorID string, 
 	return err
 }
 
-// LogMoveRequestUpdated logs when a move request details are updated
-func LogMoveRequestUpdated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, notes *string, metadata *string) error {
+// LogUpdated logs when a move request details are updated
+func LogUpdated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, notes *string, metadata *string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -252,8 +252,8 @@ func LogMoveRequestUpdated(db *sqlx.DB, moveRequestID string, actorID string, ac
 	return err
 }
 
-// GetMoveRequestHistory retrieves the full history for a move request
-func GetMoveRequestHistory(db *sqlx.DB, moveRequestID string) ([]models.MoveRequestHistoryResponse, error) {
+// GetHistory retrieves the full history for a move request
+func GetHistory(db *sqlx.DB, moveRequestID string) ([]models.MoveRequestHistoryResponse, error) {
 	query := `
 		SELECT
 			id, move_request_id, action_type, actor_id, actor_name, actor_role,

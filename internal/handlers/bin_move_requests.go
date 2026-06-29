@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
@@ -319,7 +318,7 @@ func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub,
 			log.Printf("Warning: Failed to fetch user name for history: %v", err)
 			userName = "Unknown User"
 		}
-		err = helpers.LogMoveRequestCreated(db, id, userID, userName, req.MoveType, newAddress)
+		err = moverequest.LogCreated(db, id, userID, userName, req.MoveType, newAddress)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request creation: %v", err)
 			// Don't fail the request, just log the warning
@@ -775,7 +774,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	if previousAssignedShiftID == nil && previousAssignedUserID == nil {
 		// New assignment
 		log.Printf("   📝 Logging NEW assignment to history (driver: %s, shift: %s)", driverName, activeShift.ID)
-		err = helpers.LogMoveRequestAssigned(db, moveRequest.ID, managerID, managerName,
+		err = moverequest.LogAssigned(db, moveRequest.ID, managerID, managerName,
 			newAssignmentType, &activeShift.DriverID, &driverName, &activeShift.ID)
 		if err != nil {
 			log.Printf("   ⚠️  WARNING: Failed to log assignment history: %v", err)
@@ -785,7 +784,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	} else {
 		// Reassignment
 		log.Printf("   📝 Logging REASSIGNMENT to history (from previous assignment to driver: %s, shift: %s)", driverName, activeShift.ID)
-		err = helpers.LogMoveRequestReassigned(db, moveRequest.ID, managerID, managerName,
+		err = moverequest.LogReassigned(db, moveRequest.ID, managerID, managerName,
 			previousAssignmentType, &newAssignmentType,
 			previousAssignedUserID, &activeShift.DriverID,
 			previousAssignedUserName, &driverName,
@@ -2079,7 +2078,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					assignedUserName = updatedMove.AssignedDriverName
 				}
 
-				err = helpers.LogMoveRequestAssigned(
+				err = moverequest.LogAssigned(
 					db, id, managerUserID, managerName,
 					assignmentType,
 					updatedMove.AssignedUserID,
@@ -2110,7 +2109,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					}
 				}
 
-				err = helpers.LogMoveRequestUnassigned(
+				err = moverequest.LogUnassigned(
 					db, id, managerUserID, managerName,
 					moveRequest.AssignmentType,
 					moveRequest.AssignedUserID,
@@ -2147,7 +2146,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					newAssignedUserName = updatedMove.AssignedDriverName
 				}
 
-				err = helpers.LogMoveRequestReassigned(
+				err = moverequest.LogReassigned(
 					db, id, managerUserID, managerName,
 					moveRequest.AssignmentType,
 					updatedMove.AssignmentType,
@@ -2309,7 +2308,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			// Only log "updated" history entry if there are actual changes
 			if len(changes) > 0 {
 				notes := "Updated move details"
-				err = helpers.LogMoveRequestUpdated(db, id, managerUserID, managerName, &notes, metadataJSON)
+				err = moverequest.LogUpdated(db, id, managerUserID, managerName, &notes, metadataJSON)
 				if err != nil {
 					log.Printf("Warning: Failed to log move request update: %v", err)
 				}
@@ -2563,7 +2562,7 @@ func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			managerName = "Unknown Manager"
 		}
 		reason := "Cancelled by manager"
-		err = helpers.LogMoveRequestCancelled(db, id, managerID, managerName, &reason)
+		err = moverequest.LogCancelled(db, id, managerID, managerName, &reason)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request cancellation: %v", err)
 		}
@@ -2782,7 +2781,7 @@ func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 				userName = "Unknown User"
 			}
 
-			err = helpers.LogMoveRequestAssigned(db, id, managerID, managerName, "manual", &req.UserID, &userName, nil)
+			err = moverequest.LogAssigned(db, id, managerID, managerName, "manual", &req.UserID, &userName, nil)
 			if err != nil {
 				log.Printf("Warning: Failed to log move request assignment: %v", err)
 			}
@@ -2855,7 +2854,7 @@ func ManuallyCompleteMoveRequest(store moverequest.Store, db *sqlx.DB) http.Hand
 			log.Printf("Warning: Failed to fetch manager name for history: %v", err)
 			managerName = "Unknown Manager"
 		}
-		err = helpers.LogMoveRequestCompleted(db, moveRequest.ID, userID, managerName)
+		err = moverequest.LogCompleted(db, moveRequest.ID, userID, managerName)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request completion: %v", err)
 		}
@@ -3131,7 +3130,7 @@ func ClearMoveAssignment(store moverequest.Store, db *sqlx.DB) http.HandlerFunc 
 				previousShiftID = moveRequest.AssignedShiftID
 			}
 
-			err = helpers.LogMoveRequestUnassigned(db, id, managerID, managerName,
+			err = moverequest.LogUnassigned(db, id, managerID, managerName,
 				moveRequest.AssignmentType, previousUserID, previousUserName, previousShiftID)
 			if err != nil {
 				log.Printf("Warning: Failed to log move request unassignment: %v", err)
@@ -3156,7 +3155,7 @@ func GetMoveRequestHistory(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get history using helper
-		history, err := helpers.GetMoveRequestHistory(db, id)
+		history, err := moverequest.GetHistory(db, id)
 		if err != nil {
 			log.Printf("Error fetching move request history: %v", err)
 			http.Error(w, "Failed to fetch history", http.StatusInternalServerError)

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"ropacal-backend/internal/geo"
-	"ropacal-backend/internal/helpers"
 	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -442,7 +441,7 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 		log.Printf("⚠️  [StaleShiftMonitor] Failed to release move requests: %v", relErr)
 	}
 	for _, mr := range released {
-		if logErr := helpers.LogMoveRequestUnassigned(
+		if logErr := moverequest.LogUnassigned(
 			tx, mr.ID, "system", "system",
 			mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
 		); logErr != nil {
