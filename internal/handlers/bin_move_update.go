@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +17,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -267,212 +265,40 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			}
 		}
 
-		// ── Cascading Update: Update route_tasks if move request address or type changed ───────
-		if centrifugoClient != nil && moveRequest.AssignedShiftID != nil {
-			log.Printf("🔄 [UPDATE-MOVE] Checking for cascading updates to route_tasks")
-
-			// Check if address changed (for relocation moves with pickup/dropoff tasks)
-			addressChanged := false
-			if req.NewStreet != nil || req.NewCity != nil || req.NewZip != nil ||
-				req.NewLatitude != nil || req.NewLongitude != nil {
-				addressChanged = true
-			}
-
-			// Check if move_type changed (could remove dropoff task)
+		// Reconcile the move's route_tasks if its type or address changed — the
+		// itinerary domain owns these writes now. Runs regardless of centrifugo (the
+		// DB reconcile MUST happen; the old code wrongly gated it on the notify
+		// client); the driver notify fires post-commit below.
+		var reconcileOutcome itinerary.ReconcileOutcome
+		if moveRequest.AssignedShiftID != nil {
+			addressChanged := req.NewStreet != nil || req.NewCity != nil || req.NewZip != nil ||
+				req.NewLatitude != nil || req.NewLongitude != nil
 			moveTypeChanged := req.MoveType != nil && *req.MoveType != moveRequest.MoveType
-
 			if addressChanged || moveTypeChanged {
-				// Find affected route tasks for this move request
-				var affectedTasks []struct {
-					ShiftID    string  `db:"shift_id"`
-					TaskID     string  `db:"task_id"`
-					TaskType   string  `db:"task_type"`
-					OldAddress *string `db:"old_address"`
+				newType := moveRequest.MoveType
+				if req.MoveType != nil {
+					newType = *req.MoveType
 				}
-
-				err = tx.Select(&affectedTasks, `
-					SELECT
-						rt.shift_id,
-						rt.id as task_id,
-						rt.task_type,
-						rt.address as old_address
-					FROM route_tasks rt
-					JOIN shifts s ON rt.shift_id = s.id
-					WHERE rt.move_request_id = $1
-					  AND rt.is_completed = 0
-					  AND s.status IN ('active', 'scheduled')
-				`, id)
-
-				if err != nil && err != sql.ErrNoRows {
-					log.Printf("⚠️  [UPDATE-MOVE] Failed to check route tasks: %v", err)
-				} else if len(affectedTasks) > 0 {
-					log.Printf("🎯 [UPDATE-MOVE] Found %d route task(s) affected by change", len(affectedTasks))
-
-					// If move_type changed from relocation → store, soft delete dropoff tasks
-					if moveTypeChanged && req.MoveType != nil && *req.MoveType == "store" {
-						var dropoffIDs []string
-						for _, task := range affectedTasks {
-							if task.TaskType == "dropoff" {
-								dropoffIDs = append(dropoffIDs, task.TaskID)
-							}
-						}
-						if deleteErr := itinerary.RemoveByIDs(tx, dropoffIDs, managerUserID, "move_type_changed_to_store", now); deleteErr != nil {
-							log.Printf("⚠️  [UPDATE-MOVE] Failed to soft delete dropoff tasks: %v", deleteErr)
-						} else if len(dropoffIDs) > 0 {
-							log.Printf("✅ [UPDATE-MOVE] Soft deleted %d dropoff task(s) (move_type → store)", len(dropoffIDs))
-						}
-
-						// Notify driver that dropoff task was removed
-						if moveRequest.AssignedShiftID != nil {
-							notifyErr := NotifyDriverOfRouteUpdate(
-								db,
-								centrifugoClient,
-								*moveRequest.AssignedShiftID,
-								"move_type_changed",
-								map[string]interface{}{
-									"move_request_id": id,
-									"bin_number":      moveRequest.BinNumber,
-									"old_move_type":   moveRequest.MoveType,
-									"new_move_type":   *req.MoveType,
-									"dropoff_removed": true,
-								},
-							)
-
-							if notifyErr != nil {
-								log.Printf("⚠️  [UPDATE-MOVE] Failed to notify driver: %v", notifyErr)
-							} else {
-								log.Printf("✅ [UPDATE-MOVE] Notified driver about move type change")
-							}
-						}
-
-						// If move_type changed from store → relocation, add dropoff task
-					} else if moveTypeChanged && req.MoveType != nil && *req.MoveType == "relocation" && moveRequest.MoveType == "store" {
-						// Find the pickup task to get shift_id and sequence info
-						var pickupTask *struct {
-							TaskID        string
-							ShiftID       string
-							SequenceOrder int
-						}
-
-						for _, task := range affectedTasks {
-							if task.TaskType == "pickup" {
-								pickupTask = &struct {
-									TaskID        string
-									ShiftID       string
-									SequenceOrder int
-								}{
-									TaskID:        task.TaskID,
-									ShiftID:       task.ShiftID,
-									SequenceOrder: 0, // Will query for actual sequence
-								}
-								break
-							}
-						}
-
-						if pickupTask != nil && req.NewStreet != nil && req.NewLatitude != nil && req.NewLongitude != nil {
-							// Get actual sequence order of pickup task
-							err := tx.QueryRow(`SELECT sequence_order FROM route_tasks WHERE id = $1`, pickupTask.TaskID).Scan(&pickupTask.SequenceOrder)
-							if err != nil {
-								log.Printf("⚠️  [UPDATE-MOVE] Failed to get pickup task sequence: %v", err)
-							} else {
-								// Create new dropoff task right after pickup
-								newDropoffID := uuid.New().String()
-								_, insertErr := tx.Exec(`
-									INSERT INTO route_tasks (
-										id, shift_id, move_request_id, task_type,
-										sequence_order, address, destination_address,
-										destination_latitude, destination_longitude,
-										is_completed, created_at, updated_at
-									) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $10)
-								`, newDropoffID, pickupTask.ShiftID, id, "dropoff",
-									pickupTask.SequenceOrder+1, *req.NewStreet, *req.NewStreet,
-									*req.NewLatitude, *req.NewLongitude, time.Now().Unix())
-
-								if insertErr != nil {
-									log.Printf("⚠️  [UPDATE-MOVE] Failed to create dropoff task: %v", insertErr)
-								} else {
-									log.Printf("✅ [UPDATE-MOVE] Created dropoff task %s (move_type → relocation)", newDropoffID)
-
-									// Notify driver that dropoff task was added
-									if moveRequest.AssignedShiftID != nil {
-										notifyErr := NotifyDriverOfRouteUpdate(
-											db,
-											centrifugoClient,
-											*moveRequest.AssignedShiftID,
-											"move_type_changed",
-											map[string]interface{}{
-												"move_request_id": id,
-												"bin_number":      moveRequest.BinNumber,
-												"old_move_type":   moveRequest.MoveType,
-												"new_move_type":   *req.MoveType,
-												"dropoff_added":   true,
-												"new_address":     *req.NewStreet,
-											},
-										)
-
-										if notifyErr != nil {
-											log.Printf("⚠️  [UPDATE-MOVE] Failed to notify driver: %v", notifyErr)
-										} else {
-											log.Printf("✅ [UPDATE-MOVE] Notified driver about move type change")
-										}
-									}
-								}
-							}
-						}
-
-					} else if addressChanged {
-						// Update address/coordinates for affected tasks
-						for _, task := range affectedTasks {
-							// Update based on task type
-							if task.TaskType == "dropoff" {
-								// Update dropoff destination
-								if req.NewStreet != nil && req.NewLatitude != nil && req.NewLongitude != nil {
-									_, updateErr := tx.Exec(`
-										UPDATE route_tasks
-										SET destination_address = $1,
-											destination_latitude = $2,
-											destination_longitude = $3,
-											updated_at = $4
-										WHERE id = $5
-									`, *req.NewStreet, *req.NewLatitude, *req.NewLongitude, time.Now().Unix(), task.TaskID)
-
-									if updateErr != nil {
-										log.Printf("⚠️  [UPDATE-MOVE] Failed to update dropoff task %s: %v", task.TaskID, updateErr)
-									} else {
-										oldAddr := "unknown"
-										if task.OldAddress != nil {
-											oldAddr = *task.OldAddress
-										}
-										log.Printf("✅ [UPDATE-MOVE] Updated dropoff task %s: %s → %s", task.TaskID, oldAddr, *req.NewStreet)
-									}
-								}
-							}
-						}
-
-						// Notify driver about address change
-						if moveRequest.AssignedShiftID != nil {
-							notifyErr := NotifyDriverOfRouteUpdate(
-								db,
-								centrifugoClient,
-								*moveRequest.AssignedShiftID,
-								"move_request_address_changed",
-								map[string]interface{}{
-									"move_request_id": id,
-									"bin_number":      moveRequest.BinNumber,
-									"old_address":     moveRequest.NewAddress,
-									"new_address":     *req.NewStreet,
-								},
-							)
-
-							if notifyErr != nil {
-								log.Printf("⚠️  [UPDATE-MOVE] Failed to notify driver: %v", notifyErr)
-							} else {
-								log.Printf("✅ [UPDATE-MOVE] Notified driver about address change")
-							}
-						}
+				var dest *itinerary.MoveDestination
+				if req.NewLatitude != nil && req.NewLongitude != nil {
+					addr := ""
+					if fieldEdits.NewAddress != nil {
+						addr = *fieldEdits.NewAddress
+					} else if req.NewStreet != nil {
+						addr = *req.NewStreet
 					}
-				} else {
-					log.Printf("ℹ️  [UPDATE-MOVE] No active route tasks found for this move request")
+					dest = &itinerary.MoveDestination{Address: addr, Lat: *req.NewLatitude, Lng: *req.NewLongitude}
+				}
+				reconcileOutcome, err = itinerary.ReconcileMove(tx, *moveRequest.AssignedShiftID, id,
+					moveRequest.MoveType, newType, addressChanged, dest, managerUserID, now)
+				if err != nil {
+					if errors.Is(err, itinerary.ErrMissingDestination) {
+						http.Error(w, "Changing a move to 'relocation' requires new_latitude, new_longitude, and an address", http.StatusBadRequest)
+						return
+					}
+					log.Printf("Error reconciling route_tasks: %v", err)
+					http.Error(w, "Failed to update the driver's route", http.StatusInternalServerError)
+					return
 				}
 			}
 		}
@@ -485,6 +311,24 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 		}
 
 		log.Printf("[UPDATE MOVE] ✅ Successfully updated move request: %s", id)
+
+		// Notify the driver if the route's drop-off changed (post-commit, best-effort).
+		if moveRequest.AssignedShiftID != nil && centrifugoClient != nil &&
+			(reconcileOutcome.DropoffRemoved || reconcileOutcome.DropoffAdded || reconcileOutcome.AddressUpdated) {
+			event := "move_type_changed"
+			if reconcileOutcome.AddressUpdated && !reconcileOutcome.DropoffRemoved && !reconcileOutcome.DropoffAdded {
+				event = "move_request_address_changed"
+			}
+			if notifyErr := NotifyDriverOfRouteUpdate(db, centrifugoClient, *moveRequest.AssignedShiftID, event, map[string]interface{}{
+				"move_request_id": id,
+				"bin_number":      moveRequest.BinNumber,
+				"dropoff_removed": reconcileOutcome.DropoffRemoved,
+				"dropoff_added":   reconcileOutcome.DropoffAdded,
+				"address_updated": reconcileOutcome.AddressUpdated,
+			}); notifyErr != nil {
+				log.Printf("⚠️  Failed to notify driver of route change: %v", notifyErr)
+			}
+		}
 
 		// Re-optimize shift if move request was on an active shift and address/move_type changed
 		if moveRequest.AssignedShiftID != nil {
