@@ -7609,7 +7609,9 @@ func optimizeRouteWithMapbox(
 	`, shiftID)
 	if err == nil {
 		for i, t := range allActiveTasks {
-			tx.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID)
+			if _, rErr := tx.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID); rErr != nil {
+				return fmt.Errorf("renumber task %s: %w", t.ID, rErr)
+			}
 		}
 		log.Printf("🔢 Renumbered %d tasks (1-%d)", len(allActiveTasks), len(allActiveTasks))
 	}
