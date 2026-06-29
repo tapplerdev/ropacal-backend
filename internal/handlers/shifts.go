@@ -14,6 +14,7 @@ import (
 
 	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
@@ -4131,6 +4132,12 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 
 			skippedCount := 0
 			for _, addReq := range req.AddTasks {
+				// Validate task_type at the boundary — a clean 400 instead of a 500
+				// at INSERT time (the DB CHECK). The itinerary domain owns the taxonomy.
+				if _, err := itinerary.ParseTaskType(addReq.TaskType); err != nil {
+					utils.RespondError(w, http.StatusBadRequest, err.Error())
+					return
+				}
 				// Dedup check: skip if this task already exists on the shift
 				if addReq.TaskType == "collection" && addReq.BinID != nil && existingBinIDs[*addReq.BinID] {
 					log.Printf("   ⏭️  Skipping duplicate collection for bin %s", *addReq.BinID)
