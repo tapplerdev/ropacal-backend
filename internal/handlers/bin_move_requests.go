@@ -628,8 +628,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		}
 	}
 
-	// 3. Insert move request bin at determined position
-	// Determine how many waypoints to add (pickup only, or pickup + dropoff)
+	// 3. Insert the move's stops at the determined position (itinerary.AddMove).
 	tx, err := db.Beginx()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)

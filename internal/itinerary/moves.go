@@ -78,11 +78,17 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 		return 0, fmt.Errorf("insert dropoff: %w", err)
 	}
 
-	// Invariant: pickup precedes dropoff (deterministic here; guard preserved
-	// from the original to catch any future sequencing regression).
+	// Invariant: pickup precedes dropoff (deterministic here; guard preserved from
+	// the original to catch any future sequencing regression). Capture the verify
+	// errors — a read failure must surface as a real error, not leave ps=ds=0 and
+	// trip the ps>=ds guard with a misleading "invalid sequence order".
 	var ps, ds int
-	_ = sqlx.Get(ext, &ps, ext.Rebind(`SELECT sequence_order FROM route_tasks WHERE shift_id = ? AND move_request_id = ? AND task_type = 'pickup'`), shiftID, p.MoveRequestID)
-	_ = sqlx.Get(ext, &ds, ext.Rebind(`SELECT sequence_order FROM route_tasks WHERE shift_id = ? AND move_request_id = ? AND task_type = 'dropoff'`), shiftID, p.MoveRequestID)
+	if err := sqlx.Get(ext, &ps, ext.Rebind(`SELECT sequence_order FROM route_tasks WHERE shift_id = ? AND move_request_id = ? AND task_type = 'pickup'`), shiftID, p.MoveRequestID); err != nil {
+		return 0, fmt.Errorf("verify pickup sequence: %w", err)
+	}
+	if err := sqlx.Get(ext, &ds, ext.Rebind(`SELECT sequence_order FROM route_tasks WHERE shift_id = ? AND move_request_id = ? AND task_type = 'dropoff'`), shiftID, p.MoveRequestID); err != nil {
+		return 0, fmt.Errorf("verify dropoff sequence: %w", err)
+	}
 	if ps >= ds {
 		return 0, fmt.Errorf("invalid sequence order: pickup at %d, dropoff at %d", ps, ds)
 	}

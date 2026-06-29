@@ -9,6 +9,10 @@ import "github.com/jmoiron/sqlx"
 // it. Cross-domain side effects of a removal (releasing a move to backlog +
 // logging, unassigning a potential_location) remain the caller's responsibility.
 // Runs inside the caller's transaction (ext). No-op for an empty id list.
+//
+// The `is_deleted = false` guard makes re-removal idempotent: removing an
+// already-removed task is a no-op that PRESERVES the original deletion's audit
+// fields rather than overwriting them.
 func RemoveByIDs(ext sqlx.Ext, ids []string, by, reason string, now int64) error {
 	if len(ids) == 0 {
 		return nil

@@ -29,9 +29,9 @@ type TaskTraits struct {             // exactly what the optimizer consumes (con
     CapacityDelta int                //  move/placement = +1, collection/service = 0
     Paired        bool               //  move = pickup→dropoff shipment (precedence + same vehicle)
     HasTimeWindow bool               //  service today; OR-Tools supports it for any type
-    DisplayType   string             //  the string the app renders/navigates off
 }
-// a registry maps TaskType → TaskTraits; adding a type = register a descriptor (OCP)
+// a registry maps TaskType → TaskTraits; adding a type = register a descriptor (OCP).
+// (The app renders/navigates off the task_type STRING directly — no display field needed.)
 ```
 
 ## Interface (one owner; two sequence writers)
