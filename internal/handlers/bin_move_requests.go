@@ -549,7 +549,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	// 2. Determine current position in route (find first uncompleted bin)
 	var shiftBins []models.ShiftBinWithDetails
 	err = db.Select(&shiftBins, `
-		SELECT rt.id, rt.shift_id, rt.bin_id, rt.sequence_order, rt.is_completed,
+		SELECT rt.id, rt.shift_id, COALESCE(rt.bin_id, '') as bin_id, rt.sequence_order, rt.is_completed,
 		       COALESCE(b.bin_number, 0) as bin_number, COALESCE(b.current_street, rt.address, '') as current_street,
 		       COALESCE(b.city, '') as city, COALESCE(b.zip, '') as zip, COALESCE(b.fill_percentage, 0) as fill_percentage,
 		       COALESCE(b.latitude, rt.latitude) as latitude, COALESCE(b.longitude, rt.longitude) as longitude
