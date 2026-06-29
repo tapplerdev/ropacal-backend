@@ -101,8 +101,20 @@ Driver task JSON + Centrifugo payloads byte-identical. Mutations synchronous, in
 caller's tx. Optimizer owns *order*; itinerary owns *numbering + persistence*. Two
 `sequence_order` writers only.
 
+## Future: `shift_edit_history` (unblocked by this domain)
+Today shift edits are audited only **row-level** on `route_tasks` (`added_by`/
+`addition_reason`/`deleted_by`/`deletion_reason`) + the move-side effect in
+`move_request_history`; there is **no unified, queryable edit timeline** for a shift
+(`shift_history` is the *completed-shift archive*; `shift_edited` is an ephemeral
+Centrifugo event). Once itinerary is the **single writer** of `route_tasks`, every
+`AddX` / `RemoveTasks` / `ApplyOrder` is one choke point that can also append a
+`shift_edit_history` event (added/removed/reordered/reassigned, with actor + reason).
+A clean follow-on feature this consolidation makes cheap — not part of the
+behavior-preserving migration. Tracked separately.
+
 ## Out of scope (separate initiatives)
 - OR-Tools "saved optimized route" cache / revive `route` templates (optimization layer; feeds `ApplyOrder`).
 - Time windows for collections/moves (capability confirmed; product decision).
 - PUT→PATCH verb sweep (#14, dashboard lockstep).
 - moverequest (c) kernel — *unblocked* by Phases 2 & 4.
+- `shift_edit_history` unified edit timeline (see Future above).
