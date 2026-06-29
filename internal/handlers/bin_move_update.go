@@ -155,8 +155,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 		// Plain field changes go through the moverequest domain (EditFields, called
 		// once the tx is open below). Urgency is recomputed inside the domain when
 		// scheduled_date changes; new_address is composed here at the boundary.
-		// Assignment changes are NOT here — they're handled by the assignment block
-		// below via updates[] and the guarded domain transitions.
+		// Assignment changes are resolved separately (PlanAssignment) below.
 		fieldEdits := moverequest.FieldEdits{
 			ScheduledDate: req.ScheduledDate,
 			MoveType:      req.MoveType,
@@ -170,11 +169,10 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			fieldEdits.NewAddress = &addr
 		}
 
-		// ═══════════════════════════════════════════════════════════════════
-		// ASSIGNMENT HANDLING (Shift/User reassignment)
-		// ═══════════════════════════════════════════════════════════════════
-
-		// START TRANSACTION for assignment changes
+		// One transaction wraps the whole edit: field changes (EditFields), the
+		// assignment transition (PlanAssignment → guarded domain call), and the
+		// route_tasks reconcile (itinerary.ReconcileMove). Side-effects
+		// (history/notify/reopt) run after commit.
 		tx, err := db.Beginx()
 		if err != nil {
 			log.Printf("Error starting transaction: %v", err)
@@ -375,109 +373,23 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			return
 		}
 
-		// Log history: determine specific type of change
+		// Log history: pick the specific event the edit produced. Assignment edits
+		// (assigned/unassigned/reassigned) are classified by the moverequest domain.
 		if assignmentChanged {
-			// Determine what kind of assignment change occurred
-			oldHadAssignment := moveRequest.AssignedShiftID != nil || moveRequest.AssignedUserID != nil
-			newHasAssignment := updatedMove.AssignedShiftID != nil || updatedMove.AssignedUserID != nil
-
-			if !oldHadAssignment && newHasAssignment {
-				// ASSIGNED: Was unassigned, now assigned
-				assignmentType := ""
-				if updatedMove.AssignmentType != nil {
-					assignmentType = *updatedMove.AssignmentType
-				}
-
-				// Determine assigned user name (could be from manual assignment or shift driver)
-				var assignedUserName *string
-				if updatedMove.AssignedUserName != nil {
-					assignedUserName = updatedMove.AssignedUserName
-				} else if updatedMove.AssignedDriverName != nil {
-					assignedUserName = updatedMove.AssignedDriverName
-				}
-
-				err = moverequest.LogAssigned(
-					db, id, managerUserID, managerName,
-					assignmentType,
-					updatedMove.AssignedUserID,
-					assignedUserName,
-					updatedMove.AssignedShiftID,
-				)
-				if err != nil {
-					log.Printf("Warning: Failed to log move request assignment: %v", err)
-				}
-
-			} else if oldHadAssignment && !newHasAssignment {
-				// UNASSIGNED: Was assigned, now unassigned
-				// Determine old assigned user name
-				var oldAssignedUserName *string
-				if moveRequest.AssignedUserID != nil {
-					// Fetch the old assigned user's name
-					var userName string
-					nameErr := db.Get(&userName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID)
-					if nameErr == nil {
-						oldAssignedUserName = &userName
-					}
-				} else if moveRequest.AssignedShiftID != nil {
-					// Fetch the old shift driver's name
-					var driverName string
-					nameErr := db.Get(&driverName, `SELECT u.name FROM shifts s JOIN users u ON s.driver_id = u.id WHERE s.id = $1`, *moveRequest.AssignedShiftID)
-					if nameErr == nil {
-						oldAssignedUserName = &driverName
-					}
-				}
-
-				err = moverequest.LogUnassigned(
-					db, id, managerUserID, managerName,
-					moveRequest.AssignmentType,
-					moveRequest.AssignedUserID,
-					oldAssignedUserName,
-					moveRequest.AssignedShiftID,
-				)
-				if err != nil {
-					log.Printf("Warning: Failed to log move request unassignment: %v", err)
-				}
-
-			} else if oldHadAssignment && newHasAssignment {
-				// REASSIGNED: Assignment changed from one to another
-				// Determine old assigned user name
-				var oldAssignedUserName *string
-				if moveRequest.AssignedUserID != nil {
-					var userName string
-					nameErr := db.Get(&userName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID)
-					if nameErr == nil {
-						oldAssignedUserName = &userName
-					}
-				} else if moveRequest.AssignedShiftID != nil {
-					var driverName string
-					nameErr := db.Get(&driverName, `SELECT u.name FROM shifts s JOIN users u ON s.driver_id = u.id WHERE s.id = $1`, *moveRequest.AssignedShiftID)
-					if nameErr == nil {
-						oldAssignedUserName = &driverName
-					}
-				}
-
-				// Determine new assigned user name
-				var newAssignedUserName *string
-				if updatedMove.AssignedUserName != nil {
-					newAssignedUserName = updatedMove.AssignedUserName
-				} else if updatedMove.AssignedDriverName != nil {
-					newAssignedUserName = updatedMove.AssignedDriverName
-				}
-
-				err = moverequest.LogReassigned(
-					db, id, managerUserID, managerName,
-					moveRequest.AssignmentType,
-					updatedMove.AssignmentType,
-					moveRequest.AssignedUserID,
-					updatedMove.AssignedUserID,
-					oldAssignedUserName,
-					newAssignedUserName,
-					moveRequest.AssignedShiftID,
-					updatedMove.AssignedShiftID,
-				)
-				if err != nil {
-					log.Printf("Warning: Failed to log move request reassignment: %v", err)
-				}
+			before := moverequest.AssignmentState{
+				ShiftID:        moveRequest.AssignedShiftID,
+				UserID:         moveRequest.AssignedUserID,
+				AssignmentType: moveRequest.AssignmentType,
+			}
+			after := moverequest.AssignmentState{
+				ShiftID:        updatedMove.AssignedShiftID,
+				UserID:         updatedMove.AssignedUserID,
+				AssignmentType: updatedMove.AssignmentType,
+				UserName:       updatedMove.AssignedUserName,
+				DriverName:     updatedMove.AssignedDriverName,
+			}
+			if err := moverequest.LogAssignmentChange(db, id, managerUserID, managerName, before, after); err != nil {
+				log.Printf("Warning: Failed to log assignment-change history: %v", err)
 			}
 		} else if req.ScheduledDate != nil || req.MoveType != nil || req.Reason != nil || req.Notes != nil ||
 			(req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil) ||

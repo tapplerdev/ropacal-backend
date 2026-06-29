@@ -20,18 +20,6 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// stringPtrEqual compares two string pointers for equality
-// Returns true if both are nil or both point to the same string value
-func stringPtrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
 func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
