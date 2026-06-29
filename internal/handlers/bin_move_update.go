@@ -154,60 +154,29 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 
 		now := time.Now().Unix()
 
-		// Build dynamic update query
+		// Plain field changes go through the moverequest domain (EditFields, called
+		// once the tx is open below). Urgency is recomputed inside the domain when
+		// scheduled_date changes; new_address is composed here at the boundary.
+		// Assignment changes are NOT here — they're handled by the assignment block
+		// below via updates[] and the guarded domain transitions.
+		fieldEdits := moverequest.FieldEdits{
+			ScheduledDate: req.ScheduledDate,
+			MoveType:      req.MoveType,
+			Reason:        req.Reason,
+			Notes:         req.Notes,
+			NewLatitude:   req.NewLatitude,
+			NewLongitude:  req.NewLongitude,
+		}
+		if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
+			addr := fmt.Sprintf("%s, %s %s", *req.NewStreet, *req.NewCity, *req.NewZip)
+			fieldEdits.NewAddress = &addr
+		}
+
+		// updates[] accumulates ONLY assignment SETs (assignment block below); the
+		// combined UPDATE at the end writes updated_at + any assignment changes.
 		updates := []string{"updated_at = $1"}
 		args := []interface{}{now}
 		argCount := 2
-
-		// Update scheduled date and recalculate urgency if date changed
-		if req.ScheduledDate != nil {
-			updates = append(updates, fmt.Sprintf("scheduled_date = $%d", argCount))
-			args = append(args, *req.ScheduledDate)
-			argCount++
-
-			// Recalculate urgency
-			newUrgency := moverequest.ScheduledUrgency(*req.ScheduledDate, time.Now().Unix())
-			updates = append(updates, fmt.Sprintf("urgency = $%d", argCount))
-			args = append(args, newUrgency)
-			argCount++
-		}
-
-		if req.MoveType != nil {
-			updates = append(updates, fmt.Sprintf("move_type = $%d", argCount))
-			args = append(args, *req.MoveType)
-			argCount++
-		}
-		if req.Reason != nil {
-			updates = append(updates, fmt.Sprintf("reason = $%d", argCount))
-			args = append(args, *req.Reason)
-			argCount++
-		}
-
-		if req.Notes != nil {
-			updates = append(updates, fmt.Sprintf("notes = $%d", argCount))
-			args = append(args, *req.Notes)
-			argCount++
-		}
-
-		// Build new address if separate fields provided
-		if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {
-			newAddress := fmt.Sprintf("%s, %s %s", *req.NewStreet, *req.NewCity, *req.NewZip)
-			updates = append(updates, fmt.Sprintf("new_address = $%d", argCount))
-			args = append(args, newAddress)
-			argCount++
-		}
-
-		if req.NewLatitude != nil {
-			updates = append(updates, fmt.Sprintf("new_latitude = $%d", argCount))
-			args = append(args, *req.NewLatitude)
-			argCount++
-		}
-
-		if req.NewLongitude != nil {
-			updates = append(updates, fmt.Sprintf("new_longitude = $%d", argCount))
-			args = append(args, *req.NewLongitude)
-			argCount++
-		}
 
 		// ═══════════════════════════════════════════════════════════════════
 		// ASSIGNMENT HANDLING (Shift/User reassignment)
@@ -221,6 +190,14 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			return
 		}
 		defer tx.Rollback()
+
+		// Apply the plain field changes through the domain (recomputes urgency,
+		// guarded so a terminal move can't be edited). No-op if nothing changed.
+		if err = moverequest.EditFields(tx, id, fieldEdits, now); err != nil {
+			log.Printf("Error applying field edits: %v", err)
+			http.Error(w, "Failed to update move request", http.StatusInternalServerError)
+			return
+		}
 
 		// Track if assignment changed (for WebSocket notification)
 		assignmentChanged := false

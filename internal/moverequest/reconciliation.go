@@ -83,12 +83,14 @@ func ReleaseFromShift(ext sqlx.Ext, shiftIDs []string, now int64) ([]ReleasedMov
 	return affected, nil
 }
 
-// guardedTransition is the one place that changes a move request's status. It
-// only makes the change if the move isn't already finished — i.e. not
-// 'completed' or 'cancelled'. If the move is already finished (or doesn't exist),
-// it changes nothing and returns ErrInvalidTransition. Keeping this check in one
-// spot means a bad change — like completing a move that was already cancelled —
-// is blocked here, instead of trusting every caller to check first.
+// guardedTransition is the one guarded place that writes a move request — a
+// status transition (Cancel/Complete/Assign*/ClearAssignment) or a field edit
+// (EditFields). It only makes the change if the move isn't already finished —
+// i.e. not 'completed' or 'cancelled'. If the move is already finished (or
+// doesn't exist), it changes nothing and returns ErrInvalidTransition. Keeping
+// this check in one spot means a bad change — like completing a move that was
+// already cancelled, or editing a finalized one — is blocked here, instead of
+// trusting every caller to check first.
 //
 // `set` is the columns to change (written with ? placeholders); the helper adds
 // the "only if not finished" check and the move id. Works on a plain DB
