@@ -3053,27 +3053,11 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	log.Printf("   🔄 Updated %d existing tasks", tasksUpdated)
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// Clean up sequence numbers: renumber all active tasks 1, 2, 3, ...
-	// Non-warehouse tasks first, then warehouse_stop tasks at the end
-	var activeTasks []struct {
-		ID            string `db:"id"`
-		TaskType      string `db:"task_type"`
-		SequenceOrder int    `db:"sequence_order"`
-	}
-	err = tx.Select(&activeTasks, `
-		SELECT id, task_type, sequence_order FROM route_tasks
-		WHERE shift_id = $1 AND is_deleted = false
-		ORDER BY
-			is_completed DESC,
-			CASE WHEN task_type = 'warehouse_stop' THEN 1 ELSE 0 END ASC,
-			sequence_order ASC, created_at ASC
-	`, shiftID)
-	if err == nil {
-		log.Printf("🔢 [REOPTIMIZE] Renumbering %d tasks:", len(activeTasks))
-		for i, t := range activeTasks {
-			log.Printf("   [%d] %s (old seq=%d) → new seq=%d", i, t.TaskType, t.SequenceOrder, i+1)
-			tx.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID)
-		}
+	// Normalize sequence numbers to a dense 1..N (completed first, warehouse last,
+	// else by current order). The itinerary domain owns this order-preserving
+	// renumber — one of the two sequence_order writers.
+	if err := itinerary.Resequence(tx, shiftID); err != nil {
+		log.Printf("⚠️  [REOPTIMIZE] Resequence failed: %v", err)
 	}
 
 	err = tx.Commit()
