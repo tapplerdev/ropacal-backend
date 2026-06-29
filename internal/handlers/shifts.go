@@ -2558,45 +2558,22 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	remainingTasks = len(tasks)
 	log.Printf("📊 [REOPTIMIZE] %d tasks to reoptimize (warehouse stops excluded)", remainingTasks)
 
-	// Step 4: Get driver's current location from Redis (real-time GPS)
-	var driverStartLocation optimization.Location
-
-	if redisClient == nil {
-		log.Printf("❌ [REOPTIMIZE] Redis client not available")
-		return fmt.Errorf("redis not available - cannot get driver location for reoptimization")
+	// Step 4: Resolve the driver's current GPS (Redis primary, durable DB fallback,
+	// null-island/freshness-guarded — the same resolver StartShift/preflight use, so
+	// a Redis miss no longer hard-blocks mid-shift reoptimization).
+	loc, locErr := resolveDriverStartLocation(context.Background(), db, redisClient, shift.DriverID)
+	if locErr != nil {
+		log.Printf("❌ [REOPTIMIZE] No usable driver location: %v", locErr)
+		return fmt.Errorf("driver location for reoptimization: %w", locErr)
 	}
-
-	// Get driver's current GPS location from Redis (updated every 3 seconds by mobile app)
-	ctx := context.Background()
-	locationJSON, locationErr := redisClient.GetDriverLocation(ctx, shift.DriverID)
-
-	if locationErr != nil {
-		log.Printf("❌ [REOPTIMIZE] Driver location not available in Redis: %v", locationErr)
-		log.Printf("   Driver must have GPS enabled and mobile app running")
-		return fmt.Errorf("driver location not available - GPS must be enabled")
-	}
-
-	// Parse location JSON from Redis
-	var driverLocation struct {
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
-	}
-
-	if err := json.Unmarshal([]byte(locationJSON), &driverLocation); err != nil {
-		log.Printf("❌ [REOPTIMIZE] Failed to parse location JSON from Redis: %v", err)
-		return fmt.Errorf("failed to parse driver location data")
-	}
-
-	driverStartLocation = optimization.Location{
+	driverStartLocation := optimization.Location{
 		ID:        "driver-current",
 		Name:      "Driver Current Location",
-		Latitude:  driverLocation.Latitude,
-		Longitude: driverLocation.Longitude,
+		Latitude:  loc.Latitude,
+		Longitude: loc.Longitude,
 		Address:   "Current GPS Position",
 	}
-
-	log.Printf("✅ [REOPTIMIZE] Using driver's current GPS from Redis: (%.6f, %.6f)",
-		driverLocation.Latitude, driverLocation.Longitude)
+	log.Printf("✅ [REOPTIMIZE] Driver start location via %s: (%.6f, %.6f)", loc.Source, loc.Latitude, loc.Longitude)
 
 	// Step 5: Build optimization request
 	req := &optimization.RouteRequest{
