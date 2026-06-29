@@ -30,6 +30,21 @@ func TestCountStops(t *testing.T) {
 	}
 }
 
+// A skipped task carries is_completed=1 (SkipTask sets it) but must NOT count as
+// completed — it stays in the total, like the stored completed_bins column.
+func TestCountStops_SkippedNotCompleted(t *testing.T) {
+	tasks := []models.RouteTask{
+		{TaskType: models.TaskTypeCollection, IsCompleted: 1},                // done
+		{TaskType: models.TaskTypeCollection, IsCompleted: 1, Skipped: true}, // skipped → not done
+		{TaskType: models.TaskTypeCollection, IsCompleted: 0},                // pending
+	}
+	got := CountStops(tasks)
+	want := StopCounts{TotalBins: 3, CompletedBins: 1, TotalStops: 3, CompletedStops: 1}
+	if got != want {
+		t.Fatalf("CountStops(skipped) = %+v, want %+v", got, want)
+	}
+}
+
 func TestCountStops_Empty(t *testing.T) {
 	if got := CountStops(nil); got != (StopCounts{}) {
 		t.Fatalf("CountStops(nil) = %+v, want zero", got)

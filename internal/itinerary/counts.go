@@ -23,10 +23,16 @@ type StopCounts struct {
 // CountStops derives a shift's progress from the route_tasks the caller already
 // fetched (no extra query). The slice is expected to already exclude soft-deleted
 // rows (GetShiftTasks filters is_deleted = false).
+//
+// "Done" is is_completed==1 AND not skipped: SkipTask sets is_completed=1 to take
+// the task off the driver's queue, but the stored completed_bins is deliberately
+// NOT incremented for a skip — a skip is not a completion. Excluding it keeps this
+// derivation faithful to the column it replaces. (Whether a skip should advance the
+// progress bar is a separate product decision, not something to change silently here.)
 func CountStops(tasks []models.RouteTask) StopCounts {
 	var c StopCounts
 	for _, t := range tasks {
-		done := t.IsCompleted == 1
+		done := t.IsCompleted == 1 && !t.Skipped
 		c.TotalStops++
 		if done {
 			c.CompletedStops++
