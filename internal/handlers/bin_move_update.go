@@ -213,11 +213,20 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 		if assignChange.Kind != moverequest.AssignNoChange {
 			assignmentChanged = true
 
-			// Leaving a shift → detach this move's route_tasks, recompute the shift's
-			// bin count from route_tasks, and remember the old driver to notify post-commit.
+			// Leaving a shift → detach this move's route_tasks (move-scoped audited soft-delete,
+			// was a bin-scoped HARD delete that also wiped unrelated same-bin/completed tasks —
+			// the #24 data-loss bug), recompute the shift's bin count, and remember the old driver.
 			if moveRequest.AssignedShiftID != nil {
-				if _, derr := tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND bin_id = $2`,
-					*moveRequest.AssignedShiftID, moveRequest.BinID); derr != nil {
+				var detachIDs []string
+				if serr := tx.Select(&detachIDs, `
+					SELECT id FROM route_tasks
+					WHERE move_request_id = $1 AND shift_id = $2 AND is_completed = 0 AND is_deleted = false
+				`, id, *moveRequest.AssignedShiftID); serr != nil {
+					log.Printf("Error selecting route_tasks on reassignment: %v", serr)
+					http.Error(w, "Failed to update assignment", http.StatusInternalServerError)
+					return
+				}
+				if derr := itinerary.RemoveByIDs(tx, detachIDs, managerUserID, "move_reassigned", now); derr != nil {
 					log.Printf("Error detaching route_tasks on reassignment: %v", derr)
 					http.Error(w, "Failed to update assignment", http.StatusInternalServerError)
 					return

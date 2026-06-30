@@ -554,13 +554,21 @@ func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 
 		// If previously assigned to a shift, remove from route_tasks
 		if moveRequest.AssignedShiftID != nil {
-			log.Printf("👤 [ASSIGN TO USER] Removing bin from shift %s", *moveRequest.AssignedShiftID)
-			_, err = tx.Exec(`
-				DELETE FROM route_tasks
-				WHERE shift_id = $1 AND bin_id = $2
-			`, *moveRequest.AssignedShiftID, moveRequest.BinID)
-			if err != nil {
-				log.Printf("❌ [ASSIGN TO USER] Failed to remove from route_tasks: %v", err)
+			log.Printf("👤 [ASSIGN TO USER] Removing this move's tasks from shift %s", *moveRequest.AssignedShiftID)
+			// Move-scoped audited soft-delete (was a bin-scoped HARD delete that also wiped
+			// unrelated same-bin tasks + completed tasks — the #24 data-loss bug).
+			actor, _ := middleware.GetUserFromContext(r)
+			var taskIDs []string
+			if serr := tx.Select(&taskIDs, `
+				SELECT id FROM route_tasks
+				WHERE move_request_id = $1 AND shift_id = $2 AND is_completed = 0 AND is_deleted = false
+			`, id, *moveRequest.AssignedShiftID); serr != nil {
+				log.Printf("❌ [ASSIGN TO USER] Failed to select route_tasks: %v", serr)
+				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
+				return
+			}
+			if rerr := itinerary.RemoveByIDs(tx, taskIDs, actor.UserID, "move_reassigned_to_user", now); rerr != nil {
+				log.Printf("❌ [ASSIGN TO USER] Failed to remove from route_tasks: %v", rerr)
 				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
 				return
 			}
@@ -681,13 +689,21 @@ func ClearMoveAssignment(store moverequest.Store, db *sqlx.DB) http.HandlerFunc 
 
 		// If assigned to a shift, remove from route_tasks
 		if moveRequest.AssignedShiftID != nil {
-			log.Printf("🔄 [CLEAR ASSIGNMENT] Removing bin from shift %s", *moveRequest.AssignedShiftID)
-			_, err = tx.Exec(`
-				DELETE FROM route_tasks
-				WHERE shift_id = $1 AND bin_id = $2
-			`, *moveRequest.AssignedShiftID, moveRequest.BinID)
-			if err != nil {
-				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to remove from route_tasks: %v", err)
+			log.Printf("🔄 [CLEAR ASSIGNMENT] Removing this move's tasks from shift %s", *moveRequest.AssignedShiftID)
+			// Move-scoped audited soft-delete (was a bin-scoped HARD delete that also wiped
+			// unrelated same-bin tasks + completed tasks — the #24 data-loss bug).
+			actor, _ := middleware.GetUserFromContext(r)
+			var taskIDs []string
+			if serr := tx.Select(&taskIDs, `
+				SELECT id FROM route_tasks
+				WHERE move_request_id = $1 AND shift_id = $2 AND is_completed = 0 AND is_deleted = false
+			`, id, *moveRequest.AssignedShiftID); serr != nil {
+				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to select route_tasks: %v", serr)
+				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
+				return
+			}
+			if rerr := itinerary.RemoveByIDs(tx, taskIDs, actor.UserID, "move_assignment_cleared", now); rerr != nil {
+				log.Printf("❌ [CLEAR ASSIGNMENT] Failed to remove from route_tasks: %v", rerr)
 				http.Error(w, "Failed to remove from shift", http.StatusInternalServerError)
 				return
 			}
