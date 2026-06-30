@@ -404,7 +404,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 				UserName:       updatedMove.AssignedUserName,
 				DriverName:     updatedMove.AssignedDriverName,
 			}
-			if err := moverequest.LogAssignmentChange(db, id, managerUserID, managerName, before, after); err != nil {
+			if err := moverequest.LogAssignmentChange(db, id, managerUserID, managerName, "manager", before, after); err != nil {
 				log.Printf("Warning: Failed to log assignment-change history: %v", err)
 			}
 		} else if req.ScheduledDate != nil || req.MoveType != nil || req.Reason != nil || req.Notes != nil ||
@@ -554,7 +554,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			// Only log "updated" history entry if there are actual changes
 			if len(changes) > 0 {
 				notes := "Updated move details"
-				err = moverequest.LogUpdated(db, id, managerUserID, managerName, &notes, metadataJSON)
+				err = moverequest.LogUpdated(db, id, managerUserID, managerName, "manager", &notes, metadataJSON)
 				if err != nil {
 					log.Printf("Warning: Failed to log move request update: %v", err)
 				}

@@ -174,7 +174,7 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 		for _, mr := range released {
 			metadata := fmt.Sprintf(`{"shift_id":"%s","end_reason":"manager_cancelled","cancelled_by":"%s"}`, shiftID, userClaims.UserID)
 			if logErr := moverequest.LogUnassigned(
-				tx, mr.ID, userClaims.UserID, userClaims.Email,
+				tx, mr.ID, userClaims.UserID, userClaims.Email, "manager",
 				mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
 			); logErr != nil {
 				log.Printf("⚠️  Failed to log move request unassignment history for %s: %v", mr.ID, logErr)

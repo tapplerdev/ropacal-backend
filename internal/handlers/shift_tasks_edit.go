@@ -190,7 +190,7 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 						return
 					}
 
-					if logErr := moverequest.LogUnassigned(tx, *task.MoveRequestID, userClaims.UserID, userClaims.Email, mrDetails.AssignmentType, mrDetails.AssignedUserID, assignedUserName, mrDetails.AssignedShiftID); logErr != nil {
+					if logErr := moverequest.LogUnassigned(tx, *task.MoveRequestID, userClaims.UserID, userClaims.Email, "manager", mrDetails.AssignmentType, mrDetails.AssignedUserID, assignedUserName, mrDetails.AssignedShiftID); logErr != nil {
 						log.Printf("⚠️  Failed to log move request unassignment: %v", logErr)
 					}
 				}
@@ -731,6 +731,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 							*task.MoveRequestID,
 							userClaims.UserID,
 							userClaims.Email,
+							"manager",
 							moveReq.AssignmentType,
 							moveReq.AssignedUserID,
 							assignedUserName,

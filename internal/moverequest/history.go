@@ -10,8 +10,16 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// Durability policy: every Log* takes sqlx.Ext, so a caller MAY pass its
+// transaction (*sqlx.Tx) to record the audit row atomically with the action it
+// describes — preferred, so the trail can't disagree with reality. Passing the
+// plain *sqlx.DB logs post-commit best-effort instead (the action still succeeds
+// if the audit insert fails). actorRole and previousStatus are passed in by the
+// caller (which knows who acted and the move's status before the change) rather
+// than hardcoded/guessed here.
+
 // LogCreated logs when a move request is created
-func LogCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, moveType string, destinationAddress *string) error {
+func LogCreated(db sqlx.Ext, moveRequestID string, actorID string, actorName string, actorRole string, moveType string, destinationAddress *string) error {
 	historyID := uuid.New().String()
 
 	// Build metadata JSON via json.Marshal so a quote/backslash in an address can't
@@ -36,7 +44,7 @@ func LogCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName str
 		"created",
 		actorID,
 		actorName,
-		"manager",
+		actorRole,
 		metadata,
 		time.Now().Unix(),
 	)
@@ -49,7 +57,7 @@ func LogCreated(db *sqlx.DB, moveRequestID string, actorID string, actorName str
 }
 
 // LogAssigned logs when a move request is assigned
-func LogAssigned(db *sqlx.DB, moveRequestID string, actorID string, actorName string, assignmentType string, assignedUserID *string, assignedUserName *string, assignedShiftID *string) error {
+func LogAssigned(db sqlx.Ext, moveRequestID string, actorID string, actorName string, actorRole string, assignmentType string, assignedUserID *string, assignedUserName *string, assignedShiftID *string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -66,7 +74,7 @@ func LogAssigned(db *sqlx.DB, moveRequestID string, actorID string, actorName st
 		"assigned",
 		actorID,
 		actorName,
-		"manager",
+		actorRole,
 		assignmentType,
 		assignedUserID,
 		assignedUserName,
@@ -82,7 +90,7 @@ func LogAssigned(db *sqlx.DB, moveRequestID string, actorID string, actorName st
 }
 
 // LogReassigned logs when a move request is reassigned
-func LogReassigned(db *sqlx.DB, moveRequestID string, actorID string, actorName string,
+func LogReassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName string, actorRole string,
 	previousAssignmentType *string, newAssignmentType *string,
 	previousAssignedUserID *string, newAssignedUserID *string,
 	previousAssignedUserName *string, newAssignedUserName *string,
@@ -107,7 +115,7 @@ func LogReassigned(db *sqlx.DB, moveRequestID string, actorID string, actorName 
 		"reassigned",
 		actorID,
 		actorName,
-		"manager",
+		actorRole,
 		previousAssignmentType,
 		newAssignmentType,
 		previousAssignedUserID,
@@ -127,7 +135,7 @@ func LogReassigned(db *sqlx.DB, moveRequestID string, actorID string, actorName 
 }
 
 // LogUnassigned logs when a move request is unassigned
-func LogUnassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName string,
+func LogUnassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName string, actorRole string,
 	previousAssignmentType *string, previousAssignedUserID *string, previousAssignedUserName *string, previousAssignedShiftID *string) error {
 
 	historyID := uuid.New().String()
@@ -146,7 +154,7 @@ func LogUnassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName 
 		"unassigned",
 		actorID,
 		actorName,
-		"manager",
+		actorRole,
 		previousAssignmentType,
 		previousAssignedUserID,
 		previousAssignedUserName,
@@ -161,8 +169,9 @@ func LogUnassigned(db sqlx.Ext, moveRequestID string, actorID string, actorName 
 	return err
 }
 
-// LogCompleted logs when a move request is completed
-func LogCompleted(db *sqlx.DB, moveRequestID string, actorID string, actorName string) error {
+// LogCompleted logs when a move request is completed. previousStatus is the move's
+// status immediately before completion (read by the caller, not assumed).
+func LogCompleted(db sqlx.Ext, moveRequestID string, actorID string, actorName string, actorRole string, previousStatus string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -172,7 +181,6 @@ func LogCompleted(db *sqlx.DB, moveRequestID string, actorID string, actorName s
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 
-	previousStatus := "in_progress"
 	newStatus := "completed"
 
 	_, err := db.Exec(query,
@@ -181,9 +189,9 @@ func LogCompleted(db *sqlx.DB, moveRequestID string, actorID string, actorName s
 		"completed",
 		actorID,
 		actorName,
-		"driver",
-		&previousStatus,
-		&newStatus,
+		actorRole,
+		previousStatus,
+		newStatus,
 		time.Now().Unix(),
 	)
 
@@ -194,8 +202,9 @@ func LogCompleted(db *sqlx.DB, moveRequestID string, actorID string, actorName s
 	return err
 }
 
-// LogCancelled logs when a move request is cancelled
-func LogCancelled(db *sqlx.DB, moveRequestID string, actorID string, actorName string, reason *string) error {
+// LogCancelled logs when a move request is cancelled. previousStatus is the move's
+// status immediately before cancellation (read by the caller, not assumed).
+func LogCancelled(db sqlx.Ext, moveRequestID string, actorID string, actorName string, actorRole string, previousStatus string, reason *string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -205,7 +214,6 @@ func LogCancelled(db *sqlx.DB, moveRequestID string, actorID string, actorName s
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
 
-	previousStatus := "pending" // or could be "in_progress"
 	newStatus := "cancelled"
 
 	_, err := db.Exec(query,
@@ -214,9 +222,9 @@ func LogCancelled(db *sqlx.DB, moveRequestID string, actorID string, actorName s
 		"cancelled",
 		actorID,
 		actorName,
-		"manager",
-		&previousStatus,
-		&newStatus,
+		actorRole,
+		previousStatus,
+		newStatus,
 		reason,
 		time.Now().Unix(),
 	)
@@ -229,7 +237,7 @@ func LogCancelled(db *sqlx.DB, moveRequestID string, actorID string, actorName s
 }
 
 // LogUpdated logs when a move request details are updated
-func LogUpdated(db *sqlx.DB, moveRequestID string, actorID string, actorName string, notes *string, metadata *string) error {
+func LogUpdated(db sqlx.Ext, moveRequestID string, actorID string, actorName string, actorRole string, notes *string, metadata *string) error {
 	historyID := uuid.New().String()
 
 	query := `
@@ -244,7 +252,7 @@ func LogUpdated(db *sqlx.DB, moveRequestID string, actorID string, actorName str
 		"updated",
 		actorID,
 		actorName,
-		"manager",
+		actorRole,
 		notes,
 		metadata,
 		time.Now().Unix(),

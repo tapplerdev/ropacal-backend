@@ -30,21 +30,21 @@ func (s AssignmentState) displayName() *string {
 // It is the one place that resolves a previous assignee's display name (the
 // handler used to copy-paste that lookup three times). History is post-commit and
 // best-effort: the caller logs the returned error but does not fail the request.
-func LogAssignmentChange(db *sqlx.DB, moveReqID, actorID, actorName string, before, after AssignmentState) error {
+func LogAssignmentChange(db *sqlx.DB, moveReqID, actorID, actorName, actorRole string, before, after AssignmentState) error {
 	switch {
 	case !before.assigned() && after.assigned():
 		atype := ""
 		if after.AssignmentType != nil {
 			atype = *after.AssignmentType
 		}
-		return LogAssigned(db, moveReqID, actorID, actorName, atype, after.UserID, after.displayName(), after.ShiftID)
+		return LogAssigned(db, moveReqID, actorID, actorName, actorRole, atype, after.UserID, after.displayName(), after.ShiftID)
 
 	case before.assigned() && !after.assigned():
-		return LogUnassigned(db, moveReqID, actorID, actorName,
+		return LogUnassigned(db, moveReqID, actorID, actorName, actorRole,
 			before.AssignmentType, before.UserID, resolvePreviousName(db, before), before.ShiftID)
 
 	case before.assigned() && after.assigned():
-		return LogReassigned(db, moveReqID, actorID, actorName,
+		return LogReassigned(db, moveReqID, actorID, actorName, actorRole,
 			before.AssignmentType, after.AssignmentType,
 			before.UserID, after.UserID,
 			resolvePreviousName(db, before), after.displayName(),

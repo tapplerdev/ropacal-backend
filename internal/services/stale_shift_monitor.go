@@ -442,7 +442,7 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 	}
 	for _, mr := range released {
 		if logErr := moverequest.LogUnassigned(
-			tx, mr.ID, "system", "system",
+			tx, mr.ID, "system", "system", "system",
 			mr.AssignmentType, mr.AssignedUserID, mr.AssignedUserName, mr.AssignedShiftID,
 		); logErr != nil {
 			log.Printf("⚠️  [StaleShiftMonitor] Failed to log unassignment for %s: %v", mr.ID, logErr)

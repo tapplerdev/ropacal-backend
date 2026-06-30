@@ -308,7 +308,7 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 					// Log assignment history
 					log.Printf("      📝 Logging assignment to history...")
 					assignmentType := "shift"
-					err = moverequest.LogAssigned(db, moveReqID, managerID, managerName,
+					err = moverequest.LogAssigned(db, moveReqID, managerID, managerName, "manager",
 						assignmentType, &req.DriverID, &driverName, &shiftID)
 					if err != nil {
 						log.Printf("      ⚠️  WARNING: Failed to log assignment history: %v", err)

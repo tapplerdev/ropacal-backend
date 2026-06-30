@@ -128,7 +128,7 @@ func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 		// ---- post-commit side effects (the cancel already succeeded; best-effort) ----
 
 		reason := "Cancelled by manager"
-		if logErr := moverequest.LogCancelled(db, id, managerID, managerName, &reason); logErr != nil {
+		if logErr := moverequest.LogCancelled(db, id, managerID, managerName, "manager", moveRequest.Status, &reason); logErr != nil {
 			log.Printf("Warning: Failed to log move request cancellation: %v", logErr)
 		}
 
@@ -233,7 +233,7 @@ func ManuallyCompleteMoveRequest(store moverequest.Store, db *sqlx.DB) http.Hand
 			log.Printf("Warning: Failed to fetch manager name for history: %v", err)
 			managerName = "Unknown Manager"
 		}
-		err = moverequest.LogCompleted(db, moveRequest.ID, userID, managerName)
+		err = moverequest.LogCompleted(db, moveRequest.ID, userID, managerName, "manager", moveRequest.Status)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request completion: %v", err)
 		}

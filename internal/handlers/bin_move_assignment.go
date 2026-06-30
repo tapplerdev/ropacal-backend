@@ -313,7 +313,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	if previousAssignedShiftID == nil && previousAssignedUserID == nil {
 		// New assignment
 		log.Printf("   📝 Logging NEW assignment to history (driver: %s, shift: %s)", driverName, activeShift.ID)
-		err = moverequest.LogAssigned(db, moveRequest.ID, managerID, managerName,
+		err = moverequest.LogAssigned(db, moveRequest.ID, managerID, managerName, "manager",
 			newAssignmentType, &activeShift.DriverID, &driverName, &activeShift.ID)
 		if err != nil {
 			log.Printf("   ⚠️  WARNING: Failed to log assignment history: %v", err)
@@ -323,7 +323,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	} else {
 		// Reassignment
 		log.Printf("   📝 Logging REASSIGNMENT to history (from previous assignment to driver: %s, shift: %s)", driverName, activeShift.ID)
-		err = moverequest.LogReassigned(db, moveRequest.ID, managerID, managerName,
+		err = moverequest.LogReassigned(db, moveRequest.ID, managerID, managerName, "manager",
 			previousAssignmentType, &newAssignmentType,
 			previousAssignedUserID, &activeShift.DriverID,
 			previousAssignedUserName, &driverName,
@@ -604,7 +604,7 @@ func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 				userName = "Unknown User"
 			}
 
-			err = moverequest.LogAssigned(db, id, managerID, managerName, "manual", &req.UserID, &userName, nil)
+			err = moverequest.LogAssigned(db, id, managerID, managerName, "manager", "manual", &req.UserID, &userName, nil)
 			if err != nil {
 				log.Printf("Warning: Failed to log move request assignment: %v", err)
 			}
@@ -743,7 +743,7 @@ func ClearMoveAssignment(store moverequest.Store, db *sqlx.DB) http.HandlerFunc 
 				previousShiftID = moveRequest.AssignedShiftID
 			}
 
-			err = moverequest.LogUnassigned(db, id, managerID, managerName,
+			err = moverequest.LogUnassigned(db, id, managerID, managerName, "manager",
 				moveRequest.AssignmentType, previousUserID, previousUserName, previousShiftID)
 			if err != nil {
 				log.Printf("Warning: Failed to log move request unassignment: %v", err)

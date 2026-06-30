@@ -774,7 +774,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 			log.Printf("Warning: Failed to fetch driver name for history: %v", err)
 			driverName = "Unknown Driver"
 		}
-		err = moverequest.LogCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName)
+		err = moverequest.LogCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName, "driver", moveRequest.Status)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request completion: %v", err)
 		}

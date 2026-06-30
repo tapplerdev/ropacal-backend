@@ -303,7 +303,7 @@ func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub,
 			log.Printf("Warning: Failed to fetch user name for history: %v", err)
 			userName = "Unknown User"
 		}
-		err = moverequest.LogCreated(db, id, userID, userName, req.MoveType, newAddress)
+		err = moverequest.LogCreated(db, id, userID, userName, "manager", req.MoveType, newAddress)
 		if err != nil {
 			log.Printf("Warning: Failed to log move request creation: %v", err)
 			// Don't fail the request, just log the warning
