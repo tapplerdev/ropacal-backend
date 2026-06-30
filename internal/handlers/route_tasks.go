@@ -14,6 +14,7 @@ import (
 	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
+	shiftdomain "ropacal-backend/internal/shift"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 
@@ -146,6 +147,21 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 		// Default shift_type
 		if req.ShiftType == "" {
 			req.ShiftType = "standard"
+		}
+
+		// Validate shift_type + per-task time_window_type at the boundary (clean 400,
+		// not a 500 at the shifts / route_tasks CHECK constraints).
+		if _, err := shiftdomain.ParseType(req.ShiftType); err != nil {
+			utils.RespondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for i, t := range req.Tasks {
+			if twt, ok := t["time_window_type"].(string); ok && twt != "" {
+				if _, err := itinerary.ParseTimeWindowType(twt); err != nil {
+					utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("task %d: %s", i, err.Error()))
+					return
+				}
+			}
 		}
 
 		// Check if driver already has an active/ready shift for the same date

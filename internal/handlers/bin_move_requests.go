@@ -52,6 +52,14 @@ func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub,
 			return
 		}
 
+		// Validate disposal_action value at the boundary (clean 400, not a DB CHECK 500).
+		if req.DisposalAction != nil {
+			if _, err := moverequest.ParseDisposalAction(*req.DisposalAction); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
 		// Build new address from separate fields or use provided address
 		var newAddress *string
 		if req.NewStreet != nil && req.NewCity != nil && req.NewZip != nil {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	bindomain "ropacal-backend/internal/bin"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
@@ -71,6 +72,12 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		// Validate required fields
 		if req.CurrentStreet == "" || req.City == "" || req.Zip == "" || req.Status == "" {
 			http.Error(w, "Missing required fields (current_street, city, zip, status)", http.StatusBadRequest)
+			return
+		}
+
+		// Validate status at the boundary (clean 400, not a DB CHECK 500).
+		if _, err := bindomain.ParseStatus(req.Status); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -256,6 +263,14 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			log.Printf("❌ [UPDATE-BIN] Invalid request body: %v", err)
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
+		}
+
+		// Validate status at the boundary when provided (clean 400, not a DB CHECK 500).
+		if req.Status != "" {
+			if _, err := bindomain.ParseStatus(req.Status); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		log.Printf("📦 [UPDATE-BIN] Request data: street=%s, city=%s, zip=%s, status=%s, checked=%v, fill=% v, lat=%v, lng=%v",
