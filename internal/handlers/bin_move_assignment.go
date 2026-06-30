@@ -267,6 +267,7 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 
 	// Assemble the move's stops (pickup [+ dropoff]) at the insert position — the
 	// itinerary domain owns route_tasks writes (was inline INSERTs here).
+	addReason := "assigned to shift"
 	_, err = itinerary.AddMove(tx, activeShift.ID, itinerary.MovePlacement{
 		InsertSeq:      insertSequenceOrder,
 		MoveRequestID:  moveRequest.ID,
@@ -280,6 +281,8 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 		DropoffLat:     dropoffLat,
 		DropoffLng:     dropoffLng,
 		DropoffAddress: dropoffAddr,
+		AddedBy:        &managerID,
+		AdditionReason: &addReason,
 		Now:            now,
 	})
 	if err != nil {

@@ -22,6 +22,11 @@ type MovePlacement struct {
 	DropoffLat, DropoffLng float64 // relocation destination
 	DropoffAddress         string
 
+	// Audit: who added this move to the shift mid-shift, and why. nil for tasks
+	// created with the shift (no specific adder). Surfaced in the shift edit-history.
+	AddedBy        *string
+	AdditionReason *string
+
 	Now int64
 }
 
@@ -50,11 +55,11 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 		INSERT INTO route_tasks (
 			id, shift_id, bin_id, bin_number, sequence_order, task_type,
 			latitude, longitude, address, fill_percentage,
-			move_request_id, move_type, is_completed, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
+			move_request_id, move_type, added_by, addition_reason, is_completed, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
 		uuid.New().String(), shiftID, p.BinID, p.BinNumber, p.InsertSeq, string(Pickup),
 		p.PickupLat, p.PickupLng, p.PickupAddress, p.FillPercentage,
-		p.MoveRequestID, p.MoveType, p.Now); err != nil {
+		p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
 		return 0, fmt.Errorf("insert pickup: %w", err)
 	}
 
@@ -69,12 +74,12 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 			id, shift_id, bin_id, bin_number, sequence_order, task_type,
 			latitude, longitude, address,
 			destination_latitude, destination_longitude, destination_address,
-			move_request_id, move_type, is_completed, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
+			move_request_id, move_type, added_by, addition_reason, is_completed, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
 		uuid.New().String(), shiftID, p.BinID, p.BinNumber, dropoffSeq, string(Dropoff),
 		p.DropoffLat, p.DropoffLng, p.DropoffAddress,
 		p.DropoffLat, p.DropoffLng, p.DropoffAddress,
-		p.MoveRequestID, p.MoveType, p.Now); err != nil {
+		p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
 		return 0, fmt.Errorf("insert dropoff: %w", err)
 	}
 

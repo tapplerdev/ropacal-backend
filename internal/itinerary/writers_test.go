@@ -82,7 +82,7 @@ func TestAddMove_StoreInsertsPickupOnly(t *testing.T) {
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
-			"move-1", "store", int64(1700000000),
+			"move-1", "store", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -121,7 +121,7 @@ func TestAddMove_RelocationInsertsPickupAndDropoff(t *testing.T) {
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
-			"move-1", "relocation", int64(1700000000),
+			"move-1", "relocation", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -131,7 +131,7 @@ func TestAddMove_RelocationInsertsPickupAndDropoff(t *testing.T) {
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 4, string(Dropoff),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
-			"move-1", "relocation", int64(1700000000),
+			"move-1", "relocation", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -180,7 +180,7 @@ func TestAddMove_RelocationInvalidSequenceOrder(t *testing.T) {
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
-			"move-1", "relocation", int64(1700000000),
+			"move-1", "relocation", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -189,7 +189,7 @@ func TestAddMove_RelocationInvalidSequenceOrder(t *testing.T) {
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 4, string(Dropoff),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
-			"move-1", "relocation", int64(1700000000),
+			"move-1", "relocation", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

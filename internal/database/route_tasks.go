@@ -76,6 +76,8 @@ func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, 
 			rt.deleted_at,
 			rt.deleted_by,
 			rt.deletion_reason,
+			rt.added_by,
+			rt.addition_reason,
 			rt.task_data,
 			rt.created_at,
 			rt.updated_at,
@@ -545,19 +547,43 @@ func CreateShiftWithTasks(
 						}
 
 						if taskType == "pickup" {
-							if !hasLat && mrData.OriginalLatitude != nil { taskData["latitude"] = *mrData.OriginalLatitude }
-							if !hasLng && mrData.OriginalLongitude != nil { taskData["longitude"] = *mrData.OriginalLongitude }
-							if !hasAddr && mrData.OriginalAddress != nil { taskData["address"] = *mrData.OriginalAddress }
-							if !hasDestLat && mrData.NewLatitude != nil { taskData["destination_latitude"] = *mrData.NewLatitude }
-							if !hasDestLng && mrData.NewLongitude != nil { taskData["destination_longitude"] = *mrData.NewLongitude }
-							if !hasDestAddr && mrData.NewAddress != nil { taskData["destination_address"] = *mrData.NewAddress }
+							if !hasLat && mrData.OriginalLatitude != nil {
+								taskData["latitude"] = *mrData.OriginalLatitude
+							}
+							if !hasLng && mrData.OriginalLongitude != nil {
+								taskData["longitude"] = *mrData.OriginalLongitude
+							}
+							if !hasAddr && mrData.OriginalAddress != nil {
+								taskData["address"] = *mrData.OriginalAddress
+							}
+							if !hasDestLat && mrData.NewLatitude != nil {
+								taskData["destination_latitude"] = *mrData.NewLatitude
+							}
+							if !hasDestLng && mrData.NewLongitude != nil {
+								taskData["destination_longitude"] = *mrData.NewLongitude
+							}
+							if !hasDestAddr && mrData.NewAddress != nil {
+								taskData["destination_address"] = *mrData.NewAddress
+							}
 						} else if taskType == "dropoff" {
-							if !hasLat && mrData.NewLatitude != nil { taskData["latitude"] = *mrData.NewLatitude }
-							if !hasLng && mrData.NewLongitude != nil { taskData["longitude"] = *mrData.NewLongitude }
-							if !hasAddr && mrData.NewAddress != nil { taskData["address"] = *mrData.NewAddress }
-							if !hasDestLat && mrData.NewLatitude != nil { taskData["destination_latitude"] = *mrData.NewLatitude }
-							if !hasDestLng && mrData.NewLongitude != nil { taskData["destination_longitude"] = *mrData.NewLongitude }
-							if !hasDestAddr && mrData.NewAddress != nil { taskData["destination_address"] = *mrData.NewAddress }
+							if !hasLat && mrData.NewLatitude != nil {
+								taskData["latitude"] = *mrData.NewLatitude
+							}
+							if !hasLng && mrData.NewLongitude != nil {
+								taskData["longitude"] = *mrData.NewLongitude
+							}
+							if !hasAddr && mrData.NewAddress != nil {
+								taskData["address"] = *mrData.NewAddress
+							}
+							if !hasDestLat && mrData.NewLatitude != nil {
+								taskData["destination_latitude"] = *mrData.NewLatitude
+							}
+							if !hasDestLng && mrData.NewLongitude != nil {
+								taskData["destination_longitude"] = *mrData.NewLongitude
+							}
+							if !hasDestAddr && mrData.NewAddress != nil {
+								taskData["destination_address"] = *mrData.NewAddress
+							}
 						}
 						log.Printf("   ✅ Task #%d: Auto-populated move request addresses from bin_move_requests", i+1)
 					} else {
@@ -637,13 +663,13 @@ func CreateShiftWithTasks(
 				depTaskID, shiftID, nextSeq, "placement",
 				d.DestinationLatitude, d.DestinationLongitude, addr,
 				d.BinID, d.BinNumber, nil, // bin_id (existing bin), bin_number, fill_percentage
-				nil, nil, placeSrc,        // potential_location_id, new_bin_number, placement_source
-				nil, nil, nil, nil, nil,   // move_request fields
-				nil, nil,                  // warehouse_action, bins_to_load
+				nil, nil, placeSrc, // potential_location_id, new_bin_number, placement_source
+				nil, nil, nil, nil, nil, // move_request fields
+				nil, nil, // warehouse_action, bins_to_load
 				nil, []byte("{}"), now,
-				nil, nil, false,           // task_label, task_description, photo_required
-				nil, nil, nil,             // earliest_arrival, latest_arrival, time_window_type
-				nil,                       // service_duration_seconds
+				nil, nil, false, // task_label, task_description, photo_required
+				nil, nil, nil, // earliest_arrival, latest_arrival, time_window_type
+				nil, // service_duration_seconds
 			)
 			if err != nil {
 				return "", 0, fmt.Errorf("failed to create warehouse deployment placement task: %w", err)
