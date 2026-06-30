@@ -1,6 +1,6 @@
 # `internal/itinerary` — the shift's executed itinerary (route_tasks owner)
 
-Status: **in progress** (Phase 0/1). Successor to the `moverequest` domain; follows
+Status: **in progress** (Phases 0–4 done + live-verified; Phases 5–6 remain). Successor to the `moverequest` domain; follows
 the same conventions (consumer-defined seams, phased behavior-preserving migration,
 golden-diff + live-verify each slice). Supersedes the earlier `internal/route`
 scoping — renamed to `itinerary` because "route" is overloaded (see Boundary).
@@ -43,7 +43,7 @@ type Itinerary interface {
 
     RemoveTasks(ext, sel, reason, by) error   // the ONE audited soft-delete
     Resequence(ext, shiftID) error            // order-PRESERVING dense renumber (manual edits)
-    ApplyOrder(ext, shiftID, orderedIDs []string, newTasks []Task, isFirst bool) error // optimizer order, in a tx
+    ApplyOrder(ext, shiftID, stops []OrderedStop, isFirst bool) error // optimizer order (interleaved), in a tx
 
     TasksForShift(shiftID) (...)              // read seam
 }
@@ -79,18 +79,27 @@ itinerary.ApplyOrder(tx, shiftID, orderedIDs, newWarehouseStops, isFirst)   (all
   `Resequence`. (Fixes O(N) `MAX`.) Unblocks moverequest (c) kernel.
 - **3 — RemoveTasks.** One audited soft-delete → migrate the ~5 sites. Fix **#16**
   (EndShift stale `status='pending'` subquery) + verify **#20** (SkipTask placeholder).
-- **4 — ApplyOrder (centerpiece).** Extract the 360-line optimizer persist →
-  `ApplyOrder(tx,…)`; optimizer becomes pure; **make `StartShift` first-opt
-  transactional** (fixes torn-write); both entry points call it; **`lock_route_order`
-  guard** at the boundary (**#19**). Highest value + risk.
+- **4 — ApplyOrder (centerpiece). ✅ DONE + LIVE-VERIFIED.** Optimizer persist extracted →
+  `ApplyOrder(ext, shiftID, []OrderedStop, isFirst)`; both entry points (shift-start
+  `optimizeRouteWithMapbox` + mid-shift `ReoptimizeActiveShift`) build an interleaved
+  `[]OrderedStop` and delegate. Optimizer confirmed **already pure** (DB-free). `lock_route_order`
+  guard added (**#19**, verified — locked shift takes the Resequence path, never ApplyOrder).
+  Reopt warehouse hard-delete moved in-tx (torn-write fix, slice 1). `isFirst=true` refreshes
+  coords + uses the legacy first-opt renumber (`sequence_order, created_at` — NOT warehouse-last)
+  so a leading warehouse pickup + binsPreloaded auto-completed pickups keep their slots;
+  `isFirst=false` does seq-only UPDATE + `Resequence`. (StartShift first-opt was already
+  tx-wrapped — the DESIGN's torn-write claim was refuted by the code.) Verified live: first-opt
+  ID-stability (collections + relocation pickup/dropoff), reopt ID-stability + warehouse regen,
+  and a mid-shift sim proving reopt re-anchors on the driver's GPS.
 - **5 — Creation.** `CreateShiftWithTasks` + `UpdateShift.add_tasks` → intent methods +
   shared coordinate resolver.
 - **6 — Edges + tx gaps.** `bins.go`→`SyncBinTasks`, `potential_locations.go`→
   `SyncPlacement`; wrap `CompleteTask`'s task+bin writes in a tx (torn-write).
 
 ## Bugs this initiative closes
-- **#19** lock_route_order ignored on mid-shift re-optimize → Phase 4.
-- StartShift first-optimization persist non-transactional (torn-write on route order) → Phase 4.
+- **#19** lock_route_order ignored on mid-shift re-optimize → Phase 4. ✅ fixed + live-verified.
+- Reopt warehouse hard-delete ran pre-tx (torn-write on optimizer/no-route failure) → Phase 4 slice 1. ✅ fixed.
+  (StartShift first-optimization persist was already tx-wrapped — the original non-transactional claim was refuted.)
 - CompleteTask non-transactional (task+bin) → Phase 6.
 - **#16** EndShift soft-delete stale subquery → Phase 3.
 - **#20** SkipTask paired-dropoff placeholder smell → verify in Phase 3.

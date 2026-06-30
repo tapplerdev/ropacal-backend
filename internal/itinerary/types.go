@@ -1,11 +1,14 @@
 // Package itinerary owns a shift's executed route_tasks: assembly, sequencing,
-// and the task-type taxonomy. It is BECOMING the single writer of route_tasks —
-// the audited removal (RemoveByIDs), move assembly (AddMove), and renumbering
-// (Resequence) are consolidated here, but the optimizer-persist extraction
-// (ApplyOrder) is still in progress, so handlers retain some direct route_tasks
-// writes today. The optimizer decides order and (will) hand it an ordered list
-// via ApplyOrder; manual edits tidy numbering without re-sorting (Resequence).
-// See DESIGN.md for the phased migration.
+// and the task-type taxonomy. It is the writer for every route_tasks mutation an
+// optimization or edit produces — audited removal (RemoveByIDs), move assembly
+// (AddMove), reconciliation (ReconcileMove), renumbering (Resequence), and the
+// optimizer-persist for BOTH entry points (shift-start first-optimize and
+// mid-shift reopt) via ApplyOrder. The optimizer decides order and hands it an
+// interleaved ordered list via ApplyOrder; manual edits tidy numbering without
+// re-sorting (Resequence). sequence_order has exactly two writers: ApplyOrder
+// (the optimizer's decided order) and Resequence (order-preserving renumber).
+// Still outside the domain: initial shift creation (CreateShiftWithTasks, Phase 5)
+// and a few task+bin edge writes (e.g. CompleteTask, Phase 6). See DESIGN.md.
 package itinerary
 
 import "fmt"
