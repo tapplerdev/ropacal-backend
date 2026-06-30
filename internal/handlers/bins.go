@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	bindomain "ropacal-backend/internal/bin"
+	"ropacal-backend/internal/bindomain"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services"
