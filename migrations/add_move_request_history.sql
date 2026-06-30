@@ -29,8 +29,11 @@ CREATE TABLE IF NOT EXISTS move_request_history (
     notes TEXT, -- Optional reason/description
     metadata JSONB, -- Flexible field for additional data
 
-    -- Timestamp
+    -- Timestamp (Unix seconds — too coarse to order same-second events, hence seq)
     created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+
+    -- Monotonic insertion order — tiebreaks events that share a created_at second (#26)
+    seq BIGSERIAL,
 
     -- Foreign keys
     CONSTRAINT fk_move_request_history_move_request

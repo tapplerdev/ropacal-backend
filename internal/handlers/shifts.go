@@ -876,7 +876,7 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 				log.Printf("⚠️ Failed to log move request unassignment history for %s: %v", mr.ID, logErr)
 			}
 			// Also annotate the notes field with end-specific context.
-			notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND created_at = (SELECT MAX(created_at) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
+			notesQuery := `UPDATE move_request_history SET notes = $1, metadata = $2 WHERE move_request_id = $3 AND action_type = 'unassigned' AND seq = (SELECT MAX(seq) FROM move_request_history WHERE move_request_id = $3 AND action_type = 'unassigned')`
 			if _, noteErr := tx.Exec(notesQuery, "Shift ended before completing move request", metadata, mr.ID); noteErr != nil {
 				log.Printf("⚠️ Failed to update history notes for %s: %v", mr.ID, noteErr)
 			}

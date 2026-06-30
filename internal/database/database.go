@@ -161,6 +161,12 @@ func Migrate(db *sqlx.DB) error {
 		// Migration: Add updated_fill_percentage column to existing shift_bins table
 		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS updated_fill_percentage INT`,
 
+		// Migration (#26): monotonic insertion-order column for move_request_history.
+		// created_at is Unix SECONDS, so several events in one flow (create+assign+...)
+		// tie and render non-causally ("Assigned before Created"). seq breaks the tie.
+		`ALTER TABLE move_request_history ADD COLUMN IF NOT EXISTS seq BIGSERIAL`,
+		`CREATE INDEX IF NOT EXISTS idx_mrh_move_seq ON move_request_history(move_request_id, seq)`,
+
 		// Create indexes
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_moves_bin_id ON moves(bin_id)`,

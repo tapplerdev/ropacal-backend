@@ -270,7 +270,7 @@ func GetHistory(db *sqlx.DB, moveRequestID string) ([]models.MoveRequestHistoryR
 			notes, metadata, created_at
 		FROM move_request_history
 		WHERE move_request_id = $1
-		ORDER BY created_at ASC
+		ORDER BY created_at ASC, seq ASC
 	`
 
 	var history []models.MoveRequestHistory
