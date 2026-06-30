@@ -755,28 +755,106 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 	log.Printf("[MOVE] 🚚 Handling move request completion")
 	log.Printf("[MOVE]    Type: %s", moveRequest.MoveType)
 
-	// Mark move request as completed
-	_, err := db.Exec(`
+	isStore := moveRequest.MoveType == "store" || moveRequest.MoveType == "pickup_only"
+	isRelocation := moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment"
+
+	// ── Resolve external/read-only inputs BEFORE the tx ──────────────────────────
+	// (No HERE network call or config read is held open across the transaction.)
+
+	// store/pickup_only: destination status + warehouse coordinates
+	var storeStatus string
+	var warehouse models.WarehouseLocation
+	var warehouseOK bool
+	if isStore {
+		storeStatus = "in_storage" // default
+		if moveRequest.DisposalAction != nil && *moveRequest.DisposalAction == "retire" {
+			storeStatus = "retired"
+		}
+		var warehouseJSON []byte
+		if whErr := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&warehouseJSON); whErr == nil {
+			if json.Unmarshal(warehouseJSON, &warehouse) == nil {
+				warehouseOK = true
+			}
+		}
+		log.Printf("[MOVE]    → store move: status=%s, warehouseConfig=%v", storeStatus, warehouseOK)
+	}
+
+	// relocation/redeployment: reverse-geocode the destination (network → must be pre-tx)
+	relStreet, relCity, relZip := "", "", ""
+	if isRelocation {
+		if moveRequest.NewAddress != nil {
+			relStreet = *moveRequest.NewAddress
+		}
+		if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+			geocoder := services.NewHEREGeocodingService(HereAPIKey)
+			if s, c, z, rgErr := geocoder.ReverseGeocode(*moveRequest.NewLatitude, *moveRequest.NewLongitude); rgErr != nil {
+				log.Printf("[MOVE] ⚠️  Reverse geocode failed, using move request address: %v", rgErr)
+			} else {
+				relStreet, relCity, relZip = s, c, z
+				log.Printf("[MOVE] ✅ Reverse geocoded: %s, %s %s", relStreet, relCity, relZip)
+			}
+		}
+	}
+
+	// ── Atomic core: mark the move-request completed AND move the bin together ───
+	// Previously these were separate db.Exec calls with no tx — a crash between them
+	// left the move 'completed' while the bin never moved (or vice-versa).
+	tx, err := db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin move-completion tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err = tx.Exec(`
 		UPDATE bin_move_requests
 		SET status = 'completed', completed_at = $1, updated_at = $1
 		WHERE id = $2
-	`, now, moveRequest.ID)
-	if err != nil {
+	`, now, moveRequest.ID); err != nil {
 		return fmt.Errorf("failed to complete move request: %w", err)
 	}
-	log.Printf("[MOVE] ✅ Move request marked as completed")
 
-	// Log history: move request completed by driver
+	if isStore {
+		if warehouseOK {
+			if _, err = tx.Exec(`
+				UPDATE bins
+				SET status = $1, latitude = $2, longitude = $3, current_street = $4, city = '', zip = '',
+				    fill_percentage = 0, last_checked_at = NULL, updated_at = $5
+				WHERE id = $6
+			`, storeStatus, warehouse.Latitude, warehouse.Longitude, warehouse.Address, now, moveRequest.BinID); err != nil {
+				return fmt.Errorf("failed to update bin status: %w", err)
+			}
+		} else {
+			if _, err = tx.Exec(`UPDATE bins SET status = $1, fill_percentage = 0, last_checked_at = NULL, updated_at = $2 WHERE id = $3`,
+				storeStatus, now, moveRequest.BinID); err != nil {
+				return fmt.Errorf("failed to update bin status: %w", err)
+			}
+		}
+	} else if isRelocation {
+		if _, err = tx.Exec(`
+			UPDATE bins
+			SET latitude = $1, longitude = $2, current_street = $3, city = $4, zip = $5,
+			    status = 'active', updated_at = $6
+			WHERE id = $7
+		`, moveRequest.NewLatitude, moveRequest.NewLongitude, relStreet, relCity, relZip, now, moveRequest.BinID); err != nil {
+			return fmt.Errorf("failed to relocate bin: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit move completion: %w", err)
+	}
+	log.Printf("[MOVE] ✅ Move request %s completed + bin %s updated (atomic)", moveRequest.ID, moveRequest.BinID)
+
+	// ── Post-commit, best-effort side-effects (never roll back the completion) ───
+
+	// History: move request completed by driver
 	if moveRequest.AssignedUserID != nil {
 		var driverName string
-		err = db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID)
-		if err != nil {
-			log.Printf("Warning: Failed to fetch driver name for history: %v", err)
+		if dErr := db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID); dErr != nil {
 			driverName = "Unknown Driver"
 		}
-		err = moverequest.LogCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName, "driver", moveRequest.Status)
-		if err != nil {
-			log.Printf("Warning: Failed to log move request completion: %v", err)
+		if lErr := moverequest.LogCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName, "driver", moveRequest.Status); lErr != nil {
+			log.Printf("Warning: Failed to log move request completion: %v", lErr)
 		}
 	} else {
 		log.Printf("Warning: Move request completed without assigned user ID")
@@ -789,147 +867,35 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 		"new_status":      "completed",
 		"completed_at":    now,
 	}
-	hub.BroadcastToRole("admin", map[string]interface{}{
-		"type": "move_request_status_updated",
-		"data": moveCompletedData,
-	})
-	hub.BroadcastToRole("manager", map[string]interface{}{
-		"type": "move_request_status_updated",
-		"data": moveCompletedData,
-	})
-	log.Printf("📡 Broadcast move_request_status_updated to managers: Move request %s → completed", moveRequest.ID)
-
-	// Publish to Centrifugo
+	hub.BroadcastToRole("admin", map[string]interface{}{"type": "move_request_status_updated", "data": moveCompletedData})
+	hub.BroadcastToRole("manager", map[string]interface{}{"type": "move_request_status_updated", "data": moveCompletedData})
 	if centrifugoClient != nil {
 		if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "move_request_status_updated", moveCompletedData); pubErr != nil {
 			log.Printf("⚠️  Failed to publish move_request_status_updated to Centrifugo: %v", pubErr)
 		}
 	}
 
-	if moveRequest.MoveType == "store" || moveRequest.MoveType == "pickup_only" {
-		// Store move: bin goes to warehouse → in_storage
-		// Also check disposal_action for explicit retire/store override
-		newStatus := "in_storage" // Default for store moves
-		if moveRequest.DisposalAction != nil {
-			if *moveRequest.DisposalAction == "retire" {
-				newStatus = "retired"
-				log.Printf("[MOVE]    → Bin will be RETIRED (disposal_action override)")
-			} else if *moveRequest.DisposalAction == "store" {
-				newStatus = "in_storage"
-				log.Printf("[MOVE]    → Bin will be IN STORAGE (disposal_action)")
-			}
-		}
-		log.Printf("[MOVE]    → move_type=%s, disposal_action=%v → status=%s", moveRequest.MoveType, moveRequest.DisposalAction, newStatus)
-
-		// Update bin status AND coordinates to warehouse (bin is physically at warehouse now)
-		var warehouseJSON []byte
-		whErr := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&warehouseJSON)
-		if whErr == nil {
-			var warehouse models.WarehouseLocation
-			if json.Unmarshal(warehouseJSON, &warehouse) == nil {
-				_, err = db.Exec(`
-					UPDATE bins
-					SET status = $1, latitude = $2, longitude = $3, current_street = $4, city = '', zip = '',
-					    fill_percentage = 0, last_checked_at = NULL, updated_at = $5
-					WHERE id = $6
-				`, newStatus, warehouse.Latitude, warehouse.Longitude, warehouse.Address, now, moveRequest.BinID)
-				if err != nil {
-					return fmt.Errorf("failed to update bin status: %w", err)
-				}
-				log.Printf("[MOVE] ✅ Bin status updated to %s, coordinates updated to warehouse (%.6f, %.6f)", newStatus, warehouse.Latitude, warehouse.Longitude)
-			} else {
-				log.Printf("[MOVE] ⚠️  Failed to parse warehouse config, updating status only")
-				db.Exec(`UPDATE bins SET status = $1, fill_percentage = 0, last_checked_at = NULL, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
-			}
-		} else {
-			log.Printf("[MOVE] ⚠️  Warehouse config not found, updating status only")
-			db.Exec(`UPDATE bins SET status = $1, fill_percentage = 0, last_checked_at = NULL, updated_at = $2 WHERE id = $3`, newStatus, now, moveRequest.BinID)
-		}
-
-	} else if moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment" {
-		// Update bin location to new coordinates with reverse-geocoded address from HERE Maps
-		log.Printf("[MOVE]    → Relocating bin to new address (type: %s)", moveRequest.MoveType)
-
-		street := ""
-		if moveRequest.NewAddress != nil {
-			street = *moveRequest.NewAddress
-		}
-		city := ""
-		zip := ""
-
-		// Reverse geocode the destination coordinates via HERE Maps for accurate address
-		if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
-			geocoder := services.NewHEREGeocodingService(HereAPIKey)
-			rgStreet, rgCity, rgZip, rgErr := geocoder.ReverseGeocode(*moveRequest.NewLatitude, *moveRequest.NewLongitude)
-			if rgErr != nil {
-				log.Printf("[MOVE] ⚠️  Reverse geocode failed, using move request address: %v", rgErr)
-			} else {
-				street = rgStreet
-				city = rgCity
-				zip = rgZip
-				log.Printf("[MOVE] ✅ Reverse geocoded: %s, %s %s", street, city, zip)
-			}
-		}
-
-		_, err = db.Exec(`
-			UPDATE bins
-			SET latitude = $1,
-			    longitude = $2,
-			    current_street = $3,
-			    city = $4,
-			    zip = $5,
-			    status = 'active',
-			    updated_at = $6
-			WHERE id = $7
-		`, moveRequest.NewLatitude,
-			moveRequest.NewLongitude,
-			street,
-			city,
-			zip,
-			now,
-			moveRequest.BinID)
-		if err != nil {
-			return fmt.Errorf("failed to relocate bin: %w", err)
-		}
-
-		// If this was a warehouse redeployment to a potential location, mark location as converted
-		if moveRequest.SourcePotentialLocationID != nil && (moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment") {
-			log.Printf("[MOVE]    → Relocation/redeployment to potential location - marking as converted")
-
-			// Get shift ID from assigned_shift_id
+	if isRelocation {
+		// If this was a redeployment/relocation to a potential location, mark it converted
+		if moveRequest.SourcePotentialLocationID != nil {
 			var shiftID *string
 			if moveRequest.AssignedShiftID != nil {
 				shiftID = moveRequest.AssignedShiftID
 			}
-
-			_, err = db.Exec(`
+			if _, plErr := db.Exec(`
 				UPDATE potential_locations
-				SET converted_to_bin_id = $1,
-				    converted_at = $2,
-				    converted_via_shift_id = $3,
-				    updated_at = $2
+				SET converted_to_bin_id = $1, converted_at = $2, converted_via_shift_id = $3, updated_at = $2
 				WHERE id = $4
-			`, moveRequest.BinID, now, shiftID, *moveRequest.SourcePotentialLocationID)
-
-			if err != nil {
-				log.Printf("[MOVE] ⚠️  Error updating potential location: %v", err)
+			`, moveRequest.BinID, now, shiftID, *moveRequest.SourcePotentialLocationID); plErr != nil {
+				log.Printf("[MOVE] ⚠️  Error updating potential location: %v", plErr)
 			} else {
-				log.Printf("[MOVE] ✅ Potential location marked as converted")
-
-				// Broadcast potential_location_converted event to dashboard
 				plConvertedData := map[string]interface{}{
 					"potential_location_id": *moveRequest.SourcePotentialLocationID,
 					"bin_id":                moveRequest.BinID,
 					"shift_id":              shiftID,
 					"converted_at":          now,
 				}
-				hub.BroadcastToRole("manager", map[string]interface{}{
-					"type": "potential_location_converted",
-					"data": plConvertedData,
-				})
-				log.Printf("📡 Broadcast potential_location_converted to managers")
-
-				// Publish to Centrifugo
+				hub.BroadcastToRole("manager", map[string]interface{}{"type": "potential_location_converted", "data": plConvertedData})
 				if centrifugoClient != nil {
 					if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "potential_location_converted", plConvertedData); pubErr != nil {
 						log.Printf("⚠️  Failed to publish potential_location_converted to Centrifugo: %v", pubErr)
@@ -938,45 +904,31 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 			}
 		}
 
-		// Record the move in moves table
-		// Parse address into separate fields
+		// Record the move in the moves table (best-effort — the move is already committed)
 		var fromStreet, fromCity, fromZip, toStreet, toCity, toZip *string
-
-		// Parse original address
+		parseAddr := func(addr string) (*string, *string, *string) {
+			parts := strings.Split(addr, ", ")
+			if len(parts) < 2 {
+				return nil, nil, nil
+			}
+			street := parts[0]
+			cityZipParts := strings.Split(strings.TrimSpace(parts[1]), " ")
+			if len(cityZipParts) < 2 {
+				return &street, nil, nil
+			}
+			city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+			zip := cityZipParts[len(cityZipParts)-1]
+			return &street, &city, &zip
+		}
 		if moveRequest.OriginalAddress != "" {
-			parts := strings.Split(moveRequest.OriginalAddress, ", ")
-			if len(parts) >= 2 {
-				street := parts[0]
-				fromStreet = &street
-				cityZip := strings.TrimSpace(parts[1])
-				cityZipParts := strings.Split(cityZip, " ")
-				if len(cityZipParts) >= 2 {
-					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
-					zip := cityZipParts[len(cityZipParts)-1]
-					fromCity = &city
-					fromZip = &zip
-				}
-			}
+			fromStreet, fromCity, fromZip = parseAddr(moveRequest.OriginalAddress)
 		}
-
-		// Parse new address
+		newAddr := ""
 		if moveRequest.NewAddress != nil {
-			parts := strings.Split(*moveRequest.NewAddress, ", ")
-			if len(parts) >= 2 {
-				street := parts[0]
-				toStreet = &street
-				cityZip := strings.TrimSpace(parts[1])
-				cityZipParts := strings.Split(cityZip, " ")
-				if len(cityZipParts) >= 2 {
-					city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
-					zip := cityZipParts[len(cityZipParts)-1]
-					toCity = &city
-					toZip = &zip
-				}
-			}
+			newAddr = *moveRequest.NewAddress
+			toStreet, toCity, toZip = parseAddr(newAddr)
 		}
-
-		_, err = db.Exec(`
+		if _, mvErr := db.Exec(`
 			INSERT INTO moves (
 				bin_id, moved_from, moved_to, moved_on,
 				move_type, from_street, from_city, from_zip,
@@ -984,21 +936,12 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 				move_request_id, shift_id
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		`, moveRequest.BinID,
-			moveRequest.OriginalAddress,
-			*moveRequest.NewAddress,
-			now,
-			"shift", // move_type
-			fromStreet, fromCity, fromZip,
-			toStreet, toCity, toZip,
-			moveRequest.ID,
-			moveRequest.AssignedShiftID)
-		if err != nil {
-			log.Printf("[MOVE] ⚠️  Failed to record move: %v", err)
-			// Don't fail - move is already completed
+		`, moveRequest.BinID, moveRequest.OriginalAddress, newAddr, now, "shift",
+			fromStreet, fromCity, fromZip, toStreet, toCity, toZip,
+			moveRequest.ID, moveRequest.AssignedShiftID); mvErr != nil {
+			log.Printf("[MOVE] ⚠️  Failed to record move: %v", mvErr)
 		}
-
-		log.Printf("[MOVE] ✅ Bin relocated to %s", *moveRequest.NewAddress)
+		log.Printf("[MOVE] ✅ Bin relocated to %s", newAddr)
 	}
 
 	return nil
