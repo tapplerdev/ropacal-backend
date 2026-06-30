@@ -34,6 +34,26 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		return fmt.Errorf("shift is not active (status: %s)", shift.Status)
 	}
 
+	// #19: lock_route_order means the manager pinned this route's order. A mid-shift
+	// re-optimize must NOT reshuffle it (the bug: lock was honored at shift START but
+	// ignored here). Take the order-preserving path — dense-renumber to close gaps from
+	// any added/removed tasks (never re-sort), notify the driver so the app refreshes,
+	// and return WITHOUT invoking the optimizer. (DESIGN: "Resequence path, never ApplyOrder".)
+	if shift.LockRouteOrder {
+		log.Printf("🔒 [REOPTIMIZE] lock_route_order set for shift %s — preserving manager's order (resequence only, no reshuffle)", shiftID)
+		if rerr := itinerary.Resequence(db, shiftID); rerr != nil {
+			return fmt.Errorf("resequence locked shift: %w", rerr)
+		}
+		if centrifugoClient != nil {
+			if nerr := NotifyDriverOfRouteUpdate(db, centrifugoClient, shiftID, "route_reoptimized", map[string]interface{}{
+				"reason": "Route order locked by manager — preserved (no re-optimization)",
+			}); nerr != nil {
+				log.Printf("⚠️  [REOPTIMIZE] Failed to notify driver (locked path): %v", nerr)
+			}
+		}
+		return nil
+	}
+
 	// Step 2: Get remaining (uncompleted) route_tasks (exclude soft-deleted tasks)
 	var tasks []models.RouteTask
 	err = db.Select(&tasks, `
