@@ -17,7 +17,7 @@ Go backend for the Ropacal/Binly bin management and logistics platform. Deployed
 - **Centrifugo** — real-time WebSocket message broker for live location/shift updates
 - **Firebase Cloud Messaging** — push notifications to mobile drivers
 - **OSRM** — snap-to-road for GPS accuracy, driving directions
-- **Mapbox Optimization v2** — route optimization with vehicle capacity modeling
+- **OR-Tools** — route optimization with vehicle capacity modeling (the ACTIVE optimizer; runs in-process, `optimization.NewOptimizer()` defaults to it). Mapbox/Google/HERE optimizer clients are retained ONLY for side-by-side comparison, not the live path.
 - **HERE Maps** — geocoding (forward + reverse)
 - **Apple FindMy/AirTag** — bin tracking via AirTags
 
@@ -30,7 +30,7 @@ See `.env.example`. Key vars:
 - `REDIS_URL` — Redis connection (defaults to `redis://localhost:6379`)
 - `FIREBASE_CREDENTIALS_BASE64` or `FIREBASE_CREDENTIALS_FILE` — FCM push notifications
 - `CENTRIFUGO_API_URL`, `CENTRIFUGO_API_KEY` — Centrifugo real-time messaging
-- `MAPBOX_ACCESS_TOKEN` — route optimization
+- `MAPBOX_ACCESS_TOKEN` — only the comparison optimizer (the active OR-Tools optimizer runs in-process, no token needed)
 - `HERE_API_KEY` — geocoding
 - `INTERNAL_API_KEY` — secures internal endpoints (FindMy bridge)
 
@@ -42,11 +42,16 @@ internal/
   database/
     database.go             — PostgreSQL connection + all migrations (inline SQL)
     seed.go                 — Seeds initial users and bins
-    route_tasks.go          — Route task DB queries
-  handlers/                 — HTTP handlers (~22k lines total)
-    shifts.go               — (7.5k) Shift lifecycle, Mapbox optimization, history
-    bin_move_requests.go    — (3.3k) Move request CRUD, scheduling, assignment
-    routes.go               — (1.4k) Route template CRUD, optimization previews
+    route_tasks.go          — Route task DB queries (CreateShiftWithTasks, GetShiftTasks[WithDeleted])
+  moverequest/              — move-request DOMAIN: typed Status + guarded transitions, Store, Create/EditFields, PlanAssignment, LogAssignmentChange/history, Parse{MoveType,DisposalAction}
+  itinerary/                — route_tasks DOMAIN (single writer): AddMove, RemoveByIDs, Resequence, ReconcileMove, CountStops/RecomputeShiftCounts, Parse{TaskType,TimeWindowType}
+  shift/                    — shift enum domain: ParseType (shift_type)
+  bindomain/                — bin enum domain: ParseStatus (bins.status); named bindomain to avoid shadowing local `bin` vars
+  geo/                      — haversine / distance helpers
+  handlers/                 — HTTP handlers (thin; orchestrate the domains above)
+    shifts.go               — (1.4k) Shift lifecycle; split into shift_{optimization,tasks_edit,query,complete,cancel}.go + driver_location.go
+    bin_move_requests.go    — (400) Move request create/schedule; update/assign/cancel split into bin_move_{update,assignment,lifecycle}.go
+    routes.go               — (1.5k) Route template CRUD, optimization previews
     bins.go                 — (1k) Bin CRUD, batch geocoding, retirement
     zones.go                — (1k) No-go zones, field observations, incidents
     potential_locations.go  — (870) Potential bin locations, conversion to bins
@@ -74,13 +79,13 @@ internal/
     move_request_history.go — Move request audit trail helpers
   middleware/
     auth.go                 — JWT auth + RequireRole("admin") middleware
-  models/                   — 17 data models (structs with db/json tags)
+  models/                   — 18 data models (structs with db/json tags)
   services/
     optimization/
-      mapbox_optimizer.go   — Mapbox Optimization v2 API client
-      google_optimizer.go   — Google Routes Optimization API client
+      optimizer.go          — Optimizer interface + NewOptimizer() (defaults to OR-Tools, the ACTIVE optimizer)
+      ortools_optimizer.go  — OR-Tools client (ACTIVE — the live optimization path)
+      mapbox_optimizer.go, google_optimizer.go, here_optimizer.go — retained for side-by-side comparison ONLY
       types.go              — Shared types: Location, Vehicle, Shipment
-      optimizer.go          — Optimizer interface
     roads/
       osrm_client.go        — OSRM snap-to-road
       optimizer.go          — OSRM route optimization
@@ -144,15 +149,15 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 ### Shift Lifecycle
 1. Manager creates shift via `POST /api/manager/shifts/create-with-tasks` (assigns driver, bins, tasks)
 2. Driver calls `POST /api/driver/shift/preflight` (validates shift readiness)
-3. Driver calls `POST /api/driver/shift/start` → triggers Mapbox route optimization
-4. During shift: location tracking via Centrifugo, task completion via `POST /api/driver/shift/complete-task`
+3. Driver calls `POST /api/driver/shift/start` → triggers OR-Tools route optimization
+4. During shift: location tracking via Centrifugo, task completion via `POST /api/driver/shift/complete-task`. Manager mid-shift edits (add/remove move) re-run optimization.
 5. Driver ends shift → archived to `shift_history`
 
-### Route Optimization (shifts.go → `optimizeRouteWithMapbox()`)
-- Uses Mapbox Optimization v2 API
+### Route Optimization (shift_optimization.go → `optimization.NewOptimizer()`)
+- Uses **OR-Tools** in-process (the active optimizer). Mapbox/Google/HERE clients exist only for side-by-side comparison.
 - Models bins as shipments with capacity constraints (placements consume capacity, collections don't)
 - Supports custom start/end locations on vehicle
-- Falls back to OSRM if Mapbox fails
+- Each (re)optimize hard-deletes + regenerates the incomplete `warehouse_stop` tasks (system artifacts — no audit churn) and rewrites `sequence_order` in place, preserving bin task IDs
 
 ### Real-time Location
 - Driver publishes GPS to Centrifugo channel `driver:location:{driverId}`
