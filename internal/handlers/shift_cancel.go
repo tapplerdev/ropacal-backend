@@ -548,11 +548,3 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 		})
 	}
 }
-
-// ============================================================================
-// SEGMENTED ROUTE OPTIMIZATION
-// Manager places warehouse stops, we optimize tasks within each segment
-// ============================================================================
-
-// optimizeRouteInSegments performs route optimization between warehouse stops
-// Warehouse stops act as segment boundaries and stay in place

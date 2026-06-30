@@ -775,21 +775,3 @@ func GetTaskByID(db *sqlx.DB, taskID string) (*models.RouteTask, error) {
 
 	return &task, nil
 }
-
-// DeleteShiftTasks deletes all tasks for a shift
-func DeleteShiftTasks(db *sqlx.DB, shiftID string) error {
-	query := `DELETE FROM route_tasks WHERE shift_id = $1`
-
-	result, err := db.Exec(query, shiftID)
-	if err != nil {
-		return fmt.Errorf("failed to delete shift tasks: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	log.Printf("🗑️  Deleted %d tasks for shift %s", rowsAffected, shiftID)
-	return nil
-}
