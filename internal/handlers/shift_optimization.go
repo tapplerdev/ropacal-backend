@@ -470,11 +470,10 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	log.Printf("📍 [REOPTIMIZE] Processing %d optimized stops", len(route.Stops))
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// Build the optimizer's order as inputs to itinerary.ApplyOrder (the order-deciding
-	// sequence_order writer) instead of issuing UPDATE/INSERT inline: orderedIDs = matched
-	// existing task IDs in optimizer order; newWarehouseTasks = regenerated warehouse_stops.
-	orderedIDs := make([]string, 0, len(route.Stops))
-	newWarehouseTasks := make([]models.RouteTask, 0)
+	// Build the optimizer's order (interleaved) for itinerary.ApplyOrder — the order-deciding
+	// sequence_order writer. Each stop is either an existing task to UPDATE (matched below) or a
+	// regenerated warehouse_stop to INSERT, appended in optimizer order.
+	orderedStops := make([]itinerary.OrderedStop, 0, len(route.Stops))
 
 	for i, stop := range route.Stops {
 		log.Printf("   Stop #%d/%d: Type=%s, Location=%s, CollectionID=%s, PlacementID=%s, MoveRequestID=%s, Odometer=%.0f",
@@ -489,14 +488,14 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		// Handle end stops (return to warehouse) — queued for ApplyOrder to INSERT.
 		if stop.Type == optimization.StopTypeEnd {
 			addr := stop.Address
-			newWarehouseTasks = append(newWarehouseTasks, models.RouteTask{
+			orderedStops = append(orderedStops, itinerary.OrderedStop{Insert: true, Task: models.RouteTask{
 				ID:        uuid.New().String(),
 				ShiftID:   shiftID,
 				TaskType:  "warehouse_stop",
 				Latitude:  stop.Latitude,
 				Longitude: stop.Longitude,
 				Address:   &addr,
-			})
+			}})
 			log.Printf("      ➕ Queued warehouse_stop (return to warehouse)")
 			continue
 		}
@@ -511,14 +510,14 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 
 			// Real warehouse pickup — queued for ApplyOrder to INSERT.
 			addr := stop.Address
-			newWarehouseTasks = append(newWarehouseTasks, models.RouteTask{
+			orderedStops = append(orderedStops, itinerary.OrderedStop{Insert: true, Task: models.RouteTask{
 				ID:        uuid.New().String(),
 				ShiftID:   shiftID,
 				TaskType:  "warehouse_stop",
 				Latitude:  stop.Latitude,
 				Longitude: stop.Longitude,
 				Address:   &addr,
-			})
+			}})
 			log.Printf("      ➕ Queued warehouse_stop (pickup bins)")
 			continue
 		}
@@ -583,27 +582,26 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		}
 
 		if taskID != "" {
-			orderedIDs = append(orderedIDs, taskID)
+			orderedStops = append(orderedStops, itinerary.OrderedStop{Task: models.RouteTask{ID: taskID}})
 			taskType := "unknown"
 			if origTask, exists := taskIDToOriginal[taskID]; exists {
 				taskType = string(origTask.TaskType)
 			}
-			log.Printf("      ➕ Queued %s task %s (pos %d)", taskType, taskID[:8], len(orderedIDs))
+			log.Printf("      ➕ Queued %s task %s (pos %d)", taskType, taskID[:8], len(orderedStops))
 		} else {
 			log.Printf("      ⚠️  No matching task found for stop")
 		}
 	}
 
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Printf("📊 [REOPTIMIZE] Applying optimizer order: %d existing tasks + %d warehouse stops", len(orderedIDs), len(newWarehouseTasks))
+	log.Printf("📊 [REOPTIMIZE] Applying optimizer order: %d stops", len(orderedStops))
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// itinerary.ApplyOrder is the order-deciding sequence_order writer: it stamps the matched
-	// existing tasks (in optimizer order), INSERTs the regenerated warehouse stops, then
-	// Resequences to the canonical dense 1..N. Replaces the inline UPDATE/INSERT loop + the
-	// trailing Resequence — behavior-equivalent because Resequence sorts warehouse-last, which
-	// washes out the optimizer's interim bin/warehouse interleaving.
-	if err := itinerary.ApplyOrder(tx, shiftID, orderedIDs, newWarehouseTasks, false); err != nil {
+	// existing tasks (seq-only UPDATE), INSERTs the regenerated warehouse stops, then Resequences
+	// to the canonical dense 1..N (isFirst=false → warehouse-last, which washes out the interim
+	// bin/warehouse interleaving on the reopt path).
+	if err := itinerary.ApplyOrder(tx, shiftID, orderedStops, false); err != nil {
 		return fmt.Errorf("failed to apply optimized order: %w", err)
 	}
 
@@ -1458,7 +1456,10 @@ func optimizeRouteWithMapbox(
 		log.Printf("📋 Loaded %d existing tasks for matching", len(existingTasks))
 	}
 
-	sequenceOrder := 1 // Track sequence for non-skipped stops
+	// Build the optimizer's order (interleaved) for itinerary.ApplyOrder. Each non-skipped stop
+	// becomes either an existing task to UPDATE-in-place (first-opt match) or a new row to INSERT.
+	orderedStops := make([]itinerary.OrderedStop, 0, len(route.Stops))
+	sequenceOrder := 1 // logging only; ApplyOrder assigns the final sequence_order
 	for i, stop := range route.Stops {
 		log.Printf("")
 		log.Printf("🔍 Processing Stop #%d/%d:", i+1, len(route.Stops))
@@ -1652,55 +1653,15 @@ func optimizeRouteWithMapbox(
 		}
 
 		if isFirstOptimization && existingTask != nil {
-			// UPDATE existing task (preserve task ID, update sequence and coordinates)
-			log.Printf("   ✏️  Updating existing task (ID: %s) with new sequence: %d", existingTask.ID, task.SequenceOrder)
-			updateQuery := `
-				UPDATE route_tasks SET
-					sequence_order = $1,
-					latitude = $2,
-					longitude = $3,
-					address = $4,
-					updated_at = $5
-				WHERE id = $6
-			`
-			_, err = tx.Exec(updateQuery,
-				task.SequenceOrder,
-				task.Latitude,
-				task.Longitude,
-				task.Address,
-				now,
-				existingTask.ID,
-			)
-			if err != nil {
-				return fmt.Errorf("failed to update existing task: %w", err)
-			}
+			// Existing row: queue an in-place UPDATE (preserve ID, refresh coords) for ApplyOrder.
+			task.ID = existingTask.ID
+			orderedStops = append(orderedStops, itinerary.OrderedStop{Task: task})
+			log.Printf("   ✏️  Queued existing task %s for in-place update", existingTask.ID[:8])
 		} else {
-			// INSERT new task (first optimization but no match, or subsequent optimization)
-			task.ID = uuid.New().String() // Generate new UUID
-			if !isFirstOptimization {
-				log.Printf("   💾 Inserting new task (reoptimization)...")
-			} else {
-				log.Printf("   💾 Inserting new task (warehouse stop, no existing match)...")
-			}
-			insertQuery := `
-				INSERT INTO route_tasks (
-					id, shift_id, task_type, sequence_order,
-					bin_id, bin_number, fill_percentage,
-					potential_location_id, new_bin_number, placement_source,
-					move_request_id, destination_latitude, destination_longitude, destination_address,
-					latitude, longitude, address
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-			`
-			_, err = tx.Exec(insertQuery,
-				task.ID, task.ShiftID, task.TaskType, task.SequenceOrder,
-				task.BinID, task.BinNumber, task.FillPercentage,
-				task.PotentialLocationID, task.NewBinNumber, task.PlacementSource,
-				task.MoveRequestID, task.DestinationLatitude, task.DestinationLongitude, task.DestinationAddress,
-				task.Latitude, task.Longitude, task.Address,
-			)
-			if err != nil {
-				return fmt.Errorf("failed to insert optimized task: %w", err)
-			}
+			// No existing match (warehouse stop; or — dead path — a reopt insert): queue a new row.
+			task.ID = uuid.New().String()
+			orderedStops = append(orderedStops, itinerary.OrderedStop{Insert: true, Task: task})
+			log.Printf("   💾 Queued new task %s for insert (type=%s)", task.ID[:8], task.TaskType)
 		}
 
 		// Increment sequence for next non-skipped stop
@@ -1713,23 +1674,13 @@ func optimizeRouteWithMapbox(
 		log.Printf("✅ [MAPBOX OPTIMIZER] Created %d new optimized route tasks", len(route.Stops)-2) // -2 for start/end
 	}
 
-	// Clean up sequence numbers: renumber all tasks 1, 2, 3, ...
-	// Prevents duplicate sequences from pickup/dropoff or warehouse/placement sharing sequence counters
-	var allActiveTasks []struct {
-		ID string `db:"id"`
-	}
-	err = tx.Select(&allActiveTasks, `
-		SELECT id FROM route_tasks
-		WHERE shift_id = $1 AND is_deleted = false
-		ORDER BY sequence_order ASC, created_at ASC
-	`, shiftID)
-	if err == nil {
-		for i, t := range allActiveTasks {
-			if _, rErr := tx.Exec(`UPDATE route_tasks SET sequence_order = $1 WHERE id = $2`, i+1, t.ID); rErr != nil {
-				return fmt.Errorf("renumber task %s: %w", t.ID, rErr)
-			}
-		}
-		log.Printf("🔢 Renumbered %d tasks (1-%d)", len(allActiveTasks), len(allActiveTasks))
+	// Persist the queued order atomically via the itinerary domain. ApplyOrder UPDATEs existing
+	// rows in place (preserving IDs + refreshing coords on first-opt), INSERTs new warehouse stops,
+	// then renumbers to a dense 1..N. isFirst=true uses the sequence_order/created_at renumber
+	// (NOT warehouse-last) so a leading warehouse pickup and binsPreloaded auto-completed pickups
+	// keep their positions — the legacy first-opt behavior.
+	if err := itinerary.ApplyOrder(tx, shiftID, orderedStops, isFirstOptimization); err != nil {
+		return fmt.Errorf("failed to apply optimized order: %w", err)
 	}
 
 	// 🔍 DEBUG: Verify what was ACTUALLY saved to database
