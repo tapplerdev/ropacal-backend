@@ -260,7 +260,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "phase6-slice1a-move-atomic",
+			"version": "phase6-drop-legacy-complete",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -396,7 +396,6 @@ func main() {
 			// Route Task endpoints (task-based shift system)
 			r.Get("/shifts/{shiftId}/tasks", handlers.GetShiftTasks(db))
 			r.Get("/shifts/{shiftId}/tasks/detailed", handlers.GetShiftTasksDetailed(db))
-			r.Put("/shifts/tasks/{taskId}/complete", handlers.CompleteRouteTask(db, wsHub, centrifugoClient))
 
 			// Potential Locations (drivers can create requests)
 			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub, centrifugoClient))

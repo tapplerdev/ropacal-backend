@@ -128,19 +128,6 @@ type CreateShiftWithTasksRequest struct {
 	RouteID        *string  `json:"route_id,omitempty"`        // Route template ID (if created from a template)
 }
 
-// CompleteTaskRequest represents the request to complete a task
-type CompleteTaskRequest struct {
-	UpdatedFillPercentage *int    `json:"updated_fill_percentage,omitempty"`
-	PhotoURL              *string `json:"photo_url,omitempty"`
-	NewBinID              *string `json:"new_bin_id,omitempty"` // DEPRECATED: For backward compatibility
-	NewBinNumber          int     `json:"new_bin_number"`       // REQUIRED: Driver-provided bin number for placements
-	HasIncident           bool    `json:"has_incident"`
-	IncidentType          *string `json:"incident_type,omitempty"`
-	IncidentPhotoURL      *string `json:"incident_photo_url,omitempty"`
-	IncidentDescription   *string `json:"incident_description,omitempty"`
-	CompletionNotes       *string `json:"completion_notes,omitempty"` // Driver notes for service tasks
-}
-
 // CreateShiftWithTasksResponse represents the response after creating a shift
 type CreateShiftWithTasksResponse struct {
 	ShiftID   string `json:"shift_id"`

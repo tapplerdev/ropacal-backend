@@ -701,44 +701,6 @@ func CreateShiftWithTasks(
 	return shiftID, actualTasks, nil
 }
 
-// CompleteTask marks a task as completed
-// Photo is stored in the checks table (not route_tasks) — see shifts.go CompleteTask handler
-func CompleteTask(
-	db *sqlx.DB,
-	taskID string,
-	updatedFillPercentage *int,
-	completionNotes *string,
-) error {
-	now := time.Now().Unix()
-
-	query := `
-		UPDATE route_tasks
-		SET is_completed = 1,
-		    completed_at = $1,
-		    updated_fill_percentage = $2,
-		    updated_at = $3,
-		    completion_notes = $4
-		WHERE id = $5
-	`
-
-	result, err := db.Exec(query, now, updatedFillPercentage, now, completionNotes, taskID)
-	if err != nil {
-		return fmt.Errorf("failed to complete task: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("task not found: %s", taskID)
-	}
-
-	log.Printf("✅ Task %s marked as completed", taskID)
-	return nil
-}
-
 // GetNextIncompleteTask gets the next task to complete in a shift
 func GetNextIncompleteTask(db *sqlx.DB, shiftID string) (*models.RouteTask, error) {
 	var task models.RouteTask
@@ -755,22 +717,6 @@ func GetNextIncompleteTask(db *sqlx.DB, shiftID string) (*models.RouteTask, erro
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get next task: %w", err)
-	}
-
-	return &task, nil
-}
-
-// GetTaskByID retrieves a single task by its ID
-func GetTaskByID(db *sqlx.DB, taskID string) (*models.RouteTask, error) {
-	var task models.RouteTask
-	query := `SELECT * FROM route_tasks WHERE id = $1`
-
-	err := db.Get(&task, query, taskID)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("task not found: %s", taskID)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get task: %w", err)
 	}
 
 	return &task, nil
