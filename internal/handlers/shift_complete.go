@@ -884,9 +884,9 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 			}
 			if _, plErr := db.Exec(`
 				UPDATE potential_locations
-				SET converted_to_bin_id = $1, converted_at = $2, converted_via_shift_id = $3, updated_at = $2
-				WHERE id = $4
-			`, moveRequest.BinID, now, shiftID, *moveRequest.SourcePotentialLocationID); plErr != nil {
+				SET converted_to_bin_id = $1, converted_at = $2, converted_by_user_id = $3, converted_via_shift_id = $4, updated_at = $2
+				WHERE id = $5
+			`, moveRequest.BinID, now, moveRequest.AssignedUserID, shiftID, *moveRequest.SourcePotentialLocationID); plErr != nil {
 				log.Printf("[MOVE] ⚠️  Error updating potential location: %v", plErr)
 			} else {
 				plConvertedData := map[string]interface{}{
