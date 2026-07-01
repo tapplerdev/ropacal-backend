@@ -14,7 +14,7 @@ type MovePlacement struct {
 	BinID          string
 	BinNumber      int
 	FillPercentage *int   // bin fields are nullable; nil → NULL (matches prior behavior)
-	MoveType       string // "relocation" → pickup + dropoff; otherwise pickup only
+	MoveType       string // "relocation"/"redeployment" → pickup + dropoff; otherwise pickup only
 
 	PickupLat, PickupLng *float64 // bin's current location
 	PickupAddress        string
@@ -31,15 +31,19 @@ type MovePlacement struct {
 }
 
 // AddMove assembles a move's route_tasks on a shift: a pickup at the bin's current
-// location, plus — for a relocation — a dropoff at the destination immediately
-// after it. Both rows share the move_request_id (the pickup→dropoff pair the
-// optimizer treats as one shipment). Downstream tasks are shifted to open room at
-// InsertSeq. Runs inside the caller's transaction (ext). Returns the number of
-// tasks added (1 pickup, or 2 for a relocation) so the caller can adjust
+// location, plus — for a relocation or redeployment — a dropoff at the destination
+// immediately after it. Both rows share the move_request_id (the pickup→dropoff pair
+// the optimizer treats as one shipment). Downstream tasks are shifted to open room at
+// InsertSeq. Runs inside the caller's transaction (ext). Returns the number of tasks
+// added (1 pickup, or 2 for a relocation/redeployment) so the caller can adjust
 // shift.total_bins.
 func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
+	// relocation and redeployment are both A→B bin moves (pickup at the bin's current
+	// location + dropoff at the destination). store/pickup_only are single-leg (pickup
+	// only). shift_complete's isRelocation treats both the same way on dropoff completion.
+	twoLeg := p.MoveType == "relocation" || p.MoveType == "redeployment"
 	binsAdded := 1
-	if p.MoveType == "relocation" {
+	if twoLeg {
 		binsAdded = 2
 	}
 
@@ -63,7 +67,7 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 		return 0, fmt.Errorf("insert pickup: %w", err)
 	}
 
-	if p.MoveType != "relocation" {
+	if !twoLeg {
 		return binsAdded, nil
 	}
 

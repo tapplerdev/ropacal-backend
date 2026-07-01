@@ -166,6 +166,65 @@ func TestAddMove_RelocationInsertsPickupAndDropoff(t *testing.T) {
 	}
 }
 
+// Redeployment (warehouse/in_storage bin → placement) is a two-leg move like a
+// relocation: it must insert BOTH a pickup and a dropoff so the dropoff completion
+// finalizes the move (relocates the bin + converts the source potential_location).
+func TestAddMove_RedeploymentInsertsPickupAndDropoff(t *testing.T) {
+	db, mock := mockExt(t)
+	defer db.Close()
+
+	mock.ExpectExec("(?s)UPDATE route_tasks SET sequence_order = sequence_order \\+ \\$1.*WHERE shift_id = \\$2 AND sequence_order >= \\$3").
+		WithArgs(2, "shift-1", 3).
+		WillReturnResult(sqlmock.NewResult(0, 4))
+
+	// pickup INSERT
+	mock.ExpectExec("(?s)INSERT INTO route_tasks.*fill_percentage,\\s*move_request_id.*VALUES").
+		WithArgs(
+			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
+			"move-1", "redeployment", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// dropoff INSERT (seq = InsertSeq+1 = 4)
+	mock.ExpectExec("(?s)INSERT INTO route_tasks.*destination_latitude, destination_longitude, destination_address,.*VALUES").
+		WithArgs(
+			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 4, string(Dropoff),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
+			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
+			"move-1", "redeployment", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectQuery("(?s)SELECT sequence_order FROM route_tasks WHERE shift_id = \\$1 AND move_request_id = \\$2 AND task_type = 'pickup'").
+		WithArgs("shift-1", "move-1").
+		WillReturnRows(sqlmock.NewRows([]string{"sequence_order"}).AddRow(3))
+
+	mock.ExpectQuery("(?s)SELECT sequence_order FROM route_tasks WHERE shift_id = \\$1 AND move_request_id = \\$2 AND task_type = 'dropoff'").
+		WithArgs("shift-1", "move-1").
+		WillReturnRows(sqlmock.NewRows([]string{"sequence_order"}).AddRow(4))
+
+	n, err := AddMove(db, "shift-1", MovePlacement{
+		InsertSeq:      3,
+		MoveRequestID:  "move-1",
+		BinID:          "bin-1",
+		BinNumber:      42,
+		MoveType:       "redeployment",
+		PickupAddress:  "pickup addr",
+		DropoffAddress: "dropoff addr",
+		Now:            1700000000,
+	})
+	if err != nil {
+		t.Fatalf("AddMove(redeployment) = %v, want nil", err)
+	}
+	if n != 2 {
+		t.Fatalf("AddMove(redeployment) returned %d, want 2", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 // If the verify SELECTs report pickupSeq >= dropoffSeq the invariant is violated:
 // AddMove returns 0 and an "invalid sequence order" error.
 func TestAddMove_RelocationInvalidSequenceOrder(t *testing.T) {
