@@ -78,10 +78,13 @@ func TestAddMove_StoreInsertsPickupOnly(t *testing.T) {
 		WithArgs(1, "shift-1", 3).
 		WillReturnResult(sqlmock.NewResult(0, 4))
 
+	// store is single-leg: the pickup's destination_* columns stay NULL (excluded from
+	// the optimizer by design — see #34; its destination is the warehouse, resolved later).
 	mock.ExpectExec("(?s)INSERT INTO route_tasks.*task_type.*VALUES").
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
+			nil, nil, nil,
 			"move-1", "store", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -116,11 +119,14 @@ func TestAddMove_RelocationInsertsPickupAndDropoff(t *testing.T) {
 		WithArgs(2, "shift-1", 3).
 		WillReturnResult(sqlmock.NewResult(0, 4))
 
-	// pickup INSERT (fill_percentage column, no destination_* columns)
-	mock.ExpectExec("(?s)INSERT INTO route_tasks.*fill_percentage,\\s*move_request_id.*VALUES").
+	// pickup INSERT — now ALSO carries destination_* (= the move's dropoff coords) so the
+	// optimizer can model it as a shipment (#34). Distinguished from the dropoff INSERT by
+	// the fill_percentage column that precedes destination_latitude.
+	mock.ExpectExec("(?s)INSERT INTO route_tasks.*fill_percentage,\\s*destination_latitude.*VALUES").
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
+			37.3, -121.9, "dropoff addr",
 			"move-1", "relocation", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -152,6 +158,8 @@ func TestAddMove_RelocationInsertsPickupAndDropoff(t *testing.T) {
 		BinNumber:      42,
 		MoveType:       "relocation",
 		PickupAddress:  "pickup addr",
+		DropoffLat:     37.3,
+		DropoffLng:     -121.9,
 		DropoffAddress: "dropoff addr",
 		Now:            1700000000,
 	})
@@ -177,11 +185,13 @@ func TestAddMove_RedeploymentInsertsPickupAndDropoff(t *testing.T) {
 		WithArgs(2, "shift-1", 3).
 		WillReturnResult(sqlmock.NewResult(0, 4))
 
-	// pickup INSERT
-	mock.ExpectExec("(?s)INSERT INTO route_tasks.*fill_percentage,\\s*move_request_id.*VALUES").
+	// pickup INSERT — carries destination_* (redeployment is two-leg, so the pickup is
+	// optimizer-visible via #34, same as relocation).
+	mock.ExpectExec("(?s)INSERT INTO route_tasks.*fill_percentage,\\s*destination_latitude.*VALUES").
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
+			37.3, -121.9, "dropoff addr",
 			"move-1", "redeployment", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -211,6 +221,8 @@ func TestAddMove_RedeploymentInsertsPickupAndDropoff(t *testing.T) {
 		BinNumber:      42,
 		MoveType:       "redeployment",
 		PickupAddress:  "pickup addr",
+		DropoffLat:     37.3,
+		DropoffLng:     -121.9,
 		DropoffAddress: "dropoff addr",
 		Now:            1700000000,
 	})
@@ -239,6 +251,7 @@ func TestAddMove_RelocationInvalidSequenceOrder(t *testing.T) {
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			"move-1", "relocation", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))

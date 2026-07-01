@@ -88,6 +88,21 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 		return nil
 	}
 
+	// #34: a two-leg move's PICKUP carries the destination as the optimizer's hint (it
+	// reads a move off the pickup row). Whenever the destination changes or a move becomes
+	// two-leg, refresh the pickup's destination_* so a re-opt routes to the current
+	// destination and the move stays optimizer-visible. Requires dest != nil.
+	setPickupDestination := func() error {
+		if _, err := ext.Exec(ext.Rebind(`
+			UPDATE route_tasks
+			SET destination_latitude = ?, destination_longitude = ?, destination_address = ?, updated_at = ?
+			WHERE move_request_id = ? AND shift_id = ? AND task_type = 'pickup' AND is_completed = 0 AND is_deleted = false`),
+			dest.Lat, dest.Lng, dest.Address, now, moveReqID, shiftID); err != nil {
+			return fmt.Errorf("reconcile: sync pickup destination: %w", err)
+		}
+		return nil
+	}
+
 	switch {
 	case twoLeg(oldType) && !twoLeg(newType):
 		// two-leg → single-leg (relocation/redeployment → store/pickup_only): drop the drop-off(s).
@@ -139,6 +154,11 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 			return out, fmt.Errorf("reconcile: insert dropoff: %w", err)
 		}
 		out.DropoffAdded = true
+		// Stamp the destination onto the existing pickup so the now-two-leg move is
+		// optimizer-visible (#34) — the optimizer models the move off the pickup row.
+		if err := setPickupDestination(); err != nil {
+			return out, err
+		}
 
 	default:
 		// Leg shape unchanged. If the type changed between the two two-leg kinds
@@ -152,10 +172,17 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 				return out, fmt.Errorf("reconcile: sync move_type: %w", err)
 			}
 		}
-		// Apply any destination/address change to the existing drop-off(s).
+		// Apply any destination/address change to the existing drop-off(s), and keep the
+		// two-leg move's pickup destination hint in sync so a re-opt after an address edit
+		// routes to the NEW destination, not the stale one (#34).
 		if addressChanged && dest != nil {
 			if err := updateDropoffDests(); err != nil {
 				return out, err
+			}
+			if twoLeg(newType) {
+				if err := setPickupDestination(); err != nil {
+					return out, err
+				}
 			}
 		}
 	}

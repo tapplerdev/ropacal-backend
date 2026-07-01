@@ -54,15 +54,31 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 		return 0, fmt.Errorf("shift sequence order: %w", err)
 	}
 
+	// A two-leg move's PICKUP also carries the DESTINATION (where the bin is headed) in
+	// its destination_* columns. The optimizer reads a move off the pickup row alone
+	// (its case "pickup" builds a pickup→dropoff shipment from the pickup's latitude/
+	// longitude + destination_latitude/longitude — there is no case "dropoff"), so
+	// without this the mid-shift-added move is invisible to the optimizer and rides at
+	// its insertion slot (#34). CreateShiftWithTasks already stamps this for moves
+	// created at shift-start; this brings AddMove (assign-to-shift / reopt) to parity.
+	// Single-leg moves (store/pickup_only) leave it NULL — their destination is the
+	// current warehouse, which a caller would resolve and pass via DropoffLat/Lng.
+	var pickupDestLat, pickupDestLng, pickupDestAddr interface{}
+	if twoLeg {
+		pickupDestLat, pickupDestLng, pickupDestAddr = p.DropoffLat, p.DropoffLng, p.DropoffAddress
+	}
+
 	// Pickup at the bin's current location.
 	if _, err := ext.Exec(ext.Rebind(`
 		INSERT INTO route_tasks (
 			id, shift_id, bin_id, bin_number, sequence_order, task_type,
 			latitude, longitude, address, fill_percentage,
+			destination_latitude, destination_longitude, destination_address,
 			move_request_id, move_type, added_by, addition_reason, is_completed, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
 		uuid.New().String(), shiftID, p.BinID, p.BinNumber, p.InsertSeq, string(Pickup),
 		p.PickupLat, p.PickupLng, p.PickupAddress, p.FillPercentage,
+		pickupDestLat, pickupDestLng, pickupDestAddr,
 		p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
 		return 0, fmt.Errorf("insert pickup: %w", err)
 	}
