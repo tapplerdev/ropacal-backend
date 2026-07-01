@@ -250,7 +250,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			// For pickup, we just mark the task complete (already done above) and continue
 			if taskType == "dropoff" {
 				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
-				err = handleMoveRequestCompletion(db, hub, centrifugoClient, moveRequest, req, now)
+				err = handleMoveRequestCompletion(db, hub, centrifugoClient, moveRequest, req, now, userClaims.UserID)
 				if err != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
 					// Don't fail - just log
@@ -751,7 +751,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 	IncidentType          *string  `json:"incident_type,omitempty"`
 	IncidentPhotoUrl      *string  `json:"incident_photo_url,omitempty"`
 	IncidentDescription   *string  `json:"incident_description,omitempty"`
-}, now int64) error {
+}, now int64, driverID string) error {
 	log.Printf("[MOVE] 🚚 Handling move request completion")
 	log.Printf("[MOVE]    Type: %s", moveRequest.MoveType)
 
@@ -847,17 +847,24 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 
 	// ── Post-commit, best-effort side-effects (never roll back the completion) ───
 
-	// History: move request completed by driver
-	if moveRequest.AssignedUserID != nil {
+	// History + conversion attribution: the actor is the DRIVER who completed the task.
+	// moveRequest.AssignedUserID is NULL once a move is assigned to a shift (assign-to-shift
+	// assigns to the shift, not a user — see #31), so prefer the authenticated driver and
+	// only fall back to AssignedUserID for a directly user-assigned move.
+	completedBy := driverID
+	if completedBy == "" && moveRequest.AssignedUserID != nil {
+		completedBy = *moveRequest.AssignedUserID
+	}
+	if completedBy != "" {
 		var driverName string
-		if dErr := db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, *moveRequest.AssignedUserID); dErr != nil {
+		if dErr := db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, completedBy); dErr != nil {
 			driverName = "Unknown Driver"
 		}
-		if lErr := moverequest.LogCompleted(db, moveRequest.ID, *moveRequest.AssignedUserID, driverName, "driver", moveRequest.Status); lErr != nil {
+		if lErr := moverequest.LogCompleted(db, moveRequest.ID, completedBy, driverName, "driver", moveRequest.Status); lErr != nil {
 			log.Printf("Warning: Failed to log move request completion: %v", lErr)
 		}
 	} else {
-		log.Printf("Warning: Move request completed without assigned user ID")
+		log.Printf("Warning: Move request completed without a resolvable actor ID")
 	}
 
 	// Broadcast move request completion to dashboard
@@ -886,7 +893,7 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 				UPDATE potential_locations
 				SET converted_to_bin_id = $1, converted_at = $2, converted_by_user_id = $3, converted_via_shift_id = $4, updated_at = $2
 				WHERE id = $5
-			`, moveRequest.BinID, now, moveRequest.AssignedUserID, shiftID, *moveRequest.SourcePotentialLocationID); plErr != nil {
+			`, moveRequest.BinID, now, completedBy, shiftID, *moveRequest.SourcePotentialLocationID); plErr != nil {
 				log.Printf("[MOVE] ⚠️  Error updating potential location: %v", plErr)
 			} else {
 				plConvertedData := map[string]interface{}{
