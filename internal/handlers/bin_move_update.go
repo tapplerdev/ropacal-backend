@@ -298,21 +298,36 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 				if req.MoveType != nil {
 					newType = *req.MoveType
 				}
+				// Resolve the move's dropoff destination for the (possibly new) type — every
+				// move is two-leg (#37): store/pickup_only → CURRENT warehouse; relocation/
+				// redeployment → the new coords, or the move's existing destination for a
+				// type-only change (e.g. relocation↔redeployment with no new coords).
 				var dest *itinerary.MoveDestination
-				if req.NewLatitude != nil && req.NewLongitude != nil {
+				if newType == "store" || newType == "pickup_only" {
+					if wlat, wlng, waddr, ok := resolveCurrentWarehouse(db); ok {
+						dest = &itinerary.MoveDestination{Address: waddr, Lat: wlat, Lng: wlng}
+					}
+				} else {
 					addr := ""
 					if fieldEdits.NewAddress != nil {
 						addr = *fieldEdits.NewAddress
 					} else if req.NewStreet != nil {
 						addr = *req.NewStreet
 					}
-					dest = &itinerary.MoveDestination{Address: addr, Lat: *req.NewLatitude, Lng: *req.NewLongitude}
+					if req.NewLatitude != nil && req.NewLongitude != nil {
+						dest = &itinerary.MoveDestination{Address: addr, Lat: *req.NewLatitude, Lng: *req.NewLongitude}
+					} else if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+						if addr == "" && moveRequest.NewAddress != nil {
+							addr = *moveRequest.NewAddress
+						}
+						dest = &itinerary.MoveDestination{Address: addr, Lat: *moveRequest.NewLatitude, Lng: *moveRequest.NewLongitude}
+					}
 				}
 				reconcileOutcome, err = itinerary.ReconcileMove(tx, *effectiveShiftID, id,
 					moveRequest.MoveType, newType, addressChanged, dest, managerUserID, now)
 				if err != nil {
 					if errors.Is(err, itinerary.ErrMissingDestination) {
-						http.Error(w, "Changing a move to 'relocation' requires new_latitude, new_longitude, and an address", http.StatusBadRequest)
+						http.Error(w, "Changing this move's destination requires new_latitude, new_longitude, and an address", http.StatusBadRequest)
 						return
 					}
 					log.Printf("Error reconciling route_tasks: %v", err)

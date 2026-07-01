@@ -20,6 +20,22 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// resolveCurrentWarehouse returns the CURRENT warehouse location from config (best-effort;
+// ok=false if unset/unparseable/null-island). store & pickup_only moves drop the bin off
+// here, so their route dropoff must use the current warehouse — never a possibly-stale
+// move.new_latitude — matching CreateShiftWithTasks's store-destination override.
+func resolveCurrentWarehouse(db *sqlx.DB) (lat, lng float64, addr string, ok bool) {
+	var raw []byte
+	if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&raw); err != nil {
+		return 0, 0, "", false
+	}
+	var wh models.WarehouseLocation
+	if err := json.Unmarshal(raw, &wh); err != nil || (wh.Latitude == 0 && wh.Longitude == 0) {
+		return 0, 0, "", false
+	}
+	return wh.Latitude, wh.Longitude, wh.Address, true
+}
+
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
 func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {

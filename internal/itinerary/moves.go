@@ -14,12 +14,15 @@ type MovePlacement struct {
 	BinID          string
 	BinNumber      int
 	FillPercentage *int   // bin fields are nullable; nil → NULL (matches prior behavior)
-	MoveType       string // "relocation"/"redeployment" → pickup + dropoff; otherwise pickup only
+	MoveType       string // relocation/redeployment/store/pickup_only — all two-leg (pickup + dropoff)
 
 	PickupLat, PickupLng *float64 // bin's current location
 	PickupAddress        string
 
-	DropoffLat, DropoffLng float64 // relocation destination
+	// The move's destination: the new location (relocation/redeployment) or the current
+	// warehouse (store/pickup_only). The caller resolves it (never trust a possibly-stale
+	// move.new_latitude for store — re-resolve the current warehouse config).
+	DropoffLat, DropoffLng float64
 	DropoffAddress         string
 
 	// Audit: who added this move to the shift mid-shift, and why. nil for tasks
@@ -31,21 +34,22 @@ type MovePlacement struct {
 }
 
 // AddMove assembles a move's route_tasks on a shift: a pickup at the bin's current
-// location, plus — for a relocation or redeployment — a dropoff at the destination
-// immediately after it. Both rows share the move_request_id (the pickup→dropoff pair
-// the optimizer treats as one shipment). Downstream tasks are shifted to open room at
-// InsertSeq. Runs inside the caller's transaction (ext). Returns the number of tasks
-// added (1 pickup, or 2 for a relocation/redeployment) so the caller can adjust
-// shift.total_bins.
+// location + a dropoff at the destination immediately after it. Every move type is
+// two-leg (relocation/redeployment → the new location; store/pickup_only → the current
+// warehouse). Both rows share the move_request_id (the pickup→dropoff pair the optimizer
+// treats as one shipment, and CountStops treats as one logical bin). Downstream tasks are
+// shifted to open room at InsertSeq. Runs inside the caller's transaction (ext). Returns
+// the number of tasks added (always 2) so the caller can adjust shift.total_bins.
 func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
-	// relocation and redeployment are both A→B bin moves (pickup at the bin's current
-	// location + dropoff at the destination). store/pickup_only are single-leg (pickup
-	// only). shift_complete's isRelocation treats both the same way on dropoff completion.
-	twoLeg := p.MoveType == "relocation" || p.MoveType == "redeployment"
-	binsAdded := 1
-	if twoLeg {
-		binsAdded = 2
+	// Every move relocates a bin from A→B, so all move types are two-leg: a pickup at the
+	// bin's current location + a dropoff at the destination. The destination is the move's
+	// new location (relocation/redeployment) or the current warehouse (store/pickup_only);
+	// the caller resolves it into DropoffLat/Lng. A 0,0 destination means the caller failed
+	// to resolve it — reject rather than route the bin to null island.
+	if p.DropoffLat == 0 && p.DropoffLng == 0 {
+		return 0, fmt.Errorf("AddMove: move %s (%s) has no destination coordinates", p.MoveRequestID, p.MoveType)
 	}
+	binsAdded := 2
 
 	// Open room at the insert position.
 	if _, err := ext.Exec(ext.Rebind(`
@@ -54,19 +58,13 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 		return 0, fmt.Errorf("shift sequence order: %w", err)
 	}
 
-	// A two-leg move's PICKUP also carries the DESTINATION (where the bin is headed) in
-	// its destination_* columns. The optimizer reads a move off the pickup row alone
-	// (its case "pickup" builds a pickup→dropoff shipment from the pickup's latitude/
-	// longitude + destination_latitude/longitude — there is no case "dropoff"), so
-	// without this the mid-shift-added move is invisible to the optimizer and rides at
-	// its insertion slot (#34). CreateShiftWithTasks already stamps this for moves
-	// created at shift-start; this brings AddMove (assign-to-shift / reopt) to parity.
-	// Single-leg moves (store/pickup_only) leave it NULL — their destination is the
-	// current warehouse, which a caller would resolve and pass via DropoffLat/Lng.
-	var pickupDestLat, pickupDestLng, pickupDestAddr interface{}
-	if twoLeg {
-		pickupDestLat, pickupDestLng, pickupDestAddr = p.DropoffLat, p.DropoffLng, p.DropoffAddress
-	}
+	// The PICKUP also carries the DESTINATION (where the bin is headed) in its
+	// destination_* columns so the optimizer can model the move as a pickup→dropoff
+	// shipment (#34): it reads a move off the pickup row alone (its case "pickup" builds
+	// the shipment from the pickup's latitude/longitude + destination_latitude/longitude —
+	// there is no case "dropoff"). CreateShiftWithTasks already stamps this for moves
+	// created at shift-start; this keeps AddMove (assign-to-shift / reopt) at parity.
+	pickupDestLat, pickupDestLng, pickupDestAddr := p.DropoffLat, p.DropoffLng, p.DropoffAddress
 
 	// Pickup at the bin's current location.
 	if _, err := ext.Exec(ext.Rebind(`
@@ -81,10 +79,6 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 		pickupDestLat, pickupDestLng, pickupDestAddr,
 		p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
 		return 0, fmt.Errorf("insert pickup: %w", err)
-	}
-
-	if !twoLeg {
-		return binsAdded, nil
 	}
 
 	// Dropoff at the destination, immediately after the pickup.

@@ -254,7 +254,8 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	}
 	defer tx.Rollback()
 
-	// Resolve relocation destination coordinates for the dropoff.
+	// Resolve the move's dropoff destination. relocation/redeployment go to the move's new
+	// location; store/pickup_only go to the CURRENT warehouse (every move is two-leg — #37).
 	var dropoffLat, dropoffLng float64
 	var dropoffAddr string
 	if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
@@ -263,6 +264,11 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 	}
 	if moveRequest.NewAddress != nil {
 		dropoffAddr = *moveRequest.NewAddress
+	}
+	if moveRequest.MoveType == "store" || moveRequest.MoveType == "pickup_only" {
+		if wlat, wlng, waddr, ok := resolveCurrentWarehouse(db); ok {
+			dropoffLat, dropoffLng, dropoffAddr = wlat, wlng, waddr
+		}
 	}
 
 	// Assemble the move's stops (pickup [+ dropoff]) at the insert position — the

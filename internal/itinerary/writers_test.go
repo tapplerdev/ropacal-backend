@@ -69,27 +69,74 @@ func TestResequence_FiresRenumberUpdate(t *testing.T) {
 	}
 }
 
-// A store move (non-relocation) opens room by 1 then inserts only the pickup row.
-func TestAddMove_StoreInsertsPickupOnly(t *testing.T) {
+// A store move is two-leg like a relocation: pickup at the bin + dropoff at the WAREHOUSE
+// (the caller resolves the current-warehouse coords into DropoffLat/Lng). This is what
+// makes store finalize (completion fires on the dropoff) and optimize.
+func TestAddMove_StoreInsertsPickupAndWarehouseDropoff(t *testing.T) {
 	db, mock := mockExt(t)
 	defer db.Close()
 
 	mock.ExpectExec("(?s)UPDATE route_tasks SET sequence_order = sequence_order \\+ \\$1.*WHERE shift_id = \\$2 AND sequence_order >= \\$3").
-		WithArgs(1, "shift-1", 3).
+		WithArgs(2, "shift-1", 3).
 		WillReturnResult(sqlmock.NewResult(0, 4))
 
-	// store is single-leg: the pickup's destination_* columns stay NULL (excluded from
-	// the optimizer by design — see #34; its destination is the warehouse, resolved later).
-	mock.ExpectExec("(?s)INSERT INTO route_tasks.*task_type.*VALUES").
+	// pickup INSERT — carries destination_* = the warehouse (store is optimizer-visible now).
+	mock.ExpectExec("(?s)INSERT INTO route_tasks.*fill_percentage,\\s*destination_latitude.*VALUES").
 		WithArgs(
 			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
-			nil, nil, nil,
+			37.6368, -122.1269, "Warehouse",
 			"move-1", "store", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
+	// dropoff INSERT at the warehouse (seq = InsertSeq+1 = 4)
+	mock.ExpectExec("(?s)INSERT INTO route_tasks.*destination_latitude, destination_longitude, destination_address,.*VALUES").
+		WithArgs(
+			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 4, string(Dropoff),
+			37.6368, -122.1269, "Warehouse",
+			37.6368, -122.1269, "Warehouse",
+			"move-1", "store", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectQuery("(?s)SELECT sequence_order FROM route_tasks WHERE shift_id = \\$1 AND move_request_id = \\$2 AND task_type = 'pickup'").
+		WithArgs("shift-1", "move-1").
+		WillReturnRows(sqlmock.NewRows([]string{"sequence_order"}).AddRow(3))
+	mock.ExpectQuery("(?s)SELECT sequence_order FROM route_tasks WHERE shift_id = \\$1 AND move_request_id = \\$2 AND task_type = 'dropoff'").
+		WithArgs("shift-1", "move-1").
+		WillReturnRows(sqlmock.NewRows([]string{"sequence_order"}).AddRow(4))
+
 	n, err := AddMove(db, "shift-1", MovePlacement{
+		InsertSeq:      3,
+		MoveRequestID:  "move-1",
+		BinID:          "bin-1",
+		BinNumber:      42,
+		MoveType:       "store",
+		PickupAddress:  "pickup addr",
+		DropoffLat:     37.6368,
+		DropoffLng:     -122.1269,
+		DropoffAddress: "Warehouse",
+		Now:            1700000000,
+	})
+	if err != nil {
+		t.Fatalf("AddMove(store) = %v, want nil", err)
+	}
+	if n != 2 {
+		t.Fatalf("AddMove(store) returned %d, want 2", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+// AddMove rejects a move with no destination (0,0) rather than routing the bin to null
+// island — the caller must resolve the destination (warehouse for store/pickup_only).
+func TestAddMove_RejectsMissingDestination(t *testing.T) {
+	db, mock := mockExt(t)
+	defer db.Close()
+	// No query expectations: the 0,0 guard fires before any DB write.
+	_, err := AddMove(db, "shift-1", MovePlacement{
 		InsertSeq:     3,
 		MoveRequestID: "move-1",
 		BinID:         "bin-1",
@@ -98,11 +145,8 @@ func TestAddMove_StoreInsertsPickupOnly(t *testing.T) {
 		PickupAddress: "pickup addr",
 		Now:           1700000000,
 	})
-	if err != nil {
-		t.Fatalf("AddMove(store) = %v, want nil", err)
-	}
-	if n != 1 {
-		t.Fatalf("AddMove(store) returned %d, want 1", n)
+	if err == nil || !strings.Contains(err.Error(), "no destination coordinates") {
+		t.Fatalf("AddMove(no dest) = %v, want a 'no destination coordinates' error", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
@@ -281,6 +325,8 @@ func TestAddMove_RelocationInvalidSequenceOrder(t *testing.T) {
 		BinNumber:      42,
 		MoveType:       "relocation",
 		PickupAddress:  "pickup addr",
+		DropoffLat:     37.3,
+		DropoffLng:     -121.9,
 		DropoffAddress: "dropoff addr",
 		Now:            1700000000,
 	})
