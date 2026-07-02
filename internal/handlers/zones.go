@@ -616,6 +616,8 @@ func formatIncidentTypeLabel(t string) string {
 		return "Damaged"
 	case "inaccessible":
 		return "Inaccessible"
+	case "pulled_from_service":
+		return "Pulled From Service"
 	default:
 		return strings.ReplaceAll(t, "_", " ")
 	}

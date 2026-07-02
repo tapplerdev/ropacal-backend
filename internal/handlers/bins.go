@@ -652,17 +652,29 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			if req.ReasonCategory != nil {
 				if noGoTriggers[*req.ReasonCategory] {
 					shouldCreateZone = true
-				} else if *req.ReasonCategory == "relocation_request" &&
+				} else if (*req.ReasonCategory == "relocation_request" || *req.ReasonCategory == "pulled_from_service") &&
 					req.CreateNoGoZone != nil && *req.CreateNoGoZone {
 					shouldCreateZone = true
 				}
 			}
 
-			if shouldCreateZone && (changeType == "address_change" || changeType == "coordinates_change") &&
+			// A relocation/address edit flags the OLD location because the bin moved
+			// away from it. A store/retire (pulled_from_service) doesn't change the
+			// bin's coordinates in this handler, so status_change is the trigger and
+			// the zone is flagged at the bin's current (soon-to-be-vacated) location.
+			zoneEligibleChange := changeType == "address_change" || changeType == "coordinates_change" ||
+				(isStoring && changeType == "status_change")
+
+			if shouldCreateZone && zoneEligibleChange &&
 				existing.Latitude != nil && existing.Longitude != nil {
 				zoneName := fmt.Sprintf("%s, %s", existing.CurrentStreet, existing.City)
 				adminBinChangeSource := "admin_bin_change"
-				incidentDesc := fmt.Sprintf("Bin #%d address updated by manager. Previous location flagged — %s", existing.BinNumber, formatIncidentTypeLabel(*req.ReasonCategory))
+				var incidentDesc string
+				if isStoring {
+					incidentDesc = fmt.Sprintf("Bin #%d pulled from service by manager. Location flagged — %s", existing.BinNumber, formatIncidentTypeLabel(*req.ReasonCategory))
+				} else {
+					incidentDesc = fmt.Sprintf("Bin #%d address updated by manager. Previous location flagged — %s", existing.BinNumber, formatIncidentTypeLabel(*req.ReasonCategory))
+				}
 				binIDCopy := id
 				// Run on the same transaction so the zone + incident are atomic
 				// with the bin update and change-log write below.

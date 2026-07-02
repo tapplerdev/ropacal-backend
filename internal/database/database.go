@@ -480,9 +480,11 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_manager ON zone_risk_overrides(manager_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_zone_risk_overrides_status ON zone_risk_overrides(status)`,
 
-		// Migration: Update zone_incidents incident_type constraint to include new types
+		// Migration: Update zone_incidents incident_type constraint to include new types.
+		// 'pulled_from_service' lets a manager flag a no-go zone when pulling a bin
+		// In Warehouse (the store/retire path in UpdateBin). Idempotent superset.
 		`ALTER TABLE zone_incidents DROP CONSTRAINT IF EXISTS zone_incidents_incident_type_check`,
-		`ALTER TABLE zone_incidents ADD CONSTRAINT zone_incidents_incident_type_check CHECK(incident_type IN ('vandalism', 'landlord_complaint', 'theft', 'relocation_request', 'missing', 'damaged', 'vandalized', 'inaccessible'))`,
+		`ALTER TABLE zone_incidents ADD CONSTRAINT zone_incidents_incident_type_check CHECK(incident_type IN ('vandalism', 'landlord_complaint', 'theft', 'relocation_request', 'missing', 'damaged', 'vandalized', 'inaccessible', 'pulled_from_service'))`,
 
 		// Migration: Add bin retirement tracking fields
 		`ALTER TABLE bins ADD COLUMN IF NOT EXISTS last_checked_at BIGINT`,
