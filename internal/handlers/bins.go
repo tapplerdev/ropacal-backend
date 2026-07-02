@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"ropacal-backend/internal/bindomain"
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
@@ -766,9 +768,67 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			}
 		}
 
+		// ── Cancel pending move requests the manager chose to supersede ─────────────
+		// A manual bin edit (e.g. setting the bin to In Warehouse) can make a pending move
+		// redundant/contradictory. The dashboard surfaces the move and passes its id here on
+		// confirmation, so we cancel it ATOMICALLY with the edit (audited; driver notified
+		// post-commit). Unlike CancelBinMoveRequest we do NOT revert the bin — the manual
+		// edit is authoritative. Only NON-terminal moves belonging to THIS bin are honored.
+		actorID := ""
+		if userID != nil {
+			actorID = *userID
+		}
+		type cancelledMove struct {
+			id            string
+			prevStatus    string
+			assignedShift *string
+		}
+		var cancelledMoves []cancelledMove
+		for _, mvID := range req.CancelMoveRequestIDs {
+			if mvID == "" {
+				continue
+			}
+			var mv struct {
+				Status        string  `db:"status"`
+				AssignedShift *string `db:"assigned_shift_id"`
+			}
+			selErr := tx.Get(&mv, `SELECT status, assigned_shift_id FROM bin_move_requests
+				WHERE id = $1 AND bin_id = $2 AND status NOT IN ('completed','cancelled')`, mvID, id)
+			if selErr == sql.ErrNoRows {
+				log.Printf("⚠️  [UPDATE-BIN] Skip cancel of move %s: not an active move for this bin", mvID)
+				continue
+			} else if selErr != nil {
+				log.Printf("❌ [UPDATE-BIN] Failed to load pending move %s: %v", mvID, selErr)
+				http.Error(w, "Failed to check pending move request", http.StatusInternalServerError)
+				return
+			}
+			if err = moverequest.Cancel(tx, mvID, nowUnix); err != nil {
+				log.Printf("❌ [UPDATE-BIN] Failed to cancel move %s: %v", mvID, err)
+				http.Error(w, "Failed to cancel pending move request", http.StatusInternalServerError)
+				return
+			}
+			if mv.AssignedShift != nil {
+				var taskIDs []string
+				if e := tx.Select(&taskIDs, `SELECT id FROM route_tasks WHERE move_request_id = $1 AND shift_id = $2 AND is_completed = 0 AND is_deleted = false`, mvID, *mv.AssignedShift); e != nil {
+					http.Error(w, "Failed to load move tasks", http.StatusInternalServerError)
+					return
+				}
+				if e := itinerary.RemoveByIDs(tx, taskIDs, actorID, "superseded_by_manual_bin_edit", nowUnix); e != nil {
+					http.Error(w, "Failed to remove move tasks", http.StatusInternalServerError)
+					return
+				}
+				if e := itinerary.RecomputeShiftCounts(tx, *mv.AssignedShift, nowUnix); e != nil {
+					http.Error(w, "Failed to recompute shift counts", http.StatusInternalServerError)
+					return
+				}
+			}
+			cancelledMoves = append(cancelledMoves, cancelledMove{id: mvID, prevStatus: mv.Status, assignedShift: mv.AssignedShift})
+			log.Printf("✅ [UPDATE-BIN] Cancelled pending move %s (superseded by manual edit)", mvID)
+		}
+
 		// Commit transaction — all writes above (bin update, check record,
 		// potential-location snapshot/status, no-go zone + incident, change log,
-		// route_task cascade) are now persisted atomically.
+		// route_task cascade, superseded move cancellations) are now persisted atomically.
 		log.Printf("💾 [UPDATE-BIN] Committing transaction")
 		if err := tx.Commit(); err != nil {
 			log.Printf("❌ [UPDATE-BIN] Failed to commit transaction: %v", err)
@@ -776,6 +836,36 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			return
 		}
 		log.Printf("✅ [UPDATE-BIN] Transaction committed successfully")
+
+		// Superseded-move side effects (post-commit, best-effort; the edit already committed).
+		if len(cancelledMoves) > 0 {
+			actorName := "Unknown Manager"
+			if actorID != "" {
+				_ = db.Get(&actorName, `SELECT name FROM users WHERE id = $1`, actorID)
+			}
+			cancelReason := "Superseded by manual bin edit"
+			for _, cm := range cancelledMoves {
+				if logErr := moverequest.LogCancelled(db, cm.id, actorID, actorName, "manager", cm.prevStatus, &cancelReason); logErr != nil {
+					log.Printf("⚠️  [UPDATE-BIN] Failed to log move %s cancellation: %v", cm.id, logErr)
+				}
+				if cm.assignedShift != nil {
+					wsHub.BroadcastToUser(*cm.assignedShift, map[string]interface{}{
+						"type":    "move_request_cancelled",
+						"bin_id":  id,
+						"message": "Move request cancelled — the bin was updated manually by a manager",
+					})
+					if centrifugoClient != nil {
+						if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), *cm.assignedShift, map[string]interface{}{
+							"type":            "move_request_cancelled",
+							"bin_id":          id,
+							"move_request_id": cm.id,
+						}); pubErr != nil {
+							log.Printf("⚠️  [UPDATE-BIN] Failed to publish move cancel to Centrifugo: %v", pubErr)
+						}
+					}
+				}
+			}
+		}
 
 		// Notify each affected shift (post-commit, best-effort side effect)
 		for shiftID, taskIDs := range shiftTasksMap {

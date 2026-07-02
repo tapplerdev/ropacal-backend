@@ -71,6 +71,11 @@ type UpdateBinRequest struct {
 	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty"` // Optional - for tracking potential location conversions
 	ReasonNotes               *string `json:"reason_notes,omitempty"`
 	CreateNoGoZone            *bool   `json:"create_no_go_zone,omitempty"` // Opt-in for relocation_request
+
+	// Pending move requests the manager chose to cancel because this manual edit supersedes
+	// them (e.g. setting a bin to In Warehouse fulfills a pending 'store' move). Cancelled
+	// atomically with the edit; only ids belonging to THIS bin + non-terminal are honored.
+	CancelMoveRequestIDs []string `json:"cancel_move_request_ids,omitempty"`
 }
 
 // CreateBinRequest is the request body for POST /api/bins

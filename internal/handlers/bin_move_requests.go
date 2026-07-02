@@ -16,6 +16,7 @@ import (
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
@@ -34,6 +35,51 @@ func resolveCurrentWarehouse(db *sqlx.DB) (lat, lng float64, addr string, ok boo
 		return 0, 0, "", false
 	}
 	return wh.Latitude, wh.Longitude, wh.Address, true
+}
+
+// GetBinActiveMoveRequests returns a bin's non-terminal move requests so the dashboard can
+// warn the manager — and offer to cancel them — when a manual bin edit would supersede a
+// pending move (e.g. setting a bin to In Warehouse fulfills a pending 'store' move).
+// GET /api/manager/bins/{binId}/active-move-requests
+func GetBinActiveMoveRequests(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		binID := chi.URLParam(r, "binId")
+		if binID == "" {
+			http.Error(w, "Missing bin ID", http.StatusBadRequest)
+			return
+		}
+		type activeMove struct {
+			ID                 string  `db:"id" json:"id"`
+			MoveType           string  `db:"move_type" json:"move_type"`
+			Status             string  `db:"status" json:"status"`
+			NewAddress         string  `db:"new_address" json:"new_address"`
+			DisposalAction     *string `db:"disposal_action" json:"disposal_action,omitempty"`
+			AssignedShiftID    *string `db:"assigned_shift_id" json:"assigned_shift_id,omitempty"`
+			AssignedDriverName string  `db:"assigned_driver_name" json:"assigned_driver_name"`
+		}
+		var moves []activeMove
+		if err := db.Select(&moves, `
+			SELECT mr.id, mr.move_type, mr.status,
+			       COALESCE(mr.new_address, '') AS new_address,
+			       mr.disposal_action,
+			       mr.assigned_shift_id,
+			       COALESCE(u.name, du.name, '') AS assigned_driver_name
+			FROM bin_move_requests mr
+			LEFT JOIN users u ON u.id = mr.assigned_user_id
+			LEFT JOIN shifts s ON s.id = mr.assigned_shift_id
+			LEFT JOIN users du ON du.id = s.driver_id
+			WHERE mr.bin_id = $1 AND mr.status NOT IN ('completed', 'cancelled')
+			ORDER BY mr.created_at DESC`, binID); err != nil {
+			log.Printf("Error fetching active move requests for bin %s: %v", binID, err)
+			http.Error(w, "Failed to fetch move requests", http.StatusInternalServerError)
+			return
+		}
+		if moves == nil {
+			moves = []activeMove{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": moves})
+	}
 }
 
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
