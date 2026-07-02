@@ -383,6 +383,16 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			fillPct = *req.FillPercentage
 		}
 
+		// Storing a bin (in_storage / retired) takes it out of the field: it holds
+		// no waste and its check history is no longer meaningful. Mirror the store
+		// finalization in shift_complete.go — force fill to 0% and clear the
+		// last-checked timestamps (surfaced as "N/A") regardless of request values.
+		isStoring := req.Status == "in_storage" || req.Status == "retired"
+		if isStoring {
+			fillPct = 0
+			checkedInt = 0
+		}
+
 		log.Printf("🔧 [UPDATE-BIN] Converted values: checked=%d, fill_percentage=%d, move_requested=%d",
 			checkedInt, fillPct, moveRequestedInt)
 
@@ -398,7 +408,11 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		}
 
 		paramCount := 8
-		if becomingChecked {
+		if isStoring {
+			// Stored/retired bins carry no meaningful check history — surface
+			// last-checked as N/A. Overrides any becomingChecked transition.
+			query += `, last_checked = NULL, last_checked_at = NULL`
+		} else if becomingChecked {
 			paramCount++
 			query += `, last_checked = $` + fmt.Sprintf("%d", paramCount)
 			args = append(args, now.Unix())

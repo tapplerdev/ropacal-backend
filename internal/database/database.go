@@ -974,6 +974,44 @@ func Migrate(db *sqlx.DB) error {
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS photo_longitude DOUBLE PRECISION`,
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS after_photo_latitude DOUBLE PRECISION`,
 		`ALTER TABLE route_tasks ADD COLUMN IF NOT EXISTS after_photo_longitude DOUBLE PRECISION`,
+
+		// bin_change_log (admin bin edit audit trail). Was manually created in Railway; ensure
+		// it exists on fresh DBs too. reason_category is plain TEXT here (the constraint is
+		// (re)applied by the DO block below so both fresh + existing DBs converge).
+		`CREATE TABLE IF NOT EXISTS bin_change_log (
+			id                  TEXT PRIMARY KEY,
+			bin_id              TEXT NOT NULL REFERENCES bins(id),
+			changed_by_user_id  TEXT REFERENCES users(id),
+			created_at          BIGINT NOT NULL,
+			change_type         TEXT NOT NULL,
+			old_values          JSONB,
+			new_values          JSONB,
+			reason_category     TEXT,
+			reason_notes        TEXT,
+			no_go_zone_created  BOOLEAN NOT NULL DEFAULT FALSE,
+			no_go_zone_id       TEXT REFERENCES no_go_zones(id)
+		)`,
+		// FIX: the prod bin_change_log had a stale CHECK on reason_category that rejected
+		// 'pulled_from_service' (the dashboard's In-Warehouse pull reason) → change-log INSERT
+		// 500'd → the whole bin edit rolled back. Drop any reason_category CHECK and re-add
+		// the current allowed set. Idempotent (drops the one it last added, then re-adds it).
+		`DO $$
+		DECLARE c record;
+		BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'bin_change_log') THEN
+				FOR c IN
+					SELECT con.conname FROM pg_constraint con
+					JOIN pg_class rel ON rel.oid = con.conrelid
+					WHERE rel.relname = 'bin_change_log' AND con.contype = 'c'
+					  AND pg_get_constraintdef(con.oid) ILIKE '%reason_category%'
+				LOOP
+					EXECUTE format('ALTER TABLE bin_change_log DROP CONSTRAINT %I', c.conname);
+				END LOOP;
+				ALTER TABLE bin_change_log ADD CONSTRAINT bin_change_log_reason_category_check
+					CHECK (reason_category IS NULL OR reason_category IN
+						('landlord_complaint','theft','vandalism','missing','relocation_request','pulled_from_service','other'));
+			END IF;
+		END $$;`,
 	}
 
 	for _, migration := range migrations {
