@@ -64,6 +64,13 @@ func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *
 			http.Error(w, `{"error":"Longitude must be between -180 and 180"}`, http.StatusBadRequest)
 			return
 		}
+		// Reject null-island (0,0): a real warehouse is never at 0°,0°, and downstream code
+		// (store/pickup-only move dropoffs) treats 0,0 as "unresolved" — so accepting it would
+		// silently break those moves. Guard here at the boundary.
+		if input.Latitude == 0 && input.Longitude == 0 {
+			http.Error(w, `{"error":"Warehouse coordinates cannot be 0,0 (null island)"}`, http.StatusBadRequest)
+			return
+		}
 		if input.Address == "" {
 			http.Error(w, `{"error":"Address is required"}`, http.StatusBadRequest)
 			return

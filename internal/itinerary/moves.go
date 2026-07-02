@@ -47,7 +47,7 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 	// the caller resolves it into DropoffLat/Lng. A 0,0 destination means the caller failed
 	// to resolve it — reject rather than route the bin to null island.
 	if p.DropoffLat == 0 && p.DropoffLng == 0 {
-		return 0, fmt.Errorf("AddMove: move %s (%s) has no destination coordinates", p.MoveRequestID, p.MoveType)
+		return 0, fmt.Errorf("AddMove: move %s (%s): %w", p.MoveRequestID, p.MoveType, ErrMissingDestination)
 	}
 	binsAdded := 2
 

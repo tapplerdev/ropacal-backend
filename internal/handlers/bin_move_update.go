@@ -316,7 +316,12 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					}
 					if req.NewLatitude != nil && req.NewLongitude != nil {
 						dest = &itinerary.MoveDestination{Address: addr, Lat: *req.NewLatitude, Lng: *req.NewLongitude}
-					} else if moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+					} else if (moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment") &&
+						moveRequest.NewLatitude != nil && moveRequest.NewLongitude != nil {
+						// type-only change between real-destination types (relocation↔redeployment):
+						// keep the existing destination. Do NOT reuse new_latitude for an OLD
+						// store/pickup_only move — it holds the WAREHOUSE, not a relocation target, so
+						// becoming a relocation without fresh coords must 400 (dest stays nil).
 						if addr == "" && moveRequest.NewAddress != nil {
 							addr = *moveRequest.NewAddress
 						}
@@ -327,7 +332,7 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 					moveRequest.MoveType, newType, addressChanged, dest, managerUserID, now)
 				if err != nil {
 					if errors.Is(err, itinerary.ErrMissingDestination) {
-						http.Error(w, "Changing this move's destination requires new_latitude, new_longitude, and an address", http.StatusBadRequest)
+						http.Error(w, "Changing this move's destination requires new_latitude, new_longitude, and an address (for store/pickup-only moves, the warehouse location must be configured)", http.StatusBadRequest)
 						return
 					}
 					log.Printf("Error reconciling route_tasks: %v", err)

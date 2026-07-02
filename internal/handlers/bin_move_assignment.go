@@ -94,6 +94,12 @@ func AssignMoveToShift(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hu
 		err = assignMoveToShift(db, wsHub, fcmService, centrifugoClient, *moveRequest, bin, req.ShiftID, req.InsertAfterBinID, req.InsertPosition, managerID, managerName)
 		if err != nil {
 			log.Printf("❌ [ASSIGN TO SHIFT] Error assigning move to shift: %v", err)
+			if errors.Is(err, itinerary.ErrMissingDestination) {
+				// store/pickup_only need a warehouse dropoff; if the warehouse location isn't
+				// configured we can't route the move — a clean 400, not a 500.
+				http.Error(w, "Cannot assign this move: its destination is unresolved (for store/pickup-only moves, configure the warehouse location first)", http.StatusBadRequest)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

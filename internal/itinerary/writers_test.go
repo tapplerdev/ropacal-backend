@@ -1,6 +1,7 @@
 package itinerary
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -145,8 +146,8 @@ func TestAddMove_RejectsMissingDestination(t *testing.T) {
 		PickupAddress: "pickup addr",
 		Now:           1700000000,
 	})
-	if err == nil || !strings.Contains(err.Error(), "no destination coordinates") {
-		t.Fatalf("AddMove(no dest) = %v, want a 'no destination coordinates' error", err)
+	if !errors.Is(err, ErrMissingDestination) {
+		t.Fatalf("AddMove(no dest) = %v, want ErrMissingDestination", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
