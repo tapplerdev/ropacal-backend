@@ -16,12 +16,17 @@ type NoGoZone struct {
 	ResolvedByUserID *string `json:"resolved_by_user_id" db:"resolved_by_user_id"`
 	ResolvedAt       *int64  `json:"resolved_at" db:"resolved_at"`
 	ResolutionNotes  *string `json:"resolution_notes" db:"resolution_notes"`
+	// Added by later migrations (database.go). These MUST be mapped here or a
+	// strict `SELECT * → db.Get(&NoGoZone)` (e.g. UpdateNoGoZone) fails with
+	// sqlx "missing destination name ..." → 500 on every zone edit/resolve.
+	MergedIntoZoneID *string `json:"merged_into_zone_id" db:"merged_into_zone_id"`
+	ResolutionType   *string `json:"resolution_type" db:"resolution_type"`
 }
 
 type ZoneIncident struct {
 	ID                 string   `json:"id" db:"id"`
 	ZoneID             string   `json:"zone_id" db:"zone_id"`
-	BinID              *string  `json:"bin_id" db:"bin_id"` // nil for address-only manager reports
+	BinID              *string  `json:"bin_id" db:"bin_id"`               // nil for address-only manager reports
 	IncidentType       string   `json:"incident_type" db:"incident_type"` // vandalism, landlord_complaint, theft, relocation_request
 	ReportedByUserID   *string  `json:"reported_by_user_id" db:"reported_by_user_id"`
 	ReportedAt         int64    `json:"reported_at" db:"reported_at"`
@@ -35,8 +40,8 @@ type ZoneIncident struct {
 	IsFieldObservation bool     `json:"is_field_observation" db:"is_field_observation"`
 	VerifiedByUserID   *string  `json:"verified_by_user_id" db:"verified_by_user_id"`
 	VerifiedAt         *int64   `json:"verified_at" db:"verified_at"`
-	Status             string   `json:"status" db:"status"` // open, resolved, investigating
-	Source             *string  `json:"source" db:"source"` // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
+	Status             string   `json:"status" db:"status"`                   // open, resolved, investigating
+	Source             *string  `json:"source" db:"source"`                   // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
 	MoveRequestID      *string  `json:"move_request_id" db:"move_request_id"` // Links back to the move request that triggered this incident
 }
 
@@ -91,7 +96,7 @@ type ZoneIncidentResponse struct {
 	VerifiedByName     *string  `json:"verified_by_name,omitempty" db:"verified_by_name"`
 	VerifiedAtIso      *string  `json:"verified_at_iso,omitempty" db:"verified_at"`
 	Status             string   `json:"status" db:"status"`
-	Source             *string  `json:"source,omitempty" db:"source"` // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
+	Source             *string  `json:"source,omitempty" db:"source"`                   // 'driver_shift', 'manager_report', 'admin_bin_change', 'move_request'
 	MoveRequestID      *string  `json:"move_request_id,omitempty" db:"move_request_id"` // Links back to the move request that triggered this incident
 }
 
