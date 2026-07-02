@@ -292,8 +292,38 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 		log.Printf("✅ [UPDATE-BIN] Found existing bin #%d: %s, %s %s", existing.BinNumber, existing.CurrentStreet, existing.City, existing.Zip)
 
+		// Partial-update semantics (#14/#35): a partial PATCH must NOT blank omitted fields.
+		// Backfill string/number fields from the existing row when the request omits them
+		// (empty string / 0 = omitted — never a legitimate value for these), and resolve the
+		// pointer bools (nil = omitted → keep existing). The rest of the handler then reads
+		// req.* / the resolved bools uniformly, and addrChanged stays false on an omitted
+		// address (so coords aren't nulled — the confirmed #35 corruption).
+		if strings.TrimSpace(req.CurrentStreet) == "" {
+			req.CurrentStreet = existing.CurrentStreet
+		}
+		if strings.TrimSpace(req.City) == "" {
+			req.City = existing.City
+		}
+		if strings.TrimSpace(req.Zip) == "" {
+			req.Zip = existing.Zip
+		}
+		if req.Status == "" {
+			req.Status = existing.Status
+		}
+		if req.BinNumber == 0 {
+			req.BinNumber = existing.BinNumber
+		}
+		checked := existing.Checked
+		if req.Checked != nil {
+			checked = *req.Checked
+		}
+		moveRequested := existing.MoveRequested
+		if req.MoveRequested != nil {
+			moveRequested = *req.MoveRequested
+		}
+
 		wasChecked := existing.Checked
-		becomingChecked := req.Checked && !wasChecked
+		becomingChecked := checked && !wasChecked
 
 		// Determine check time
 		now := time.Now()
@@ -337,11 +367,11 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 		// Convert booleans to integers (database uses INTEGER for boolean fields)
 		checkedInt := 0
-		if req.Checked {
+		if checked {
 			checkedInt = 1
 		}
 		moveRequestedInt := 0
-		if req.MoveRequested {
+		if moveRequested {
 			moveRequestedInt = 1
 		}
 

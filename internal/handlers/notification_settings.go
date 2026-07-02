@@ -111,7 +111,15 @@ func GetNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 // UpdateNotificationSettings saves notification preferences
 func UpdateNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var settings NotificationSettings
+		// Partial update (#14): start from the currently-stored settings (or defaults) so a
+		// partial PATCH overrides ONLY the fields it sends — json.Decode into a pre-populated
+		// struct leaves omitted fields at their existing values instead of blanking them to
+		// Go zero-values (which the validators below would also reject, e.g. interval 0 < 1).
+		settings := DefaultNotificationSettings()
+		var existingRaw []byte
+		if err := db.QueryRow(`SELECT value FROM config WHERE key = 'notification_settings'`).Scan(&existingRaw); err == nil {
+			_ = json.Unmarshal(existingRaw, &settings) // keep defaults if the stored blob is unparseable
+		}
 		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 			http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
 			return
