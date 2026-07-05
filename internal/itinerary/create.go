@@ -120,18 +120,28 @@ func AddPlacement(ext sqlx.Ext, shiftID string, p NewPlacement) (string, error) 
 }
 
 // NewMoveLeg is ONE resolved leg (pickup or dropoff) of a move for the
-// add_tasks path — distinct from AddMove, which assembles both legs at once
-// with the richer create-parity columns. The caller resolves coordinates per
-// the historical rules (pickup ← move original_*, dropoff ← new_* or the
-// shift's warehouse snapshot).
+// add_tasks path — distinct from AddMove, which assembles both legs at once.
+// The caller resolves coordinates per the historical rules (pickup ← move
+// original_*, dropoff ← new_* or the shift's warehouse snapshot).
+//
+// Slice 2b (#34 fix on the PATCH path): legs now also carry bin_number,
+// move_type and the DESTINATION coordinates. The OR-Tools request builder
+// reads a move off the PICKUP row alone (latitude/longitude +
+// destination_latitude/longitude — there is no case "dropoff"), so a pickup
+// without DestLat/DestLng is silently excluded from optimization. This brings
+// PATCH-added legs to parity with CreateShiftWithTasks and AddMove.
 type NewMoveLeg struct {
 	Seq                int
 	Type               TaskType // Pickup or Dropoff
 	MoveRequestID      string
 	BinID              string
+	BinNumber          *int
+	FillPercentage     *int // pickup carries the bin's fill snapshot; dropoff nil
+	MoveType           string
 	Lat, Lng           float64
-	Address            *string // pickup: origin address or nil; dropoff: nil (legacy quirk)
-	DestinationAddress *string // dropoff: destination or nil; pickup: nil (legacy quirk)
+	Address            *string  // pickup: origin address; dropoff: the destination address
+	DestLat, DestLng   *float64 // where the bin is headed (both legs, per convention)
+	DestinationAddress *string
 	AddedBy            string
 	AdditionReason     string
 	Now                int64
@@ -146,9 +156,11 @@ func AddMoveLeg(ext sqlx.Ext, shiftID string, l NewMoveLeg) (string, error) {
 	if err := insertTask(ext, []taskCol{
 		{"id", id}, {"shift_id", shiftID}, {"task_type", string(l.Type)},
 		{"bin_id", l.BinID}, {"potential_location_id", nil}, {"move_request_id", l.MoveRequestID},
-		{"bin_number", nil}, {"latitude", l.Lat}, {"longitude", l.Lng},
+		{"bin_number", l.BinNumber}, {"latitude", l.Lat}, {"longitude", l.Lng},
 		{"address", l.Address}, {"destination_address", l.DestinationAddress},
-		{"fill_percentage", nil}, {"sequence_order", l.Seq},
+		{"destination_latitude", l.DestLat}, {"destination_longitude", l.DestLng},
+		{"move_type", l.MoveType},
+		{"fill_percentage", l.FillPercentage}, {"sequence_order", l.Seq},
 		{"is_completed", 0}, {"created_at", l.Now}, {"updated_at", l.Now},
 		{"added_by", l.AddedBy}, {"addition_reason", l.AdditionReason},
 	}); err != nil {

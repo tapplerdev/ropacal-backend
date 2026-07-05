@@ -67,18 +67,54 @@ func TestAddPlacement_ColumnContract(t *testing.T) {
 	}
 }
 
-// A dropoff leg: NULL address, destination_address set — the legacy quirk,
-// preserved byte-for-byte in Slice 2a.
+// The move-leg column contract (Slice 2b): the 18 legacy columns PLUS
+// destination_latitude/longitude and move_type — the pickup's destination_*
+// is what makes the move visible to the OR-Tools shipment builder (#34).
+const legCols = `INSERT INTO route_tasks \(id, shift_id, task_type, bin_id, potential_location_id, move_request_id, bin_number, latitude, longitude, address, destination_address, destination_latitude, destination_longitude, move_type, fill_percentage, sequence_order, is_completed, created_at, updated_at, added_by, addition_reason\) VALUES`
+
+// A pickup leg carries the move's destination — the #34 fix pinned.
+func TestAddMoveLeg_PickupCarriesDestination(t *testing.T) {
+	db, mock := mockExtCreate(t)
+	defer db.Close()
+
+	origin, dest := "P5 Move Rd", "P5 Dest Way"
+	dLat, dLng, fill, binNum := 37.334, -121.884, 42, 10993
+	mock.ExpectExec(legCols).
+		WithArgs(sqlmock.AnyArg(), "s1", "pickup",
+			"b1", nil, "m1",
+			&binNum, 37.332, -121.882,
+			&origin, &dest,
+			&dLat, &dLng, "relocation",
+			&fill, 4,
+			0, int64(1700000000), int64(1700000000),
+			"mgr1", "why").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if _, err := AddMoveLeg(db, "s1", NewMoveLeg{
+		Seq: 4, Type: Pickup, MoveRequestID: "m1", BinID: "b1",
+		BinNumber: &binNum, FillPercentage: &fill, MoveType: "relocation",
+		Lat: 37.332, Lng: -121.882, Address: &origin,
+		DestLat: &dLat, DestLng: &dLng, DestinationAddress: &dest,
+		AddedBy: "mgr1", AdditionReason: "why", Now: 1700000000,
+	}); err != nil {
+		t.Fatalf("AddMoveLeg pickup: %v", err)
+	}
+}
+
+// A dropoff leg sits AT the destination: its own coords + address duplicate
+// the destination_* columns (the app-nav convention shared with AddMove).
 func TestAddMoveLeg_DropoffContract(t *testing.T) {
 	db, mock := mockExtCreate(t)
 	defer db.Close()
 
 	dest := "P5 Dest Way"
-	mock.ExpectExec(addTasksCols).
+	dLat, dLng, binNum := 37.334, -121.884, 10993
+	mock.ExpectExec(legCols).
 		WithArgs(sqlmock.AnyArg(), "s1", "dropoff",
 			"b1", nil, "m1",
-			nil, 37.3, -121.7,
-			nil, &dest,
+			&binNum, 37.334, -121.884,
+			&dest, &dest,
+			&dLat, &dLng, "relocation",
 			nil, 5,
 			0, int64(1700000000), int64(1700000000),
 			"mgr1", "why").
@@ -86,7 +122,9 @@ func TestAddMoveLeg_DropoffContract(t *testing.T) {
 
 	if _, err := AddMoveLeg(db, "s1", NewMoveLeg{
 		Seq: 5, Type: Dropoff, MoveRequestID: "m1", BinID: "b1",
-		Lat: 37.3, Lng: -121.7, DestinationAddress: &dest,
+		BinNumber: &binNum, MoveType: "relocation",
+		Lat: 37.334, Lng: -121.884, Address: &dest,
+		DestLat: &dLat, DestLng: &dLng, DestinationAddress: &dest,
 		AddedBy: "mgr1", AdditionReason: "why", Now: 1700000000,
 	}); err != nil {
 		t.Fatalf("AddMoveLeg dropoff: %v", err)

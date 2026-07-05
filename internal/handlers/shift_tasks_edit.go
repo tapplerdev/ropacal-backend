@@ -936,10 +936,14 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						utils.RespondError(w, http.StatusBadRequest, "move_request_id required for pickup/dropoff task")
 						return
 					}
-					// Fetch move request details
+					// Fetch move request details (+ move_type and the bin's number/fill,
+					// stamped on the legs since Slice 2b for create/AddMove parity).
 					var moveReq struct {
 						ID            string   `db:"id"`
 						BinID         string   `db:"bin_id"`
+						MoveType      string   `db:"move_type"`
+						BinNumber     *int     `db:"bin_number"`
+						BinFill       *int     `db:"fill_percentage"`
 						Latitude      *float64 `db:"original_latitude"`
 						Longitude     *float64 `db:"original_longitude"`
 						Address       *string  `db:"original_address"`
@@ -947,23 +951,49 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						DestLongitude *float64 `db:"new_longitude"`
 						DestAddress   *string  `db:"new_address"`
 					}
-					err = tx.Get(&moveReq, `SELECT id, bin_id, original_latitude, original_longitude, original_address, new_latitude, new_longitude, new_address FROM bin_move_requests WHERE id = $1`, *addReq.MoveRequestID)
+					err = tx.Get(&moveReq, `
+						SELECT mr.id, mr.bin_id, mr.move_type,
+						       b.bin_number, b.fill_percentage,
+						       mr.original_latitude, mr.original_longitude, mr.original_address,
+						       mr.new_latitude, mr.new_longitude, mr.new_address
+						FROM bin_move_requests mr
+						LEFT JOIN bins b ON b.id = mr.bin_id
+						WHERE mr.id = $1`, *addReq.MoveRequestID)
 					if err != nil {
 						log.Printf("❌ Error fetching move request: %v", err)
 						utils.RespondError(w, http.StatusBadRequest, "Move request not found")
 						return
 					}
 
+					// Resolve the move's DESTINATION once for both legs: the move's
+					// new_* (relocation/redeployment) or the shift's warehouse
+					// (store/pickup_only). The pickup carries it in destination_* so
+					// the optimizer can model the move as a pickup→dropoff shipment —
+					// it reads moves off the pickup row alone (#34).
+					var destLat, destLng *float64
+					var destAddr *string
+					if moveReq.DestLatitude != nil && moveReq.DestLongitude != nil {
+						destLat, destLng, destAddr = moveReq.DestLatitude, moveReq.DestLongitude, moveReq.DestAddress
+					} else if shift.WarehouseLatitude != nil && shift.WarehouseLongitude != nil {
+						destLat, destLng, destAddr = shift.WarehouseLatitude, shift.WarehouseLongitude, shift.WarehouseAddress
+					}
+
 					leg := itinerary.NewMoveLeg{
-						Seq:            nextSeq,
-						MoveRequestID:  *addReq.MoveRequestID,
-						BinID:          moveReq.BinID,
-						AddedBy:        userClaims.UserID,
-						AdditionReason: req.Reason,
-						Now:            now,
+						Seq:                nextSeq,
+						MoveRequestID:      *addReq.MoveRequestID,
+						BinID:              moveReq.BinID,
+						BinNumber:          moveReq.BinNumber,
+						MoveType:           moveReq.MoveType,
+						DestLat:            destLat,
+						DestLng:            destLng,
+						DestinationAddress: destAddr,
+						AddedBy:            userClaims.UserID,
+						AdditionReason:     req.Reason,
+						Now:                now,
 					}
 					if addReq.TaskType == "pickup" {
 						leg.Type = itinerary.Pickup
+						leg.FillPercentage = moveReq.BinFill
 						if moveReq.Latitude != nil && moveReq.Longitude != nil {
 							leg.Lat = *moveReq.Latitude
 							leg.Lng = *moveReq.Longitude
@@ -973,27 +1003,17 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						}
 					} else { // dropoff
 						leg.Type = itinerary.Dropoff
-						// For relocation/redeployment moves, use destination from move request
-						if moveReq.DestLatitude != nil && moveReq.DestLongitude != nil {
-							leg.Lat = *moveReq.DestLatitude
-							leg.Lng = *moveReq.DestLongitude
-							if moveReq.DestAddress != nil {
-								leg.DestinationAddress = moveReq.DestAddress
-							}
-						} else {
-							// For "store" moves, destination is warehouse
-							if shift.WarehouseLatitude != nil && shift.WarehouseLongitude != nil {
-								leg.Lat = *shift.WarehouseLatitude
-								leg.Lng = *shift.WarehouseLongitude
-								if shift.WarehouseAddress != nil {
-									leg.DestinationAddress = shift.WarehouseAddress
-								}
-								log.Printf("✅ [SHIFT UPDATE] Store move dropoff: using warehouse coordinates (%.6f, %.6f)", leg.Lat, leg.Lng)
-							} else {
-								log.Printf("⚠️  [SHIFT UPDATE] Warehouse coordinates not set for store move, skipping dropoff task for move request %s", *addReq.MoveRequestID)
-								continue // Skip this task entirely
-							}
+						// The dropoff sits AT the destination (its own coords duplicate
+						// destination_* — the app-nav convention shared with AddMove).
+						if destLat == nil || destLng == nil {
+							// Store move on a shift without warehouse coords: destination
+							// unresolvable — skip the dropoff (preserved legacy behavior).
+							log.Printf("⚠️  [SHIFT UPDATE] Warehouse coordinates not set for store move, skipping dropoff task for move request %s", *addReq.MoveRequestID)
+							continue // Skip this task entirely
 						}
+						leg.Lat = *destLat
+						leg.Lng = *destLng
+						leg.Address = destAddr
 					}
 
 					// Mark as assigned
