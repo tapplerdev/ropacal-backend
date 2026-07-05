@@ -8,9 +8,11 @@ import (
 	"strconv"
 	"time"
 
+	"ropacal-backend/internal/itinerary"
+	"ropacal-backend/internal/models"
+
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"ropacal-backend/internal/models"
 )
 
 // GetShiftTasks retrieves all active (non-deleted) tasks for a shift ordered by sequence
@@ -274,31 +276,9 @@ func CreateShiftWithTasks(
 		return "", 0, fmt.Errorf("failed to create shift: %w", err)
 	}
 
-	// Create tasks
-	taskQuery := `
-		INSERT INTO route_tasks (
-			id, shift_id, sequence_order, task_type, latitude, longitude, address,
-			bin_id, bin_number, fill_percentage,
-			potential_location_id, new_bin_number, placement_source,
-			move_request_id, destination_latitude, destination_longitude, destination_address, move_type,
-			warehouse_action, bins_to_load,
-			route_id, task_data, created_at,
-			task_label, task_description, photo_required,
-			earliest_arrival, latest_arrival, time_window_type,
-			service_duration_seconds
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10,
-			$11, $12, $13,
-			$14, $15, $16, $17, $18,
-			$19, $20,
-			$21, $22, $23,
-			$24, $25, $26,
-			$27, $28, $29,
-			$30
-		)
-	`
-
+	// Create tasks — the INSERT itself lives in the itinerary domain
+	// (itinerary.InsertCreatedTask, the shift-birth 30-column contract);
+	// this loop keeps the legacy client-first enrichment/merge semantics.
 	skippedInactive := 0
 	for i, taskData := range tasks {
 		taskID := uuid.New().String()
@@ -625,20 +605,33 @@ func CreateShiftWithTasks(
 		lat, _ = taskData["latitude"].(float64)
 		lon, _ = taskData["longitude"].(float64)
 
-		_, err = tx.Exec(
-			taskQuery,
-			taskID, shiftID, i+1, taskType, lat, lon,
-			getString("address"),
-			getString("bin_id"), getInt("bin_number"), getInt("fill_percentage"),
-			getString("potential_location_id"), getString("new_bin_number"), placementSource,
-			getString("move_request_id"), getFloat("destination_latitude"),
-			getFloat("destination_longitude"), getString("destination_address"), getString("move_type"),
-			getString("warehouse_action"), getInt("bins_to_load"),
-			getString("route_id"), taskDataJSON, now,
-			getString("task_label"), getString("task_description"), photoRequired,
-			earliestArrival, latestArrival, getString("time_window_type"),
-			getInt("service_duration_seconds"),
-		)
+		err = itinerary.InsertCreatedTask(tx, shiftID, itinerary.CreatedTask{
+			ID: taskID, Seq: i + 1, TaskType: taskType, Lat: lat, Lng: lon,
+			Address:                getString("address"),
+			BinID:                  getString("bin_id"),
+			BinNumber:              getInt("bin_number"),
+			FillPercentage:         getInt("fill_percentage"),
+			PotentialLocationID:    getString("potential_location_id"),
+			NewBinNumber:           getString("new_bin_number"),
+			PlacementSource:        placementSource,
+			MoveRequestID:          getString("move_request_id"),
+			DestLat:                getFloat("destination_latitude"),
+			DestLng:                getFloat("destination_longitude"),
+			DestAddress:            getString("destination_address"),
+			MoveType:               getString("move_type"),
+			WarehouseAction:        getString("warehouse_action"),
+			BinsToLoad:             getInt("bins_to_load"),
+			RouteID:                getString("route_id"),
+			TaskData:               taskDataJSON,
+			CreatedAt:              now,
+			TaskLabel:              getString("task_label"),
+			TaskDescription:        getString("task_description"),
+			PhotoRequired:          photoRequired,
+			EarliestArrival:        earliestArrival,
+			LatestArrival:          latestArrival,
+			TimeWindowType:         getString("time_window_type"),
+			ServiceDurationSeconds: getInt("service_duration_seconds"),
+		})
 		if err != nil {
 			return "", 0, fmt.Errorf("failed to create task %d: %w", i+1, err)
 		}
@@ -655,22 +648,18 @@ func CreateShiftWithTasks(
 		// Create placement tasks: one per deployment bin, with placement_source="warehouse"
 		// Mapbox treats these as shipments (pickup at warehouse, dropoff at destination)
 		for _, d := range warehouseDeployments {
-			placeSrc := "warehouse"
-			addr := d.DestinationAddress
 			depTaskID := uuid.New().String()
-			_, err = tx.Exec(
-				taskQuery,
-				depTaskID, shiftID, nextSeq, "placement",
-				d.DestinationLatitude, d.DestinationLongitude, addr,
-				d.BinID, d.BinNumber, nil, // bin_id (existing bin), bin_number, fill_percentage
-				nil, nil, placeSrc, // potential_location_id, new_bin_number, placement_source
-				nil, nil, nil, nil, nil, // move_request fields
-				nil, nil, // warehouse_action, bins_to_load
-				nil, []byte("{}"), now,
-				nil, nil, false, // task_label, task_description, photo_required
-				nil, nil, nil, // earliest_arrival, latest_arrival, time_window_type
-				nil, // service_duration_seconds
-			)
+			err = itinerary.InsertCreatedTask(tx, shiftID, itinerary.CreatedTask{
+				ID: depTaskID, Seq: nextSeq, TaskType: "placement",
+				Lat: d.DestinationLatitude, Lng: d.DestinationLongitude,
+				Address:         d.DestinationAddress,
+				BinID:           d.BinID, // existing in_storage bin
+				BinNumber:       d.BinNumber,
+				PlacementSource: "warehouse",
+				TaskData:        []byte("{}"),
+				CreatedAt:       now,
+				// everything else: explicit NULL (create semantics), photo_required false
+			})
 			if err != nil {
 				return "", 0, fmt.Errorf("failed to create warehouse deployment placement task: %w", err)
 			}

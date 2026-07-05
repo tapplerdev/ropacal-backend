@@ -42,6 +42,56 @@ func insertTask(ext sqlx.Ext, cols []taskCol) error {
 	return err
 }
 
+// ── Shift-birth writer (Slice 3a — CreateShiftWithTasks migration) ───────────
+//
+// CreatedTask carries the 30-column contract of a task born WITH its shift
+// (CreateShiftWithTasks): every column is BOUND for every row — absent values
+// are explicit NULLs that BYPASS the DDL defaults (time_window_type 'soft',
+// service_duration_seconds 300, photo_required FALSE) — that is the historical
+// create-path semantic and it differs from the add_tasks path on purpose.
+//
+// Fields are interface{} because this path is client-first: it binds raw JSON
+// payload values (nil-safe getters) merged with DB enrichment. Typing these up
+// is the shared-Resolver work (Slice 4), not this byte-identical relocation.
+type CreatedTask struct {
+	ID       string
+	Seq      int
+	TaskType string
+	Lat, Lng float64
+
+	Address, BinID, BinNumber, FillPercentage interface{}
+	PotentialLocationID, NewBinNumber         interface{}
+	PlacementSource, MoveRequestID            interface{}
+	DestLat, DestLng, DestAddress, MoveType   interface{}
+	WarehouseAction, BinsToLoad, RouteID      interface{}
+	TaskLabel, TaskDescription                interface{}
+	EarliestArrival, LatestArrival            interface{}
+	TimeWindowType, ServiceDurationSeconds    interface{}
+
+	TaskData      interface{} // marshaled JSON; callers default []byte("{}") — never NULL (prevents scan errors)
+	PhotoRequired bool
+	CreatedAt     int64
+}
+
+// InsertCreatedTask inserts one shift-birth task with create semantics
+// (all 30 columns bound; added_by stays absent → NULL = "created with shift"
+// in the edit-history contract).
+func InsertCreatedTask(ext sqlx.Ext, shiftID string, t CreatedTask) error {
+	return insertTask(ext, []taskCol{
+		{"id", t.ID}, {"shift_id", shiftID}, {"sequence_order", t.Seq}, {"task_type", t.TaskType},
+		{"latitude", t.Lat}, {"longitude", t.Lng}, {"address", t.Address},
+		{"bin_id", t.BinID}, {"bin_number", t.BinNumber}, {"fill_percentage", t.FillPercentage},
+		{"potential_location_id", t.PotentialLocationID}, {"new_bin_number", t.NewBinNumber}, {"placement_source", t.PlacementSource},
+		{"move_request_id", t.MoveRequestID}, {"destination_latitude", t.DestLat},
+		{"destination_longitude", t.DestLng}, {"destination_address", t.DestAddress}, {"move_type", t.MoveType},
+		{"warehouse_action", t.WarehouseAction}, {"bins_to_load", t.BinsToLoad},
+		{"route_id", t.RouteID}, {"task_data", t.TaskData}, {"created_at", t.CreatedAt},
+		{"task_label", t.TaskLabel}, {"task_description", t.TaskDescription}, {"photo_required", t.PhotoRequired},
+		{"earliest_arrival", t.EarliestArrival}, {"latest_arrival", t.LatestArrival}, {"time_window_type", t.TimeWindowType},
+		{"service_duration_seconds", t.ServiceDurationSeconds},
+	})
+}
+
 // ── Manager add_tasks intent methods (Slice 2a — byte-identical migration) ───
 //
 // These carry the EXACT 18-column contract of the historical UpdateShift
