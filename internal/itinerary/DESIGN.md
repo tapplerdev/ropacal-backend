@@ -98,12 +98,18 @@ itinerary.ApplyOrder(tx, shiftID, orderedIDs, newWarehouseStops, isFirst)   (all
   pinned. Slice 2a was byte-identical (18/18 golden artifacts); Slice 2b consciously fixed
   the PATCH-path #34 regression (added pickups now carry destination_*/move_type/bin_number;
   dropoffs born AT the destination with address set) — verified additive-only delta.
-  **REMAINING (Slice 3):** migrate `CreateShiftWithTasks` per task type onto the same writer
-  with create-semantics (bind-all-30-columns, taskData-authoritative merge incl. the 624-626
-  re-extract clobber, '{}' task_data, gapped i+1 seq, added_by=NULL) + the shared Resolver
-  (bins/potloc/move/warehouse-config); capture the create-path golden scenarios BEFORE
-  touching that code. Then Slice 4 conscious unifications (ParseTaskType→400 on create,
-  RecomputeShiftCounts, clobber fix, store live-config policy, assignment symmetry).
+  **Slice 3a DONE + golden-verified (3/3 identical):** `InsertCreatedTask` carries the
+  create 30-column bind-all contract (explicit NULLs bypass DDL defaults); both
+  CreateShiftWithTasks call sites (request loop + deployments) migrated — pure INSERT
+  relocation, enrichment/merge left in place. **INSERT census: zero route_tasks INSERTs
+  outside this package.** Create golden harness: scratchpad/p5c_golden.sh (pins gap-seq
+  via retired skip, the 0,0 clobbers, live-config store dest, explicit-NULL windows,
+  string bin_number, deployment at len(tasks)+1).
+  **REMAINING (Slice 3b/4, flagged deltas):** typed shared Resolver extraction
+  (bins/potloc/move/warehouse-config — replaces the interface{} passthrough + the
+  624-626-equivalent merge), then conscious unifications: ParseTaskType→400 on create,
+  RecomputeShiftCounts vs the dead deployment increment, clobber fix, store live-config
+  policy, add_tasks assignment status/history symmetry.
 - **6 — Edges + tx gaps.** `bins.go`→`SyncBinTasks`, `potential_locations.go`→
   `SyncPlacement`; wrap `CompleteTask`'s task+bin writes in a tx (torn-write).
 
