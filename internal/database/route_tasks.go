@@ -303,11 +303,7 @@ func CreateShiftWithTasks(
 					binID, _ := binIDInterface.(string)
 					if binID != "" {
 						// Look up bin coordinates from bins table
-						var binCoords struct {
-							Latitude  float64 `db:"latitude"`
-							Longitude float64 `db:"longitude"`
-						}
-						err := tx.Get(&binCoords, "SELECT latitude, longitude FROM bins WHERE id = $1", binID)
+						binCoords, err := itinerary.ResolveBinCoords(tx, binID)
 						if err == nil && binCoords.Latitude != 0 && binCoords.Longitude != 0 {
 							lat = binCoords.Latitude
 							lon = binCoords.Longitude
@@ -398,8 +394,8 @@ func CreateShiftWithTasks(
 			binID, _ := binIDInterface.(string)
 			if binID != "" {
 				// Safety net: skip retired/missing bins
-				var binStatus string
-				if err := tx.Get(&binStatus, "SELECT status FROM bins WHERE id = $1", binID); err == nil {
+				binStatus, err := itinerary.ResolveBinStatus(tx, binID)
+				if err == nil {
 					if binStatus == "retired" || binStatus == "missing" || binStatus == "in_storage" {
 						log.Printf("   ⚠️  Task #%d: Skipping %s bin %s (status=%s)", i+1, taskType, binID, binStatus)
 						skippedInactive++
@@ -415,16 +411,7 @@ func CreateShiftWithTasks(
 				_, hasAddress := taskData["address"]
 
 				if !hasBinNumber || !hasFillPercentage || !hasLatitude || !hasLongitude || !hasAddress {
-					var binData struct {
-						BinNumber      int     `db:"bin_number"`
-						FillPercentage int     `db:"fill_percentage"`
-						Latitude       float64 `db:"latitude"`
-						Longitude      float64 `db:"longitude"`
-						CurrentStreet  string  `db:"current_street"`
-						City           string  `db:"city"`
-						Zip            string  `db:"zip"`
-					}
-					err := tx.Get(&binData, "SELECT bin_number, fill_percentage, latitude, longitude, current_street, city, zip FROM bins WHERE id = $1", binID)
+					binData, err := itinerary.ResolveBinEnrichment(tx, binID)
 					if err == nil {
 						if !hasBinNumber {
 							taskData["bin_number"] = binData.BinNumber
@@ -441,7 +428,7 @@ func CreateShiftWithTasks(
 							taskData["longitude"] = binData.Longitude
 						}
 						if !hasAddress {
-							taskData["address"] = fmt.Sprintf("%s, %s %s", binData.CurrentStreet, binData.City, binData.Zip)
+							taskData["address"] = binData.ComposedAddress()
 						}
 						if !hasLatitude || !hasLongitude || !hasAddress {
 							log.Printf("   ✅ Task #%d: Auto-populated location (%.6f, %.6f) %s", i+1, binData.Latitude, binData.Longitude, binData.CurrentStreet)
@@ -462,19 +449,12 @@ func CreateShiftWithTasks(
 				_, hasAddr := taskData["address"]
 
 				if !hasLat || !hasLon || !hasAddr || lat == 0 || lon == 0 {
-					var plData struct {
-						Latitude  float64 `db:"latitude"`
-						Longitude float64 `db:"longitude"`
-						Street    string  `db:"street"`
-						City      string  `db:"city"`
-						Zip       string  `db:"zip"`
-					}
-					err := tx.Get(&plData, "SELECT latitude, longitude, street, city, zip FROM potential_locations WHERE id = $1", plID)
+					plData, err := itinerary.ResolvePotentialLocationEnrichment(tx, plID)
 					if err == nil && plData.Latitude != 0 {
 						taskData["latitude"] = plData.Latitude
 						taskData["longitude"] = plData.Longitude
 						if !hasAddr {
-							taskData["address"] = fmt.Sprintf("%s, %s, %s", plData.Street, plData.City, plData.Zip)
+							taskData["address"] = plData.ComposedAddress()
 						}
 						log.Printf("   ✅ Task #%d: Auto-populated from potential location (%.6f, %.6f) %s", i+1, plData.Latitude, plData.Longitude, plData.Street)
 					} else if err != nil {
@@ -496,31 +476,13 @@ func CreateShiftWithTasks(
 				_, hasDestLng := taskData["destination_longitude"]
 
 				if !hasLat || !hasLng || !hasAddr || !hasDestAddr || !hasDestLat || !hasDestLng {
-					var mrData struct {
-						OriginalLatitude  *float64 `db:"original_latitude"`
-						OriginalLongitude *float64 `db:"original_longitude"`
-						OriginalAddress   *string  `db:"original_address"`
-						NewLatitude       *float64 `db:"new_latitude"`
-						NewLongitude      *float64 `db:"new_longitude"`
-						NewAddress        *string  `db:"new_address"`
-						BinID             string   `db:"bin_id"`
-						MoveType          string   `db:"move_type"`
-					}
-					err := tx.Get(&mrData, "SELECT original_latitude, original_longitude, original_address, new_latitude, new_longitude, new_address, bin_id, move_type FROM bin_move_requests WHERE id = $1", moveReqID)
+					mrData, err := itinerary.ResolveMoveEnrichment(tx, moveReqID)
 					if err == nil {
 
 						// For "store" type: destination is ALWAYS the current warehouse
 						// (move request may have stale warehouse address from when it was created)
 						if mrData.MoveType == "store" {
-							var whCfg struct {
-								Lat  float64 `db:"lat"`
-								Lng  float64 `db:"lng"`
-								Addr string  `db:"addr"`
-							}
-							cfgErr := tx.Get(&whCfg, `SELECT
-								COALESCE((SELECT (value::jsonb->>'latitude')::float8 FROM config WHERE key = 'warehouse_location'), 0) as lat,
-								COALESCE((SELECT (value::jsonb->>'longitude')::float8 FROM config WHERE key = 'warehouse_location'), 0) as lng,
-								COALESCE((SELECT value::jsonb->>'address' FROM config WHERE key = 'warehouse_location'), '') as addr`)
+							whCfg, cfgErr := itinerary.ResolveWarehouseConfig(tx)
 							if cfgErr == nil && whCfg.Lat != 0 {
 								mrData.NewLatitude = &whCfg.Lat
 								mrData.NewLongitude = &whCfg.Lng
@@ -530,8 +492,7 @@ func CreateShiftWithTasks(
 						}
 
 						// Get bin_number
-						var binNum int
-						tx.Get(&binNum, "SELECT bin_number FROM bins WHERE id = $1", mrData.BinID)
+						binNum, _ := itinerary.ResolveBinNumber(tx, mrData.BinID)
 						if binNum > 0 {
 							taskData["bin_number"] = binNum
 							taskData["bin_id"] = mrData.BinID
