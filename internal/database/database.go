@@ -1014,6 +1014,22 @@ func Migrate(db *sqlx.DB) error {
 						('landlord_complaint','theft','vandalism','missing','relocation_request','pulled_from_service','other'));
 			END IF;
 		END $$;`,
+
+		// INVARIANT: one open move request per bin. A bin is a single physical
+		// object — two concurrent open (pending/assigned/in_progress) moves would
+		// hand two drivers contradictory instructions. ScheduleBinMove pre-checks
+		// and returns 409; this partial unique index is the race-proof enforcer
+		// (moverequest.Store.Create maps its violation to ErrOpenMoveExists).
+		// Exception-safe: if legacy duplicate open rows ever block the build, log
+		// and boot anyway — the handler guard still protects new creates.
+		`DO $$
+		BEGIN
+			CREATE UNIQUE INDEX IF NOT EXISTS uidx_bin_move_requests_one_open
+				ON bin_move_requests(bin_id)
+				WHERE status IN ('pending', 'assigned', 'in_progress');
+		EXCEPTION WHEN others THEN
+			RAISE NOTICE 'uidx_bin_move_requests_one_open not created (duplicate open moves present?): %', SQLERRM;
+		END $$;`,
 	}
 
 	for _, migration := range migrations {

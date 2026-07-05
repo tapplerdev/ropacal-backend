@@ -7,10 +7,23 @@ import (
 	"ropacal-backend/internal/models"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 // ErrNotFound is returned by Store reads when no move-request matches.
 var ErrNotFound = errors.New("move request not found")
+
+// ErrOpenMoveExists is returned by Create when the bin already has an open
+// (pending/assigned/in_progress) move request. The invariant is one open move
+// per bin — a bin is a single physical object, and two concurrent open moves
+// would hand two drivers contradictory instructions and freeze stale origin
+// coordinates into the second move. Enforced at the DB by the
+// uidx_bin_move_requests_one_open partial unique index (database.go); handlers
+// map this to HTTP 409.
+var ErrOpenMoveExists = errors.New("bin already has an open move request")
+
+// oneOpenMoveIndex is the partial unique index backing ErrOpenMoveExists.
+const oneOpenMoveIndex = "uidx_bin_move_requests_one_open"
 
 // Store is the data-access seam for the move-request domain. It is
 // consumer-defined: it lists only the operations the domain's handlers and
@@ -29,16 +42,36 @@ type Store interface {
 	EditByID(id string) (*EditView, error)
 	// Create inserts a new move-request row (the lifecycle entry point). The
 	// reasonCategory is stored separately (it is not a model field); any no-go
-	// zone is linked by the caller after insert.
+	// zone is linked by the caller after insert. Returns ErrOpenMoveExists when
+	// the one-open-move-per-bin index rejects the insert (concurrent create race).
 	Create(m *models.BinMoveRequest, reasonCategory *string) error
 	// ActiveWithBin returns every not-yet-completed move (pending/assigned/
 	// in_progress) joined with its bin number — the watcher's working set.
 	ActiveWithBin() ([]ActionableMove, error)
+	// ActiveForBin returns one bin's open (non-terminal) moves with the display
+	// context clients need (type, destination, responsible driver). Single home
+	// for the "does this bin already have an open move?" question — used by the
+	// schedule-move 409 guard and the active-move-requests endpoint.
+	ActiveForBin(binID string) ([]ActiveMove, error)
 	// ResponsibleDriver returns the driver id + name on the hook for a move:
 	// assigned_user_id (manual) or the shift's driver (shift-assigned). Both
 	// empty (nil error) when the move is in the pool. This is the single home for
 	// the "who owns this move" rule — derived live, so no denormalization drift.
 	ResponsibleDriver(m *models.BinMoveRequest) (driverID, driverName string, err error)
+}
+
+// ActiveMove is one of a bin's open (pending/assigned/in_progress) move
+// requests, shaped for client display: what kind of move, where it's headed,
+// and who is on the hook for it. JSON tags match the active-move-requests
+// endpoint contract (the dashboard's supersede banner and the schedule 409).
+type ActiveMove struct {
+	ID                 string  `db:"id" json:"id"`
+	MoveType           string  `db:"move_type" json:"move_type"`
+	Status             string  `db:"status" json:"status"`
+	NewAddress         string  `db:"new_address" json:"new_address"`
+	DisposalAction     *string `db:"disposal_action" json:"disposal_action,omitempty"`
+	AssignedShiftID    *string `db:"assigned_shift_id" json:"assigned_shift_id,omitempty"`
+	AssignedDriverName string  `db:"assigned_driver_name" json:"assigned_driver_name"`
 }
 
 // EditView is a move plus the joined shift/bin context the multi-field editor
@@ -113,7 +146,31 @@ func (s *sqlStore) Create(m *models.BinMoveRequest, reasonCategory *string) erro
 		m.CreatedAt, m.UpdatedAt,
 		reasonCategory, nil, // no_go_zone_id linked after insert
 	)
+	// A violation of the one-open-move partial unique index means a concurrent
+	// create slipped past the handler's pre-check — surface it as the typed
+	// domain error so the handler can 409 instead of 500.
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "23505" && pqErr.Constraint == oneOpenMoveIndex {
+		return ErrOpenMoveExists
+	}
 	return err
+}
+
+func (s *sqlStore) ActiveForBin(binID string) ([]ActiveMove, error) {
+	var moves []ActiveMove
+	err := s.db.Select(&moves, `
+		SELECT mr.id, mr.move_type, mr.status,
+		       COALESCE(mr.new_address, '') AS new_address,
+		       mr.disposal_action,
+		       mr.assigned_shift_id,
+		       COALESCE(u.name, du.name, '') AS assigned_driver_name
+		FROM bin_move_requests mr
+		LEFT JOIN users u ON u.id = mr.assigned_user_id
+		LEFT JOIN shifts s ON s.id = mr.assigned_shift_id
+		LEFT JOIN users du ON du.id = s.driver_id
+		WHERE mr.bin_id = $1 AND mr.status NOT IN ('completed', 'cancelled')
+		ORDER BY mr.created_at DESC`, binID)
+	return moves, err
 }
 
 func (s *sqlStore) ResponsibleDriver(m *models.BinMoveRequest) (driverID, driverName string, err error) {

@@ -260,7 +260,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "fix-nogozone-select-star-scan",
+			"version": "feat-one-open-move-per-bin",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -453,7 +453,7 @@ func main() {
 			// Bin move request management
 			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
 			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))                                                                           // List all move requests (register first - exact match)
-			r.Get("/manager/bins/{binId}/active-move-requests", handlers.GetBinActiveMoveRequests(db))                                                      // bin's non-terminal moves (for the manual-edit-supersedes-move banner)
+			r.Get("/manager/bins/{binId}/active-move-requests", handlers.GetBinActiveMoveRequests(moverequest.NewSQLStore(db)))                             // bin's non-terminal moves (for the manual-edit-supersedes-move banner)
 			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(moverequest.NewSQLStore(db), db))                                          // Get single move request (register after)
 			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db))                                  // Check if move request is in active shifts
 			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient)) // Update move request

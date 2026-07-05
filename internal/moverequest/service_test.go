@@ -20,6 +20,7 @@ func (f *fakeStore) ResponsibleDriver(*models.BinMoveRequest) (string, string, e
 }
 func (f *fakeStore) Create(*models.BinMoveRequest, *string) error { return nil }
 func (f *fakeStore) EditByID(string) (*EditView, error)           { return nil, ErrNotFound }
+func (f *fakeStore) ActiveForBin(string) ([]ActiveMove, error)    { return nil, nil }
 
 func ids(ms []ActionableMove) []string {
 	out := make([]string, len(ms))
