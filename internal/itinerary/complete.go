@@ -50,17 +50,3 @@ func Complete(ext sqlx.Ext, taskID string, now int64, c Completion) (int64, erro
 	n, _ := res.RowsAffected()
 	return n, nil
 }
-
-// Uncomplete reverts a completion — the manual compensation CompleteTask's
-// pool-write flow needs when a follow-up write fails. It exists ONLY because
-// that flow is not yet tx-wrapped; the CompleteTask tx-wrap slice deletes
-// every caller (a failure becomes tx.Rollback) and then this function.
-func Uncomplete(ext sqlx.Ext, taskID string, now int64) error {
-	_, err := ext.Exec(ext.Rebind(
-		`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = ? WHERE id = ?`),
-		now, taskID)
-	if err != nil {
-		return fmt.Errorf("uncomplete task: %w", err)
-	}
-	return nil
-}

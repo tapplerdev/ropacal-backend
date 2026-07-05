@@ -185,36 +185,11 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				return
 			}
 		}
-		// Complete via the domain — the single completion write (photos + EXIF GPS).
-		rowsAffected, err := itinerary.Complete(db, taskID, now, itinerary.Completion{
-			FillPercentage: req.UpdatedFillPercentage,
-			Notes:          req.CompletionNotes,
-			PhotoURL:       req.PhotoUrl,
-			AfterPhotoURL:  req.AfterPhotoUrl,
-			PhotoLat:       req.PhotoLatitude,
-			PhotoLng:       req.PhotoLongitude,
-			AfterPhotoLat:  req.AfterPhotoLatitude,
-			AfterPhotoLng:  req.AfterPhotoLongitude,
-		})
-		if err != nil {
-			log.Printf("❌ Error marking task as completed: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
-			return
-		}
-
-		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
-
-		if rowsAffected == 0 {
-			log.Printf("[DIAGNOSTIC] ⚠️  Update affected 0 rows")
-			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
-			return
-		}
-
 		// Track newly created bin ID for placement tasks (used later for check record)
 		var placementBinID *string
 
-		// Check if this bin is part of a move request
-		// First try by bin_id, then fall back to looking up via route_tasks.move_request_id
+		// ── Pre-tx reads: detect a move + resolve its finalization inputs ─────────
+		// The geocode/config reads must never be held open across the transaction.
 		var moveRequest models.BinMoveRequest
 		moveErr := db.Get(&moveRequest, `
 			SELECT * FROM bin_move_requests
@@ -233,21 +208,61 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				`, *moveReqID)
 			}
 		}
+		isMoveDropoff := moveErr == nil && taskType == "dropoff"
+		var moveFin moveFinalization
+		if isMoveDropoff {
+			moveFin = prepareMoveCompletion(db, moveRequest)
+		}
+
+		// ── ONE transaction: task completion + every branch write ────────────────
+		// (Previously pool writes with manual "uncomplete" compensations — a crash
+		// between the completion and its branch writes tore the state.)
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ Error starting completion transaction: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+			return
+		}
+		defer tx.Rollback()
+
+		// Complete via the domain — the single completion write (photos + EXIF GPS).
+		rowsAffected, err := itinerary.Complete(tx, taskID, now, itinerary.Completion{
+			FillPercentage: req.UpdatedFillPercentage,
+			Notes:          req.CompletionNotes,
+			PhotoURL:       req.PhotoUrl,
+			AfterPhotoURL:  req.AfterPhotoUrl,
+			PhotoLat:       req.PhotoLatitude,
+			PhotoLng:       req.PhotoLongitude,
+			AfterPhotoLat:  req.AfterPhotoLatitude,
+			AfterPhotoLng:  req.AfterPhotoLongitude,
+		})
+		if err != nil {
+			log.Printf("❌ Error marking task as completed: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+			return
+		}
+		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
+		if rowsAffected == 0 {
+			log.Printf("[DIAGNOSTIC] ⚠️  Update affected 0 rows")
+			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
+			return
+		}
 
 		if moveErr == nil {
 			// This is a MOVE REQUEST bin!
 			log.Printf("[DIAGNOSTIC] 🚚 Detected move request: %s (type: %s)", moveRequest.ID, moveRequest.MoveType)
-			// Use task_type from route_tasks (already fetched above)
 			log.Printf("[DIAGNOSTIC] Task type: %s", taskType)
 
-			// Only finalize move request (update bin location, mark complete) when DROPOFF is completed
-			// For pickup, we just mark the task complete (already done above) and continue
-			if taskType == "dropoff" {
+			if isMoveDropoff {
+				// Finalize the move ATOMICALLY with the dropoff's completion. A
+				// failure now fails the request and rolls back the completion —
+				// this used to be swallowed ("don't fail — just log"), leaving a
+				// completed dropoff with a move that never finalized.
 				log.Printf("[DIAGNOSTIC] This is the DROPOFF - finalizing move request")
-				err = handleMoveRequestCompletion(db, hub, centrifugoClient, moveRequest, req, now, userClaims.UserID)
-				if err != nil {
-					log.Printf("[DIAGNOSTIC] ❌ Error handling move request: %v", err)
-					// Don't fail - just log
+				if err = applyMoveCompletion(tx, moveRequest, moveFin, now); err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error finalizing move request: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to finalize move request")
+					return
 				}
 			} else {
 				log.Printf("[DIAGNOSTIC] This is the PICKUP - move request remains in_progress")
@@ -267,7 +282,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			`, taskID).Scan(&potentialLocationID, &placementSource, &taskBinID)
 			if err != nil {
 				log.Printf("[DIAGNOSTIC] ❌ Error fetching placement details: %v", err)
-				_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 				utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement details")
 				return
 			}
@@ -285,7 +299,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 				if taskBinID == nil || *taskBinID == "" {
 					log.Printf("[DIAGNOSTIC] ❌ No bin_id on warehouse placement task")
-					_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 					utils.RespondError(w, http.StatusBadRequest, "bin_id is required for warehouse deployment tasks")
 					return
 				}
@@ -299,7 +312,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					addrVal = *destAddr
 				}
 
-				_, err = db.Exec(`
+				_, err = tx.Exec(`
 					UPDATE bins
 					SET status = 'active',
 					    current_street = $1,
@@ -311,7 +324,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				`, addrVal, destLat, destLon, now, *taskBinID)
 				if err != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error redeploying warehouse bin: %v", err)
-					_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to redeploy bin")
 					return
 				}
@@ -348,7 +360,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				// Create a brand new bin from a potential location
 				if potentialLocationID == nil {
 					log.Printf("[DIAGNOSTIC] ❌ Missing potential_location_id for potential_location placement")
-					_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement location")
 					return
 				}
@@ -378,7 +389,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					log.Printf("[DIAGNOSTIC] Using driver-provided bin number: %d", actualBinNumber)
 					if actualBinNumber == 0 {
 						log.Printf("[DIAGNOSTIC] ❌ Driver did not provide a bin number")
-						_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 						utils.RespondError(w, http.StatusBadRequest, "Bin number is required for placement tasks")
 						return
 					}
@@ -390,7 +400,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						log.Printf("[DIAGNOSTIC] ⚠️ Bin #%d already exists — allowing duplicate", actualBinNumber)
 					}
 
-					_, err = db.Exec(
+					_, err = tx.Exec(
 						binInsertQuery,
 						newBinID,
 						actualBinNumber,
@@ -410,7 +420,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 					if err != nil {
 						log.Printf("[DIAGNOSTIC] ❌ Error creating bin: %v", err)
-						_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 						utils.RespondError(w, http.StatusInternalServerError, "Failed to create bin, please try again")
 						return
 					} else {
@@ -420,7 +429,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						placementBinID = &newBinID
 
 						// Update potential_location record (mark as converted via shift)
-						_, err = db.Exec(`
+						_, err = tx.Exec(`
 							UPDATE potential_locations
 							SET converted_to_bin_id = $1,
 								converted_at = $2,
@@ -503,19 +512,24 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 								       updated_at = $2
 								   WHERE id = $3`
 
-				_, err = db.Exec(binUpdateQuery, *req.UpdatedFillPercentage, now, req.BinID)
+				_, err = tx.Exec(binUpdateQuery, *req.UpdatedFillPercentage, now, req.BinID)
 				if err != nil {
+					// In-tx now: a failed statement aborts the transaction, so this
+					// can no longer be swallowed — roll back the completion with it.
 					log.Printf("[DIAGNOSTIC] ❌ Error updating bin fill percentage: %v", err)
-					// Don't fail the request - the bin is already marked complete in route
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to update bin")
+					return
 				} else {
 					log.Printf("[DIAGNOSTIC] ✅ Bin fill percentage updated to %d%% and last_checked_at set to %d", *req.UpdatedFillPercentage, now)
 				}
 			} else {
 				// Even without fill percentage, update last_checked_at
 				log.Printf("[DIAGNOSTIC] 📝 Updating last_checked_at (no fill percentage due to incident)...")
-				_, err = db.Exec(`UPDATE bins SET last_checked_at = $1, updated_at = $1 WHERE id = $2`, now, req.BinID)
+				_, err = tx.Exec(`UPDATE bins SET last_checked_at = $1, updated_at = $1 WHERE id = $2`, now, req.BinID)
 				if err != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error updating last_checked_at: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to update bin")
+					return
 				} else {
 					log.Printf("[DIAGNOSTIC] ✅ last_checked_at set to %d", now)
 				}
@@ -547,12 +561,12 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 						   RETURNING id`
 
 			var returnedID int
-			err = db.QueryRow(checkQuery, binIDForCheck, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID, shift.ID).Scan(&returnedID)
+			err = tx.QueryRow(checkQuery, binIDForCheck, "shift", req.UpdatedFillPercentage, now, userClaims.UserID, req.PhotoUrl, req.MoveRequestID, shift.ID).Scan(&returnedID)
 			if err != nil {
+				// In-tx now: a failed statement aborts the transaction — fatal.
 				log.Printf("[DIAGNOSTIC] ❌ Error inserting check record: %v", err)
-				// Don't fail the request - the bin is already marked complete
-				log.Printf("[DIAGNOSTIC] ⚠️  Continuing despite check insert error...")
-				checkID = nil
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to record check")
+				return
 			} else {
 				checkID = &returnedID
 				if req.PhotoUrl != nil {
@@ -566,6 +580,26 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			}
 		} else {
 			log.Printf("[DIAGNOSTIC] ⏭️  Skipping check record insert (warehouse stop or no bin_id)")
+		}
+
+		// Recompute the shift's counts ON THE SAME TX — a pool-based recompute here
+		// would not see the uncommitted completion and would persist stale counts.
+		if rerr := itinerary.RecomputeShiftCounts(tx, shift.ID, now); rerr != nil {
+			log.Printf("❌ Failed to recompute shift counts: %v", rerr)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift counts")
+			return
+		}
+
+		// ── COMMIT: task completion + branch writes + checks + counts, atomically ──
+		if err = tx.Commit(); err != nil {
+			log.Printf("❌ Error committing completion: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
+			return
+		}
+
+		// ── Post-commit, best-effort side effects ────────────────────────────────
+		if isMoveDropoff {
+			moveCompletionSideEffects(db, hub, centrifugoClient, moveRequest, now, userClaims.UserID)
 		}
 
 		// Create incident if reported
@@ -638,13 +672,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					}
 				}
 			}
-		}
-
-		// Recompute the shift's counts from route_tasks (single source of truth) now
-		// that this task's completion is persisted — replaces the hand-rolled +1 that
-		// drifts. RecomputeShiftCounts handles warehouse exclusion itself.
-		if rerr := itinerary.RecomputeShiftCounts(db, shift.ID, now); rerr != nil {
-			log.Printf("⚠️  Failed to recompute shift counts: %v", rerr)
 		}
 
 		// Get updated shift
@@ -727,27 +754,22 @@ func calculateZoneDistance(lat1, lon1, lat2, lon2 float64) float64 {
 	return geo.HaversineMeters(lat1, lon1, lat2, lon2)
 }
 
-// handleMoveRequestCompletion handles move request completion logic
-func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, req struct {
-	TaskID                string   `json:"task_id"`
-	BinID                 string   `json:"bin_id"`
-	UpdatedFillPercentage *int     `json:"updated_fill_percentage,omitempty"`
-	PhotoUrl              *string  `json:"photo_url,omitempty"`
-	AfterPhotoUrl         *string  `json:"after_photo_url,omitempty"`
-	PhotoLatitude         *float64 `json:"photo_latitude,omitempty"`
-	PhotoLongitude        *float64 `json:"photo_longitude,omitempty"`
-	AfterPhotoLatitude    *float64 `json:"after_photo_latitude,omitempty"`
-	AfterPhotoLongitude   *float64 `json:"after_photo_longitude,omitempty"`
-	MoveRequestID         *string  `json:"move_request_id,omitempty"`
-	NewBinNumber          int      `json:"new_bin_number"`
-	CompletionNotes       *string  `json:"completion_notes,omitempty"`
-	HasIncident           bool     `json:"has_incident"`
-	IncidentType          *string  `json:"incident_type,omitempty"`
-	IncidentPhotoUrl      *string  `json:"incident_photo_url,omitempty"`
-	IncidentDescription   *string  `json:"incident_description,omitempty"`
-}, now int64, driverID string) error {
-	log.Printf("[MOVE] 🚚 Handling move request completion")
-	log.Printf("[MOVE]    Type: %s", moveRequest.MoveType)
+// moveFinalization carries the pre-resolved inputs a move completion needs:
+// destination status, warehouse config, and the reverse-geocoded destination.
+// Resolved BEFORE the completion tx (the HERE geocode is a network call that
+// must never be held open across a transaction).
+type moveFinalization struct {
+	isStore, isRelocation      bool
+	storeStatus                string
+	warehouse                  models.WarehouseLocation
+	warehouseOK                bool
+	relStreet, relCity, relZip string
+}
+
+// prepareMoveCompletion resolves everything applyMoveCompletion will write —
+// config reads + reverse geocoding — on the pool, pre-tx.
+func prepareMoveCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest) moveFinalization {
+	log.Printf("[MOVE] 🚚 Preparing move request completion (type: %s)", moveRequest.MoveType)
 
 	isStore := moveRequest.MoveType == "store" || moveRequest.MoveType == "pickup_only"
 	isRelocation := moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment"
@@ -790,16 +812,19 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 		}
 	}
 
-	// ── Atomic core: mark the move-request completed AND move the bin together ───
-	// Previously these were separate db.Exec calls with no tx — a crash between them
-	// left the move 'completed' while the bin never moved (or vice-versa).
-	tx, err := db.Beginx()
-	if err != nil {
-		return fmt.Errorf("begin move-completion tx: %w", err)
+	return moveFinalization{
+		isStore: isStore, isRelocation: isRelocation, storeStatus: storeStatus,
+		warehouse: warehouse, warehouseOK: warehouseOK,
+		relStreet: relStreet, relCity: relCity, relZip: relZip,
 	}
-	defer tx.Rollback()
+}
 
-	if _, err = tx.Exec(`
+// applyMoveCompletion is the move finalization's atomic core — mark the move
+// request completed and move the bin — running on the CALLER's transaction,
+// atomic with the dropoff task's own completion (closing the historical torn
+// write: a completed dropoff whose move never finalized, error swallowed).
+func applyMoveCompletion(ext sqlx.Ext, moveRequest models.BinMoveRequest, fin moveFinalization, now int64) error {
+	if _, err := ext.Exec(`
 		UPDATE bin_move_requests
 		SET status = 'completed', completed_at = $1, updated_at = $1
 		WHERE id = $2
@@ -807,39 +832,41 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 		return fmt.Errorf("failed to complete move request: %w", err)
 	}
 
-	if isStore {
-		if warehouseOK {
-			if _, err = tx.Exec(`
+	if fin.isStore {
+		if fin.warehouseOK {
+			if _, err := ext.Exec(`
 				UPDATE bins
 				SET status = $1, latitude = $2, longitude = $3, current_street = $4, city = '', zip = '',
 				    fill_percentage = 0, last_checked_at = NULL, updated_at = $5
 				WHERE id = $6
-			`, storeStatus, warehouse.Latitude, warehouse.Longitude, warehouse.Address, now, moveRequest.BinID); err != nil {
+			`, fin.storeStatus, fin.warehouse.Latitude, fin.warehouse.Longitude, fin.warehouse.Address, now, moveRequest.BinID); err != nil {
 				return fmt.Errorf("failed to update bin status: %w", err)
 			}
 		} else {
-			if _, err = tx.Exec(`UPDATE bins SET status = $1, fill_percentage = 0, last_checked_at = NULL, updated_at = $2 WHERE id = $3`,
-				storeStatus, now, moveRequest.BinID); err != nil {
+			if _, err := ext.Exec(`UPDATE bins SET status = $1, fill_percentage = 0, last_checked_at = NULL, updated_at = $2 WHERE id = $3`,
+				fin.storeStatus, now, moveRequest.BinID); err != nil {
 				return fmt.Errorf("failed to update bin status: %w", err)
 			}
 		}
-	} else if isRelocation {
-		if _, err = tx.Exec(`
+	} else if fin.isRelocation {
+		if _, err := ext.Exec(`
 			UPDATE bins
 			SET latitude = $1, longitude = $2, current_street = $3, city = $4, zip = $5,
 			    status = 'active', updated_at = $6
 			WHERE id = $7
-		`, moveRequest.NewLatitude, moveRequest.NewLongitude, relStreet, relCity, relZip, now, moveRequest.BinID); err != nil {
+		`, moveRequest.NewLatitude, moveRequest.NewLongitude, fin.relStreet, fin.relCity, fin.relZip, now, moveRequest.BinID); err != nil {
 			return fmt.Errorf("failed to relocate bin: %w", err)
 		}
 	}
 
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit move completion: %w", err)
-	}
-	log.Printf("[MOVE] ✅ Move request %s completed + bin %s updated (atomic)", moveRequest.ID, moveRequest.BinID)
+	return nil
+}
 
-	// ── Post-commit, best-effort side-effects (never roll back the completion) ───
+// moveCompletionSideEffects runs the best-effort post-commit tail: history,
+// dashboard broadcasts, potential-location conversion, the moves record.
+func moveCompletionSideEffects(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, now int64, driverID string) {
+	log.Printf("[MOVE] ✅ Move request %s completed + bin %s updated (atomic with task completion)", moveRequest.ID, moveRequest.BinID)
+	isRelocation := moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment"
 
 	// History + conversion attribution: the actor is the DRIVER who completed the task.
 	// moveRequest.AssignedUserID is NULL once a move is assigned to a shift (assign-to-shift
@@ -945,7 +972,6 @@ func handleMoveRequestCompletion(db *sqlx.DB, hub *websocket.Hub, centrifugoClie
 		log.Printf("[MOVE] ✅ Bin relocated to %s", newAddr)
 	}
 
-	return nil
 }
 
 // CancelShift cancels a specific shift
