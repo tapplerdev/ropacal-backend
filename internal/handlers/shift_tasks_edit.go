@@ -1156,8 +1156,9 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 
 		// Clean up warehouse stops on ready shifts — they're meaningless before optimization
 		if shouldReoptimize && shift.Status == "ready" {
-			result, _ := db.Exec(`DELETE FROM route_tasks WHERE shift_id = $1 AND task_type = 'warehouse_stop' AND is_completed = 0`, shiftID)
-			if deleted, _ := result.RowsAffected(); deleted > 0 {
+			// (Now also scoped to is_deleted=false like the two optimizer purge
+			// sites — soft-deleted artifacts are audit rows, not live clutter.)
+			if deleted, _ := itinerary.PurgeIncompleteWarehouseStops(db, shiftID); deleted > 0 {
 				log.Printf("🗑️ Cleaned up %d stale warehouse stops on ready shift", deleted)
 			}
 		}

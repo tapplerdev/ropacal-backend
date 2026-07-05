@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services/centrifugo"
@@ -328,50 +329,13 @@ func DeletePotentialLocation(db *sqlx.DB, redisClient *redis.Client, wsHub *webs
 			log.Printf("🔄 [DELETE-POTENTIAL-LOCATION] Checking for active shift dependencies")
 
 			// Find active shifts with placement tasks for this potential location
-			var affectedShifts []struct {
-				ShiftID string `db:"shift_id"`
-				TaskID  string `db:"task_id"`
-			}
-
-			err = db.Select(&affectedShifts, `
-				SELECT
-					rt.shift_id,
-					rt.id as task_id
-				FROM route_tasks rt
-				JOIN shifts s ON rt.shift_id = s.id
-				WHERE rt.potential_location_id = $1
-				  AND rt.task_type = 'placement'
-				  AND rt.is_completed = 0
-				  AND s.status IN ('active', 'scheduled')
-			`, id)
-
-			if err != nil && err != sql.ErrNoRows {
-				log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to check active shift dependencies: %v", err)
-			} else if len(affectedShifts) > 0 {
-				log.Printf("🎯 [DELETE-POTENTIAL-LOCATION] Found %d active shift task(s) affected by deletion", len(affectedShifts))
-
-				// Group tasks by shift for notification
-				shiftTasksMap := make(map[string][]string)
-				for _, affected := range affectedShifts {
-					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
-
-					// Soft delete the placement task (potential location no longer exists)
-					_, deleteErr := db.Exec(`
-						UPDATE route_tasks
-						SET is_deleted = true,
-							deleted_at = $1,
-							deleted_by = $2,
-							deletion_reason = $3,
-							updated_at = $1
-						WHERE id = $4 AND is_deleted = false
-					`, now, managerUserID, "potential_location_deleted", affected.TaskID)
-
-					if deleteErr != nil {
-						log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to soft delete placement task %s: %v", affected.TaskID, deleteErr)
-					} else {
-						log.Printf("✅ [DELETE-POTENTIAL-LOCATION] Soft deleted placement task %s", affected.TaskID)
-					}
-				}
+			// Soft-delete the affected placement tasks via the domain (audited,
+			// batched); returns shiftID→taskIDs for the notify loop below.
+			shiftTasksMap, syncErr := itinerary.SyncPlacementRemoval(db, id, managerUserID, "potential_location_deleted", now)
+			if syncErr != nil {
+				log.Printf("⚠️  [DELETE-POTENTIAL-LOCATION] Failed to sync placement tasks: %v", syncErr)
+			} else if len(shiftTasksMap) > 0 {
+				log.Printf("🎯 [DELETE-POTENTIAL-LOCATION] Soft deleted placement task(s) on %d shift(s)", len(shiftTasksMap))
 
 				// Notify each affected shift
 				for shiftID, taskIDs := range shiftTasksMap {
@@ -611,50 +575,13 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, redisClient *redis.Client, wsHub
 			log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Checking for active shift dependencies")
 
 			// Find active shifts with placement tasks for this potential location
-			var affectedShifts []struct {
-				ShiftID string `db:"shift_id"`
-				TaskID  string `db:"task_id"`
-			}
-
-			err = db.Select(&affectedShifts, `
-				SELECT
-					rt.shift_id,
-					rt.id as task_id
-				FROM route_tasks rt
-				JOIN shifts s ON rt.shift_id = s.id
-				WHERE rt.potential_location_id = $1
-				  AND rt.task_type = 'placement'
-				  AND rt.is_completed = 0
-				  AND s.status IN ('active', 'scheduled')
-			`, id)
-
-			if err != nil && err != sql.ErrNoRows {
-				log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to check active shift dependencies: %v", err)
-			} else if len(affectedShifts) > 0 {
-				log.Printf("🎯 [CONVERT-POTENTIAL-LOCATION] Found %d active shift task(s) affected by conversion", len(affectedShifts))
-
-				// Group tasks by shift for notification
-				shiftTasksMap := make(map[string][]string)
-				for _, affected := range affectedShifts {
-					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
-
-					// Soft delete the placement task (potential location converted to bin)
-					_, deleteErr := db.Exec(`
-						UPDATE route_tasks
-						SET is_deleted = true,
-							deleted_at = $1,
-							deleted_by = $2,
-							deletion_reason = $3,
-							updated_at = $1
-						WHERE id = $4 AND is_deleted = false
-					`, now, userID, "potential_location_converted_to_bin", affected.TaskID)
-
-					if deleteErr != nil {
-						log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to soft delete placement task %s: %v", affected.TaskID, deleteErr)
-					} else {
-						log.Printf("✅ [CONVERT-POTENTIAL-LOCATION] Soft deleted placement task %s", affected.TaskID)
-					}
-				}
+			// Soft-delete the affected placement tasks via the domain (audited,
+			// batched); returns shiftID→taskIDs for the notify loop below.
+			shiftTasksMap, syncErr := itinerary.SyncPlacementRemoval(db, id, userID, "potential_location_converted_to_bin", now)
+			if syncErr != nil {
+				log.Printf("⚠️  [CONVERT-POTENTIAL-LOCATION] Failed to sync placement tasks: %v", syncErr)
+			} else if len(shiftTasksMap) > 0 {
+				log.Printf("🎯 [CONVERT-POTENTIAL-LOCATION] Soft deleted placement task(s) on %d shift(s)", len(shiftTasksMap))
 
 				// Notify each affected shift
 				for shiftID, taskIDs := range shiftTasksMap {

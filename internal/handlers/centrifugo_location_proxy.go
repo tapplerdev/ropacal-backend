@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -299,18 +300,34 @@ func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, f
 	// 6. All conditions met — driver near warehouse with all tasks done
 	log.Printf("📍 [PROXIMITY] Driver near warehouse (%.0fm), all tasks done — prompting to end shift %s", distance, shiftID[:12])
 
-	// Set ready_to_end_at timestamp
+	// Set ready_to_end_at + auto-complete the warehouse stops in ONE tx —
+	// previously two pool writes, so a failure between them could prompt the
+	// driver to end (and auto-end 5 min later) while an incomplete
+	// warehouse_stop lingered in the itinerary. Best-effort as before: a
+	// failure just logs; the next location publish retries.
 	now := time.Now().Unix()
-	if _, err := db.Exec(`UPDATE shifts SET ready_to_end_at = $1 WHERE id = $2`, now, shiftID); err != nil {
-		log.Printf("⚠️  [PROXIMITY] Failed to set ready_to_end_at for shift %s: %v", shiftID, err)
-	}
-
-	// Auto-complete warehouse_stop tasks
-	if _, err := db.Exec(`
-		UPDATE route_tasks SET is_completed = 1, completed_at = $1, updated_at = $1
-		WHERE shift_id = $2 AND task_type = 'warehouse_stop' AND is_completed = 0 AND is_deleted = false
-	`, now, shiftID); err != nil {
-		log.Printf("⚠️  [PROXIMITY] Failed to auto-complete warehouse_stop tasks for shift %s: %v", shiftID, err)
+	if tx, txErr := db.Beginx(); txErr != nil {
+		log.Printf("⚠️  [PROXIMITY] Failed to begin tx for shift %s: %v", shiftID, txErr)
+	} else {
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, err := tx.Exec(`UPDATE shifts SET ready_to_end_at = $1 WHERE id = $2`, now, shiftID); err != nil {
+			log.Printf("⚠️  [PROXIMITY] Failed to set ready_to_end_at for shift %s: %v", shiftID, err)
+			return
+		}
+		if _, err := itinerary.CompleteWarehouseStops(tx, shiftID, now); err != nil {
+			log.Printf("⚠️  [PROXIMITY] Failed to auto-complete warehouse_stop tasks for shift %s: %v", shiftID, err)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			log.Printf("⚠️  [PROXIMITY] Failed to commit proximity tx for shift %s: %v", shiftID, err)
+			return
+		}
+		committed = true
 	}
 
 	// Send Centrifugo event to driver

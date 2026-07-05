@@ -1055,63 +1055,16 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centri
 		}
 		defer tx.Rollback()
 
-		tasksSkipped := 1 // At minimum, we skip the current task
-
-		// Mark the task as skipped
-		_, err = tx.Exec(`
-			UPDATE route_tasks
-			SET skipped = true,
-				is_completed = 1,
-				completed_at = $1,
-				task_data = $2,
-				updated_at = $3
-			WHERE id = $4
-		`, now, skipDataJSON, now, task.ID)
+		// Skip via the domain: marks the task processed and cascade-skips the
+		// paired incomplete dropoff when a pickup is skipped (the handler must
+		// not know how move legs pair).
+		tasksSkipped, err := itinerary.Skip(tx, shift.ID, task.ID, itinerary.TaskType(task.TaskType), task.MoveRequestID, skipDataJSON, now)
 		if err != nil {
-			log.Printf("❌ Error marking task as skipped: %v", err)
+			log.Printf("❌ Error skipping task: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to skip task")
 			return
 		}
-
-		log.Printf("✅ Task marked as skipped: %s", task.ID)
-
-		// If skipping a pickup, also skip the paired dropoff
-		if task.TaskType == models.TaskTypePickup && task.MoveRequestID != nil {
-			log.Printf("🔗 Pickup task has move_request_id: %s, also skipping dropoff...", *task.MoveRequestID)
-
-			var dropoffID string
-			err = tx.QueryRow(`
-				SELECT id FROM route_tasks
-				WHERE shift_id = $1
-				  AND move_request_id = $2
-				  AND task_type = 'dropoff'
-				  AND is_completed = 0
-			`, shift.ID, *task.MoveRequestID).Scan(&dropoffID)
-
-			if err == nil {
-				// Found paired dropoff, skip it too
-				_, err = tx.Exec(`
-					UPDATE route_tasks
-					SET skipped = true,
-						is_completed = 1,
-						completed_at = $1,
-						task_data = $2,
-						updated_at = $3
-					WHERE id = $4
-				`, now, skipDataJSON, now, dropoffID)
-				if err != nil {
-					log.Printf("❌ Error marking dropoff as skipped: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to skip paired dropoff")
-					return
-				}
-				tasksSkipped++
-				log.Printf("✅ Paired dropoff also marked as skipped: %s", dropoffID)
-			} else if err != sql.ErrNoRows {
-				log.Printf("❌ Error querying dropoff: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Failed to find paired dropoff")
-				return
-			}
-		}
+		log.Printf("✅ Task marked as skipped: %s (%d task(s) total)", task.ID, tasksSkipped)
 
 		// FIX: Do NOT increment completed_bins for skipped tasks!
 		// Skipped tasks should not count toward completion percentage.

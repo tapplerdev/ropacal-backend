@@ -742,53 +742,21 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 		if addrChanged && centrifugoClient != nil {
 			log.Printf("🔄 [UPDATE-BIN] Address changed - checking for active shift dependencies")
 
-			// Find active shifts with tasks for this bin
-			var affectedShifts []struct {
-				ShiftID    string `db:"shift_id"`
-				TaskID     string `db:"task_id"`
-				OldAddress string `db:"old_address"`
-			}
-
-			err = tx.Select(&affectedShifts, `
-				SELECT
-					rt.shift_id,
-					rt.id as task_id,
-					rt.address as old_address
-				FROM route_tasks rt
-				JOIN shifts s ON rt.shift_id = s.id
-				WHERE rt.bin_id = $1
-				  AND rt.is_completed = 0
-				  AND s.status IN ('active', 'scheduled')
-			`, id)
-
-			if err != nil && err != sql.ErrNoRows {
-				log.Printf("❌ [UPDATE-BIN] Failed to check active shift dependencies: %v", err)
-				http.Error(w, "Failed to check active shift dependencies", http.StatusInternalServerError)
+			// Refresh the bin's incomplete tasks on active/scheduled shifts to the
+			// new address/coords (domain-owned; atomic with the bin update in tx).
+			synced, syncErr := itinerary.SyncBinTasks(tx, id, req.CurrentStreet, req.Latitude, req.Longitude, time.Now().Unix())
+			if syncErr != nil {
+				log.Printf("❌ [UPDATE-BIN] Failed to sync route tasks: %v", syncErr)
+				http.Error(w, "Failed to update route tasks", http.StatusInternalServerError)
 				return
-			} else if len(affectedShifts) > 0 {
-				log.Printf("🎯 [UPDATE-BIN] Found %d active shift task(s) affected by address change", len(affectedShifts))
-
-				// Group tasks by shift for notification
-				for _, affected := range affectedShifts {
-					shiftTasksMap[affected.ShiftID] = append(shiftTasksMap[affected.ShiftID], affected.TaskID)
-
-					// Update the task's address and coordinates
-					_, updateErr := tx.Exec(`
-						UPDATE route_tasks
-						SET address = $1,
-							latitude = $2,
-							longitude = $3,
-							updated_at = $4
-						WHERE id = $5
-					`, req.CurrentStreet, req.Latitude, req.Longitude, time.Now().Unix(), affected.TaskID)
-
-					if updateErr != nil {
-						log.Printf("❌ [UPDATE-BIN] Failed to update route task %s: %v", affected.TaskID, updateErr)
-						http.Error(w, "Failed to update route task", http.StatusInternalServerError)
-						return
-					}
-					log.Printf("✅ [UPDATE-BIN] Updated route task %s: %s → %s", affected.TaskID, affected.OldAddress, req.CurrentStreet)
+			}
+			if len(synced) > 0 {
+				total := 0
+				for sid, tids := range synced {
+					shiftTasksMap[sid] = append(shiftTasksMap[sid], tids...)
+					total += len(tids)
 				}
+				log.Printf("🎯 [UPDATE-BIN] Updated %d active shift task(s) to the new address", total)
 			} else {
 				log.Printf("ℹ️  [UPDATE-BIN] No active shift dependencies found for this bin")
 			}
