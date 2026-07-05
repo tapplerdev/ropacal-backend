@@ -92,7 +92,18 @@ itinerary.ApplyOrder(tx, shiftID, orderedIDs, newWarehouseStops, isFirst)   (all
   ID-stability (collections + relocation pickup/dropoff), reopt ID-stability + warehouse regen,
   and a mid-shift sim proving reopt re-anchors on the driver's GPS.
 - **5 — Creation.** `CreateShiftWithTasks` + `UpdateShift.add_tasks` → intent methods +
-  shared coordinate resolver.
+  shared coordinate resolver. **IN PROGRESS — add_tasks half DONE + golden-verified:**
+  `insertTask` (the single INSERT assembler; per-column bind-NULL vs omit-for-DDL-default
+  policy) + `AddCollection`/`AddPlacement`/`AddMoveLeg` intent methods (create.go), sqlmock-
+  pinned. Slice 2a was byte-identical (18/18 golden artifacts); Slice 2b consciously fixed
+  the PATCH-path #34 regression (added pickups now carry destination_*/move_type/bin_number;
+  dropoffs born AT the destination with address set) — verified additive-only delta.
+  **REMAINING (Slice 3):** migrate `CreateShiftWithTasks` per task type onto the same writer
+  with create-semantics (bind-all-30-columns, taskData-authoritative merge incl. the 624-626
+  re-extract clobber, '{}' task_data, gapped i+1 seq, added_by=NULL) + the shared Resolver
+  (bins/potloc/move/warehouse-config); capture the create-path golden scenarios BEFORE
+  touching that code. Then Slice 4 conscious unifications (ParseTaskType→400 on create,
+  RecomputeShiftCounts, clobber fix, store live-config policy, assignment symmetry).
 - **6 — Edges + tx gaps.** `bins.go`→`SyncBinTasks`, `potential_locations.go`→
   `SyncPlacement`; wrap `CompleteTask`'s task+bin writes in a tx (torn-write).
 
