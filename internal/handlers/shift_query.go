@@ -618,6 +618,14 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 			TaskDescription *string `db:"task_description"      json:"task_description"`
 			CompletionNotes *string `db:"completion_notes"      json:"completion_notes"`
 			PhotoRequired   bool    `db:"photo_required"        json:"photo_required"`
+			// Driver-reported incident at this stop (if any). Completion validation
+			// allows a photo-less/fill-less completion when an incident is filed —
+			// the driver's evidence lives on the incident record, so the history
+			// card must surface it or the stop looks like a missing photo.
+			IncidentType        *string `db:"incident_type"        json:"incident_type"`
+			IncidentPhotoURL    *string `db:"incident_photo_url"   json:"incident_photo_url"`
+			IncidentDescription *string `db:"incident_description" json:"incident_description"`
+			IncidentZoneID      *string `db:"incident_zone_id"     json:"incident_zone_id"`
 		}
 
 		query := `
@@ -656,7 +664,11 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				rt.task_label,
 				rt.task_description,
 				rt.completion_notes,
-				rt.photo_required
+				rt.photo_required,
+				zi.incident_type,
+				zi.photo_url    AS incident_photo_url,
+				zi.description  AS incident_description,
+				zi.zone_id      AS incident_zone_id
 			FROM route_tasks rt
 			LEFT JOIN bins b   ON b.id  = rt.bin_id
 			LEFT JOIN LATERAL (
@@ -667,6 +679,13 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				ORDER BY checked_on DESC
 				LIMIT 1
 			) bc ON true
+			LEFT JOIN LATERAL (
+				SELECT incident_type, photo_url, description, zone_id
+				FROM zone_incidents
+				WHERE shift_id = rt.shift_id AND bin_id = rt.bin_id
+				ORDER BY reported_at DESC
+				LIMIT 1
+			) zi ON true
 			LEFT JOIN potential_locations pl ON pl.id = rt.potential_location_id
 			LEFT JOIN bins cb  ON cb.id = pl.converted_to_bin_id
 			LEFT JOIN bin_move_requests bmr ON bmr.id = rt.move_request_id
