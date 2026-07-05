@@ -311,6 +311,12 @@ func CreateShiftWithTasks(
 						if err == nil && binCoords.Latitude != 0 && binCoords.Longitude != 0 {
 							lat = binCoords.Latitude
 							lon = binCoords.Longitude
+							// Persist into taskData: latitude/longitude are re-extracted
+							// from taskData just before insert, which used to discard
+							// this fix and insert the pickup at 0,0 (null island) —
+							// feeding the optimizer matrix and app nav bad coordinates.
+							taskData["latitude"] = lat
+							taskData["longitude"] = lon
 							log.Printf("   ✅ Task #%d: Populated pickup coordinates from bin %s: %.6f, %.6f", i+1, binID, lat, lon)
 						} else if err != nil {
 							log.Printf("   ⚠️  Task #%d: Failed to lookup bin coordinates for %s: %v", i+1, binID, err)
@@ -328,6 +334,11 @@ func CreateShiftWithTasks(
 			log.Printf("   🏭 Task #%d: Warehouse stop detected - overriding with shift warehouse coordinates", i+1)
 			lat = *warehouseLat
 			lon = *warehouseLon
+			// Persist into taskData (see the pickup fix above): the pre-insert
+			// re-extract used to discard this override and insert warehouse
+			// stops at 0,0 when the client sent no coordinates.
+			taskData["latitude"] = lat
+			taskData["longitude"] = lon
 			log.Printf("   ✅ Task #%d: Using shift warehouse: %.6f, %.6f", i+1, lat, lon)
 
 			// Also override address if not provided or empty
@@ -667,17 +678,28 @@ func CreateShiftWithTasks(
 			nextSeq++
 		}
 
-		totalBins += len(warehouseDeployments) // Only count placements, not warehouse_stop
 	}
 
 	// ❌ REMOVED: Auto-append warehouse stop logic
 	// Mapbox Optimization v2 will automatically add warehouse stops (end stops) as needed
 	// Let the optimizer handle warehouse returns for optimal routing
-	actualTasks := len(tasks) - skippedInactive
+	//
+	// task_count = rows actually inserted (skips excluded, deployments INCLUDED —
+	// deployments were historically under-counted here and never persisted into
+	// shifts.total_bins at all).
+	actualTasks := len(tasks) - skippedInactive + len(warehouseDeployments)
 	if skippedInactive > 0 {
 		log.Printf("⚠️  Skipped %d inactive bins (retired/missing) from shift", skippedInactive)
-		// Update total_bins on the shift to reflect actual task count
-		_, _ = tx.Exec("UPDATE shifts SET total_bins = total_bins - $1 WHERE id = $2", skippedInactive, shiftID)
+	}
+
+	// Recompute the shift's counts from route_tasks in-tx — the same single
+	// semantic (logical bins: a relocation pair counts once) every later
+	// mutation rewrites them to. Replaces the hand-count + skip-decrement
+	// (whose Exec error was silently swallowed) + the dead deployment
+	// increment, so counts are consistent from birth instead of from the
+	// first mutation.
+	if err = itinerary.RecomputeShiftCounts(tx, shiftID, now); err != nil {
+		return "", 0, fmt.Errorf("failed to recompute shift counts: %w", err)
 	}
 	log.Printf("✅ Created shift with %d tasks - Mapbox will add warehouse stops during optimization", actualTasks)
 

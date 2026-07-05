@@ -156,6 +156,14 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			return
 		}
 		for i, t := range req.Tasks {
+			// task_type was an unchecked passthrough to the DB CHECK (bad value →
+			// 500 at insert); validate here for a clean 400. The itinerary domain
+			// owns the taxonomy.
+			tt, _ := t["task_type"].(string)
+			if _, err := itinerary.ParseTaskType(tt); err != nil {
+				utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("task %d: %s", i, err.Error()))
+				return
+			}
 			if twt, ok := t["time_window_type"].(string); ok && twt != "" {
 				if _, err := itinerary.ParseTimeWindowType(twt); err != nil {
 					utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("task %d: %s", i, err.Error()))
