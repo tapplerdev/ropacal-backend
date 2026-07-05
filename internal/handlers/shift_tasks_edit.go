@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -799,6 +800,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 			}
 
 			skippedCount := 0
+			loggedAssignments := make(map[string]bool) // one history event per move per request
 			for _, addReq := range req.AddTasks {
 				// Validate task_type at the boundary — a clean 400 instead of a 500
 				// at INSERT time (the DB CHECK). The itinerary domain owns the taxonomy.
@@ -974,8 +976,14 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					var destAddr *string
 					if moveReq.DestLatitude != nil && moveReq.DestLongitude != nil {
 						destLat, destLng, destAddr = moveReq.DestLatitude, moveReq.DestLongitude, moveReq.DestAddress
-					} else if shift.WarehouseLatitude != nil && shift.WarehouseLongitude != nil {
-						destLat, destLng, destAddr = shift.WarehouseLatitude, shift.WarehouseLongitude, shift.WarehouseAddress
+					} else if wlat, wlng, waddr, ok := resolveCurrentWarehouse(db); ok {
+						// Store/pickup_only destination: the CURRENT config warehouse —
+						// never the shift's creation-time snapshot, which goes stale if
+						// the warehouse moved (matches CreateShiftWithTasks + AddMove).
+						destLat, destLng = &wlat, &wlng
+						if waddr != "" {
+							destAddr = &waddr
+						}
 					}
 
 					leg := itinerary.NewMoveLeg{
@@ -1016,13 +1024,37 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						leg.Address = destAddr
 					}
 
-					// Mark as assigned
-					_, err = tx.Exec(`UPDATE bin_move_requests SET assigned_shift_id = $1, assigned_user_id = $2, updated_at = $3 WHERE id = $4`,
-						shiftID, shift.DriverID, now, *addReq.MoveRequestID)
-					if err != nil {
+					// Assign via the domain's guarded transition — status flips to
+					// assigned/in_progress, assignment_type='shift', assigned_user_id
+					// NULL (the shift's driver is derived, never denormalized — #31).
+					// The raw UPDATE this replaces set no status and stamped the
+					// driver into assigned_user_id, silently diverging from every
+					// other assignment path — and would even "assign" a cancelled move.
+					moveStatus := string(moverequest.StatusAssigned)
+					if shift.Status == "active" {
+						moveStatus = string(moverequest.StatusInProgress)
+					}
+					if err = moverequest.AssignToShift(tx, *addReq.MoveRequestID, shiftID, moveStatus, now); err != nil {
+						if errors.Is(err, moverequest.ErrInvalidTransition) {
+							utils.RespondError(w, http.StatusBadRequest, "move request is already completed or cancelled")
+							return
+						}
 						log.Printf("❌ Error assigning move request: %v", err)
 						utils.RespondError(w, http.StatusInternalServerError, "Failed to assign move request")
 						return
+					}
+					// History: one 'assigned' event per move per request (both legs
+					// share the move), logged in-tx so it commits with the assignment.
+					if !loggedAssignments[*addReq.MoveRequestID] {
+						loggedAssignments[*addReq.MoveRequestID] = true
+						var driverName string
+						if e := tx.Get(&driverName, `SELECT name FROM users WHERE id = $1`, shift.DriverID); e != nil {
+							driverName = "Unknown Driver"
+						}
+						if logErr := moverequest.LogAssigned(tx, *addReq.MoveRequestID, userClaims.UserID, userClaims.Email, "manager",
+							"shift", &shift.DriverID, &driverName, &shiftID); logErr != nil {
+							log.Printf("⚠️  Failed to log move assignment history: %v", logErr)
+						}
 					}
 
 					newTaskID, err = itinerary.AddMoveLeg(tx, shiftID, leg)
