@@ -185,22 +185,17 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				return
 			}
 		}
-		// Update the task as completed (with before/after photos + EXIF GPS)
-		updateQuery := `UPDATE route_tasks
-						SET is_completed = 1,
-							completed_at = $1,
-							updated_fill_percentage = $2,
-							completion_notes = $3,
-							updated_at = $4,
-							photo_url = $6,
-							after_photo_url = $7,
-							photo_latitude = $8,
-							photo_longitude = $9,
-							after_photo_latitude = $10,
-							after_photo_longitude = $11
-						WHERE id = $5`
-		result, err := db.Exec(updateQuery, now, req.UpdatedFillPercentage, req.CompletionNotes, now, taskID,
-			req.PhotoUrl, req.AfterPhotoUrl, req.PhotoLatitude, req.PhotoLongitude, req.AfterPhotoLatitude, req.AfterPhotoLongitude)
+		// Complete via the domain — the single completion write (photos + EXIF GPS).
+		rowsAffected, err := itinerary.Complete(db, taskID, now, itinerary.Completion{
+			FillPercentage: req.UpdatedFillPercentage,
+			Notes:          req.CompletionNotes,
+			PhotoURL:       req.PhotoUrl,
+			AfterPhotoURL:  req.AfterPhotoUrl,
+			PhotoLat:       req.PhotoLatitude,
+			PhotoLng:       req.PhotoLongitude,
+			AfterPhotoLat:  req.AfterPhotoLatitude,
+			AfterPhotoLng:  req.AfterPhotoLongitude,
+		})
 		if err != nil {
 			log.Printf("❌ Error marking task as completed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to complete task")
@@ -209,7 +204,6 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 		log.Printf("[DIAGNOSTIC] ✅ Task marked as completed in route_tasks table")
 
-		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {
 			log.Printf("[DIAGNOSTIC] ⚠️  Update affected 0 rows")
 			utils.RespondError(w, http.StatusBadRequest, "Failed to update task")
@@ -273,7 +267,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			`, taskID).Scan(&potentialLocationID, &placementSource, &taskBinID)
 			if err != nil {
 				log.Printf("[DIAGNOSTIC] ❌ Error fetching placement details: %v", err)
-				db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+				_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 				utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement details")
 				return
 			}
@@ -291,7 +285,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 				if taskBinID == nil || *taskBinID == "" {
 					log.Printf("[DIAGNOSTIC] ❌ No bin_id on warehouse placement task")
-					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 					utils.RespondError(w, http.StatusBadRequest, "bin_id is required for warehouse deployment tasks")
 					return
 				}
@@ -317,7 +311,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				`, addrVal, destLat, destLon, now, *taskBinID)
 				if err != nil {
 					log.Printf("[DIAGNOSTIC] ❌ Error redeploying warehouse bin: %v", err)
-					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to redeploy bin")
 					return
 				}
@@ -354,7 +348,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				// Create a brand new bin from a potential location
 				if potentialLocationID == nil {
 					log.Printf("[DIAGNOSTIC] ❌ Missing potential_location_id for potential_location placement")
-					db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+					_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to retrieve placement location")
 					return
 				}
@@ -384,7 +378,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					log.Printf("[DIAGNOSTIC] Using driver-provided bin number: %d", actualBinNumber)
 					if actualBinNumber == 0 {
 						log.Printf("[DIAGNOSTIC] ❌ Driver did not provide a bin number")
-						db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+						_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 						utils.RespondError(w, http.StatusBadRequest, "Bin number is required for placement tasks")
 						return
 					}
@@ -416,7 +410,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 
 					if err != nil {
 						log.Printf("[DIAGNOSTIC] ❌ Error creating bin: %v", err)
-						db.Exec(`UPDATE route_tasks SET is_completed = 0, completed_at = NULL, updated_at = $1 WHERE id = $2`, now, taskID)
+						_ = itinerary.Uncomplete(db, taskID, now) // compensation until CompleteTask is tx-wrapped
 						utils.RespondError(w, http.StatusInternalServerError, "Failed to create bin, please try again")
 						return
 					} else {
