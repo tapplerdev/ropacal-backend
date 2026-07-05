@@ -1143,7 +1143,12 @@ func optimizeRouteWithMapbox(
 		// Build lookup map by identifiers
 		for i := range existingTasks {
 			task := &existingTasks[i]
-			if task.BinID != nil {
+			// Plain bin_id key ONLY for tasks that aren't move legs: a move's
+			// pickup and dropoff share the bin_id, so registering them here let
+			// the last-iterated leg overwrite the other (and could shadow a
+			// collection on the same bin). Move legs match via the composite
+			// move_request_id:task_type key below.
+			if task.BinID != nil && task.MoveRequestID == nil {
 				existingTasksMap[*task.BinID] = task
 			}
 			if task.PotentialLocationID != nil {
@@ -1344,15 +1349,20 @@ func optimizeRouteWithMapbox(
 		// Find existing task if first optimization
 		var existingTask *models.RouteTask
 		if isFirstOptimization {
-			// Try to match by bin_id, potential_location_id, move_request_id, or service task ID
-			if task.BinID != nil {
-				existingTask = existingTasksMap[*task.BinID]
-			} else if task.PotentialLocationID != nil {
-				// Use composite key to match placement vs warehouse_stop correctly
-				existingTask = existingTasksMap[*task.PotentialLocationID+":"+string(task.TaskType)]
-			} else if task.MoveRequestID != nil {
-				// Use composite key to match pickup vs dropoff correctly
+			// Match MOST-SPECIFIC key first. Move-leg stops carry BOTH a bin_id
+			// and a move_request_id — checking bin_id first sent both legs to the
+			// same (collided) plain-bin key, so the pickup stop stamped its
+			// position onto the DROPOFF row and the pickup row was never updated,
+			// leaving the pair's order to an unstable created_at tiebreak
+			// (dropoff-before-pickup on mixed shifts — #41).
+			if task.MoveRequestID != nil {
+				// Composite key: pickup vs dropoff of the same move
 				existingTask = existingTasksMap[*task.MoveRequestID+":"+string(task.TaskType)]
+			} else if task.PotentialLocationID != nil {
+				// Composite key: placement vs warehouse_stop of the same location
+				existingTask = existingTasksMap[*task.PotentialLocationID+":"+string(task.TaskType)]
+			} else if task.BinID != nil {
+				existingTask = existingTasksMap[*task.BinID]
 			} else if task.TaskType == "service" && stop.CollectionID != "" {
 				// Service tasks: extract original task ID from "service-{uuid}"
 				svcID := strings.TrimPrefix(stop.CollectionID, "service-")

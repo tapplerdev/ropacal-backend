@@ -91,7 +91,7 @@ func ApplyOrder(ext sqlx.Ext, shiftID string, stops []OrderedStop, isFirst bool)
 			UPDATE route_tasks AS rt
 			SET sequence_order = sub.rn
 			FROM (
-				SELECT id, ROW_NUMBER() OVER (ORDER BY sequence_order ASC, created_at ASC) AS rn
+				SELECT id, ROW_NUMBER() OVER (ORDER BY sequence_order ASC, created_at ASC, id ASC) AS rn
 				FROM route_tasks
 				WHERE shift_id = ? AND is_deleted = false
 			) sub

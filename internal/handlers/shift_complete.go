@@ -211,6 +211,26 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 		isMoveDropoff := moveErr == nil && taskType == "dropoff"
 		var moveFin moveFinalization
 		if isMoveDropoff {
+			// Leg-order guard: a dropoff must not complete (and finalize the move,
+			// relocating the bin in the system) while its paired pickup is still
+			// live and incomplete — the bin isn't on the truck yet. Mirrors the
+			// RemoveTasks dropoff guard. Skipped/auto-completed pickups
+			// (is_completed=1) and consciously removed ones (is_deleted) pass.
+			var incompletePickups int
+			if gErr := db.Get(&incompletePickups, `
+				SELECT COUNT(*) FROM route_tasks
+				WHERE shift_id = $1 AND move_request_id = $2
+				  AND task_type = 'pickup' AND is_deleted = false AND is_completed = 0
+			`, shift.ID, moveRequest.ID); gErr != nil {
+				log.Printf("❌ Error checking paired pickup: %v", gErr)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to verify move pickup")
+				return
+			}
+			if incompletePickups > 0 {
+				log.Printf("🚫 Dropoff blocked: move %s has an incomplete pickup", moveRequest.ID)
+				utils.RespondError(w, http.StatusBadRequest, "Complete the pickup first — the bin has not been picked up yet")
+				return
+			}
 			moveFin = prepareMoveCompletion(db, moveRequest)
 		}
 
