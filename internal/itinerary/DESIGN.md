@@ -119,8 +119,21 @@ itinerary.ApplyOrder(tx, shiftID, orderedIDs, newWarehouseStops, isFirst)   (all
   branches into typed domain Resolver functions (bins/potloc/move/warehouse-config),
   replacing CreatedTask's interface{} passthrough — pure refactor now that all
   behavioral deltas above have landed; gate with the same p5c golden harness.
-- **6 — Edges + tx gaps.** `bins.go`→`SyncBinTasks`, `potential_locations.go`→
-  `SyncPlacement`; wrap `CompleteTask`'s task+bin writes in a tx (torn-write).
+- **6 — Edges + tx gaps. CENSUS ZERO (2c396bb/4c5e0b0):** every route_tasks write
+  (INSERT/UPDATE/DELETE) in the codebase now lives in this package. Folded:
+  PurgeIncompleteWarehouseStops (the ONE sanctioned hard delete, 3 sites),
+  CompleteWarehouseStops (+ its proximity call site tx-wrapped with
+  shifts.ready_to_end_at — real torn-write closed), AutoCompletePreloaded-
+  RedeploymentPickups, Skip (paired-dropoff cascade — live-verified),
+  RemoveAllLive (legacy dead reopt branch, kept until deleted), SyncBinTasks,
+  SyncPlacementRemoval (batched via RemoveByIDs), Complete (THE completion
+  write — live-verified) + Uncomplete (compensation stopgap).
+  **REMAINING (final slice, blueprint in the Phase-6 census):** tx-wrap
+  CompleteTask — one tx for {Complete + branch writes: bins/checks/potential
+  conversion/move finalization (thread the caller tx through
+  handleMoveRequestCompletion)}, move the 3 post-write validations pre-write,
+  DELETE the 6 Uncomplete compensations, and (flagged, needs mobile retry
+  tolerance) the is_completed=0 guard → 409 on double-submit.
 
 ## Bugs this initiative closes
 - **#19** lock_route_order ignored on mid-shift re-optimize → Phase 4. ✅ fixed + live-verified.
