@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -824,8 +823,7 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					continue
 				}
 
-				newTaskID := uuid.New().String()
-				log.Printf("   Creating task: type=%s, id=%s", addReq.TaskType, newTaskID)
+				log.Printf("   Creating task: type=%s", addReq.TaskType)
 
 				// Get next sequence order
 				var maxSeq sql.NullInt64
@@ -845,16 +843,10 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					nextSeq = int(maxSeq.Int64) + 1
 				}
 
-				// Build task based on type
-				var task models.RouteTask
-				task.ID = newTaskID
-				task.ShiftID = shiftID
-				task.TaskType = models.TaskType(addReq.TaskType)
-				task.SequenceOrder = nextSeq
-				task.IsCompleted = 0
-				task.CreatedAt = now
-				task.UpdatedAt = &now
-
+				// Resolve per type at the boundary (400s live here), then insert via
+				// the itinerary domain's intent methods — the single route_tasks
+				// writer (Phase 5). Column contract unchanged from the legacy INSERT.
+				var newTaskID string
 				switch addReq.TaskType {
 				case "collection":
 					if addReq.BinID == nil {
@@ -887,13 +879,18 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 
 					log.Printf("✅ [SHIFT UPDATE] Found bin #%d at %s", bin.BinNumber, bin.CurrentStreet)
 
-					task.BinID = addReq.BinID
-					task.BinNumber = &bin.BinNumber
-					task.Latitude = bin.Latitude
-					task.Longitude = bin.Longitude
-					address := fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.ZipCode)
-					task.Address = &address
-					task.FillPercentage = &bin.FillPercentage
+					newTaskID, err = itinerary.AddCollection(tx, shiftID, itinerary.NewCollection{
+						Seq:            nextSeq,
+						BinID:          *addReq.BinID,
+						BinNumber:      bin.BinNumber,
+						Lat:            bin.Latitude,
+						Lng:            bin.Longitude,
+						Address:        fmt.Sprintf("%s, %s %s", bin.CurrentStreet, bin.City, bin.ZipCode),
+						FillPercentage: bin.FillPercentage,
+						AddedBy:        userClaims.UserID,
+						AdditionReason: req.Reason,
+						Now:            now,
+					})
 
 				case "placement":
 					if addReq.PotentialLocationID == nil {
@@ -914,11 +911,6 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						return
 					}
 
-					task.PotentialLocationID = addReq.PotentialLocationID
-					task.Latitude = potLoc.Latitude
-					task.Longitude = potLoc.Longitude
-					task.Address = &potLoc.Address
-
 					// Mark as assigned
 					_, err = tx.Exec(`UPDATE potential_locations SET assigned_shift_id = $1, updated_at = $2 WHERE id = $3`,
 						shiftID, now, *addReq.PotentialLocationID)
@@ -927,6 +919,17 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						utils.RespondError(w, http.StatusInternalServerError, "Failed to assign potential location")
 						return
 					}
+
+					newTaskID, err = itinerary.AddPlacement(tx, shiftID, itinerary.NewPlacement{
+						Seq:                 nextSeq,
+						PotentialLocationID: *addReq.PotentialLocationID,
+						Lat:                 potLoc.Latitude,
+						Lng:                 potLoc.Longitude,
+						Address:             potLoc.Address,
+						AddedBy:             userClaims.UserID,
+						AdditionReason:      req.Reason,
+						Now:                 now,
+					})
 
 				case "pickup", "dropoff":
 					if addReq.MoveRequestID == nil {
@@ -951,34 +954,41 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						return
 					}
 
-					task.MoveRequestID = addReq.MoveRequestID
-					task.BinID = &moveReq.BinID
-
+					leg := itinerary.NewMoveLeg{
+						Seq:            nextSeq,
+						MoveRequestID:  *addReq.MoveRequestID,
+						BinID:          moveReq.BinID,
+						AddedBy:        userClaims.UserID,
+						AdditionReason: req.Reason,
+						Now:            now,
+					}
 					if addReq.TaskType == "pickup" {
+						leg.Type = itinerary.Pickup
 						if moveReq.Latitude != nil && moveReq.Longitude != nil {
-							task.Latitude = *moveReq.Latitude
-							task.Longitude = *moveReq.Longitude
+							leg.Lat = *moveReq.Latitude
+							leg.Lng = *moveReq.Longitude
 						}
 						if moveReq.Address != nil {
-							task.Address = moveReq.Address
+							leg.Address = moveReq.Address
 						}
 					} else { // dropoff
+						leg.Type = itinerary.Dropoff
 						// For relocation/redeployment moves, use destination from move request
 						if moveReq.DestLatitude != nil && moveReq.DestLongitude != nil {
-							task.Latitude = *moveReq.DestLatitude
-							task.Longitude = *moveReq.DestLongitude
+							leg.Lat = *moveReq.DestLatitude
+							leg.Lng = *moveReq.DestLongitude
 							if moveReq.DestAddress != nil {
-								task.DestinationAddress = moveReq.DestAddress
+								leg.DestinationAddress = moveReq.DestAddress
 							}
 						} else {
 							// For "store" moves, destination is warehouse
 							if shift.WarehouseLatitude != nil && shift.WarehouseLongitude != nil {
-								task.Latitude = *shift.WarehouseLatitude
-								task.Longitude = *shift.WarehouseLongitude
+								leg.Lat = *shift.WarehouseLatitude
+								leg.Lng = *shift.WarehouseLongitude
 								if shift.WarehouseAddress != nil {
-									task.DestinationAddress = shift.WarehouseAddress
+									leg.DestinationAddress = shift.WarehouseAddress
 								}
-								log.Printf("✅ [SHIFT UPDATE] Store move dropoff: using warehouse coordinates (%.6f, %.6f)", task.Latitude, task.Longitude)
+								log.Printf("✅ [SHIFT UPDATE] Store move dropoff: using warehouse coordinates (%.6f, %.6f)", leg.Lat, leg.Lng)
 							} else {
 								log.Printf("⚠️  [SHIFT UPDATE] Warehouse coordinates not set for store move, skipping dropoff task for move request %s", *addReq.MoveRequestID)
 								continue // Skip this task entirely
@@ -995,28 +1005,19 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						return
 					}
 
+					newTaskID, err = itinerary.AddMoveLeg(tx, shiftID, leg)
+
 				default:
 					utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid task type: %s", addReq.TaskType))
 					return
 				}
 
-				// Insert task (with audit fields for manager addition)
-				_, err = tx.Exec(`
-					INSERT INTO route_tasks (
-						id, shift_id, task_type, bin_id, potential_location_id, move_request_id,
-						bin_number, latitude, longitude, address, destination_address,
-						fill_percentage, sequence_order, is_completed, created_at, updated_at,
-						added_by, addition_reason
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-				`, task.ID, task.ShiftID, task.TaskType, task.BinID, task.PotentialLocationID, task.MoveRequestID,
-					task.BinNumber, task.Latitude, task.Longitude, task.Address, task.DestinationAddress,
-					task.FillPercentage, task.SequenceOrder, task.IsCompleted, task.CreatedAt, task.UpdatedAt,
-					userClaims.UserID, req.Reason)
 				if err != nil {
 					log.Printf("❌ Error inserting task: %v", err)
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to add task")
 					return
 				}
+				log.Printf("   Created task: type=%s, id=%s", addReq.TaskType, newTaskID)
 
 				addedCount++
 			}
