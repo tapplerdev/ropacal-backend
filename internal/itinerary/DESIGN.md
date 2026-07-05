@@ -1,6 +1,9 @@
 # `internal/itinerary` — the shift's executed itinerary (route_tasks owner)
 
-Status: **in progress** (Phases 0–4 done + live-verified; Phases 5–6 remain). Successor to the `moverequest` domain; follows
+Status: **COMPLETE** (Phases 0–6 done + live-verified; census zero — no route_tasks
+writes outside this package; CompleteTask tx-wrapped, all seven task types
+live-completed on prod). Known follow-up: task #41 — pre-existing dropoff-before-
+pickup persisted ordering on mixed shifts + missing completion leg-order guard. Successor to the `moverequest` domain; follows
 the same conventions (consumer-defined seams, phased behavior-preserving migration,
 golden-diff + live-verify each slice). Supersedes the earlier `internal/route`
 scoping — renamed to `itinerary` because "route" is overloaded (see Boundary).
