@@ -105,11 +105,20 @@ itinerary.ApplyOrder(tx, shiftID, orderedIDs, newWarehouseStops, isFirst)   (all
   outside this package.** Create golden harness: scratchpad/p5c_golden.sh (pins gap-seq
   via retired skip, the 0,0 clobbers, live-config store dest, explicit-NULL windows,
   string bin_number, deployment at len(tasks)+1).
-  **REMAINING (Slice 3b/4, flagged deltas):** typed shared Resolver extraction
-  (bins/potloc/move/warehouse-config — replaces the interface{} passthrough + the
-  624-626-equivalent merge), then conscious unifications: ParseTaskType→400 on create,
-  RecomputeShiftCounts vs the dead deployment increment, clobber fix, store live-config
-  policy, add_tasks assignment status/history symmetry.
+  **Slice 4 conscious unifications DONE + golden-reviewed (1465315/87ca67f):**
+  ParseTaskType→400 on create (was DB-CHECK 500); RecomputeShiftCounts in-tx at create
+  (replaces hand-count + swallowed skip-decrement + dead deployment increment; counts
+  carry the logical-bin semantic from birth; 201 task_count includes deployments);
+  CLOBBER FIXED (pickup-0,0→bins and warehouse_stop→warehouse coords now persist —
+  no more null-island rows); add_tasks store dropoffs re-resolve the LIVE config
+  warehouse (snapshot retired); add_tasks move assignment via moverequest.AssignToShift
+  (status flip, assignment_type 'shift', assigned_user_id NULL per #31, LogAssigned
+  in-tx, terminal moves 400). Verified deltas: create task_count 13→14 + the two
+  coordinate fixes ONLY; add_tasks 17/18 identical, delta confined to the move row.
+  **REMAINING (structural, behavior-neutral):** extract the create loop's enrichment
+  branches into typed domain Resolver functions (bins/potloc/move/warehouse-config),
+  replacing CreatedTask's interface{} passthrough — pure refactor now that all
+  behavioral deltas above have landed; gate with the same p5c golden harness.
 - **6 — Edges + tx gaps.** `bins.go`→`SyncBinTasks`, `potential_locations.go`→
   `SyncPlacement`; wrap `CompleteTask`'s task+bin writes in a tx (torn-write).
 
