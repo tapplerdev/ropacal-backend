@@ -66,7 +66,7 @@ func TestApplyOrder_FirstOpt_CoordUpdateInsertThenFirstOptRenumber(t *testing.T)
 			sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// first-opt renumber = sequence_order/created_at order, NO is_completed/warehouse-last
-	mock.ExpectExec(`(?s)ROW_NUMBER\(\) OVER \(ORDER BY sequence_order ASC, created_at ASC\).*WHERE shift_id = \$1`).
+	mock.ExpectExec(`(?s)ROW_NUMBER\(\) OVER \(ORDER BY sequence_order ASC, created_at ASC, id ASC\).*WHERE shift_id = \$1`).
 		WithArgs("shift-1").WillReturnResult(sqlmock.NewResult(0, 2))
 
 	stops := []OrderedStop{
