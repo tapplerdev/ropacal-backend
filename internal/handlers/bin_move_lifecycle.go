@@ -91,8 +91,15 @@ func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			return
 		}
 
-		// Revert bin status back to active.
-		if _, err = tx.Exec(`UPDATE bins SET status = 'active', updated_at = $1 WHERE id = $2`, now, moveRequest.BinID); err != nil {
+		// Revert bin status. Street moves flipped the bin to pending_move, so they
+		// revert to active — but a redeployment's bin never left the warehouse:
+		// cancelling one must leave it in_storage, not surface a warehoused bin as
+		// active at its stale street coordinates.
+		revertStatus := "active"
+		if moveRequest.MoveType == "redeployment" {
+			revertStatus = "in_storage"
+		}
+		if _, err = tx.Exec(`UPDATE bins SET status = $1, updated_at = $2 WHERE id = $3`, revertStatus, now, moveRequest.BinID); err != nil {
 			log.Printf("Error reverting bin status on cancel: %v", err)
 			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
 			return

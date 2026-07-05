@@ -10,6 +10,7 @@ import (
 
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/moverequest"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -193,10 +194,14 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 	return tasks, nil
 }
 
-// CreateShiftWithTasks creates a shift and its tasks in a transaction
+// CreateShiftWithTasks creates a shift and its tasks in a transaction.
+// Warehouse deployments are minted as real redeployment move requests in the
+// same transaction; their ids are returned so the handler can log history
+// post-commit. managerID stamps requested_by on those minted moves.
 func CreateShiftWithTasks(
 	db *sqlx.DB,
 	driverID string,
+	managerID string,
 	truckBinCapacity int,
 	warehouseLat, warehouseLon *float64,
 	warehouseAddr *string,
@@ -217,10 +222,10 @@ func CreateShiftWithTasks(
 	scheduledDate *string,
 	// Route template ID (if created from a template)
 	routeID *string,
-) (string, int, error) {
+) (string, int, []string, error) {
 	tx, err := db.Beginx()
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to begin transaction: %w", err)
+		return "", 0, nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -273,7 +278,7 @@ func CreateShiftWithTasks(
 		routeID, now, now,
 	)
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to create shift: %w", err)
+		return "", 0, nil, fmt.Errorf("failed to create shift: %w", err)
 	}
 
 	// Create tasks — the INSERT itself lives in the itinerary domain
@@ -605,50 +610,102 @@ func CreateShiftWithTasks(
 			ServiceDurationSeconds: getInt("service_duration_seconds"),
 		})
 		if err != nil {
-			return "", 0, fmt.Errorf("failed to create task %d: %w", i+1, err)
+			return "", 0, nil, fmt.Errorf("failed to create task %d: %w", i+1, err)
 		}
 	}
 
-	// Insert warehouse deployment placement tasks (source="warehouse")
-	// ❌ REMOVED: warehouse_stop "load" task creation
-	// Mapbox will automatically route to warehouse for placements - no explicit load stop needed
+	// Warehouse deployments: each becomes a REAL redeployment move request
+	// (minted here, in the same tx) plus the standard two-leg pickup/dropoff
+	// task pair — the same shape as any other move, so completion, history,
+	// counts, the leg-order guard, and the optimizer all treat it uniformly.
+	// Replaces the old bespoke single placement task with
+	// placement_source='warehouse' (untracked, invisible in Move Requests).
+	//
+	// The bin's status is deliberately NOT flipped to pending_move (unlike
+	// ScheduleBinMove): it stays in_storage until the dropoff completes,
+	// preserving warehouse-inventory visibility — the old deployment behavior.
 	nextSeq := len(tasks) + 1
+	mintedMoveIDs := make([]string, 0, len(warehouseDeployments))
 	if len(warehouseDeployments) > 0 {
-		log.Printf("🏭 Inserting %d warehouse deployment placement task(s)...", len(warehouseDeployments))
-		log.Printf("   ℹ️  Mapbox will automatically handle warehouse pickup routing")
-
-		// Create placement tasks: one per deployment bin, with placement_source="warehouse"
-		// Mapbox treats these as shipments (pickup at warehouse, dropoff at destination)
-		for _, d := range warehouseDeployments {
-			depTaskID := uuid.New().String()
-			err = itinerary.InsertCreatedTask(tx, shiftID, itinerary.CreatedTask{
-				ID: depTaskID, Seq: nextSeq, TaskType: "placement",
-				Lat: d.DestinationLatitude, Lng: d.DestinationLongitude,
-				Address:         d.DestinationAddress,
-				BinID:           d.BinID, // existing in_storage bin
-				BinNumber:       d.BinNumber,
-				PlacementSource: "warehouse",
-				TaskData:        []byte("{}"),
-				CreatedAt:       now,
-				// everything else: explicit NULL (create semantics), photo_required false
-			})
-			if err != nil {
-				return "", 0, fmt.Errorf("failed to create warehouse deployment placement task: %w", err)
-			}
-			log.Printf("   ✅ Deployment placement inserted (seq %d, bin #%d → %s)", nextSeq, d.BinNumber, d.DestinationAddress)
-			nextSeq++
+		if warehouseLat == nil || warehouseLon == nil {
+			return "", 0, nil, fmt.Errorf("warehouse location is required for warehouse deployments")
 		}
+		whAddr := ""
+		if warehouseAddr != nil {
+			whAddr = *warehouseAddr
+		}
+		log.Printf("🏭 Minting %d redeployment move(s) for warehouse deployment(s)...", len(warehouseDeployments))
+		assignmentType := "shift"
+		for _, d := range warehouseDeployments {
+			moveID := uuid.New().String()
+			notes := "Created via shift builder (warehouse deployment)"
+			if err = moverequest.Insert(tx, &models.BinMoveRequest{
+				ID:                moveID,
+				BinID:             d.BinID, // existing in_storage bin
+				ScheduledDate:     now,
+				Urgency:           "scheduled",
+				RequestedBy:       managerID,
+				Status:            "assigned",
+				OriginalLatitude:  *warehouseLat,
+				OriginalLongitude: *warehouseLon,
+				OriginalAddress:   whAddr,
+				NewLatitude:       &d.DestinationLatitude,
+				NewLongitude:      &d.DestinationLongitude,
+				NewAddress:        &d.DestinationAddress,
+				MoveType:          "redeployment",
+				Notes:             &notes,
+				AssignmentType:    &assignmentType,
+				AssignedShiftID:   &shiftID,
+				CreatedAt:         now,
+				UpdatedAt:         now,
+			}, nil); err != nil {
+				// ErrOpenMoveExists surfaces here if the bin gained an open move
+				// between the handler's pre-check and this insert (or the same bin
+				// appears twice in one request) — the tx rolls back whole.
+				return "", 0, nil, fmt.Errorf("failed to create deployment move for bin #%d: %w", d.BinNumber, err)
+			}
 
+			// Two legs in pickup-then-dropoff order, dest_* mirrored on both
+			// (the same shape CreateShiftWithTasks writes for dashboard-built
+			// moves and AddMove writes mid-shift).
+			for _, leg := range []struct {
+				taskType string
+				lat, lng float64
+				addr     string
+			}{
+				{"pickup", *warehouseLat, *warehouseLon, whAddr},
+				{"dropoff", d.DestinationLatitude, d.DestinationLongitude, d.DestinationAddress},
+			} {
+				if err = itinerary.InsertCreatedTask(tx, shiftID, itinerary.CreatedTask{
+					ID: uuid.New().String(), Seq: nextSeq, TaskType: leg.taskType,
+					Lat: leg.lat, Lng: leg.lng,
+					Address:       leg.addr,
+					BinID:         d.BinID,
+					BinNumber:     d.BinNumber,
+					MoveRequestID: moveID,
+					DestLat:       d.DestinationLatitude,
+					DestLng:       d.DestinationLongitude,
+					DestAddress:   d.DestinationAddress,
+					MoveType:      "redeployment",
+					TaskData:      []byte("{}"),
+					CreatedAt:     now,
+				}); err != nil {
+					return "", 0, nil, fmt.Errorf("failed to create deployment %s task: %w", leg.taskType, err)
+				}
+				nextSeq++
+			}
+			mintedMoveIDs = append(mintedMoveIDs, moveID)
+			log.Printf("   ✅ Deployment move %s minted (bin #%d: warehouse → %s, pickup+dropoff seq %d-%d)", moveID, d.BinNumber, d.DestinationAddress, nextSeq-2, nextSeq-1)
+		}
 	}
 
 	// ❌ REMOVED: Auto-append warehouse stop logic
 	// Mapbox Optimization v2 will automatically add warehouse stops (end stops) as needed
 	// Let the optimizer handle warehouse returns for optimal routing
 	//
-	// task_count = rows actually inserted (skips excluded, deployments INCLUDED —
-	// deployments were historically under-counted here and never persisted into
-	// shifts.total_bins at all).
-	actualTasks := len(tasks) - skippedInactive + len(warehouseDeployments)
+	// task_count = rows actually inserted (skips excluded; each deployment now
+	// contributes its pickup+dropoff pair).
+	actualTasks := len(tasks) - skippedInactive + 2*len(warehouseDeployments)
 	if skippedInactive > 0 {
 		log.Printf("⚠️  Skipped %d inactive bins (retired/missing) from shift", skippedInactive)
 	}
@@ -660,17 +717,17 @@ func CreateShiftWithTasks(
 	// increment, so counts are consistent from birth instead of from the
 	// first mutation.
 	if err = itinerary.RecomputeShiftCounts(tx, shiftID, now); err != nil {
-		return "", 0, fmt.Errorf("failed to recompute shift counts: %w", err)
+		return "", 0, nil, fmt.Errorf("failed to recompute shift counts: %w", err)
 	}
-	log.Printf("✅ Created shift with %d tasks - Mapbox will add warehouse stops during optimization", actualTasks)
+	log.Printf("✅ Created shift with %d tasks - optimizer will add warehouse stops during optimization", actualTasks)
 
 	err = tx.Commit()
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to commit transaction: %w", err)
+		return "", 0, nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	log.Printf("✅ Created shift %s with %d tasks (%d inactive skipped)", shiftID, actualTasks, skippedInactive)
-	return shiftID, actualTasks, nil
+	return shiftID, actualTasks, mintedMoveIDs, nil
 }
 
 // GetNextIncompleteTask gets the next task to complete in a shift

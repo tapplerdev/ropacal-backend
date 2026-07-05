@@ -125,7 +125,14 @@ func (s *sqlStore) EditByID(id string) (*EditView, error) {
 }
 
 func (s *sqlStore) Create(m *models.BinMoveRequest, reasonCategory *string) error {
-	_, err := s.db.Exec(`
+	return Insert(s.db, m, reasonCategory)
+}
+
+// Insert writes a new move-request row on the caller's executor — the shared
+// core of Store.Create (pool) and in-transaction minting (e.g. the shift
+// builder turning warehouse deployments into redeployment moves).
+func Insert(ext sqlx.Ext, m *models.BinMoveRequest, reasonCategory *string) error {
+	_, err := ext.Exec(`
 		INSERT INTO bin_move_requests (
 			id, bin_id, scheduled_date, urgency, requested_by, status,
 			original_latitude, original_longitude, original_address,

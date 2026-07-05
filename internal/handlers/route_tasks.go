@@ -239,9 +239,47 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			}
 		}
 
-		shiftID, taskCount, err := database.CreateShiftWithTasks(
+		// Pre-validate warehouse deployments at the boundary: each becomes a real
+		// redeployment move request inside the create transaction, so bad input
+		// surfaces as a clean 400/409 here instead of a mid-tx 500. The partial
+		// unique index still backstops races past this check.
+		if len(req.WarehouseDeployments) > 0 {
+			mrStore := moverequest.NewSQLStore(db)
+			seenDeploymentBins := make(map[string]bool, len(req.WarehouseDeployments))
+			for _, d := range req.WarehouseDeployments {
+				if d.BinID == "" {
+					utils.RespondError(w, http.StatusBadRequest, "Each warehouse deployment requires a bin_id")
+					return
+				}
+				if seenDeploymentBins[d.BinID] {
+					utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Bin #%d appears in more than one warehouse deployment — a bin can only be deployed once per shift", d.BinNumber))
+					return
+				}
+				seenDeploymentBins[d.BinID] = true
+
+				var binStatus string
+				if bErr := db.Get(&binStatus, `SELECT status FROM bins WHERE id = $1`, d.BinID); bErr != nil {
+					utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Warehouse deployment bin #%d not found", d.BinNumber))
+					return
+				}
+				if binStatus != "in_storage" {
+					utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("Bin #%d cannot be deployed — it is not in the warehouse (status: %s)", d.BinNumber, binStatus))
+					return
+				}
+				active, aErr := mrStore.ActiveForBin(d.BinID)
+				if aErr != nil {
+					log.Printf("⚠️  Failed to check open moves for deployment bin %s: %v", d.BinID, aErr)
+				} else if len(active) > 0 {
+					respondOpenMoveConflict(w, d.BinNumber, &active[0])
+					return
+				}
+			}
+		}
+
+		shiftID, taskCount, deploymentMoveIDs, err := database.CreateShiftWithTasks(
 			db,
 			req.DriverID,
+			userClaims.UserID,
 			req.TruckBinCapacity,
 			req.WarehouseLatitude,
 			req.WarehouseLongitude,
@@ -343,6 +381,34 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			}
 		} else {
 			log.Printf("   ℹ️  No move requests in this shift")
+		}
+
+		// History for the deployment moves minted inside the create tx
+		// (post-commit best-effort, like all Log* on the pool): created +
+		// assigned, mirroring schedule-move followed by assign-to-shift.
+		if len(deploymentMoveIDs) > 0 {
+			managerID := userClaims.UserID
+			var managerName string
+			if nErr := db.Get(&managerName, `SELECT name FROM users WHERE id = $1`, managerID); nErr != nil {
+				managerName = "Unknown Manager"
+			}
+			var driverName string
+			if nErr := db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, req.DriverID); nErr != nil {
+				driverName = "Unknown Driver"
+			}
+			for i, moveID := range deploymentMoveIDs {
+				var destAddr *string
+				if i < len(req.WarehouseDeployments) {
+					destAddr = &req.WarehouseDeployments[i].DestinationAddress
+				}
+				if lErr := moverequest.LogCreated(db, moveID, managerID, managerName, "manager", "redeployment", destAddr); lErr != nil {
+					log.Printf("⚠️  Failed to log deployment move creation: %v", lErr)
+				}
+				if lErr := moverequest.LogAssigned(db, moveID, managerID, managerName, "manager", "shift", &req.DriverID, &driverName, &shiftID); lErr != nil {
+					log.Printf("⚠️  Failed to log deployment move assignment: %v", lErr)
+				}
+			}
+			log.Printf("📝 Logged history for %d deployment move(s)", len(deploymentMoveIDs))
 		}
 
 		log.Printf("📤 RESPONSE: 201 - Created shift %s with %d tasks", shiftID, taskCount)

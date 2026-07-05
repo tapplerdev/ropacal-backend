@@ -313,9 +313,14 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			log.Printf("[DIAGNOSTIC]    placement_source: %s", src)
 
 			if src == "warehouse" {
-				// ── WAREHOUSE REDEPLOYMENT ─────────────────────────────────────────────
+				// ── WAREHOUSE REDEPLOYMENT (LEGACY) ────────────────────────────────────
+				// DEPRECATED: new shifts no longer create placement tasks with
+				// placement_source='warehouse' — the shift builder now mints a real
+				// redeployment move request with a pickup/dropoff pair, completed via
+				// the move branch above. This branch remains only for in-flight shifts
+				// created before the consolidation; remove once none exist.
 				// The bin already exists (in_storage). Update its location + status → active.
-				log.Printf("[DIAGNOSTIC] 🏭 Warehouse redeployment path")
+				log.Printf("[DIAGNOSTIC] 🏭 Warehouse redeployment path (legacy placement task)")
 
 				if taskBinID == nil || *taskBinID == "" {
 					log.Printf("[DIAGNOSTIC] ❌ No bin_id on warehouse placement task")
