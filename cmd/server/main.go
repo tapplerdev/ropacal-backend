@@ -266,7 +266,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "feat-analytics-phase2",
+			"version": "feat-analytics-growth",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -361,6 +361,8 @@ func main() {
 		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
 		r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db)) // weekly operational buckets (Network Health tab)
 		r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))     // per-bin quadrant scorecard (Bin Performance tab)
+		r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))   // per-bin 90d yield proxy (Growth hex map)
+		r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db)) // scored deployment candidates (Growth tab)
 
 		// Potential Locations endpoints (managers can view all - no auth required)
 		r.Get("/potential-locations", handlers.GetPotentialLocations(db))
