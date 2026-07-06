@@ -276,7 +276,7 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			}
 		}
 
-		shiftID, taskCount, deploymentMoveIDs, err := database.CreateShiftWithTasks(
+		shiftID, taskCount, deploymentMoveIDs, skippedBins, err := database.CreateShiftWithTasks(
 			db,
 			req.DriverID,
 			userClaims.UserID,
@@ -490,8 +490,9 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 		utils.RespondJSON(w, http.StatusCreated, map[string]interface{}{
 			"success": true,
 			"data": models.CreateShiftWithTasksResponse{
-				ShiftID:   shiftID,
-				TaskCount: taskCount,
+				ShiftID:     shiftID,
+				TaskCount:   taskCount,
+				SkippedBins: skippedBins,
 			},
 		})
 	}

@@ -224,10 +224,10 @@ func CreateShiftWithTasks(
 	scheduledDate *string,
 	// Route template ID (if created from a template)
 	routeID *string,
-) (string, int, []string, error) {
+) (string, int, []string, []models.SkippedBin, error) {
 	tx, err := db.Beginx()
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -280,13 +280,14 @@ func CreateShiftWithTasks(
 		routeID, now, now,
 	)
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("failed to create shift: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("failed to create shift: %w", err)
 	}
 
 	// Create tasks — the INSERT itself lives in the itinerary domain
 	// (itinerary.InsertCreatedTask, the shift-birth 30-column contract);
 	// this loop keeps the legacy client-first enrichment/merge semantics.
 	skippedInactive := 0
+	var skippedBins []models.SkippedBin
 	for i, taskData := range tasks {
 		taskID := uuid.New().String()
 
@@ -400,11 +401,16 @@ func CreateShiftWithTasks(
 		if binIDInterface, ok := taskData["bin_id"]; ok && binIDInterface != nil {
 			binID, _ := binIDInterface.(string)
 			if binID != "" {
-				// Safety net: skip retired/missing bins
+				// Safety net: skip retired/missing/warehoused bins — and RECORD the
+				// skip so the response can surface it (was a log-only silent drop).
 				binStatus, err := itinerary.ResolveBinStatus(tx, binID)
 				if err == nil {
 					if binStatus == "retired" || binStatus == "missing" || binStatus == "in_storage" {
 						log.Printf("   ⚠️  Task #%d: Skipping %s bin %s (status=%s)", i+1, taskType, binID, binStatus)
+						binNum, _ := itinerary.ResolveBinNumber(tx, binID)
+						skippedBins = append(skippedBins, models.SkippedBin{
+							BinID: binID, BinNumber: binNum, Status: binStatus,
+						})
 						skippedInactive++
 						continue
 					}
@@ -612,7 +618,7 @@ func CreateShiftWithTasks(
 			ServiceDurationSeconds: getInt("service_duration_seconds"),
 		})
 		if err != nil {
-			return "", 0, nil, fmt.Errorf("failed to create task %d: %w", i+1, err)
+			return "", 0, nil, nil, fmt.Errorf("failed to create task %d: %w", i+1, err)
 		}
 	}
 
@@ -630,7 +636,7 @@ func CreateShiftWithTasks(
 	mintedMoveIDs := make([]string, 0, len(warehouseDeployments))
 	if len(warehouseDeployments) > 0 {
 		if warehouseLat == nil || warehouseLon == nil {
-			return "", 0, nil, fmt.Errorf("warehouse location is required for warehouse deployments")
+			return "", 0, nil, nil, fmt.Errorf("warehouse location is required for warehouse deployments")
 		}
 		whAddr := ""
 		if warehouseAddr != nil {
@@ -664,7 +670,7 @@ func CreateShiftWithTasks(
 				// ErrOpenMoveExists surfaces here if the bin gained an open move
 				// between the handler's pre-check and this insert (or the same bin
 				// appears twice in one request) — the tx rolls back whole.
-				return "", 0, nil, fmt.Errorf("failed to create deployment move for bin #%d: %w", d.BinNumber, err)
+				return "", 0, nil, nil, fmt.Errorf("failed to create deployment move for bin #%d: %w", d.BinNumber, err)
 			}
 
 			// Two legs in pickup-then-dropoff order, dest_* mirrored on both
@@ -692,7 +698,7 @@ func CreateShiftWithTasks(
 					TaskData:      []byte("{}"),
 					CreatedAt:     now,
 				}); err != nil {
-					return "", 0, nil, fmt.Errorf("failed to create deployment %s task: %w", leg.taskType, err)
+					return "", 0, nil, nil, fmt.Errorf("failed to create deployment %s task: %w", leg.taskType, err)
 				}
 				nextSeq++
 			}
@@ -719,17 +725,17 @@ func CreateShiftWithTasks(
 	// increment, so counts are consistent from birth instead of from the
 	// first mutation.
 	if err = itinerary.RecomputeShiftCounts(tx, shiftID, now); err != nil {
-		return "", 0, nil, fmt.Errorf("failed to recompute shift counts: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("failed to recompute shift counts: %w", err)
 	}
 	log.Printf("✅ Created shift with %d tasks - optimizer will add warehouse stops during optimization", actualTasks)
 
 	err = tx.Commit()
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("failed to commit transaction: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	log.Printf("✅ Created shift %s with %d tasks (%d inactive skipped)", shiftID, actualTasks, skippedInactive)
-	return shiftID, actualTasks, mintedMoveIDs, nil
+	return shiftID, actualTasks, mintedMoveIDs, skippedBins, nil
 }
 
 // GetNextIncompleteTask gets the next task to complete in a shift

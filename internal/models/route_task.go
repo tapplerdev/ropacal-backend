@@ -128,8 +128,18 @@ type CreateShiftWithTasksRequest struct {
 	RouteID        *string  `json:"route_id,omitempty"`        // Route template ID (if created from a template)
 }
 
+// SkippedBin describes a requested task dropped at shift creation because its
+// bin is not routable (retired, missing, or in the warehouse). Returned on the
+// create response so clients can surface what was silently a log line before.
+type SkippedBin struct {
+	BinID     string `json:"bin_id"`
+	BinNumber int    `json:"bin_number"`
+	Status    string `json:"status"`
+}
+
 // CreateShiftWithTasksResponse represents the response after creating a shift
 type CreateShiftWithTasksResponse struct {
-	ShiftID   string `json:"shift_id"`
-	TaskCount int    `json:"task_count"`
+	ShiftID     string       `json:"shift_id"`
+	TaskCount   int          `json:"task_count"`
+	SkippedBins []SkippedBin `json:"skipped_bins,omitempty"`
 }
