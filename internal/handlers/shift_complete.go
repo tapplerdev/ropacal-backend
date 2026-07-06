@@ -581,8 +581,16 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				log.Printf("[DIAGNOSTIC]    Inserting fill_percentage: NULL")
 			}
 
-			checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id, shift_id)
-						   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			// The address snapshot reads the bins row as of THIS point in the tx:
+			// collections capture the bin's current spot; a move dropoff captures
+			// the destination (applyMoveCompletion already relocated the bin
+			// above) — i.e. wherever the driver physically stood for the check.
+			checkQuery := `INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url, move_request_id, shift_id,
+											   bin_address_snapshot, bin_latitude_snapshot, bin_longitude_snapshot)
+						   VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+								   (SELECT CONCAT_WS(', ', NULLIF(current_street,''), NULLIF(city,''), NULLIF(zip,'')) FROM bins WHERE id = $1),
+								   (SELECT latitude FROM bins WHERE id = $1),
+								   (SELECT longitude FROM bins WHERE id = $1))
 						   RETURNING id`
 
 			var returnedID int

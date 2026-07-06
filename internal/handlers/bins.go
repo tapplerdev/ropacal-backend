@@ -483,10 +483,17 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			log.Printf("📝 [UPDATE-BIN] Creating check: from=%s, fill=%d%%, time=%d, user=%v",
 				checkedFrom, fillForCheck, now.Unix(), userID)
 
-			// Include checked_by (authenticated user) and photo_url if provided
+			// Include checked_by (authenticated user) and photo_url if provided.
+			// The address snapshot reads the bins row post-update in this same
+			// tx: if the edit also changed the address, the check belongs to
+			// the new location (the change log keeps the old one).
 			_, err = tx.Exec(`
-				INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url)
-				VALUES ($1, $2, $3, $4, $5, $6)
+				INSERT INTO checks (bin_id, checked_from, fill_percentage, checked_on, checked_by, photo_url,
+									bin_address_snapshot, bin_latitude_snapshot, bin_longitude_snapshot)
+				VALUES ($1, $2, $3, $4, $5, $6,
+						(SELECT CONCAT_WS(', ', NULLIF(current_street,''), NULLIF(city,''), NULLIF(zip,'')) FROM bins WHERE id = $1),
+						(SELECT latitude FROM bins WHERE id = $1),
+						(SELECT longitude FROM bins WHERE id = $1))
 			`, id, checkedFrom, fillForCheck, now.Unix(), userID, req.PhotoUrl)
 			if err != nil {
 				log.Printf("❌ [UPDATE-BIN] Failed to create check record: %v", err)

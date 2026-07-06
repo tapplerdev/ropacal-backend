@@ -666,6 +666,16 @@ func Migrate(db *sqlx.DB) error {
 		// Create index on shift_id in checks for faster lookups
 		`CREATE INDEX IF NOT EXISTS idx_checks_shift_id ON checks(shift_id)`,
 
+		// Migration: snapshot the bin's address onto each check at write time.
+		// checks.checked_from is only a source tag ('shift'/'manual'), so
+		// historical checks used to inherit the bin's CURRENT address at read
+		// time — after a bin moved, old checks displayed the new address.
+		// Existing rows are backfilled once at boot from the bin_change_log +
+		// moves timelines (BackfillCheckAddressSnapshots).
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS bin_address_snapshot TEXT`,
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS bin_latitude_snapshot DOUBLE PRECISION`,
+		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS bin_longitude_snapshot DOUBLE PRECISION`,
+
 		// Migration: Add stop_type and move_request_id columns to shift_bins table for move request waypoint tracking
 		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS stop_type TEXT DEFAULT 'collection'`,
 		`ALTER TABLE shift_bins ADD COLUMN IF NOT EXISTS move_request_id TEXT`,

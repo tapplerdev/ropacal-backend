@@ -45,7 +45,10 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 				u.name AS checked_by_name,
 				s.status AS shift_status,
 				LAG(c.fill_percentage) OVER (ORDER BY c.checked_on) AS previous_fill_percentage,
-				CONCAT(b.current_street, ', ', b.city, ', ', b.zip) AS bin_location
+				-- Address AS OF the check: the snapshot written at check time
+				-- (older rows backfilled from the change-log/moves timelines);
+				-- falls back to the bin's current address only when unresolved.
+				COALESCE(NULLIF(c.bin_address_snapshot, ''), CONCAT(b.current_street, ', ', b.city, ', ', b.zip)) AS bin_location
 			FROM checks c
 			LEFT JOIN users u ON c.checked_by = u.id
 			LEFT JOIN shifts s ON c.shift_id = s.id

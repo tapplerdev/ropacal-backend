@@ -93,6 +93,12 @@ func main() {
 	}
 	log.Println("✅ Database migrations completed")
 
+	// One-time (idempotent) backfill: address snapshots on checks that predate
+	// the snapshot columns. Non-fatal — a failure retries on the next boot.
+	if err := database.BackfillCheckAddressSnapshots(db); err != nil {
+		log.Printf("⚠️  Check address-snapshot backfill failed (will retry next boot): %v", err)
+	}
+
 	// Seed database
 	log.Println("🌱 Seeding database with initial data...")
 	if err := database.SeedUsers(db); err != nil {
@@ -260,7 +266,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "feat-detailed-after-photo",
+			"version": "feat-check-address-snapshots",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
