@@ -262,7 +262,7 @@ func GetWeeklyGrowthPlan(db *sqlx.DB) http.HandlerFunc {
 			Baseline   *float64 `db:"baseline_fill_rate" json:"baseline_fill_rate"`
 			EvaluateAt int64    `db:"evaluate_at" json:"evaluate_at"`
 		}
-		var watching []watchRow
+		watching := []watchRow{} // non-nil so empty marshals as [], not null
 		if err := db.Select(&watching, `
 			SELECT w.bin_id, COALESCE(b.bin_number,0) AS bin_number, b.current_street,
 			       w.reason, w.baseline_fill_rate, w.evaluate_at
@@ -282,7 +282,7 @@ func GetWeeklyGrowthPlan(db *sqlx.DB) http.HandlerFunc {
 			CreatedAt int64  `db:"created_at" json:"created_at"`
 		}
 		loadRecs := func(recType string) []recRow {
-			var rows []recRow
+			rows := []recRow{}
 			if err := db.Select(&rows, `
 				SELECT r.id, r.type, COALESCE(r.entity_id,'') AS entity_id,
 				       COALESCE(b.bin_number,0) AS bin_number, COALESCE(b.current_street,'') AS current_street,
@@ -303,7 +303,7 @@ func GetWeeklyGrowthPlan(db *sqlx.DB) http.HandlerFunc {
 			Type  string `db:"type" json:"type"`
 			Count int    `db:"count" json:"count"`
 		}
-		var applied []outcomeRow
+		applied := []outcomeRow{}
 		if err := db.Select(&applied, `
 			SELECT type, COUNT(*) AS count FROM ai_recommendations
 			WHERE actioned_at IS NOT NULL AND actioned_at > $1 - 7*86400
