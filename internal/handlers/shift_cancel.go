@@ -548,3 +548,81 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 		})
 	}
 }
+
+// PurgeShift hard-deletes a single non-live shift: its route_tasks, its
+// shift_history archive row, and the shifts row (shift_bins cascades; checks,
+// moves, incidents, and move-request assignments are FK SET NULL, so real
+// records survive with the shift link cleared). Admin cleanup tool for
+// test/demo shifts — the only prior removal option was ClearAllShifts, which
+// wipes every shift.
+// DELETE /api/manager/shifts/{shiftId}/purge
+func PurgeShift(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shiftID := chi.URLParam(r, "shiftId")
+		if shiftID == "" {
+			utils.RespondError(w, http.StatusBadRequest, "shiftId is required")
+			return
+		}
+
+		// A live shift must be cancelled/ended first — purging one out from
+		// under a driver would strand the app mid-route.
+		var status string
+		err := db.Get(&status, `SELECT status FROM shifts WHERE id = $1`, shiftID)
+		shiftRowExists := err == nil
+		if err != nil && err != sql.ErrNoRows {
+			log.Printf("❌ [PURGE-SHIFT] Error fetching shift %s: %v", shiftID, err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch shift")
+			return
+		}
+		if shiftRowExists && (status == "active" || status == "ready" || status == "paused") {
+			utils.RespondError(w, http.StatusConflict, "Cannot purge a live shift — cancel or end it first")
+			return
+		}
+
+		tx, err := db.Beginx()
+		if err != nil {
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to purge shift")
+			return
+		}
+		defer tx.Rollback()
+
+		// route_tasks is FK SET NULL on shifts delete — remove explicitly so no
+		// orphaned task rows survive the purge.
+		if _, err = tx.Exec(`DELETE FROM route_tasks WHERE shift_id = $1`, shiftID); err != nil {
+			log.Printf("❌ [PURGE-SHIFT] Error deleting tasks for %s: %v", shiftID, err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to purge shift")
+			return
+		}
+		// shift_history shares the shift's id (archiveShift).
+		histRes, err := tx.Exec(`DELETE FROM shift_history WHERE id = $1`, shiftID)
+		if err != nil {
+			log.Printf("❌ [PURGE-SHIFT] Error deleting history for %s: %v", shiftID, err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to purge shift")
+			return
+		}
+		var shiftRes sql.Result
+		if shiftRes, err = tx.Exec(`DELETE FROM shifts WHERE id = $1`, shiftID); err != nil {
+			log.Printf("❌ [PURGE-SHIFT] Error deleting shift %s: %v", shiftID, err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to purge shift")
+			return
+		}
+
+		histRows, _ := histRes.RowsAffected()
+		shiftRows, _ := shiftRes.RowsAffected()
+		if histRows == 0 && shiftRows == 0 {
+			utils.RespondError(w, http.StatusNotFound, "Shift not found")
+			return
+		}
+
+		if err = tx.Commit(); err != nil {
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to purge shift")
+			return
+		}
+
+		log.Printf("🗑️  [PURGE-SHIFT] Purged shift %s (shift row: %d, history row: %d)", shiftID, shiftRows, histRows)
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success":  true,
+			"shift_id": shiftID,
+		})
+	}
+}
