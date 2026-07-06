@@ -3,8 +3,11 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
+
+	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -287,5 +290,110 @@ func GetAreaPerformance(db *sqlx.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
+	}
+}
+
+// GetAnalyticsTimeseries returns weekly operational buckets — the first
+// time-dimension in the analytics API (everything else is a snapshot). Weeks
+// are Monday-anchored via date_trunc('week', ...). ?weeks=N (default 12,
+// max 52) controls the window; empty weeks are filled with zero rows so
+// charts don't skip gaps.
+// GET /api/analytics/timeseries?weeks=12
+func GetAnalyticsTimeseries(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		weeks := 12
+		if v := r.URL.Query().Get("weeks"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 52 {
+				weeks = n
+			}
+		}
+
+		type WeekRow struct {
+			WeekStart           string   `db:"week_start" json:"week_start"` // YYYY-MM-DD (Monday)
+			Collections         int      `db:"collections" json:"collections"`
+			MedianFill          *float64 `db:"median_fill" json:"median_fill_at_collection"`
+			Incidents           int      `db:"incidents" json:"incidents"`
+			ShiftsCompleted     int      `db:"shifts_completed" json:"shifts_completed"`
+			AvgCompletionRate   *float64 `db:"avg_completion_rate" json:"avg_completion_rate"`
+			Moves               int      `db:"moves" json:"moves"`
+		}
+
+		var rows []WeekRow
+		err := db.Select(&rows, `
+			WITH weeks AS (
+				SELECT generate_series(
+					date_trunc('week', now()) - ($1::int - 1) * interval '1 week',
+					date_trunc('week', now()),
+					interval '1 week'
+				) AS wk
+			),
+			c AS (
+				SELECT date_trunc('week', to_timestamp(checked_on)) AS wk,
+				       COUNT(*) AS collections,
+				       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY fill_percentage) AS median_fill
+				FROM checks
+				WHERE shift_id IS NOT NULL AND fill_percentage IS NOT NULL
+				GROUP BY 1
+			),
+			i AS (
+				SELECT date_trunc('week', to_timestamp(reported_at)) AS wk, COUNT(*) AS incidents
+				FROM zone_incidents GROUP BY 1
+			),
+			s AS (
+				SELECT date_trunc('week', to_timestamp(ended_at)) AS wk,
+				       COUNT(*) AS shifts_completed,
+				       AVG(completion_rate) AS avg_completion_rate
+				FROM shift_history GROUP BY 1
+			),
+			m AS (
+				SELECT date_trunc('week', to_timestamp(moved_on)) AS wk, COUNT(*) AS moves
+				FROM moves GROUP BY 1
+			)
+			SELECT to_char(weeks.wk, 'YYYY-MM-DD') AS week_start,
+			       COALESCE(c.collections, 0) AS collections,
+			       c.median_fill AS median_fill,
+			       COALESCE(i.incidents, 0) AS incidents,
+			       COALESCE(s.shifts_completed, 0) AS shifts_completed,
+			       s.avg_completion_rate AS avg_completion_rate,
+			       COALESCE(m.moves, 0) AS moves
+			FROM weeks
+			LEFT JOIN c ON c.wk = weeks.wk
+			LEFT JOIN i ON i.wk = weeks.wk
+			LEFT JOIN s ON s.wk = weeks.wk
+			LEFT JOIN m ON m.wk = weeks.wk
+			ORDER BY weeks.wk ASC`, weeks)
+		if err != nil {
+			log.Printf("❌ Error building analytics timeseries: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to build timeseries")
+			return
+		}
+
+		// Current fleet-state snapshot: where capacity sits right now.
+		type FleetState struct {
+			Active      int `db:"active" json:"active"`
+			InStorage   int `db:"in_storage" json:"in_storage"`
+			PendingMove int `db:"pending_move" json:"pending_move"`
+			Missing     int `db:"missing" json:"missing"`
+			Retired     int `db:"retired" json:"retired"`
+		}
+		var fleet FleetState
+		if err := db.Get(&fleet, `
+			SELECT
+				COUNT(*) FILTER (WHERE status = 'active')       AS active,
+				COUNT(*) FILTER (WHERE status = 'in_storage')   AS in_storage,
+				COUNT(*) FILTER (WHERE status = 'pending_move') AS pending_move,
+				COUNT(*) FILTER (WHERE status = 'missing')      AS missing,
+				COUNT(*) FILTER (WHERE status = 'retired')      AS retired
+			FROM bins`); err != nil {
+			log.Printf("⚠️  Fleet state snapshot failed: %v", err)
+		}
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"weeks": rows,
+				"fleet": fleet,
+			},
+		})
 	}
 }
