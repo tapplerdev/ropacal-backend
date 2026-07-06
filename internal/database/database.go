@@ -672,6 +672,21 @@ func Migrate(db *sqlx.DB) error {
 		// time — after a bin moved, old checks displayed the new address.
 		// Existing rows are backfilled once at boot from the bin_change_log +
 		// moves timelines (BackfillCheckAddressSnapshots).
+		// Watchlist: bins under probation after a cadence change or relocation.
+		// The AI ops agent evaluates matured rows — improved bins graduate,
+		// unimproved ones escalate to a relocation recommendation.
+		`CREATE TABLE IF NOT EXISTS bin_watchlist (
+			id TEXT PRIMARY KEY,
+			bin_id TEXT NOT NULL REFERENCES bins(id) ON DELETE CASCADE,
+			reason TEXT NOT NULL,
+			baseline_fill_rate DOUBLE PRECISION,
+			started_at BIGINT NOT NULL,
+			evaluate_at BIGINT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'watching' CHECK(status IN ('watching','improved','escalated','dismissed')),
+			resolved_at BIGINT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bin_watchlist_status ON bin_watchlist(status, evaluate_at)`,
+
 		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS bin_address_snapshot TEXT`,
 		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS bin_latitude_snapshot DOUBLE PRECISION`,
 		`ALTER TABLE checks ADD COLUMN IF NOT EXISTS bin_longitude_snapshot DOUBLE PRECISION`,

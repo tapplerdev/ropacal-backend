@@ -244,3 +244,83 @@ func GetGrowthCandidates(db *sqlx.DB) http.HandlerFunc {
 		})
 	}
 }
+
+// GetWeeklyGrowthPlan assembles the week's growth actions into one reviewable
+// plan: bins on probation, matured escalations (relocations with the scorer
+// as destination picker), warehouse redeploys, and last week's applied
+// outcomes — so the plan grades itself over time.
+// GET /api/analytics/growth/weekly-plan
+func GetWeeklyGrowthPlan(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now().Unix()
+
+		type watchRow struct {
+			BinID      string   `db:"bin_id" json:"bin_id"`
+			BinNumber  int      `db:"bin_number" json:"bin_number"`
+			Street     string   `db:"current_street" json:"current_street"`
+			Reason     string   `db:"reason" json:"reason"`
+			Baseline   *float64 `db:"baseline_fill_rate" json:"baseline_fill_rate"`
+			EvaluateAt int64    `db:"evaluate_at" json:"evaluate_at"`
+		}
+		var watching []watchRow
+		if err := db.Select(&watching, `
+			SELECT w.bin_id, COALESCE(b.bin_number,0) AS bin_number, b.current_street,
+			       w.reason, w.baseline_fill_rate, w.evaluate_at
+			FROM bin_watchlist w JOIN bins b ON b.id = w.bin_id
+			WHERE w.status = 'watching' ORDER BY w.evaluate_at ASC`); err != nil {
+			log.Printf("❌ Weekly plan: watchlist query failed: %v", err)
+		}
+
+		type recRow struct {
+			ID        string `db:"id" json:"id"`
+			Type      string `db:"type" json:"type"`
+			EntityID  string `db:"entity_id" json:"entity_id"`
+			BinNumber int    `db:"bin_number" json:"bin_number"`
+			Street    string `db:"current_street" json:"current_street"`
+			Title     string `db:"title" json:"title"`
+			Severity  string `db:"severity" json:"severity"`
+			CreatedAt int64  `db:"created_at" json:"created_at"`
+		}
+		loadRecs := func(recType string) []recRow {
+			var rows []recRow
+			if err := db.Select(&rows, `
+				SELECT r.id, r.type, COALESCE(r.entity_id,'') AS entity_id,
+				       COALESCE(b.bin_number,0) AS bin_number, COALESCE(b.current_street,'') AS current_street,
+				       r.title, r.severity, r.created_at
+				FROM ai_recommendations r
+				LEFT JOIN bins b ON b.id = r.entity_id
+				WHERE r.type = $1 AND r.status = 'pending'
+				  AND (r.expires_at IS NULL OR r.expires_at > $2)
+				  AND (r.snoozed_until IS NULL OR r.snoozed_until < $2)
+				ORDER BY r.created_at DESC`, recType, now); err != nil {
+				log.Printf("❌ Weekly plan: %s recs query failed: %v", recType, err)
+			}
+			return rows
+		}
+
+		// Last week's applied outcomes: actioned recs by type.
+		type outcomeRow struct {
+			Type  string `db:"type" json:"type"`
+			Count int    `db:"count" json:"count"`
+		}
+		var applied []outcomeRow
+		if err := db.Select(&applied, `
+			SELECT type, COUNT(*) AS count FROM ai_recommendations
+			WHERE actioned_at IS NOT NULL AND actioned_at > $1 - 7*86400
+			GROUP BY type`, now); err != nil {
+			log.Printf("❌ Weekly plan: outcomes query failed: %v", err)
+		}
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"watching":     watching,
+				"escalations":  loadRecs("bin_relocate"),
+				"redeploys":    loadRecs("bin_redeploy"),
+				"cadence_ups":  loadRecs("bin_increase_cadence"),
+				"applied_7d":   applied,
+				"generated_at": now,
+			},
+		})
+	}
+}

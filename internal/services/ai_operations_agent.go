@@ -107,6 +107,9 @@ func (a *AIOperationsAgent) runCycle() {
 	// Stranded inventory: warehouse dwellers + half-finished moves
 	a.checkStrandedInventory()
 
+	// Watchlist probation: matured watches graduate or escalate
+	a.evaluateWatchlist()
+
 	log.Printf("🤖 [AIAgent] Cycle complete")
 	log.Printf("🤖 [AIAgent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
@@ -341,6 +344,7 @@ func (a *AIOperationsAgent) checkUnderperformingBins() {
 			if existing > 0 {
 				continue
 			}
+			a.startWatch(bin.ID, fmt.Sprintf("Cadence review: median %.0f%% at collection, fills %.1f%%/day", bin.MedianFill, rateVal), rateVal, 14)
 			a.createRecommendation(
 				"bin_reduce_cadence", "bin", bin.ID,
 				fmt.Sprintf("Bin #%d is over-visited — collect it less often", bin.BinNumber),
@@ -494,6 +498,109 @@ func (a *AIOperationsAgent) checkStrandedInventory() {
 				fmt.Sprintf("Pickup completed %d days ago; dropoff task still live.", m.Days),
 			)
 		}
+	}
+}
+
+// startWatch puts a bin on probation: the agent re-measures its demand after
+// evaluateDays and either graduates it (improved) or escalates to a
+// relocation recommendation. One open watch per bin.
+func (a *AIOperationsAgent) startWatch(binID, reason string, baselineRate float64, evaluateDays int) {
+	var open int
+	a.db.Get(&open, `SELECT COUNT(*) FROM bin_watchlist WHERE bin_id = $1 AND status = 'watching'`, binID)
+	if open > 0 {
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := a.db.Exec(`
+		INSERT INTO bin_watchlist (id, bin_id, reason, baseline_fill_rate, started_at, evaluate_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		uuid.New().String(), binID, reason, baselineRate, now, now+int64(evaluateDays)*86400); err != nil {
+		log.Printf("❌ [AIAgent] Failed to start watch for bin %s: %v", binID, err)
+		return
+	}
+	log.Printf("🤖 [AIAgent] Watch started: bin %s for %d days (baseline %.1f%%/day)", binID, evaluateDays, baselineRate)
+}
+
+// evaluateWatchlist processes matured watches: fill rate improved >=20% over
+// baseline -> graduated; otherwise escalate to a relocation recommendation
+// (suppressed when the bin already has an open move — one-open-move rule).
+func (a *AIOperationsAgent) evaluateWatchlist() {
+	type watch struct {
+		ID        string   `db:"id"`
+		BinID     string   `db:"bin_id"`
+		BinNumber int      `db:"bin_number"`
+		Baseline  *float64 `db:"baseline_fill_rate"`
+		Current   *float64 `db:"current_rate"`
+		OpenMoves int      `db:"open_moves"`
+	}
+	var due []watch
+	err := a.db.Select(&due, `
+		WITH pairs AS (
+			SELECT bin_id,
+			       fill_percentage - LAG(fill_percentage) OVER (PARTITION BY bin_id ORDER BY checked_on) AS dfill,
+			       (checked_on - LAG(checked_on) OVER (PARTITION BY bin_id ORDER BY checked_on)) / 86400.0 AS ddays
+			FROM checks WHERE fill_percentage IS NOT NULL
+			  AND checked_on > EXTRACT(EPOCH FROM NOW())::BIGINT - 30*86400
+		),
+		rate AS (
+			SELECT bin_id, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY dfill / ddays) AS current_rate
+			FROM pairs WHERE dfill > 0 AND ddays > 0.25 GROUP BY bin_id
+		)
+		SELECT w.id, w.bin_id, COALESCE(b.bin_number, 0) AS bin_number,
+		       w.baseline_fill_rate, rate.current_rate,
+		       (SELECT COUNT(*) FROM bin_move_requests mr
+		        WHERE mr.bin_id = w.bin_id AND mr.status NOT IN ('completed','cancelled')) AS open_moves
+		FROM bin_watchlist w
+		JOIN bins b ON b.id = w.bin_id
+		LEFT JOIN rate ON rate.bin_id = w.bin_id
+		WHERE w.status = 'watching' AND w.evaluate_at <= EXTRACT(EPOCH FROM NOW())::BIGINT`)
+	if err != nil {
+		log.Printf("❌ [AIAgent] Failed to load matured watches: %v", err)
+		return
+	}
+	if len(due) == 0 {
+		return
+	}
+	log.Printf("🤖 [AIAgent] Evaluating %d matured watch(es)", len(due))
+	now := time.Now().Unix()
+
+	for _, w := range due {
+		baseline := 0.0
+		if w.Baseline != nil {
+			baseline = *w.Baseline
+		}
+		current := 0.0
+		if w.Current != nil {
+			current = *w.Current
+		}
+		improved := baseline > 0 && current >= baseline*1.2
+
+		status := "escalated"
+		if improved {
+			status = "improved"
+		}
+		a.db.Exec(`UPDATE bin_watchlist SET status = $1, resolved_at = $2 WHERE id = $3`, status, now, w.ID)
+
+		if improved {
+			log.Printf("🤖 [AIAgent] Watch graduated: bin #%d (%.1f -> %.1f %%/day)", w.BinNumber, baseline, current)
+			continue
+		}
+		if w.OpenMoves > 0 {
+			continue
+		}
+		var existing int
+		a.db.Get(&existing, `SELECT COUNT(*) FROM ai_recommendations WHERE entity_id = $1 AND type = 'bin_relocate' AND status = 'pending'`, w.BinID)
+		if existing > 0 {
+			continue
+		}
+		a.createRecommendation(
+			"bin_relocate", "bin", w.BinID,
+			fmt.Sprintf("Bin #%d didn't improve after its probation — relocate it", w.BinNumber),
+			fmt.Sprintf("Bin #%d was watched after a cadence review. Its fill rate is %.1f%%/day vs a %.1f%%/day baseline — the site, not the schedule, is the constraint.", w.BinNumber, current, baseline),
+			"medium",
+			"Relocate to a scored candidate location (use the suggested destinations picker)",
+			fmt.Sprintf("Watch matured without improvement: baseline %.1f%%/day, current %.1f%%/day (needs +20%% to graduate).", baseline, current),
+		)
 	}
 }
 

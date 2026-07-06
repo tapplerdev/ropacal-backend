@@ -266,7 +266,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "feat-analytics-growth",
+			"version": "feat-weekly-growth-plan",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -363,6 +363,7 @@ func main() {
 		r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))     // per-bin quadrant scorecard (Bin Performance tab)
 		r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))   // per-bin 90d yield proxy (Growth hex map)
 		r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db)) // scored deployment candidates (Growth tab)
+		r.Get("/analytics/growth/weekly-plan", handlers.GetWeeklyGrowthPlan(db)) // the week's growth actions in one plan
 
 		// Potential Locations endpoints (managers can view all - no auth required)
 		r.Get("/potential-locations", handlers.GetPotentialLocations(db))
