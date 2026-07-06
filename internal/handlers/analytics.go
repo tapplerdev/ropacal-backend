@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"ropacal-backend/pkg/utils"
 
@@ -397,3 +398,125 @@ func GetAnalyticsTimeseries(db *sqlx.DB) http.HandlerFunc {
 		})
 	}
 }
+
+// GetBinScorecard returns the per-bin performance scorecard behind the Bin
+// Performance tab: demand (fill %/day), cadence outcome (median fill at the
+// last 6 collections), recency, projection, and the quadrant classification
+// the recommendation rules use — so the table and the recs never disagree.
+// GET /api/analytics/bin-scorecard
+func GetBinScorecard(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type row struct {
+			ID             string   `db:"id" json:"id"`
+			BinNumber      int      `db:"bin_number" json:"bin_number"`
+			CurrentStreet  string   `db:"current_street" json:"current_street"`
+			City           string   `db:"city" json:"city"`
+			MedianFill     *float64 `db:"median_fill" json:"median_fill_last6"`
+			Collections    int      `db:"collections" json:"collections_last6"`
+			TotalChecks    int      `db:"total_checks" json:"total_checks"`
+			FillRate       *float64 `db:"fill_rate" json:"fill_rate_per_day"`
+			LastFill       *float64 `db:"last_fill" json:"last_fill"`
+			LastCheckedOn  *int64   `db:"last_checked_on" json:"last_checked_on"`
+			LastCollection *int64   `db:"last_collection_on" json:"last_collection_on"`
+			// computed below
+			EstCurrentFill *float64 `db:"-" json:"est_current_fill"`
+			EstDaysTo90    *float64 `db:"-" json:"est_days_to_90"`
+			Quadrant       string   `db:"-" json:"quadrant"`
+		}
+
+		var rows []row
+		err := db.Select(&rows, `
+			WITH recent AS (
+				SELECT bin_id, fill_percentage,
+				       ROW_NUMBER() OVER (PARTITION BY bin_id ORDER BY checked_on DESC) AS rn
+				FROM checks WHERE shift_id IS NOT NULL AND fill_percentage IS NOT NULL
+			),
+			coll AS (
+				SELECT bin_id,
+				       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY fill_percentage) AS median_fill,
+				       COUNT(*) AS collections
+				FROM recent WHERE rn <= 6 GROUP BY bin_id
+			),
+			pairs AS (
+				SELECT bin_id,
+				       fill_percentage - LAG(fill_percentage) OVER (PARTITION BY bin_id ORDER BY checked_on) AS dfill,
+				       (checked_on - LAG(checked_on) OVER (PARTITION BY bin_id ORDER BY checked_on)) / 86400.0 AS ddays
+				FROM checks WHERE fill_percentage IS NOT NULL
+			),
+			rate AS (
+				SELECT bin_id,
+				       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY dfill / ddays) AS fill_rate
+				FROM pairs WHERE dfill > 0 AND ddays > 0.25 GROUP BY bin_id
+			),
+			last_check AS (
+				SELECT DISTINCT ON (bin_id) bin_id, fill_percentage AS last_fill, checked_on AS last_checked_on
+				FROM checks WHERE fill_percentage IS NOT NULL
+				ORDER BY bin_id, checked_on DESC
+			),
+			last_coll AS (
+				SELECT bin_id, MAX(checked_on) AS last_collection_on
+				FROM checks WHERE shift_id IS NOT NULL GROUP BY bin_id
+			)
+			SELECT b.id, b.bin_number, b.current_street, b.city,
+			       coll.median_fill, COALESCE(coll.collections, 0) AS collections,
+			       (SELECT COUNT(*) FROM checks c WHERE c.bin_id = b.id) AS total_checks,
+			       rate.fill_rate,
+			       last_check.last_fill, last_check.last_checked_on,
+			       last_coll.last_collection_on
+			FROM bins b
+			LEFT JOIN coll ON coll.bin_id = b.id
+			LEFT JOIN rate ON rate.bin_id = b.id
+			LEFT JOIN last_check ON last_check.bin_id = b.id
+			LEFT JOIN last_coll ON last_coll.bin_id = b.id
+			WHERE b.status = 'active'
+			ORDER BY b.bin_number ASC`)
+		if err != nil {
+			log.Printf("❌ Error building bin scorecard: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to build bin scorecard")
+			return
+		}
+
+		now := float64(timeNowUnix())
+		for i := range rows {
+			r := &rows[i]
+			// Estimated current fill: last observation + demand slope since.
+			if r.LastFill != nil && r.LastCheckedOn != nil && r.FillRate != nil {
+				days := (now - float64(*r.LastCheckedOn)) / 86400.0
+				est := *r.LastFill + *r.FillRate*days
+				if est > 100 {
+					est = 100
+				}
+				r.EstCurrentFill = &est
+				if *r.FillRate > 0 && est < 90 {
+					d := (90 - est) / *r.FillRate
+					r.EstDaysTo90 = &d
+				}
+			}
+			// Quadrant — same thresholds the recommendation rules use.
+			rate := 0.0
+			if r.FillRate != nil {
+				rate = *r.FillRate
+			}
+			switch {
+			case r.Collections < 5:
+				r.Quadrant = "new" // not enough collections to judge
+			case r.MedianFill != nil && *r.MedianFill >= 85:
+				r.Quadrant = "overflow_risk"
+			case r.MedianFill != nil && *r.MedianFill < 30 && rate < 1.5:
+				r.Quadrant = "weak_site"
+			case r.MedianFill != nil && *r.MedianFill < 30:
+				r.Quadrant = "over_visited"
+			default:
+				r.Quadrant = "healthy"
+			}
+		}
+
+		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"data":    rows,
+		})
+	}
+}
+
+// timeNowUnix is split out so the scorecard math reads cleanly.
+func timeNowUnix() int64 { return time.Now().Unix() }
