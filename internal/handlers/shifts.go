@@ -21,7 +21,6 @@ import (
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
 
-	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -1157,229 +1156,18 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centri
 	}
 }
 
-// RemoveTasksFromShift removes one or more tasks from an active shift (manager-initiated)
-// This unassigns tasks without deleting the underlying resources
+// AssignRoute is a tombstone for the legacy pre-optimizer creation path.
+// The original handler stopped creating tasks when shift_bins gave way to
+// route_tasks, so any shift it made was a task-less husk that could shadow a
+// driver's real ready shift (StartShift picks the latest ready row). No live
+// client calls it — the dashboard and app both create via
+// POST /api/manager/shifts/create-with-tasks. It answers 410 (instead of the
+// route being deleted outright) so any unknown caller fails loudly and shows
+// up in the logs rather than silently minting broken shifts.
 func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userClaims, ok := middleware.GetUserFromContext(r)
-		if !ok {
-			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
-			return
-		}
-
-		// Check if user is manager
-		if userClaims.Role != "manager" && userClaims.Role != "admin" {
-			utils.RespondError(w, http.StatusForbidden, "Manager access required")
-			return
-		}
-
-		// Parse request body
-		var req struct {
-			DriverID string   `json:"driver_id"`
-			RouteID  string   `json:"route_id"`
-			BinIDs   []string `json:"bin_ids"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			utils.RespondError(w, http.StatusBadRequest, "Invalid request body")
-			return
-		}
-
-		// Validate request
-		if len(req.BinIDs) == 0 {
-			utils.RespondError(w, http.StatusBadRequest, "At least one bin_id is required")
-			return
-		}
-
-		log.Printf("📋 Assigning route %s to driver %s with %d bins", req.RouteID, req.DriverID, len(req.BinIDs))
-		log.Printf("🔄 Route will be optimized when driver starts shift (based on actual location)")
-
-		now := time.Now().Unix()
-
-		// Start transaction
-		tx, err := db.Beginx()
-		if err != nil {
-			log.Printf("❌ Error starting transaction: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to assign route")
-			return
-		}
-		defer tx.Rollback()
-
-		// Validate all bins exist
-		query := `SELECT COUNT(*) FROM bins WHERE id IN (?)`
-		query, args, err := sqlx.In(query, req.BinIDs)
-		if err != nil {
-			log.Printf("❌ Error building query: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to validate bins")
-			return
-		}
-		query = tx.Rebind(query)
-
-		var count int
-		err = tx.Get(&count, query, args...)
-		if err != nil {
-			log.Printf("❌ Error validating bins: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to validate bins")
-			return
-		}
-		if count != len(req.BinIDs) {
-			utils.RespondError(w, http.StatusBadRequest, "One or more bin_ids are invalid")
-			return
-		}
-
-		// Create new shift (route optimization will happen when driver starts)
-		shiftID := uuid.New().String()
-		totalBins := len(req.BinIDs)
-
-		shiftQuery := `INSERT INTO shifts (id, driver_id, route_id, status, total_bins, created_at, updated_at)
-					   VALUES ($1, $2, $3, 'ready', $4, $5, $6)`
-
-		_, err = tx.Exec(shiftQuery, shiftID, req.DriverID, req.RouteID, totalBins, now, now)
-		if err != nil {
-			log.Printf("❌ Error creating shift: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to create shift")
-			return
-		}
-
-		// Insert bins - preserve route sequence if from pre-defined route, otherwise mark as unoptimized
-		// Check if this is from a pre-defined route (has bins in route_bins table)
-		var routeBins []struct {
-			BinID         string `db:"bin_id"`
-			SequenceOrder int    `db:"sequence_order"`
-		}
-
-		if req.RouteID != "" && req.RouteID != "custom" {
-			// Try to get pre-defined route bins with sequence
-			routeBinsQuery := `SELECT bin_id, sequence_order FROM route_bins
-							   WHERE route_id = $1
-							   ORDER BY sequence_order`
-			err = tx.Select(&routeBins, routeBinsQuery, req.RouteID)
-			if err != nil && err != sql.ErrNoRows {
-				log.Printf("❌ Error fetching route_bins: %v", err)
-				// Continue anyway - will treat as custom
-				routeBins = nil
-			}
-		}
-
-		// DEPRECATED: This endpoint no longer creates tasks.
-		// Use POST /api/manager/shifts/with-tasks (CreateShiftWithTasks) instead.
-		// route_tasks table has been removed in favor of route_tasks.
-		log.Printf("⚠️  DEPRECATED: AssignRoute endpoint called. This endpoint is legacy and does not create tasks.")
-		log.Printf("⚠️  Please update clients to use POST /api/manager/shifts/with-tasks instead.")
-
-		// Commit transaction
-		if err := tx.Commit(); err != nil {
-			log.Printf("❌ Error committing transaction: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to assign route")
-			return
-		}
-
-		// Get created shift
-		var shift models.Shift
-		db.Get(&shift, `SELECT * FROM shifts WHERE id = $1`, shiftID)
-
-		// Get route bins with details
-		bins, err := getShiftTasksWithDetails(db, shiftID)
-		if err != nil {
-			log.Printf("❌ Error fetching route bins: %v", err)
-			utils.RespondError(w, http.StatusInternalServerError, "Failed to fetch route bins")
-			return
-		}
-
-		// Send push notification (preference-aware)
-		raTitle, raBody := services.ShiftNotificationText("route_assigned", nil)
-		_, raNotifIDs := services.CreateNotificationForUsers(db, []string{req.DriverID}, "route_assigned", raTitle, raBody, map[string]string{"route_id": req.RouteID})
-		notificationSent := false
-
-		if len(raNotifIDs) > 0 {
-			var fcmToken models.FCMToken
-			tokenErr := db.Get(&fcmToken, `SELECT * FROM fcm_tokens WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1`, req.DriverID)
-			if tokenErr == nil {
-				err := fcmService.SendRouteAssignedNotification(fcmToken.Token, req.RouteID, totalBins)
-				if err != nil {
-					log.Printf("⚠️  Failed to send FCM notification: %v", err)
-				} else {
-					notificationSent = true
-				}
-			}
-		}
-
-		// Broadcast WebSocket update to driver with FULL shift data
-		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Printf("📡 ATTEMPTING WEBSOCKET BROADCAST")
-		log.Printf("   Target driver_id: %s", req.DriverID)
-		log.Printf("   Is driver connected: %v", hub.IsUserConnected(req.DriverID))
-		log.Printf("   Total connected clients: %d", hub.GetClientCount())
-		log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-		routeAssignedData := map[string]interface{}{
-			"id":                  shift.ID,
-			"driver_id":           shift.DriverID,
-			"route_id":            shift.RouteID,
-			"status":              shift.Status,
-			"start_time":          shift.StartTime,
-			"end_time":            shift.EndTime,
-			"total_pause_seconds": shift.TotalPauseSeconds,
-			"pause_start_time":    shift.PauseStartTime,
-			"total_bins":          shift.TotalBins,
-			"completed_bins":      shift.CompletedBins,
-			"tasks":               bins,
-			"created_at":          shift.CreatedAt,
-			"updated_at":          shift.UpdatedAt,
-			"message":             "New route assigned!",
-		}
-		hub.BroadcastToUser(req.DriverID, map[string]interface{}{
-			"type": "route_assigned",
-			"data": routeAssignedData,
-		})
-
-		// Publish route_assigned via Centrifugo shift channel
-		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shift.ID, map[string]interface{}{
-				"type": "route_assigned",
-				"data": routeAssignedData,
-			}); pubErr != nil {
-				log.Printf("⚠️  Failed to publish route_assigned to Centrifugo: %v", pubErr)
-			}
-		}
-
-		// Broadcast shift state change to all managers (new driver assigned)
-		broadcastPayload := map[string]interface{}{
-			"type": "driver_shift_change",
-			"data": map[string]interface{}{
-				"driver_id": req.DriverID,
-				"status":    shift.Status,
-				"shift_id":  shiftID,
-			},
-		}
-		hub.BroadcastToRole("admin", broadcastPayload)
-		hub.BroadcastToRole("manager", broadcastPayload)
-		log.Printf("📡 Broadcast driver_shift_change to managers: Route assigned to driver")
-
-		// Also publish via Centrifugo
-		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
-				"driver_id": req.DriverID,
-				"status":    shift.Status,
-				"shift_id":  shiftID,
-			}); pubErr != nil {
-				log.Printf("⚠️  Failed to publish driver_shift_change to Centrifugo: %v", pubErr)
-			}
-		}
-
-		log.Printf("✅ Route assigned: %s to driver %s (%d bins)", req.RouteID, req.DriverID, totalBins)
-
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"shift_id":          shiftID,
-				"driver_id":         req.DriverID,
-				"route_id":          req.RouteID,
-				"status":            shift.Status,
-				"total_bins":        totalBins,
-				"tasks":             bins, // ← Changed from "bins" to "tasks" for mobile app compatibility
-				"notification_sent": notificationSent,
-			},
-		})
+		log.Printf("⛔ 410: legacy /api/manager/assign-route called — use /api/manager/shifts/create-with-tasks")
+		utils.RespondError(w, http.StatusGone, "This endpoint has been retired. Use POST /api/manager/shifts/create-with-tasks instead.")
 	}
 }
 
