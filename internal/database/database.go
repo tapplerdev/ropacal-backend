@@ -1055,6 +1055,18 @@ func Migrate(db *sqlx.DB) error {
 		EXCEPTION WHEN others THEN
 			RAISE NOTICE 'uidx_bin_move_requests_one_open not created (duplicate open moves present?): %', SQLERRM;
 		END $$;`,
+
+		// Backfill: bins.last_checked_at from the checks timeline. Driver
+		// check-ins write last_checked_at, but bins whose latest check
+		// predates that writer show "never checked" in the bins list.
+		// Idempotent — only fills NULLs; stored/retired bins keep NULL
+		// deliberately (UpdateBin clears it when storing).
+		`UPDATE bins b
+		SET last_checked_at = c.max_checked
+		FROM (SELECT bin_id, MAX(checked_on) AS max_checked FROM checks GROUP BY bin_id) c
+		WHERE c.bin_id = b.id
+		  AND b.last_checked_at IS NULL
+		  AND b.status NOT IN ('in_storage', 'retired')`,
 	}
 
 	for _, migration := range migrations {

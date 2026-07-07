@@ -41,7 +41,7 @@ func GetBins(db *sqlx.DB) http.HandlerFunc {
 		var bins []models.Bin
 		err = db.Select(&bins, `
 			SELECT id, bin_number, current_street, city, zip,
-			       last_moved, last_checked, status, fill_percentage,
+			       last_moved, last_checked, last_checked_at, status, fill_percentage,
 			       checked, move_requested, latitude, longitude,
 			       created_at, updated_at
 			FROM bins

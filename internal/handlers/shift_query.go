@@ -676,6 +676,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				FROM checks
 				WHERE bin_id = rt.bin_id
 				AND shift_id = rt.shift_id
+				AND checked_on = rt.completed_at
 				ORDER BY checked_on DESC
 				LIMIT 1
 			) bc ON true

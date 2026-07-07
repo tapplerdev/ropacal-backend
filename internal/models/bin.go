@@ -115,8 +115,17 @@ func (b *Bin) ToBinResponse() BinResponse {
 		resp.LastMovedIso = &iso
 	}
 
-	if b.LastChecked != nil {
-		t := time.Unix(*b.LastChecked, 0)
+	// "Last checked" for display is the most recent check by anyone:
+	// last_checked is only written by the manager's checked toggle, while
+	// driver check-ins write last_checked_at — either alone understates.
+	// The raw columns keep their check-cycle semantics.
+	lastCheckedUnix := b.LastChecked
+	if b.LastCheckedAt != nil &&
+		(lastCheckedUnix == nil || *b.LastCheckedAt > *lastCheckedUnix) {
+		lastCheckedUnix = b.LastCheckedAt
+	}
+	if lastCheckedUnix != nil {
+		t := time.Unix(*lastCheckedUnix, 0)
 		iso := t.Format(time.RFC3339)
 		resp.LastCheckedIso = &iso
 	}
