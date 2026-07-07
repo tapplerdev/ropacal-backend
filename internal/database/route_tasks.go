@@ -247,6 +247,28 @@ func CreateShiftWithTasks(
 		scheduledDate = &today
 	}
 
+	// Derive the shift-level route_id when the client omitted it but the
+	// tasks carry a consistent template id (the mobile app sends route_id
+	// per task only) — otherwise app-created template shifts are invisible
+	// to template performance stats, which aggregate shift_history.route_id.
+	if routeID == nil {
+		derived := ""
+		consistent := true
+		for _, t := range tasks {
+			if v, ok := t["route_id"].(string); ok && v != "" {
+				if derived == "" {
+					derived = v
+				} else if derived != v {
+					consistent = false
+					break
+				}
+			}
+		}
+		if consistent && derived != "" {
+			routeID = &derived
+		}
+	}
+
 	shiftQuery := `
 		INSERT INTO shifts (
 			id, driver_id, status, total_bins, completed_bins,
