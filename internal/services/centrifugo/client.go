@@ -248,10 +248,14 @@ func (c *Client) GenerateSubscriptionToken(userID string, channel string, expire
 	return tokenString, nil
 }
 
-// DriverLocation represents a driver's real-time location
+// DriverLocation represents a driver's real-time location.
+// Keys MUST match what the Centrifugo publish proxy broadcasts
+// ("latitude"/"longitude" — centrifugo_location_proxy.go): both clients
+// parse that shape, and the old "lat"/"lng" tags meant every fix published
+// through the HTTP path was silently dropped by their parsers.
 type DriverLocation struct {
-	Latitude  float64 `json:"lat"`
-	Longitude float64 `json:"lng"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
 	Heading   float64 `json:"heading,omitempty"`
 	Speed     float64 `json:"speed,omitempty"`
 	Accuracy  float64 `json:"accuracy,omitempty"`
