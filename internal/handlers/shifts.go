@@ -387,8 +387,11 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			)
 
 			if err != nil {
-				log.Printf("❌ Mapbox v2 route optimization failed: %v", err)
-				utils.RespondError(w, http.StatusInternalServerError, "Route optimization failed")
+				log.Printf("❌ Route optimization failed: %v", err)
+				// Include the underlying cause — "Route optimization failed"
+				// alone is undiagnosable from the client side.
+				utils.RespondError(w, http.StatusInternalServerError,
+					fmt.Sprintf("Route optimization failed: %v", err))
 				return
 			}
 
