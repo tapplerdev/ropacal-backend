@@ -14,10 +14,14 @@ import (
 	"github.com/lib/pq"
 )
 
-// DriverLocation represents the driver's current GPS location
+// DriverLocation represents the driver's current GPS location.
+// Heading/speed are pointers so a missing value stays null — heading 0 is
+// "due north", not "unknown", and clients rotate markers from it.
 type DriverLocation struct {
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
+	Latitude  float64  `json:"latitude"`
+	Longitude float64  `json:"longitude"`
+	Heading   *float64 `json:"heading,omitempty"`
+	Speed     *float64 `json:"speed,omitempty"`
 }
 
 // ActiveDriverResponse represents an active driver with their current shift
@@ -159,7 +163,16 @@ func GetActiveDrivers(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 
 			// 4. Get location from Redis
 			if locationJSON, ok := locations[driver.DriverID]; ok {
-				var location LocationData
+				// Local decode instead of LocationData: its plain float64
+				// heading turns "absent" into 0, which reads as a real
+				// due-north heading downstream.
+				var location struct {
+					Latitude  float64  `json:"latitude"`
+					Longitude float64  `json:"longitude"`
+					Heading   *float64 `json:"heading"`
+					Speed     *float64 `json:"speed"`
+					Timestamp int64    `json:"timestamp"`
+				}
 				if err := json.Unmarshal([]byte(locationJSON), &location); err != nil {
 					log.Printf("⚠️ Failed to parse location for driver %s: %v", driver.DriverID, err)
 					continue
@@ -168,6 +181,8 @@ func GetActiveDrivers(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 				driver.CurrentLocation = &DriverLocation{
 					Latitude:  location.Latitude,
 					Longitude: location.Longitude,
+					Heading:   location.Heading,
+					Speed:     location.Speed,
 				}
 
 				// Calculate location age
