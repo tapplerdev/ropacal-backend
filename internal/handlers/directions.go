@@ -31,10 +31,10 @@ type OSRMRouteGeometry struct {
 
 // DirectionsResponse is the response sent to the client
 type DirectionsResponse struct {
-	Success    bool              `json:"success"`
+	Success     bool              `json:"success"`
 	Coordinates []DirectionsPoint `json:"coordinates"`
-	Distance   float64           `json:"distance_meters"`
-	Duration   float64           `json:"duration_seconds"`
+	Distance    float64           `json:"distance_meters"`
+	Duration    float64           `json:"duration_seconds"`
 }
 
 // DirectionsPoint represents a single lat/lng point

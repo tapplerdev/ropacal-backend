@@ -6,9 +6,10 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/jmoiron/sqlx"
 	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/models"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // DriverShiftDetailResponse represents detailed shift information for a specific driver
@@ -121,14 +122,14 @@ func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
 
 		detail.Bins = bins
 
-	// Also get tasks from route_tasks table (new task-based system)
-	tasks, err := database.GetShiftTasks(db, detail.ShiftID)
-	if err != nil {
-		log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
-		tasks = []models.RouteTask{} // Empty tasks array on error
-	}
+		// Also get tasks from route_tasks table (new task-based system)
+		tasks, err := database.GetShiftTasks(db, detail.ShiftID)
+		if err != nil {
+			log.Printf("⚠️  Warning: Could not fetch tasks: %v (using bins only)", err)
+			tasks = []models.RouteTask{} // Empty tasks array on error
+		}
 
-	detail.Tasks = tasks
+		detail.Tasks = tasks
 
 		log.Printf("✅ Found shift with %d bins, %d tasks for driver: %s", len(bins), len(tasks), detail.DriverName)
 

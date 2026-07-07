@@ -210,7 +210,7 @@ Returns: total bins, active bins, clean bins, problematic bins, avg fill %, tota
 			},
 		},
 		{
-			Name: "get_bin_check_history",
+			Name:        "get_bin_check_history",
 			Description: anthropic.String(`Get the check history for a specific bin — shows fill percentages over time with dates and photos. Use bin_number (the user-facing number like #34) or bin_id (internal UUID). Use this to analyze fill rate trends for individual bins.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
@@ -236,7 +236,7 @@ Returns: total bins, active bins, clean bins, problematic bins, avg fill %, tota
 			},
 		},
 		{
-			Name: "get_shift_history",
+			Name:        "get_shift_history",
 			Description: anthropic.String(`Get completed shift history. Use this to analyze driver performance, shift frequency, and operational trends. Returns shift date, driver name, duration, tasks completed, distance traveled, completion rate, and end reason.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
@@ -247,7 +247,7 @@ Returns: total bins, active bins, clean bins, problematic bins, avg fill %, tota
 			},
 		},
 		{
-			Name: "get_potential_locations",
+			Name:        "get_potential_locations",
 			Description: anthropic.String(`Get potential locations — spots suggested by drivers for placing new bins. Shows address, who suggested it, date, and conversion status. Use this to review pending driver suggestions.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
@@ -277,7 +277,7 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 			},
 		},
 		{
-			Name: "get_census_income",
+			Name:        "get_census_income",
 			Description: anthropic.String(`Look up median household income for Bay Area zip codes. Use this when the user asks about income levels, demographics, or affordability of an area. Can look up a specific zip code or return all zip codes for a city.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
@@ -301,10 +301,10 @@ type chatRequest struct {
 }
 
 type chatResponse struct {
-	Response        string           `json:"response"`
-	ToolCallsMade   []string         `json:"tool_calls_made,omitempty"`
-	ConversationID  string           `json:"conversation_id"`
-	Recommendations json.RawMessage  `json:"recommendations,omitempty"`
+	Response        string          `json:"response"`
+	ToolCallsMade   []string        `json:"tool_calls_made,omitempty"`
+	ConversationID  string          `json:"conversation_id"`
+	Recommendations json.RawMessage `json:"recommendations,omitempty"`
 }
 
 func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {

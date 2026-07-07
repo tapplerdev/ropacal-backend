@@ -30,10 +30,10 @@ type TestOSRMResponse struct {
 		Latitude  float64 `json:"latitude"`
 		Longitude float64 `json:"longitude"`
 	} `json:"snapped"`
-	WasSnapped       bool    `json:"was_snapped"`
-	DriverID         string  `json:"driver_id"`
-	BroadcastSuccess bool    `json:"broadcast_success"`
-	Message          string  `json:"message"`
+	WasSnapped       bool   `json:"was_snapped"`
+	DriverID         string `json:"driver_id"`
+	BroadcastSuccess bool   `json:"broadcast_success"`
+	Message          string `json:"message"`
 }
 
 // TestOSRM is a test endpoint to verify OSRM integration

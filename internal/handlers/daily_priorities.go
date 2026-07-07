@@ -31,15 +31,15 @@ func GetDailyPriorities(db *sqlx.DB) http.HandlerFunc {
 
 		// Step 1: Fetch all active bins
 		type binRow struct {
-			ID              string   `db:"id"`
-			BinNumber       int      `db:"bin_number"`
-			CurrentStreet   string   `db:"current_street"`
-			City            string   `db:"city"`
-			Zip             string   `db:"zip"`
-			Latitude        *float64 `db:"latitude"`
-			Longitude       *float64 `db:"longitude"`
-			FillPercentage  int      `db:"fill_percentage"`
-			LastCheckedAt   *int64   `db:"last_checked_at"`
+			ID             string   `db:"id"`
+			BinNumber      int      `db:"bin_number"`
+			CurrentStreet  string   `db:"current_street"`
+			City           string   `db:"city"`
+			Zip            string   `db:"zip"`
+			Latitude       *float64 `db:"latitude"`
+			Longitude      *float64 `db:"longitude"`
+			FillPercentage int      `db:"fill_percentage"`
+			LastCheckedAt  *int64   `db:"last_checked_at"`
 		}
 		var bins []binRow
 		err := db.Select(&bins, `
@@ -211,7 +211,7 @@ func GetDailyPriorities(db *sqlx.DB) http.HandlerFunc {
 			"data": map[string]interface{}{
 				"as_of":      now.Format(time.RFC3339),
 				"summary":    summary,
-				"priorities":  priorities,
+				"priorities": priorities,
 				"by_area":    byArea,
 			},
 		})

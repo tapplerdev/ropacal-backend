@@ -20,29 +20,29 @@ type ESRIEnrichmentResult struct {
 	DisposableIncome      float64 `json:"disposable_income"`      // Median disposable income
 
 	// Foot traffic proxy
-	DaytimePopulation     float64 `json:"daytime_population"`
-	DaytimePopDensity     float64 `json:"daytime_pop_density"`
+	DaytimePopulation float64 `json:"daytime_population"`
+	DaytimePopDensity float64 `json:"daytime_pop_density"`
 
 	// Clothing/textile signal
-	AvgClothingSpend      float64 `json:"avg_clothing_spend"` // Avg household clothing spending
+	AvgClothingSpend float64 `json:"avg_clothing_spend"` // Avg household clothing spending
 
 	// Safety
-	CrimeIndex            float64 `json:"crime_index"` // Total crime index (100 = national avg)
+	CrimeIndex float64 `json:"crime_index"` // Total crime index (100 = national avg)
 
 	// Metadata
-	HasData               bool    `json:"has_data"`
+	HasData bool `json:"has_data"`
 }
 
 // analysisVariables are the ESRI variable names we request per location
 var esriAnalysisVariables = []string{
-	"KeyUSFacts.MEDHINC_CY",         // Median Household Income
-	"KeyUSFacts.TOTPOP_CY",          // Total Population
-	"KeyUSFacts.POPGRWCYFY",         // Population Growth Rate 2026-2031
-	"DaytimePopulation.DPOP_CY",     // Total Daytime Population
-	"DaytimePopulation.DPOPDENSCY",  // Daytime Population Density
-	"clothing.X5001_A",              // Avg Household Clothing Spending
-	"disposableincome.MEDDI_CY",     // Median Disposable Income
-	"crime.CRMCYTOTC",               // Total Crime Index
+	"KeyUSFacts.MEDHINC_CY",        // Median Household Income
+	"KeyUSFacts.TOTPOP_CY",         // Total Population
+	"KeyUSFacts.POPGRWCYFY",        // Population Growth Rate 2026-2031
+	"DaytimePopulation.DPOP_CY",    // Total Daytime Population
+	"DaytimePopulation.DPOPDENSCY", // Daytime Population Density
+	"clothing.X5001_A",             // Avg Household Clothing Spending
+	"disposableincome.MEDDI_CY",    // Median Disposable Income
+	"crime.CRMCYTOTC",              // Total Crime Index
 }
 
 // EnrichLocation calls ESRI GeoEnrichment API for a single lat/lng point
@@ -140,7 +140,7 @@ func EnrichLocationsBatch(locations []struct{ Lat, Lng float64 }) ([]ESRIEnrichm
 	studyAreas := make([]map[string]interface{}, len(locations))
 	for i, loc := range locations {
 		studyAreas[i] = map[string]interface{}{
-			"geometry": map[string]float64{"x": loc.Lng, "y": loc.Lat},
+			"geometry":   map[string]float64{"x": loc.Lng, "y": loc.Lat},
 			"attributes": map[string]interface{}{"id": fmt.Sprintf("%d", i)},
 		}
 	}

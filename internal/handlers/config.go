@@ -6,10 +6,11 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/jmoiron/sqlx"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // GetWarehouseLocation returns the current warehouse location from config

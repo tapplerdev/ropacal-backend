@@ -146,7 +146,7 @@ func authorizeSubscription(db *sqlx.DB, userID string, channel string) (bool, er
 		return false, fmt.Errorf("invalid channel format: %s", channel)
 	}
 
-	namespace := parts[0]    // driver, shift, manager
+	namespace := parts[0]   // driver, shift, manager
 	channelType := parts[1] // location, updates, notifications
 
 	switch namespace {
@@ -316,7 +316,7 @@ func authorizePublication(db *sqlx.DB, userID string, channel string) (bool, err
 		return false, fmt.Errorf("invalid channel format: %s", channel)
 	}
 
-	namespace := parts[0]    // driver, shift, manager
+	namespace := parts[0]   // driver, shift, manager
 	channelType := parts[1] // location, updates, notifications
 
 	switch namespace {

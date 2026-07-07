@@ -191,12 +191,12 @@ func GetNotificationRecipients(db *sqlx.DB) http.HandlerFunc {
 		logID := chi.URLParam(r, "id")
 
 		type recipientRow struct {
-			UserID         string  `json:"user_id" db:"user_id"`
-			UserName       string  `json:"user_name" db:"user_name"`
-			UserEmail      string  `json:"user_email" db:"user_email"`
-			DeliveryStatus string  `json:"delivery_status" db:"delivery_status"`
-			ReadAt         *int64  `json:"read_at" db:"read_at"`
-			CreatedAt      int64   `json:"created_at" db:"created_at"`
+			UserID         string `json:"user_id" db:"user_id"`
+			UserName       string `json:"user_name" db:"user_name"`
+			UserEmail      string `json:"user_email" db:"user_email"`
+			DeliveryStatus string `json:"delivery_status" db:"delivery_status"`
+			ReadAt         *int64 `json:"read_at" db:"read_at"`
+			CreatedAt      int64  `json:"created_at" db:"created_at"`
 		}
 
 		var recipients []recipientRow

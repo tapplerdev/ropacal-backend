@@ -132,9 +132,9 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 			case "collection":
 				if task.BinID != nil && task.Latitude != nil && task.Longitude != nil {
 					collection := optimization.Collection{
-						ID:             task.ID,
-						BinID:          *task.BinID,
-						BinNumber:      getIntValue(task.BinNumber),
+						ID:        task.ID,
+						BinID:     *task.BinID,
+						BinNumber: getIntValue(task.BinNumber),
 						Location: optimization.Location{
 							ID:        *task.BinID,
 							Name:      fmt.Sprintf("Bin #%d", getIntValue(task.BinNumber)),
@@ -372,8 +372,8 @@ func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (
 
 	var hereResp struct {
 		Results []struct {
-			Distance        string `json:"distance"`
-			Time            string `json:"time"`
+			Distance         string `json:"distance"`
+			Time             string `json:"time"`
 			Interconnections []struct {
 				FromWaypoint string  `json:"fromWaypoint"`
 				ToWaypoint   string  `json:"toWaypoint"`
@@ -415,11 +415,11 @@ func callHereOptimization(warehouseLat, warehouseLon float64, tasks []TaskRow) (
 		for i, conn := range hereResp.Results[0].Interconnections {
 			cumulativeTime += conn.Time
 			routeSequence = append(routeSequence, map[string]interface{}{
-				"sequence":     i + 2,
-				"waypoint":     conn.ToWaypoint,
-				"type":         getWaypointType(conn.ToWaypoint),
-				"task_info":    getTaskInfo(conn.ToWaypoint, tasks),
-				"arrival_time": formatSeconds(cumulativeTime),
+				"sequence":                  i + 2,
+				"waypoint":                  conn.ToWaypoint,
+				"type":                      getWaypointType(conn.ToWaypoint),
+				"task_info":                 getTaskInfo(conn.ToWaypoint, tasks),
+				"arrival_time":              formatSeconds(cumulativeTime),
 				"distance_from_prev_meters": conn.Distance,
 				"time_from_prev_seconds":    conn.Time,
 			})
@@ -514,7 +514,7 @@ func callSegmentedOptimization(warehouseLat, warehouseLon float64, tasks []TaskR
 
 	// Step 1: Split tasks into segments by warehouse stops
 	type segment struct {
-		tasks    []TaskRow
+		tasks       []TaskRow
 		isWarehouse bool
 	}
 
@@ -587,7 +587,7 @@ func callSegmentedOptimization(warehouseLat, warehouseLon float64, tasks []TaskR
 			task := seg.tasks[0]
 			// Rough distance estimate (Haversine returns km, convert to meters)
 			distKm := haversineDistance(startLat, startLon, *task.Latitude, *task.Longitude)
-			dist := distKm * 1000 // Convert to meters
+			dist := distKm * 1000                // Convert to meters
 			travelTime := (distKm / 50.0) * 3600 // Assume 50 km/h average
 
 			cumulativeTime += travelTime
@@ -725,8 +725,8 @@ func callHereSegmentOptimization(startLat, startLon, endLat, endLon float64, tas
 
 	var hereResp struct {
 		Results []struct {
-			Distance        string `json:"distance"`
-			Time            string `json:"time"`
+			Distance         string `json:"distance"`
+			Time             string `json:"time"`
 			Interconnections []struct {
 				FromWaypoint string  `json:"fromWaypoint"`
 				ToWaypoint   string  `json:"toWaypoint"`
@@ -779,7 +779,7 @@ func callHereSegmentOptimization(startLat, startLon, endLat, endLon float64, tas
 }
 
 // Helper to extract task info from TaskRow
-func getTaskInfoFromTask(task TaskRow) map[string]interface{}{
+func getTaskInfoFromTask(task TaskRow) map[string]interface{} {
 	return map[string]interface{}{
 		"task_type":  task.TaskType,
 		"bin_number": getIntValue(task.BinNumber),
@@ -800,4 +800,3 @@ func getTaskInfoByWaypoint(waypoint string, tasks []TaskRow) map[string]interfac
 
 	return map[string]interface{}{}
 }
-

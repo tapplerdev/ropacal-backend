@@ -7,11 +7,12 @@ import (
 	"net/http"
 	"time"
 
+	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/models"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"ropacal-backend/internal/middleware"
-	"ropacal-backend/internal/models"
 )
 
 // LogAppError handles diagnostic/error logs from the mobile app

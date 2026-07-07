@@ -609,17 +609,24 @@ func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
 		}
 		route := optResp.Routes[0]
 
-		optimizedBinIDs := make([]string, 0, len(bins))
-		for _, stop := range route.Stops {
-			if stop.CollectionID != "" {
-				optimizedBinIDs = append(optimizedBinIDs, stop.CollectionID)
-			}
-		}
-
 		// Create map for quick lookup of bin details
 		binMap := make(map[string]models.Bin)
 		for _, bin := range bins {
 			binMap[bin.ID] = bin
+		}
+
+		// Stops reference tasks as "collection-<binID>" (prefix included);
+		// membership-check against binMap so a format drift degrades to a
+		// shorter list instead of a nil-deref on a zero-value bin.
+		optimizedBinIDs := make([]string, 0, len(bins))
+		for _, stop := range route.Stops {
+			if stop.CollectionID == "" {
+				continue
+			}
+			binID := strings.TrimPrefix(stop.CollectionID, "collection-")
+			if _, ok := binMap[binID]; ok {
+				optimizedBinIDs = append(optimizedBinIDs, binID)
+			}
 		}
 
 		// Build response with bin details in optimized order
