@@ -6,7 +6,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -71,11 +73,21 @@ func GetDirections() http.HandlerFunc {
 			return
 		}
 
-		// Build OSRM Route API URL
-		// Note: OSRM uses lng,lat order (GeoJSON standard)
+		// Build OSRM Route API URL. Honor OSRM_SERVER_URL like every other
+		// OSRM consumer (roads client, OR-Tools matrix, route optimize) — this
+		// endpoint builds the manager map's guide polylines, so being pinned to
+		// the public demo server meant its rate-limit failures degraded guides
+		// to straight chords through buildings. Falls back to the demo server
+		// only when the env var is unset.
+		// Note: OSRM uses lng,lat order (GeoJSON standard).
+		osrmBase := os.Getenv("OSRM_SERVER_URL")
+		if osrmBase == "" {
+			osrmBase = "http://router.project-osrm.org"
+		}
+		osrmBase = strings.TrimRight(osrmBase, "/")
 		osrmURL := fmt.Sprintf(
-			"http://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson",
-			originLng, originLat, destLng, destLat,
+			"%s/route/v1/driving/%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson",
+			osrmBase, originLng, originLat, destLng, destLat,
 		)
 
 		log.Printf("🛣️  [Directions] OSRM request: (%.4f,%.4f) → (%.4f,%.4f)", originLat, originLng, destLat, destLng)

@@ -127,37 +127,21 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 			go checkWarehouseProximity(db, centrifugoClient, fcmService, driverID, *locationData.ShiftID, locationData.Latitude, locationData.Longitude)
 		}
 
-		// 5. OSRM road snapping (if accuracy > 15m)
-		snappedLat := locationData.Latitude
-		snappedLng := locationData.Longitude
+		// 5. Broadcast the RAW fix — no synchronous OSRM snap.
+		// This proxy sits on Centrifugo's critical path: Centrifugo blocks the
+		// broadcast until we respond, so a per-fix SnapToRoad round-trip (worst
+		// case a public-OSRM call, then a proxy timeout → the driver's HTTP
+		// fallback → a SECOND OSRM call) injected multi-second delivery jitter
+		// and reordering — a measured contributor to the marker's stutter. The
+		// manager client already snaps the marker to its guide geometry, so
+		// snapping here was redundant latency. (osrmClient stays in the
+		// signature for other consumers / future async use.)
+		_ = osrmClient
 
-		if osrmClient != nil && locationData.Accuracy > 15 {
-			newLat, newLng, err := osrmClient.SnapToRoad(
-				locationData.Latitude,
-				locationData.Longitude,
-				locationData.Accuracy,
-			)
-
-			if err != nil {
-				log.Printf("⚠️  [LocationProxy] OSRM snap failed: %v (using original coords)", err)
-			} else if newLat != locationData.Latitude || newLng != locationData.Longitude {
-				snappedLat = newLat
-				snappedLng = newLng
-				// log.Printf("🗺️  [LocationProxy] Snapped: (%.6f, %.6f) → (%.6f, %.6f)",
-				// locationData.Latitude, locationData.Longitude, snappedLat, snappedLng)
-			} else {
-				// log.Printf("✅ [LocationProxy] GPS accuracy good (%.1fm) - no snapping needed",
-				// locationData.Accuracy)
-			}
-		} else if locationData.Accuracy <= 15 {
-			// log.Printf("✅ [LocationProxy] GPS accuracy excellent (%.1fm) - skipping OSRM",
-			// locationData.Accuracy)
-		}
-
-		// 6. Return MODIFIED data to Centrifugo (it will broadcast this instead of original)
+		// 6. Return the fix to Centrifugo for broadcast, unmodified.
 		modifiedData := map[string]interface{}{
-			"latitude":  snappedLat,
-			"longitude": snappedLng,
+			"latitude":  locationData.Latitude,
+			"longitude": locationData.Longitude,
 			"accuracy":  locationData.Accuracy,
 			"heading":   locationData.Heading,
 			"speed":     locationData.Speed,
