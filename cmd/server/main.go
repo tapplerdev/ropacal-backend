@@ -266,7 +266,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "fix-live-marker-pipeline",
+			"version": "shift-route-preview",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -455,6 +455,7 @@ func main() {
 			r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))                 // Per-task granular breakdown for a shift
 			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                                       // Get single shift (register after)
 			r.Get("/manager/shifts/{shiftId}/tasks/history", handlers.GetShiftTasksWithHistory(db))             // Get ALL tasks including deleted ones for audit trail
+			r.Post("/manager/shifts/{shiftId}/optimize-preview", handlers.PreviewShiftOptimization(db))         // Dry-run: preview a scheduled shift's optimized route (warehouse-anchored, no persist)
 			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db))              // Compare Mapbox v2 optimization
 			r.Get("/manager/shifts/{id}/driver-proximity", handlers.CheckShiftDriverProximity(db, redisClient)) // Check if driver is nearby current task
 

@@ -642,10 +642,18 @@ func min(a, b int) int {
 	return b
 }
 
-// optimizeRouteWithMapbox optimizes a shift's route using Mapbox Optimization v2 API
-// This replaces the old segmented HERE Maps optimization with intelligent capacity-aware routing
-// isFirstOptimization: true = shift starting (UPDATE tasks), false = mid-shift reoptimization (DELETE+CREATE tasks)
-func optimizeRouteWithMapbox(
+// buildAndOptimizeShiftRoute is the shared optimization CORE: it loads a shift's
+// tasks, builds the optimizer RouteRequest (collections/placements/moves/service,
+// vehicle capacity, custom start/end, schedule windows) and runs the active
+// optimizer — returning the request + optimized route WITHOUT persisting anything.
+//
+// Both the live start-shift path (optimizeRouteWithMapbox, which then persists the
+// result) and the read-only manager preview (PreviewShiftOptimization) call this,
+// so the previewed order/stops/duration are guaranteed identical to what the driver
+// gets — there is no second copy of the task→request mapping to drift.
+//
+// Returns (nil, nil, nil) when the shift has no tasks to optimize.
+func buildAndOptimizeShiftRoute(
 	db *sqlx.DB,
 	shiftID string,
 	capacity int,
@@ -653,13 +661,12 @@ func optimizeRouteWithMapbox(
 	warehouseLat, warehouseLon float64,
 	warehouseAddr string,
 	binsPreloaded bool,
-	isFirstOptimization bool,
 	customStartLat, customStartLon *float64, // Custom start location (overrides driver GPS)
 	customStartAddr *string,
 	customEndLat, customEndLon *float64, // Custom end location (overrides warehouse as end)
 	customEndAddr *string,
-) error {
-	log.Printf("🚀 [MAPBOX OPTIMIZER] Starting Mapbox v2 route optimization (first_optimization=%v)", isFirstOptimization)
+) (*optimization.RouteRequest, *optimization.OptimizedRoute, error) {
+	log.Printf("🚀 [OPTIMIZER CORE] Building + optimizing route for shift %s", shiftID)
 	log.Printf("   🚚 Bins preloaded: %v", binsPreloaded)
 
 	// Step 1: Fetch shift details
@@ -672,7 +679,7 @@ func optimizeRouteWithMapbox(
 	}
 	err := db.Get(&shift, `SELECT id, driver_id, warehouse_address, scheduled_start, scheduled_end FROM shifts WHERE id = $1`, shiftID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch shift: %w", err)
+		return nil, nil, fmt.Errorf("failed to fetch shift: %w", err)
 	}
 
 	// Step 2: Fetch all tasks for the shift (only active, non-deleted tasks)
@@ -680,7 +687,7 @@ func optimizeRouteWithMapbox(
 	query := `SELECT * FROM route_tasks WHERE shift_id = $1 AND is_deleted = FALSE ORDER BY sequence_order ASC`
 	err = db.Select(&tasks, query, shiftID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch tasks: %w", err)
+		return nil, nil, fmt.Errorf("failed to fetch tasks: %w", err)
 	}
 
 	log.Printf("📋 [MAPBOX OPTIMIZER] Fetched %d tasks", len(tasks))
@@ -734,8 +741,8 @@ func optimizeRouteWithMapbox(
 	}
 
 	if len(tasks) == 0 {
-		log.Printf("✅ [MAPBOX OPTIMIZER] No tasks to optimize")
-		return nil
+		log.Printf("✅ [OPTIMIZER CORE] No tasks to optimize")
+		return nil, nil, nil
 	}
 
 	// Step 3: Convert to optimization.RouteRequest
@@ -1045,7 +1052,7 @@ func optimizeRouteWithMapbox(
 	response, err := optimizer.OptimizeRoute(req)
 	if err != nil {
 		log.Printf("❌ [OPTIMIZER] Optimization FAILED: %v", err)
-		return fmt.Errorf("optimization failed: %w", err)
+		return nil, nil, fmt.Errorf("optimization failed: %w", err)
 	}
 
 	log.Printf("✅ [MAPBOX OPTIMIZER] Received response from Mapbox")
@@ -1053,7 +1060,7 @@ func optimizeRouteWithMapbox(
 
 	if len(response.Routes) == 0 {
 		log.Printf("❌ [MAPBOX OPTIMIZER] No routes in response! Dropped tasks: %v", response.DroppedTasks)
-		return fmt.Errorf("Mapbox returned no routes")
+		return nil, nil, fmt.Errorf("optimizer returned no routes")
 	}
 
 	route := response.Routes[0]
@@ -1079,6 +1086,50 @@ func optimizeRouteWithMapbox(
 			i+1, stopDesc, stop.Latitude, stop.Longitude, stop.Address)
 	}
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// ── End of shared optimization core ─────────────────────────────────────
+	// Everything above (fetch tasks → build request → optimize) is drift-free and
+	// reused by the manager preview. Return the request + route; the caller decides
+	// whether to persist.
+	return req, &route, nil
+}
+
+// optimizeRouteWithMapbox runs the shared optimization core, then PERSISTS the
+// result: it rewrites the shift's route_tasks into the optimized order (synthesizing
+// warehouse_stop rows), applies the order atomically via the itinerary domain, and
+// saves the shift's optimization metadata. This is the live start-shift and mid-shift
+// re-optimization path. The manager preview never enters this persistence half.
+//
+// isFirstOptimization: true = shift starting (UPDATE tasks), false = mid-shift
+// reoptimization (DELETE+CREATE tasks).
+func optimizeRouteWithMapbox(
+	db *sqlx.DB,
+	shiftID string,
+	capacity int,
+	driverLat, driverLon float64,
+	warehouseLat, warehouseLon float64,
+	warehouseAddr string,
+	binsPreloaded bool,
+	isFirstOptimization bool,
+	customStartLat, customStartLon *float64,
+	customStartAddr *string,
+	customEndLat, customEndLon *float64,
+	customEndAddr *string,
+) error {
+	req, routePtr, err := buildAndOptimizeShiftRoute(
+		db, shiftID, capacity, driverLat, driverLon,
+		warehouseLat, warehouseLon, warehouseAddr, binsPreloaded,
+		customStartLat, customStartLon, customStartAddr,
+		customEndLat, customEndLon, customEndAddr,
+	)
+	if err != nil {
+		return err
+	}
+	if req == nil || routePtr == nil {
+		// No tasks to optimize — nothing to persist.
+		return nil
+	}
+	route := *routePtr
 
 	// Step 5: Handle existing tasks based on optimization type
 	now := time.Now().Unix()
