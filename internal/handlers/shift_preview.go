@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -51,6 +52,7 @@ type shiftPreviewResponse struct {
 	Warehouse              previewLocation `json:"warehouse"`
 	Stops                  []previewStop   `json:"stops"`
 	StopCount              int             `json:"stop_count"`
+	Capacity               int             `json:"capacity"` // truck bin capacity used for this run
 }
 
 // PreviewShiftOptimization runs the SAME optimizer the driver's start-shift runs,
@@ -95,9 +97,22 @@ func PreviewShiftOptimization(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// Optional request-body override so a manager can preview "what if the truck
+		// holds N bins" without changing the shift. Empty body is fine (io.EOF ignored).
+		var overrides struct {
+			Capacity *int `json:"capacity"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&overrides)
+
 		capacity := 4
 		if shift.TruckBinCapacity != nil {
 			capacity = *shift.TruckBinCapacity
+		}
+		if overrides.Capacity != nil && *overrides.Capacity > 0 {
+			capacity = *overrides.Capacity
+			if capacity > 100 {
+				capacity = 100 // sane ceiling
+			}
 		}
 
 		warehouseLat, warehouseLon := 0.0, 0.0
@@ -144,6 +159,7 @@ func PreviewShiftOptimization(db *sqlx.DB) http.HandlerFunc {
 			StartLocation: startLoc,
 			Warehouse:     previewLocation{Latitude: warehouseLat, Longitude: warehouseLon, Address: warehouseAddr},
 			Stops:         []previewStop{},
+			Capacity:      capacity,
 		}
 
 		// No tasks → empty (but valid) preview.
