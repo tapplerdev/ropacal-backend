@@ -131,6 +131,7 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 			rt.fill_percentage,
 			rt.potential_location_id,
 			rt.new_bin_number,
+			rt.placement_source,
 			rt.move_request_id,
 			rt.destination_latitude,
 			rt.destination_longitude,
