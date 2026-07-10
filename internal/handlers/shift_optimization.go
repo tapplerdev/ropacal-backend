@@ -269,8 +269,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		}
 	}
 
-	// bins on truck now = (preloaded at start + everything loaded so far)
-	//                     − (everything deployed so far). Clamp to [0, capacity].
+	// bins physically on truck now = (preloaded at start + everything loaded so far)
+	//                                − (everything deployed so far). Clamp to [0, capacity].
+	// (Kept for the log line — the honest physical count.)
 	binsOnTruck := (shift.PreloadedBins + warehouseRowsCompleted + redeployPickupsCompleted) -
 		(placementsCompleted + redeployDropoffsCompleted)
 	if binsOnTruck < 0 {
@@ -278,6 +279,22 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	}
 	if binsOnTruck > capacity {
 		binsOnTruck = capacity
+	}
+
+	// Bins available FOR PLACEMENTS = preloaded + warehouse reloads − placements done. This is
+	// binsOnTruck MINUS the in-flight redeployment bins (pickup done, dropoff pending) — their
+	// redeploy terms cancel here — because such a bin sits on the truck committed to its OWN
+	// dropoff and is not placement stock. Crediting it to placements would make the solver
+	// under-reload and route the driver to place a bin they don't have. This placement-available
+	// count (never the raw physical one) gates the preload decision and seeds the optimizer.
+	// (At shift start nothing is completed, so this equals preloadedBins — the start path is
+	// unaffected; redeployments there are rigid warehouse pickups, so preload is all placement stock.)
+	placementBinsOnTruck := shift.PreloadedBins + warehouseRowsCompleted - placementsCompleted
+	if placementBinsOnTruck < 0 {
+		placementBinsOnTruck = 0
+	}
+	if placementBinsOnTruck > capacity {
+		placementBinsOnTruck = capacity
 	}
 
 	// Bins the REMAINING route still needs the driver to carry (one per placement /
@@ -292,32 +309,32 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		}
 	}
 
-	// "Fully preloaded" = the truck already holds ENOUGH to cover every remaining deploy.
-	// ONLY then is it safe to model deploys as plain dropoffs (no warehouse trip). A partial
-	// load (fewer on the truck than the route needs) MUST keep the warehouse-pickup model so
-	// OR-Tools schedules reload trips — otherwise it routes the driver to place bins they
-	// don't have. (This was the bug: a fabricated binsOnTruck made 20 placements on an 8-bin
-	// truck look fully preloaded → 0 reload runs → a physically impossible route.)
-	binsPreloaded := binsOnTruck > 0 && binsOnTruck >= binsNeeded
+	// "Fully preloaded" = enough PLACEMENT-available bins to cover every remaining deploy. ONLY
+	// then is it safe to model deploys as plain dropoffs (no warehouse trip). A partial load
+	// (fewer placement bins than the route needs) MUST keep the warehouse-pickup model so
+	// OR-Tools schedules reload trips — otherwise it routes the driver to place bins they don't
+	// have. Gating on placementBinsOnTruck (not raw physical binsOnTruck) keeps an in-flight
+	// redeployment bin from masquerading as placement stock.
+	binsPreloaded := placementBinsOnTruck > 0 && placementBinsOnTruck >= binsNeeded
 
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("🔢 [REOPTIMIZE] Bin Inventory:")
 	log.Printf("   Preloaded at start: %d", shift.PreloadedBins)
 	log.Printf("   Loaded: warehouse rows %d (×1) + redeploy pickups %d", warehouseRowsCompleted, redeployPickupsCompleted)
 	log.Printf("   Deployed: placements %d + redeploy dropoffs %d", placementsCompleted, redeployDropoffsCompleted)
-	log.Printf("   Bins on truck now: %d/%d", binsOnTruck, capacity)
+	log.Printf("   Bins on truck (physical): %d/%d", binsOnTruck, capacity)
+	log.Printf("   Placement-available bins: %d/%d", placementBinsOnTruck, capacity)
 	log.Printf("   Bins still needed (remaining deploys): %d", binsNeeded)
 	log.Printf("   → BinsPreloaded=%v", binsPreloaded)
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// Feed the derived decision to the optimizer. Fully preloaded → truck starts with its
-	// current bins and deploys are dropoffs; otherwise start empty and let OR-Tools schedule
-	// warehouse reloads.
-	if binsPreloaded {
-		req.Vehicles[0].StartupBins = binsOnTruck
-	} else {
-		req.Vehicles[0].StartupBins = 0
-	}
+	// Feed the derived decision to the optimizer. Seed with the PLACEMENT-available bins
+	// (not the raw physical count): fully preloaded → deploys become dropoffs; otherwise
+	// (Tier 2) still credit the partial load — the solver models placements as droppable-pickup
+	// + mandatory-dropoff, so those bins cover that many dropoffs and only the shortfall reloads
+	// (0 → shortfall=all, identical to the pre-Tier-2 model). The solver handles the
+	// full-truck+move corner internally.
+	req.Vehicles[0].StartupBins = placementBinsOnTruck
 	req.BinsPreloaded = binsPreloaded
 	log.Printf("📦 [REOPTIMIZE] BinsPreloaded=%v, StartupBins=%d/%d", req.BinsPreloaded, req.Vehicles[0].StartupBins, capacity)
 
@@ -979,8 +996,13 @@ func buildAndOptimizeShiftRoute(
 		req.Vehicles[0].StartupBins = preloadedBins
 		log.Printf("📦 [OPTIMIZER] Fully preloaded: StartupBins=%d/%d (>= %d needed) — placements modeled as dropoffs", preloadedBins, capacity, binsNeeded)
 	} else {
-		req.Vehicles[0].StartupBins = 0
-		log.Printf("📦 [OPTIMIZER] Not fully preloaded: %d on truck, %d needed — warehouse-pickup model with reloads", preloadedBins, binsNeeded)
+		// Tier 2: credit the PARTIAL load. The solver models placements as droppable-pickup
+		// + mandatory-dropoff, so the bins already aboard cover that many dropoffs and only
+		// the shortfall (binsNeeded − preloadedBins) reloads at the warehouse. (preloadedBins
+		// is 0 when nothing's aboard → shortfall = all, identical to the pre-Tier-2 model.)
+		// The solver internally handles the full-truck+move corner (leaves a slot).
+		req.Vehicles[0].StartupBins = preloadedBins
+		log.Printf("📦 [OPTIMIZER] Partial preload: StartupBins=%d/%d, %d needed — reload only the shortfall", preloadedBins, capacity, binsNeeded)
 	}
 
 	// Convert tasks to optimization format
