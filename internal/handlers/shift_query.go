@@ -653,6 +653,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 				rt.after_photo_longitude,
 				rt.potential_location_id,
 				rt.new_bin_number,
+				rt.placement_source,
 				pl.address          AS placement_address,
 				pl.converted_to_bin_id AS placement_created_bin_id,
 				cb.bin_number       AS placement_created_bin_number,
