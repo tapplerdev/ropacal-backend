@@ -193,7 +193,9 @@ redeployment):**
 | user-facing label | "Placement" | **"Redeployment · Bin #N"** — never expose that it's a placement internally |
 
 (`placement_source='warehouse'` is a third, LEGACY value from pre-move-request
-warehouse deployments — historical shifts only, slated for removal.)
+warehouse deployments — historical rows only; its completion path was RETIRED to a
+410 tombstone and the pickup-pair redeploy optimizer handling deleted, 2026-07-10,
+after verifying zero live shifts carried either shape.)
 
 The layers are hard-linked so they can't drift: completing the placement finalizes
 the move; cancelling the move soft-deletes the task and reverts the bin to
