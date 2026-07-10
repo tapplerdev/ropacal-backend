@@ -210,6 +210,20 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		return ""
 	}
 
+	// Build lookup: move_request_id → move_type (redeployment vs relocation/store/
+	// pickup_only). Redeployments draw a bin from the warehouse like a placement and
+	// so count toward the truck's bin inventory; the other move types are self-contained
+	// field moves and don't. Same query the start path uses so both classify identically.
+	moveRequestTypes := make(map[string]string)
+	var mrRows []struct {
+		ID       string `db:"id"`
+		MoveType string `db:"move_type"`
+	}
+	db.Select(&mrRows, `SELECT id, move_type FROM bin_move_requests WHERE id IN (SELECT DISTINCT move_request_id FROM route_tasks WHERE shift_id = $1 AND move_request_id IS NOT NULL AND is_deleted = false)`, shiftID)
+	for _, mr := range mrRows {
+		moveRequestTypes[mr.ID] = mr.MoveType
+	}
+
 	// Step 5.5: Calculate bins currently on truck (two-warehouse trick)
 	// Count completed warehouse stops (bins loaded) and completed placements (bins used)
 	var allTasks []models.RouteTask
@@ -222,65 +236,92 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		log.Printf("⚠️  [REOPTIMIZE] Failed to fetch all tasks for bin calculation: %v", err)
 	}
 
-	warehouseStopsCompleted := 0
+	// Derive the truck's HONEST current load from completed bin-consuming work, tracking
+	// which legs LOAD a bin onto the truck vs. take one OFF into the field:
+	//   LOAD  (+): completed warehouse_stop (a placement reload — the old bug multiplied
+	//             this by capacity: 5 rows × 8 = 40 phantom bins) and completed redeployment
+	//             PICKUP (bin fetched from the warehouse onto the truck).
+	//   DEPLOY (−): completed placement and completed redeployment DROPOFF (bin left in field).
+	// Relocation/store/pickup_only legs move an EXISTING field bin committed to its own
+	// dropoff — they aren't fungible warehouse stock — so they're NOT counted here.
+	warehouseRowsCompleted := 0
 	placementsCompleted := 0
+	redeployPickupsCompleted := 0
+	redeployDropoffsCompleted := 0
 	for _, t := range allTasks {
-		if t.IsCompleted == 1 {
-			if t.TaskType == "warehouse_stop" {
-				warehouseStopsCompleted++
-			} else if t.TaskType == "placement" {
-				placementsCompleted++
+		if t.IsCompleted != 1 {
+			continue
+		}
+		isRedeploy := t.MoveRequestID != nil && moveRequestTypes[*t.MoveRequestID] == "redeployment"
+		switch t.TaskType {
+		case "warehouse_stop":
+			warehouseRowsCompleted++
+		case "placement":
+			placementsCompleted++
+		case "pickup":
+			if isRedeploy {
+				redeployPickupsCompleted++
+			}
+		case "dropoff":
+			if isRedeploy {
+				redeployDropoffsCompleted++
 			}
 		}
 	}
 
-	// Calculate bins on truck
-	// Bins come from: preloaded at shift start + warehouse stops during shift
-	// Bins used by: completed placements
-	binsLoaded := shift.PreloadedBins + (warehouseStopsCompleted * capacity)
-	binsUsed := placementsCompleted
-	binsOnTruck := binsLoaded - binsUsed
-
+	// bins on truck now = (preloaded at start + everything loaded so far)
+	//                     − (everything deployed so far). Clamp to [0, capacity].
+	binsOnTruck := (shift.PreloadedBins + warehouseRowsCompleted + redeployPickupsCompleted) -
+		(placementsCompleted + redeployDropoffsCompleted)
 	if binsOnTruck < 0 {
-		binsOnTruck = 0 // Safety check
+		binsOnTruck = 0
+	}
+	if binsOnTruck > capacity {
+		binsOnTruck = capacity
 	}
 
-	// Count remaining (uncompleted) placements
-	remainingPlacements := 0
+	// Bins the REMAINING route still needs the driver to carry (one per placement /
+	// redeployment pickup) — the same definition buildAndOptimizeShiftRoute (the verified
+	// start path) uses, so start and reopt gate identically.
+	binsNeeded := 0
 	for _, task := range tasks {
 		if task.TaskType == "placement" {
-			remainingPlacements++
+			binsNeeded++
+		} else if task.TaskType == "pickup" && task.MoveRequestID != nil && moveRequestTypes[*task.MoveRequestID] == "redeployment" {
+			binsNeeded++
 		}
 	}
 
-	// KEY FIX: If remaining placements fit within truck capacity, treat ALL as preloaded.
-	// This prevents OR-Tools from creating a separate warehouse stop per placement.
-	// The end-of-route warehouse stop (added by optimizer) serves as the reload point.
-	if remainingPlacements <= capacity && binsOnTruck < remainingPlacements {
-		log.Printf("📦 [REOPTIMIZE] Adjusting: %d remaining placements fit in truck (capacity=%d). Driver has %d, needs %d more.",
-			remainingPlacements, capacity, binsOnTruck, remainingPlacements-binsOnTruck)
-		log.Printf("📦 [REOPTIMIZE] Treating all as preloaded — driver will reload at warehouse stop.")
-		binsOnTruck = remainingPlacements
+	// "Fully preloaded" = the truck already holds ENOUGH to cover every remaining deploy.
+	// ONLY then is it safe to model deploys as plain dropoffs (no warehouse trip). A partial
+	// load (fewer on the truck than the route needs) MUST keep the warehouse-pickup model so
+	// OR-Tools schedules reload trips — otherwise it routes the driver to place bins they
+	// don't have. (This was the bug: a fabricated binsOnTruck made 20 placements on an 8-bin
+	// truck look fully preloaded → 0 reload runs → a physically impossible route.)
+	binsPreloaded := binsOnTruck > 0 && binsOnTruck >= binsNeeded
+
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("🔢 [REOPTIMIZE] Bin Inventory:")
+	log.Printf("   Preloaded at start: %d", shift.PreloadedBins)
+	log.Printf("   Loaded: warehouse rows %d (×1) + redeploy pickups %d", warehouseRowsCompleted, redeployPickupsCompleted)
+	log.Printf("   Deployed: placements %d + redeploy dropoffs %d", placementsCompleted, redeployDropoffsCompleted)
+	log.Printf("   Bins on truck now: %d/%d", binsOnTruck, capacity)
+	log.Printf("   Bins still needed (remaining deploys): %d", binsNeeded)
+	log.Printf("   → BinsPreloaded=%v", binsPreloaded)
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Feed the derived decision to the optimizer. Fully preloaded → truck starts with its
+	// current bins and deploys are dropoffs; otherwise start empty and let OR-Tools schedule
+	// warehouse reloads.
+	if binsPreloaded {
+		req.Vehicles[0].StartupBins = binsOnTruck
+	} else {
+		req.Vehicles[0].StartupBins = 0
 	}
-
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	log.Printf("🔢 [REOPTIMIZE] Bin Inventory Calculation:")
-	log.Printf("   Warehouse stops completed: %d", warehouseStopsCompleted)
-	log.Printf("   Bins loaded (original): %d (capacity=%d)", binsLoaded, capacity)
-	log.Printf("   Placements completed: %d", placementsCompleted)
-	log.Printf("   Bins on truck (adjusted): %d", binsOnTruck)
-	log.Printf("   Remaining placements: %d", remainingPlacements)
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-	// Set startup bins to current truck inventory
-	// Google will use Vehicle.StartupBins for native startLoadDemands
-	// Mapbox will ignore it and use the two-warehouse trick
-	req.Vehicles[0].StartupBins = binsOnTruck
-	req.BinsPreloaded = (binsOnTruck > 0)
-	log.Printf("📦 [REOPTIMIZE] BinsPreloaded=%v, StartupBins=%d/%d", req.BinsPreloaded, binsOnTruck, capacity)
+	req.BinsPreloaded = binsPreloaded
+	log.Printf("📦 [REOPTIMIZE] BinsPreloaded=%v, StartupBins=%d/%d", req.BinsPreloaded, req.Vehicles[0].StartupBins, capacity)
 
 	// Convert tasks to optimization format
-	placementIndex := 0
 	for _, task := range tasks {
 		switch task.TaskType {
 		case "collection":
@@ -304,9 +345,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 
 		case "placement":
 			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
-				if placementIndex < binsOnTruck {
-					// Bin already on truck — model as service task (just a dropoff)
-					log.Printf("   📦 Placement %d: bin on truck — modeled as dropoff", placementIndex+1)
+				if binsPreloaded {
+					// Enough bins already on truck — model as a service task (dropoff only, no warehouse)
+					log.Printf("   📦 [PLACEMENT] Bin already on truck — modeled as dropoff service")
 					svcTask := optimization.ServiceTask{
 						ID: *task.PotentialLocationID,
 						Location: optimization.Location{
@@ -321,8 +362,9 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 					}
 					req.ServiceTasks = append(req.ServiceTasks, svcTask)
 				} else {
-					// Need warehouse reload — model as shipment
-					log.Printf("   🏭 Placement %d: needs warehouse — modeled as shipment", placementIndex+1)
+					// Not fully preloaded — model as shipment (warehouse pickup → site dropoff)
+					// so OR-Tools schedules the reload trip(s).
+					log.Printf("   🏭 [PLACEMENT] Needs warehouse pickup — modeled as shipment")
 					placement := optimization.Placement{
 						ID:                *task.PotentialLocationID,
 						NewBinNumber:      getIntValue(task.NewBinNumber),
@@ -339,7 +381,6 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 					}
 					req.Placements = append(req.Placements, placement)
 				}
-				placementIndex++
 			}
 
 		case "pickup":
@@ -348,28 +389,51 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 				log.Printf("🔍 [OPTIMIZER] Move request %s: pickup=(%.6f,%.6f) '%s' → dropoff=(%.6f,%.6f) '%s'",
 					*task.MoveRequestID, task.Latitude, task.Longitude, getStringValue(task.Address),
 					*task.DestinationLatitude, *task.DestinationLongitude, getStringValue(task.DestinationAddress))
-				moveRequest := optimization.MoveRequest{
-					ID:        *task.MoveRequestID,
-					BinID:     getStringValue(task.BinID),
-					BinNumber: getIntValue(task.BinNumber),
-					PickupLocation: optimization.Location{
-						ID:        fmt.Sprintf("%s-pickup", *task.MoveRequestID),
-						Name:      fmt.Sprintf("Pickup #%d", getIntValue(task.BinNumber)),
-						Latitude:  task.Latitude,
-						Longitude: task.Longitude,
-						Address:   getStringValue(task.Address),
-					},
-					DropoffLocation: optimization.Location{
-						ID:        fmt.Sprintf("%s-dropoff", *task.MoveRequestID),
-						Name:      fmt.Sprintf("Dropoff #%d", getIntValue(task.BinNumber)),
-						Latitude:  *task.DestinationLatitude,
-						Longitude: *task.DestinationLongitude,
-						Address:   getStringValue(task.DestinationAddress),
-					},
-					PickupDuration:  120,
-					DropoffDuration: 120,
+
+				// Redeployment consumes truck stock like a placement. When the truck is fully
+				// preloaded there's no warehouse pickup — model it as a dropoff-only service (its
+				// pickup leg is auto-completed below). Otherwise keep the pickup→dropoff pair.
+				// (Relocation/store/pickup_only are self-contained field moves — always PD pairs.)
+				isRedeployment := moveRequestTypes[*task.MoveRequestID] == "redeployment"
+				if binsPreloaded && isRedeployment {
+					log.Printf("📦 [REDEPLOYMENT] Bins preloaded — modeled as service task (dropoff only)")
+					svcTask := optimization.ServiceTask{
+						ID: *task.MoveRequestID,
+						Location: optimization.Location{
+							ID:        fmt.Sprintf("%s-dropoff", *task.MoveRequestID),
+							Name:      fmt.Sprintf("Deploy Bin #%d", getIntValue(task.BinNumber)),
+							Latitude:  *task.DestinationLatitude,
+							Longitude: *task.DestinationLongitude,
+							Address:   getStringValue(task.DestinationAddress),
+						},
+						Duration: 120,
+						Label:    fmt.Sprintf("Deploy Bin #%d", getIntValue(task.BinNumber)),
+					}
+					req.ServiceTasks = append(req.ServiceTasks, svcTask)
+				} else {
+					moveRequest := optimization.MoveRequest{
+						ID:        *task.MoveRequestID,
+						BinID:     getStringValue(task.BinID),
+						BinNumber: getIntValue(task.BinNumber),
+						PickupLocation: optimization.Location{
+							ID:        fmt.Sprintf("%s-pickup", *task.MoveRequestID),
+							Name:      fmt.Sprintf("Pickup #%d", getIntValue(task.BinNumber)),
+							Latitude:  task.Latitude,
+							Longitude: task.Longitude,
+							Address:   getStringValue(task.Address),
+						},
+						DropoffLocation: optimization.Location{
+							ID:        fmt.Sprintf("%s-dropoff", *task.MoveRequestID),
+							Name:      fmt.Sprintf("Dropoff #%d", getIntValue(task.BinNumber)),
+							Latitude:  *task.DestinationLatitude,
+							Longitude: *task.DestinationLongitude,
+							Address:   getStringValue(task.DestinationAddress),
+						},
+						PickupDuration:  120,
+						DropoffDuration: 120,
+					}
+					req.MoveRequests = append(req.MoveRequests, moveRequest)
 				}
-				req.MoveRequests = append(req.MoveRequests, moveRequest)
 			}
 
 		case "service":
@@ -457,6 +521,19 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		log.Printf("🗑️  [REOPTIMIZE] Deleted %d incomplete warehouse_stop tasks (will regenerate)", deletedCount)
 	}
 
+	// When fully preloaded, redeployment bins are already aboard — their warehouse pickup
+	// legs are physically done and were modeled as dropoff-only services above. Complete
+	// those pickups so Resequence files them under completed (not phantom active stops).
+	// Mirrors the start path (optimizeRouteWithMapbox); best-effort like the purge above.
+	if binsPreloaded {
+		now := time.Now().Unix()
+		if rows, acErr := itinerary.AutoCompletePreloadedRedeploymentPickups(tx, shiftID, now); acErr != nil {
+			log.Printf("⚠️  [REOPTIMIZE] Failed to auto-complete preloaded redeployment pickups: %v", acErr)
+		} else if rows > 0 {
+			log.Printf("✅ [REOPTIMIZE] Auto-completed %d preloaded redeployment pickup(s)", rows)
+		}
+	}
+
 	taskIDToOriginal := make(map[string]models.RouteTask)
 	for _, task := range tasks {
 		taskIDToOriginal[task.ID] = task
@@ -541,6 +618,18 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 					if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == cleanID {
 						taskID = origTask.ID
 						log.Printf("      ✅ Matched service→placement: %s", taskID[:8])
+						break
+					}
+				}
+			}
+			// Try matching redeployment modeled as service (preloaded bins):
+			// "service-{moveRequestID}" → the redeployment's dropoff task. Its pickup
+			// leg was auto-completed in the tx below, so only the dropoff needs ordering.
+			if taskID == "" {
+				for _, origTask := range tasks {
+					if origTask.TaskType == "dropoff" && origTask.MoveRequestID != nil && *origTask.MoveRequestID == cleanID {
+						taskID = origTask.ID
+						log.Printf("      ✅ Matched service→dropoff (redeployment preloaded): %s", taskID[:8])
 						break
 					}
 				}
