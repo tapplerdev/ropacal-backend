@@ -14,7 +14,7 @@ type MovePlacement struct {
 	BinID          string
 	BinNumber      int
 	FillPercentage *int   // bin fields are nullable; nil → NULL (matches prior behavior)
-	MoveType       string // relocation/redeployment/store/pickup_only — all two-leg (pickup + dropoff)
+	MoveType       string // relocation/store/pickup_only = two-leg pair; redeployment = ONE placement task
 
 	PickupLat, PickupLng *float64 // bin's current location
 	PickupAddress        string
@@ -33,19 +33,19 @@ type MovePlacement struct {
 	Now int64
 }
 
-// AddMove assembles a move's route_tasks on a shift: a pickup at the bin's current
-// location + a dropoff at the destination immediately after it. Every move type is
-// two-leg (relocation/redeployment → the new location; store/pickup_only → the current
-// warehouse). Both rows share the move_request_id (the pickup→dropoff pair the optimizer
-// treats as one shipment, and CountStops treats as one logical bin). Downstream tasks are
-// shifted to open room at InsertSeq. Runs inside the caller's transaction (ext). Returns
-// the number of tasks added (always 2) so the caller can adjust shift.total_bins.
+// AddMove assembles a move's route_tasks on a shift. Pair types (relocation /
+// store / pickup_only) get a pickup at the bin's current location + a dropoff at
+// the destination immediately after it — both rows share the move_request_id (the
+// pickup→dropoff pair the optimizer treats as one shipment, and CountStops treats
+// as one logical bin). A REDEPLOYMENT gets ONE placement task instead (Phase 2 —
+// the branch below). Downstream tasks are shifted to open room at InsertSeq. Runs
+// inside the caller's transaction (ext). Returns the number of tasks added (2 for
+// pairs, 1 for redeployments) so the caller can adjust shift.total_bins.
 func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
-	// Every move relocates a bin from A→B, so all move types are two-leg: a pickup at the
-	// bin's current location + a dropoff at the destination. The destination is the move's
-	// new location (relocation/redeployment) or the current warehouse (store/pickup_only);
-	// the caller resolves it into DropoffLat/Lng. A 0,0 destination means the caller failed
-	// to resolve it — reject rather than route the bin to null island.
+	// The destination is the move's new location (relocation/redeployment) or the
+	// current warehouse (store/pickup_only); the caller resolves it into
+	// DropoffLat/Lng. A 0,0 destination means the caller failed to resolve it —
+	// reject rather than route the bin to null island.
 	if p.DropoffLat == 0 && p.DropoffLng == 0 {
 		return 0, fmt.Errorf("AddMove: move %s (%s): %w", p.MoveRequestID, p.MoveType, ErrMissingDestination)
 	}

@@ -354,73 +354,14 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			}
 
 			if src == "warehouse" {
-				// ── WAREHOUSE REDEPLOYMENT (LEGACY) ────────────────────────────────────
-				// DEPRECATED: new shifts no longer create placement tasks with
-				// placement_source='warehouse' — the shift builder now mints a real
-				// redeployment move request with a pickup/dropoff pair, completed via
-				// the move branch above. This branch remains only for in-flight shifts
-				// created before the consolidation; remove once none exist.
-				// The bin already exists (in_storage). Update its location + status → active.
-				log.Printf("[DIAGNOSTIC] 🏭 Warehouse redeployment path (legacy placement task)")
-
-				if taskBinID == nil || *taskBinID == "" {
-					log.Printf("[DIAGNOSTIC] ❌ No bin_id on warehouse placement task")
-					utils.RespondError(w, http.StatusBadRequest, "bin_id is required for warehouse deployment tasks")
-					return
-				}
-
-				// Use task coordinates + address as the deployment destination
-				var destLat, destLon float64
-				var destAddr *string
-				db.QueryRow(`SELECT latitude, longitude, address FROM route_tasks WHERE id = $1`, taskID).Scan(&destLat, &destLon, &destAddr)
-				addrVal := ""
-				if destAddr != nil {
-					addrVal = *destAddr
-				}
-
-				_, err = tx.Exec(`
-					UPDATE bins
-					SET status = 'active',
-					    current_street = $1,
-					    latitude = $2,
-					    longitude = $3,
-					    last_checked_at = $4,
-					    updated_at = $4
-					WHERE id = $5
-				`, addrVal, destLat, destLon, now, *taskBinID)
-				if err != nil {
-					log.Printf("[DIAGNOSTIC] ❌ Error redeploying warehouse bin: %v", err)
-					utils.RespondError(w, http.StatusInternalServerError, "Failed to redeploy bin")
-					return
-				}
-				log.Printf("[DIAGNOSTIC] ✅ Bin %s redeployed to active at (%f, %f)", *taskBinID, destLat, destLon)
-
-				// Broadcast bin_redeployed event to managers
-				if hub != nil {
-					hub.BroadcastToRole("manager", websocket.Message{
-						UserID: "",
-						Data: map[string]interface{}{
-							"type":     "bin_redeployed",
-							"bin_id":   *taskBinID,
-							"address":  addrVal,
-							"status":   "active",
-							"shift_id": shift.ID,
-						},
-					})
-					log.Printf("[DIAGNOSTIC] 📡 Broadcast bin_redeployed event to managers")
-				}
-
-				// Publish bin_redeployed via Centrifugo
-				if centrifugoClient != nil {
-					if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_redeployed", map[string]interface{}{
-						"bin_id":   *taskBinID,
-						"address":  addrVal,
-						"status":   "active",
-						"shift_id": shift.ID,
-					}); pubErr != nil {
-						log.Printf("[DIAGNOSTIC] ⚠️  Failed to publish bin_redeployed to Centrifugo: %v", pubErr)
-					}
-				}
+				// RETIRED (410, per the legacy-retirement pattern — #44): pre-move-request
+				// warehouse deployments (placement_source='warehouse') stopped being
+				// minted at the #42 consolidation, and slice 6 verified ZERO live shifts
+				// carry the shape before deleting the completion logic. Historical rows
+				// are read-only; anything hitting this is a stale client.
+				log.Printf("[DIAGNOSTIC] 🪦 Legacy warehouse placement %s — retired shape", taskID)
+				utils.RespondError(w, http.StatusGone, "Legacy warehouse deployment tasks are no longer completable — recreate the work as a redeployment move")
+				return
 			} else {
 				// ── POTENTIAL LOCATION PLACEMENT ──────────────────────────────────────
 				// Create a brand new bin from a potential location

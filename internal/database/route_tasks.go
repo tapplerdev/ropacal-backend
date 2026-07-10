@@ -740,14 +740,15 @@ func CreateShiftWithTasks(
 	}
 
 	// Warehouse deployments: each becomes a REAL redeployment move request
-	// (minted here, in the same tx) plus the standard two-leg pickup/dropoff
-	// task pair — the same shape as any other move, so completion, history,
-	// counts, the leg-order guard, and the optimizer all treat it uniformly.
-	// Replaces the old bespoke single placement task with
-	// placement_source='warehouse' (untracked, invisible in Move Requests).
+	// (minted here, in the same tx) plus ONE placement task at the destination
+	// (Phase 2: bin_id + placement_source='redeployment' + move_request_id) —
+	// the optimizer's placement model sources the bin from the Load-N warehouse
+	// run, and completing the placement finalizes the move. (Replaced both the
+	// pre-#42 untracked placement_source='warehouse' rows AND the interim
+	// pickup/dropoff pair shape.)
 	//
 	// The bin's status is deliberately NOT flipped to pending_move (unlike
-	// ScheduleBinMove): it stays in_storage until the dropoff completes,
+	// ScheduleBinMove): it stays in_storage until the placement completes,
 	// preserving warehouse-inventory visibility — the old deployment behavior.
 	nextSeq := len(tasks) + 1
 	mintedMoveIDs := make([]string, 0, len(warehouseDeployments))

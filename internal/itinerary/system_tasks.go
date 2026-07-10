@@ -103,23 +103,6 @@ func SkipWarehouseRun(ext sqlx.Ext, shiftID string, taskIDs []string, skipData [
 	return n, nil
 }
 
-// AutoCompletePreloadedRedeploymentPickups completes a shift's redeployment
-// pickup legs when the driver starts with the bins already on the truck —
-// the warehouse fetch is physically done, so the persisted route must not
-// send the driver back for them. First-optimization path only.
-func AutoCompletePreloadedRedeploymentPickups(ext sqlx.Ext, shiftID string, now int64) (int64, error) {
-	res, err := ext.Exec(ext.Rebind(`
-		UPDATE route_tasks SET is_completed = 1, completed_at = ?, updated_at = ?
-		WHERE shift_id = ? AND task_type = 'pickup' AND is_deleted = false AND is_completed = 0
-		  AND move_request_id IN (SELECT id FROM bin_move_requests WHERE move_type = 'redeployment')`),
-		now, now, shiftID)
-	if err != nil {
-		return 0, fmt.Errorf("auto-complete preloaded pickups: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
-}
-
 // Skip marks a task skipped-with-reason (processed: is_completed=1 +
 // skipped=true, so progress advances — see CountStops). When the task is a
 // pickup with a move, the paired incomplete dropoff is cascade-skipped: the

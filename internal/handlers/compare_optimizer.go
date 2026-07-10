@@ -154,14 +154,20 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 			case "placement":
 				log.Printf("🔍 Processing placement task: id=%s, potentialLocID=%v, lat=%v, lon=%v",
 					task.ID, task.PotentialLocationID, task.Latitude, task.Longitude)
-				// For placement tasks, latitude/longitude contain the placement location coordinates
-				if task.PotentialLocationID != nil && task.Latitude != nil && task.Longitude != nil {
+				// For placement tasks, latitude/longitude contain the placement location coordinates.
+				// Optimizer ID = potential location, or the route-task id for a redeployment
+				// placement (Phase 2, no potential location) — same fallback as the live paths.
+				if task.Latitude != nil && task.Longitude != nil {
+					plID := task.ID
+					if task.PotentialLocationID != nil {
+						plID = *task.PotentialLocationID
+					}
 					placement := optimization.Placement{
-						ID:                *task.PotentialLocationID,
+						ID:                plID,
 						NewBinNumber:      getIntValue(task.NewBinNumber),
 						WarehouseLocation: warehouseLocation,
 						PlacementLocation: optimization.Location{
-							ID:        *task.PotentialLocationID,
+							ID:        plID,
 							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
 							Latitude:  *task.Latitude,
 							Longitude: *task.Longitude,
@@ -171,10 +177,9 @@ func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
 						DropoffDuration: 120,
 					}
 					req.Placements = append(req.Placements, placement)
-					log.Printf("✅ Added placement: %s", *task.PotentialLocationID)
+					log.Printf("✅ Added placement: %s", plID)
 				} else {
-					log.Printf("⚠️  Skipping placement task %s: missing required fields (potentialLocID=%v, lat=%v, lon=%v)",
-						task.ID, task.PotentialLocationID != nil, task.Latitude != nil, task.Longitude != nil)
+					log.Printf("⚠️  Skipping placement task %s: missing coordinates", task.ID)
 				}
 
 			case "pickup":
