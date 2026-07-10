@@ -183,6 +183,37 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 		tasks = append(tasks, task)
 	}
 
+	// MapScan hands uuid/numeric/jsonb columns back as []byte, which
+	// encoding/json then emits as BASE64 — consumers were receiving
+	// id="ZTBiMmUy..." and latitude="MzcuNjE1..." instead of plain values.
+	// (Both known consumers grew defensive decoders around this over time —
+	// RemoveTasksFromShift's base64-decode-with-fallback and the app's
+	// route_task extension fallback loop — while driver endpoints without a
+	// decoder 500'd on the base64 ids: invalid uuid at the WHERE clause.)
+	// Normalize at the SOURCE: bytes → string, coordinates → numbers. The
+	// downstream decoders keep working: a plain UUID contains '-' (not in the
+	// base64 alphabet), so their decode fails and falls back to as-is.
+	numericKeys := map[string]bool{
+		"latitude": true, "longitude": true,
+		"destination_latitude": true, "destination_longitude": true,
+	}
+	for _, task := range tasks {
+		for k, v := range task {
+			b, ok := v.([]byte)
+			if !ok {
+				continue
+			}
+			s := string(b)
+			if numericKeys[k] {
+				if f, perr := strconv.ParseFloat(s, 64); perr == nil {
+					task[k] = f
+					continue
+				}
+			}
+			task[k] = s
+		}
+	}
+
 	// Log first 3 tasks to see coordinate data types
 	if len(tasks) > 0 {
 		log.Println("[DIAGNOSTIC] 🔍 RAW TASK DATA FROM DATABASE (first 3 tasks):")
