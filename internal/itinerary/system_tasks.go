@@ -74,6 +74,35 @@ func CompleteWarehouseRun(ext sqlx.Ext, shiftID string, taskIDs []string, now in
 	return n, nil
 }
 
+// SkipWarehouseRun skips a SPECIFIC set of a shift's warehouse stops in one
+// write — the skip twin of CompleteWarehouseRun. A reload run is ONE physical
+// stop rendered from N rows (one per bin), so the driver's single "Skip"
+// gesture must skip the whole run; skipping one bin-row at a time just surfaced
+// the next identical warehouse card and read as a frozen task. Skipped rows are
+// processed (is_completed=1 + skipped=true, the same shape Skip writes) so
+// progress advances; skipData is the caller-marshaled {"skip_reason": ...}.
+// Scoped hard like the complete twin: only this shift's incomplete, non-deleted
+// warehouse_stop rows whose id is in the list.
+func SkipWarehouseRun(ext sqlx.Ext, shiftID string, taskIDs []string, skipData []byte, now int64) (int64, error) {
+	if len(taskIDs) == 0 {
+		return 0, nil
+	}
+	q, args, err := sqlx.In(`
+		UPDATE route_tasks SET skipped = true, is_completed = 1, completed_at = ?, task_data = ?, updated_at = ?
+		WHERE shift_id = ? AND task_type = 'warehouse_stop'
+		  AND is_completed = 0 AND is_deleted = false AND id IN (?)`,
+		now, skipData, now, shiftID, taskIDs)
+	if err != nil {
+		return 0, fmt.Errorf("skip warehouse run: %w", err)
+	}
+	res, err := ext.Exec(ext.Rebind(q), args...)
+	if err != nil {
+		return 0, fmt.Errorf("skip warehouse run: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // AutoCompletePreloadedRedeploymentPickups completes a shift's redeployment
 // pickup legs when the driver starts with the bins already on the truck —
 // the warehouse fetch is physically done, so the persisted route must not

@@ -249,7 +249,11 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 	redeployPickupsCompleted := 0
 	redeployDropoffsCompleted := 0
 	for _, t := range allTasks {
-		if t.IsCompleted != 1 {
+		// SKIPPED rows are processed for progress (is_completed=1) but represent
+		// actions that did NOT physically happen — a skipped load put no bin on the
+		// truck, a skipped placement consumed none. Counting them corrupts the
+		// inventory in both directions, so only genuinely completed rows count.
+		if t.IsCompleted != 1 || t.Skipped {
 			continue
 		}
 		isRedeploy := t.MoveRequestID != nil && moveRequestTypes[*t.MoveRequestID] == "redeployment"

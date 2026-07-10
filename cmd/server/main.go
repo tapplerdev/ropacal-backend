@@ -266,7 +266,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"version": "tier2-partial-preload",
+			"version": "skip-warehouse-run",
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -389,6 +389,7 @@ func main() {
 			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub, centrifugoClient))
 			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub, centrifugoClient))
 			r.Post("/driver/shift/complete-warehouse-run", handlers.CompleteWarehouseRun(db, wsHub, centrifugoClient)) // Batch-complete a whole reload run (one tap for N loads)
+			r.Post("/driver/shift/skip-warehouse-run", handlers.SkipWarehouseRun(db, wsHub, centrifugoClient))         // Batch-skip a whole reload run (skip twin of the above)
 			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, redisClient, wsHub, centrifugoClient))
 
 			// Shift history
