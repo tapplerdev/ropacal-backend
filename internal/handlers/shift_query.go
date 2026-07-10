@@ -991,22 +991,18 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 				logicalTotal++
 				processedMoveRequests[moveReqID] = true
 
-				// Check if BOTH waypoints are completed
-				pickupCompleted := false
-				dropoffCompleted := false
-
+				// Complete when ALL the move's waypoints are done (mirrors
+				// itinerary.CountStops): a pair-move needs both legs, a
+				// redeployment placement (single-leg move) just its one task.
+				groupCompleted := true
 				for _, b := range bins {
-					if b.MoveRequestID != nil && *b.MoveRequestID == moveReqID {
-						if b.StopType == "pickup" && b.IsCompleted == 1 {
-							pickupCompleted = true
-						}
-						if b.StopType == "dropoff" && b.IsCompleted == 1 {
-							dropoffCompleted = true
-						}
+					if b.MoveRequestID != nil && *b.MoveRequestID == moveReqID && b.IsCompleted != 1 {
+						groupCompleted = false
+						break
 					}
 				}
 
-				if pickupCompleted && dropoffCompleted {
+				if groupCompleted {
 					logicalCompleted++
 				}
 			}

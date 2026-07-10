@@ -335,6 +335,13 @@ func UpdateBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 						http.Error(w, "Changing this move's destination requires new_latitude, new_longitude, and an address (for store/pickup-only moves, the warehouse location must be configured)", http.StatusBadRequest)
 						return
 					}
+					if errors.Is(err, itinerary.ErrRedeployShapeChange) {
+						// Redeployments ride the placement rails (one placement task);
+						// other types are pickup/dropoff pairs — shapes can't convert
+						// mid-shift. Clean 400 with guidance, not a 500.
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
 					log.Printf("Error reconciling route_tasks: %v", err)
 					http.Error(w, "Failed to update the driver's route", http.StatusInternalServerError)
 					return

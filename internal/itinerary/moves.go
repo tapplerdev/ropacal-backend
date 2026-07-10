@@ -49,6 +49,37 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 	if p.DropoffLat == 0 && p.DropoffLng == 0 {
 		return 0, fmt.Errorf("AddMove: move %s (%s): %w", p.MoveRequestID, p.MoveType, ErrMissingDestination)
 	}
+
+	// Phase 2: a redeployment rides the PLACEMENT rails — ONE placement task at
+	// the destination (bin_id + placement_source='redeployment' + move_request_id),
+	// not a pickup/dropoff pair. The warehouse fetch is not a driver-visible leg:
+	// the optimizer's placement model sources the bin from the "Load N bins" run,
+	// and the driver completes a placement-style "Place Bin #N" stop that also
+	// finalizes the move request.
+	if p.MoveType == "redeployment" {
+		if _, err := ext.Exec(ext.Rebind(`
+			UPDATE route_tasks SET sequence_order = sequence_order + 1
+			WHERE shift_id = ? AND sequence_order >= ?`), shiftID, p.InsertSeq); err != nil {
+			return 0, fmt.Errorf("shift sequence order: %w", err)
+		}
+		if _, err := ext.Exec(ext.Rebind(`
+			INSERT INTO route_tasks (
+				id, shift_id, bin_id, bin_number, sequence_order, task_type,
+				latitude, longitude, address,
+				new_bin_number, placement_source,
+				destination_latitude, destination_longitude, destination_address,
+				move_request_id, move_type, added_by, addition_reason, is_completed, created_at
+			) VALUES (?, ?, ?, ?, ?, 'placement', ?, ?, ?, ?, 'redeployment', ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
+			uuid.New().String(), shiftID, p.BinID, p.BinNumber, p.InsertSeq,
+			p.DropoffLat, p.DropoffLng, p.DropoffAddress,
+			p.BinNumber, // "Place Bin #N" display parity with placements
+			p.DropoffLat, p.DropoffLng, p.DropoffAddress,
+			p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
+			return 0, fmt.Errorf("insert redeployment placement: %w", err)
+		}
+		return 1, nil
+	}
+
 	binsAdded := 2
 
 	// Open room at the insert position.

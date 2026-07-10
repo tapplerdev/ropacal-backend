@@ -149,7 +149,11 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 
 			// Unassign underlying resources
 			switch task.TaskType {
-			case models.TaskTypePickup, models.TaskTypeDropoff:
+			case models.TaskTypePickup, models.TaskTypeDropoff, models.TaskTypePlacement:
+				// A redeployment rides the placement rails (Phase 2): its single
+				// placement task carries move_request_id and releases like a pair
+				// leg. A potential-location placement instead unassigns its
+				// location below — the nil-guards pick the right arm.
 				// Detach the move from the shift and return it to that shift
 				// driver's backlog (status='assigned', assignment_type='manual',
 				// assigned_user_id = the shift's driver), matching the shift-level
@@ -195,8 +199,8 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 					}
 				}
 
-			case models.TaskTypePlacement:
-				// Unassign potential location
+				// Unassign potential location (potential-location placements only —
+				// nil on a redeployment placement, whose move was released above).
 				if task.PotentialLocationID != nil {
 					log.Printf("   Unassigning potential location %s", *task.PotentialLocationID)
 					_, err = tx.Exec(`
@@ -682,9 +686,12 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					return
 				}
 
-				// Unassign resources based on task type
+				// Unassign resources based on task type. A redeployment placement
+				// (Phase 2: one placement task carrying move_request_id) unassigns
+				// its move like a pair leg; a potential-location placement
+				// unassigns its location — the nil-guards pick the right arm.
 				switch task.TaskType {
-				case models.TaskTypePickup, models.TaskTypeDropoff:
+				case models.TaskTypePickup, models.TaskTypeDropoff, models.TaskTypePlacement:
 					if task.MoveRequestID != nil && !loggedMoveRequests[*task.MoveRequestID] {
 						// Get move request assignment details BEFORE unassigning (for history logging)
 						var moveReq struct {
@@ -747,7 +754,6 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 						// Mark as logged to avoid duplicate entries
 						loggedMoveRequests[*task.MoveRequestID] = true
 					}
-				case models.TaskTypePlacement:
 					if task.PotentialLocationID != nil {
 						_, err = tx.Exec(`
 							UPDATE potential_locations

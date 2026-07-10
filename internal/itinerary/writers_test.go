@@ -219,45 +219,31 @@ func TestAddMove_RelocationInsertsPickupAndDropoff(t *testing.T) {
 	}
 }
 
-// Redeployment (warehouse/in_storage bin → placement) is a two-leg move like a
-// relocation: it must insert BOTH a pickup and a dropoff so the dropoff completion
-// finalizes the move (relocates the bin + converts the source potential_location).
-func TestAddMove_RedeploymentInsertsPickupAndDropoff(t *testing.T) {
+// Phase 2: a redeployment rides the PLACEMENT rails — AddMove inserts ONE
+// placement task at the destination (bin_id + new_bin_number +
+// placement_source='redeployment' + move_request_id), NOT a pickup/dropoff
+// pair. The warehouse fetch is the optimizer's job (the Load-N run), and the
+// placement's completion finalizes the move.
+func TestAddMove_RedeploymentInsertsPlacement(t *testing.T) {
 	db, mock := mockExt(t)
 	defer db.Close()
 
-	mock.ExpectExec("(?s)UPDATE route_tasks SET sequence_order = sequence_order \\+ \\$1.*WHERE shift_id = \\$2 AND sequence_order >= \\$3").
-		WithArgs(2, "shift-1", 3).
+	// Opens room for exactly ONE row (literal +1, not a bind).
+	mock.ExpectExec("(?s)UPDATE route_tasks SET sequence_order = sequence_order \\+ 1\\s*WHERE shift_id = \\$1 AND sequence_order >= \\$2").
+		WithArgs("shift-1", 3).
 		WillReturnResult(sqlmock.NewResult(0, 4))
 
-	// pickup INSERT — carries destination_* (redeployment is two-leg, so the pickup is
-	// optimizer-visible via #34, same as relocation).
-	mock.ExpectExec("(?s)INSERT INTO route_tasks.*fill_percentage,\\s*destination_latitude.*VALUES").
+	// Single placement INSERT at the destination, redeployment-tagged
+	// (task_type and placement_source are SQL literals in the statement).
+	mock.ExpectExec("(?s)INSERT INTO route_tasks.*new_bin_number, placement_source,.*VALUES.*'placement'.*'redeployment'").
 		WithArgs(
-			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3, string(Pickup),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), "pickup addr", sqlmock.AnyArg(),
+			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 3,
+			37.3, -121.9, "dropoff addr",
+			42, // new_bin_number = the existing bin's number ("Place Bin #42")
 			37.3, -121.9, "dropoff addr",
 			"move-1", "redeployment", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	// dropoff INSERT (seq = InsertSeq+1 = 4)
-	mock.ExpectExec("(?s)INSERT INTO route_tasks.*destination_latitude, destination_longitude, destination_address,.*VALUES").
-		WithArgs(
-			sqlmock.AnyArg(), "shift-1", "bin-1", 42, 4, string(Dropoff),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
-			sqlmock.AnyArg(), sqlmock.AnyArg(), "dropoff addr",
-			"move-1", "redeployment", sqlmock.AnyArg(), sqlmock.AnyArg(), int64(1700000000),
-		).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	mock.ExpectQuery("(?s)SELECT sequence_order FROM route_tasks WHERE shift_id = \\$1 AND move_request_id = \\$2 AND task_type = 'pickup'").
-		WithArgs("shift-1", "move-1").
-		WillReturnRows(sqlmock.NewRows([]string{"sequence_order"}).AddRow(3))
-
-	mock.ExpectQuery("(?s)SELECT sequence_order FROM route_tasks WHERE shift_id = \\$1 AND move_request_id = \\$2 AND task_type = 'dropoff'").
-		WithArgs("shift-1", "move-1").
-		WillReturnRows(sqlmock.NewRows([]string{"sequence_order"}).AddRow(4))
 
 	n, err := AddMove(db, "shift-1", MovePlacement{
 		InsertSeq:      3,
@@ -274,8 +260,8 @@ func TestAddMove_RedeploymentInsertsPickupAndDropoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddMove(redeployment) = %v, want nil", err)
 	}
-	if n != 2 {
-		t.Fatalf("AddMove(redeployment) returned %d, want 2", n)
+	if n != 1 {
+		t.Fatalf("AddMove(redeployment) returned %d, want 1 (single placement row)", n)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)

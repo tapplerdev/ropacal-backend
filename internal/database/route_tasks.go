@@ -726,37 +726,35 @@ func CreateShiftWithTasks(
 				return "", 0, nil, nil, fmt.Errorf("failed to create deployment move for bin #%d: %w", d.BinNumber, err)
 			}
 
-			// Two legs in pickup-then-dropoff order, dest_* mirrored on both
-			// (the same shape CreateShiftWithTasks writes for dashboard-built
-			// moves and AddMove writes mid-shift).
-			for _, leg := range []struct {
-				taskType string
-				lat, lng float64
-				addr     string
-			}{
-				{"pickup", *warehouseLat, *warehouseLon, whAddr},
-				{"dropoff", d.DestinationLatitude, d.DestinationLongitude, d.DestinationAddress},
-			} {
-				if err = itinerary.InsertCreatedTask(tx, shiftID, itinerary.CreatedTask{
-					ID: uuid.New().String(), Seq: nextSeq, TaskType: leg.taskType,
-					Lat: leg.lat, Lng: leg.lng,
-					Address:       leg.addr,
-					BinID:         d.BinID,
-					BinNumber:     d.BinNumber,
-					MoveRequestID: moveID,
-					DestLat:       d.DestinationLatitude,
-					DestLng:       d.DestinationLongitude,
-					DestAddress:   d.DestinationAddress,
-					MoveType:      "redeployment",
-					TaskData:      []byte("{}"),
-					CreatedAt:     now,
-				}); err != nil {
-					return "", 0, nil, nil, fmt.Errorf("failed to create deployment %s task: %w", leg.taskType, err)
-				}
-				nextSeq++
+			// Phase 2: a redeployment rides the PLACEMENT rails — ONE placement task
+			// at the destination (bin_id + placement_source='redeployment' +
+			// move_request_id), NOT a pickup/dropoff pair. The warehouse fetch is not
+			// a driver-visible leg: the optimizer's placement model sources the bin
+			// from the one-tap "Load N bins" run automatically, and the driver
+			// completes a placement-style "Place Bin #N" stop. The move request above
+			// remains the manager-facing record (audit, one-open-move, cancel-revert)
+			// and is finalized when this placement task completes.
+			if err = itinerary.InsertCreatedTask(tx, shiftID, itinerary.CreatedTask{
+				ID: uuid.New().String(), Seq: nextSeq, TaskType: "placement",
+				Lat: d.DestinationLatitude, Lng: d.DestinationLongitude,
+				Address:         d.DestinationAddress,
+				BinID:           d.BinID,
+				BinNumber:       d.BinNumber,
+				NewBinNumber:    d.BinNumber, // "Place Bin #N" display parity with placements
+				PlacementSource: "redeployment",
+				MoveRequestID:   moveID,
+				DestLat:         d.DestinationLatitude,
+				DestLng:         d.DestinationLongitude,
+				DestAddress:     d.DestinationAddress,
+				MoveType:        "redeployment",
+				TaskData:        []byte("{}"),
+				CreatedAt:       now,
+			}); err != nil {
+				return "", 0, nil, nil, fmt.Errorf("failed to create deployment placement task: %w", err)
 			}
+			nextSeq++
 			mintedMoveIDs = append(mintedMoveIDs, moveID)
-			log.Printf("   ✅ Deployment move %s minted (bin #%d: warehouse → %s, pickup+dropoff seq %d-%d)", moveID, d.BinNumber, d.DestinationAddress, nextSeq-2, nextSeq-1)
+			log.Printf("   ✅ Deployment move %s minted (bin #%d: warehouse → %s, placement task seq %d)", moveID, d.BinNumber, d.DestinationAddress, nextSeq-1)
 		}
 	}
 
@@ -765,8 +763,8 @@ func CreateShiftWithTasks(
 	// Let the optimizer handle warehouse returns for optimal routing
 	//
 	// task_count = rows actually inserted (skips excluded; each deployment now
-	// contributes its pickup+dropoff pair).
-	actualTasks := len(tasks) - skippedInactive + 2*len(warehouseDeployments)
+	// contributes ONE placement task — Phase 2 redeployment-as-placement).
+	actualTasks := len(tasks) - skippedInactive + len(warehouseDeployments)
 	if skippedInactive > 0 {
 		log.Printf("⚠️  Skipped %d inactive bins (retired/missing) from shift", skippedInactive)
 	}

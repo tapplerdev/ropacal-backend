@@ -27,6 +27,14 @@ type ReconcileOutcome struct {
 // reconcile to — the caller maps it to a 400 instead of silently leaving a bad route.
 var ErrMissingDestination = errors.New("move requires a destination (address + coordinates)")
 
+// ErrRedeployShapeChange is returned when a move-type edit crosses the redeployment
+// boundary while the move is on a shift. A redeployment rides the placement rails
+// (one placement task); the other move types are pickup/dropoff pairs — converting
+// between shapes mid-shift is semantically nonsensical (a stored bin can't become a
+// field relocation) and structurally unsafe. Callers map this to a 400 telling the
+// manager to unassign the move first.
+var ErrRedeployShapeChange = errors.New("cannot change a move to/from redeployment while it is assigned to a shift — unassign it first")
+
 // ReconcileMove brings a move's route_tasks in line with a move_type/address change on the
 // move's shift — the itinerary domain owns these route_tasks writes so the handler doesn't
 // hand-roll them. Every move is two-leg (a pickup + a drop-off at the destination); the
@@ -56,16 +64,37 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 		return out, fmt.Errorf("reconcile: fetch tasks: %w", err)
 	}
 
-	// Every move is two-leg with a destination (#37): relocation/redeployment → the new
-	// location; store/pickup_only → the current warehouse. The caller resolves `dest` for
-	// the (possibly changed) move type. Reconcile runs only on a move_type/address change,
-	// so it re-asserts the correct two-leg shape: exactly one dropoff at `dest`, the pickup's
-	// destination hint (#34) refreshed, and move_type synced on both legs. oldType is no
-	// longer needed for a leg decision (all moves are two-leg).
-	_ = oldType
+	// Phase 2: redeployments ride the placement rails (ONE placement task), while the
+	// other move types are pickup/dropoff pairs. Reconcile handles three shapes:
+	//   redeployment → redeployment: destination/address edit → update the placement row.
+	//   pair-type    → pair-type:    the two-leg re-assertion below (pre-Phase-2 logic).
+	//   crossing the boundary:       rejected — shapes can't convert mid-shift.
 	_ = addressChanged
 	if dest == nil {
 		return out, ErrMissingDestination
+	}
+	if (oldType == "redeployment") != (newType == "redeployment") {
+		return out, ErrRedeployShapeChange
+	}
+	if newType == "redeployment" {
+		for _, t := range tasks {
+			if t.TaskType != "placement" {
+				continue
+			}
+			if _, err := ext.Exec(ext.Rebind(`
+				UPDATE route_tasks
+				SET latitude = ?, longitude = ?, address = ?,
+				    destination_latitude = ?, destination_longitude = ?, destination_address = ?,
+				    updated_at = ?
+				WHERE id = ?`),
+				dest.Lat, dest.Lng, dest.Address,
+				dest.Lat, dest.Lng, dest.Address,
+				now, t.ID); err != nil {
+				return out, fmt.Errorf("reconcile: update redeployment placement: %w", err)
+			}
+			out.AddressUpdated = true
+		}
+		return out, nil
 	}
 
 	pickupSeq, pickupFound := 0, false

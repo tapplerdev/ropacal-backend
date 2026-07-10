@@ -138,6 +138,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				WHERE shift_id = $1
 				  AND bin_id = $2
 				  AND is_completed = 0
+				  AND is_deleted = false
 				ORDER BY sequence_order ASC
 				LIMIT 1
 			`, shift.ID, req.BinID).Scan(&taskID, &taskType)
@@ -150,6 +151,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				WHERE shift_id = $1
 				  AND id = $2
 				  AND is_completed = 0
+				  AND is_deleted = false
 				LIMIT 1
 			`, shift.ID, req.TaskID).Scan(&taskID, &taskType)
 		}
@@ -209,7 +211,15 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			}
 		}
 		isMoveDropoff := moveErr == nil && taskType == "dropoff"
+		// Phase 2: a redeployment rides the placement rails — ONE placement task
+		// carrying the move_request_id. Completing it IS the delivery: it finalizes
+		// the move and relocates the bin. No leg-order guard applies (there is no
+		// pickup leg; the bin is sourced from the warehouse load run).
+		isRedeployPlacement := moveErr == nil && taskType == "placement" && moveRequest.MoveType == "redeployment"
 		var moveFin moveFinalization
+		if isRedeployPlacement {
+			moveFin = prepareMoveCompletion(db, moveRequest)
+		}
 		if isMoveDropoff {
 			// Leg-order guard: a dropoff must not complete (and finalize the move,
 			// relocating the bin in the system) while its paired pickup is still
@@ -284,6 +294,26 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					utils.RespondError(w, http.StatusInternalServerError, "Failed to finalize move request")
 					return
 				}
+			} else if isRedeployPlacement {
+				// Phase 2 redeployment placement: the "Place Bin #N" completion IS the
+				// delivery — finalize the move atomically (bin → active at the
+				// destination with reverse-geocoded address, move → completed) and
+				// stamp the driver's placement photo on the bin, exactly like a
+				// potential-location placement stamps the new bin's photo.
+				log.Printf("[DIAGNOSTIC] 🚚 Redeployment placement — finalizing move + relocating bin #%v", moveRequest.BinID)
+				if err = applyMoveCompletion(tx, moveRequest, moveFin, now); err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error finalizing redeployment: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to finalize redeployment")
+					return
+				}
+				if _, err = tx.Exec(`
+					UPDATE bins SET placement_photo_url = COALESCE($1, placement_photo_url),
+					    last_checked_at = $2, updated_at = $2
+					WHERE id = $3`, req.PhotoUrl, now, moveRequest.BinID); err != nil {
+					log.Printf("[DIAGNOSTIC] ❌ Error stamping redeployment photo: %v", err)
+					utils.RespondError(w, http.StatusInternalServerError, "Failed to record placement photo")
+					return
+				}
 			} else {
 				log.Printf("[DIAGNOSTIC] This is the PICKUP - move request remains in_progress")
 			}
@@ -311,6 +341,17 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 				src = *placementSource
 			}
 			log.Printf("[DIAGNOSTIC]    placement_source: %s", src)
+
+			if src == "redeployment" {
+				// Phase 2 redeployment placement whose move is no longer open —
+				// the move branch above claims every placement with a live
+				// (assigned/in_progress) move, so reaching here means the move
+				// was cancelled or unassigned while the driver's app held a
+				// stale route. Client staleness, not a server fault: clean 409.
+				log.Printf("[DIAGNOSTIC] ⚠️  Redeployment placement %s has no open move — stale route", taskID)
+				utils.RespondError(w, http.StatusConflict, "This deployment is no longer active — refresh your route")
+				return
+			}
 
 			if src == "warehouse" {
 				// ── WAREHOUSE REDEPLOYMENT (LEGACY) ────────────────────────────────────
@@ -631,7 +672,7 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 		}
 
 		// ── Post-commit, best-effort side effects ────────────────────────────────
-		if isMoveDropoff {
+		if isMoveDropoff || isRedeployPlacement {
 			moveCompletionSideEffects(db, hub, centrifugoClient, moveRequest, now, userClaims.UserID)
 		}
 

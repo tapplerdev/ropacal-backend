@@ -365,14 +365,21 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 			}
 
 		case "placement":
-			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
+			// Placement optimizer ID: the potential location when this placement
+			// creates a NEW bin, or the route-task id for a REDEPLOYMENT placement
+			// (Phase 2: existing bin, placement_source='redeployment').
+			plID := task.ID
+			if task.PotentialLocationID != nil {
+				plID = *task.PotentialLocationID
+			}
+			if task.Latitude != 0 && task.Longitude != 0 {
 				if binsPreloaded {
 					// Enough bins already on truck — model as a service task (dropoff only, no warehouse)
 					log.Printf("   📦 [PLACEMENT] Bin already on truck — modeled as dropoff service")
 					svcTask := optimization.ServiceTask{
-						ID: *task.PotentialLocationID,
+						ID: plID,
 						Location: optimization.Location{
-							ID:        *task.PotentialLocationID,
+							ID:        plID,
 							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
 							Latitude:  task.Latitude,
 							Longitude: task.Longitude,
@@ -387,11 +394,11 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 					// so OR-Tools schedules the reload trip(s).
 					log.Printf("   🏭 [PLACEMENT] Needs warehouse pickup — modeled as shipment")
 					placement := optimization.Placement{
-						ID:                *task.PotentialLocationID,
+						ID:                plID,
 						NewBinNumber:      getIntValue(task.NewBinNumber),
 						WarehouseLocation: warehouseLocation,
 						PlacementLocation: optimization.Location{
-							ID:        *task.PotentialLocationID,
+							ID:        plID,
 							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
 							Latitude:  task.Latitude,
 							Longitude: task.Longitude,
@@ -633,10 +640,13 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 					break
 				}
 			}
-			// Try matching placement modeled as service (preloaded bins)
+			// Try matching placement modeled as service (preloaded bins).
+			// cleanID is the potential location id — or the route-task id for a
+			// redeployment placement (Phase 2, no potential location).
 			if taskID == "" {
 				for _, origTask := range tasks {
-					if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == cleanID {
+					if origTask.TaskType == "placement" &&
+						((origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == cleanID) || origTask.ID == cleanID) {
 						taskID = origTask.ID
 						log.Printf("      ✅ Matched service→placement: %s", taskID[:8])
 						break
@@ -661,7 +671,8 @@ func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID strin
 		} else if stop.PlacementID != "" {
 			cleanID := strings.TrimPrefix(stop.PlacementID, "placement-")
 			for _, origTask := range tasks {
-				if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == cleanID {
+				if origTask.TaskType == "placement" &&
+					((origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == cleanID) || origTask.ID == cleanID) {
 					taskID = origTask.ID
 					log.Printf("      ✅ Matched placement: %s", taskID[:8])
 					break
@@ -1034,14 +1045,22 @@ func buildAndOptimizeShiftRoute(
 			}
 
 		case "placement":
-			if task.PotentialLocationID != nil && task.Latitude != 0 && task.Longitude != 0 {
+			// Placement optimizer ID: the potential location when this placement
+			// creates a NEW bin, or the route-task id for a REDEPLOYMENT placement
+			// (Phase 2: existing bin, placement_source='redeployment', no potential
+			// location). The matching on the way back checks both.
+			plID := task.ID
+			if task.PotentialLocationID != nil {
+				plID = *task.PotentialLocationID
+			}
+			if task.Latitude != 0 && task.Longitude != 0 {
 				if binsPreloaded {
 					// Bins already on truck — model as a service task (just a dropoff, no warehouse pickup)
 					log.Printf("📦 [PLACEMENT] Bin already on truck — modeled as dropoff service")
 					svcTask := optimization.ServiceTask{
-						ID: *task.PotentialLocationID,
+						ID: plID,
 						Location: optimization.Location{
-							ID:        *task.PotentialLocationID,
+							ID:        plID,
 							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
 							Latitude:  task.Latitude,
 							Longitude: task.Longitude,
@@ -1055,11 +1074,11 @@ func buildAndOptimizeShiftRoute(
 					// Bins not loaded — model as shipment (warehouse pickup → site dropoff)
 					log.Printf("🏭 [PLACEMENT] Needs warehouse pickup — modeled as shipment")
 					placement := optimization.Placement{
-						ID:                *task.PotentialLocationID,
+						ID:                plID,
 						NewBinNumber:      getIntValue(task.NewBinNumber),
 						WarehouseLocation: warehouseLocation,
 						PlacementLocation: optimization.Location{
-							ID:        *task.PotentialLocationID,
+							ID:        plID,
 							Name:      fmt.Sprintf("Placement #%d", getIntValue(task.NewBinNumber)),
 							Latitude:  task.Latitude,
 							Longitude: task.Longitude,
@@ -1331,6 +1350,11 @@ func optimizeRouteWithMapbox(
 				// placement dropoff don't overwrite each other in the map
 				existingTasksMap[*task.PotentialLocationID+":"+string(task.TaskType)] = task
 			}
+			if task.TaskType == "placement" && task.PotentialLocationID == nil {
+				// Redeployment placement (Phase 2): no potential location — its
+				// optimizer ID is the route-task id, so key it the same way.
+				existingTasksMap[task.ID+":"+string(task.TaskType)] = task
+			}
 			if task.MoveRequestID != nil {
 				// Use composite key for move requests so pickup and dropoff
 				// don't overwrite each other in the map
@@ -1387,14 +1411,22 @@ func optimizeRouteWithMapbox(
 				matched := false
 
 				// First: check if this is a placement modeled as service (binsPreloaded).
-				// The CollectionID will be "service-{potentialLocationId}".
+				// The CollectionID will be "service-{plID}" where plID is the potential
+				// location id — or the route-task id for a redeployment placement.
 				// Map it back to the original placement task, NOT a new service task.
 				svcID := strings.TrimPrefix(stop.CollectionID, "service-")
 				for _, origTask := range existingTasks {
-					if origTask.TaskType == "placement" && origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == svcID {
+					if origTask.TaskType == "placement" &&
+						((origTask.PotentialLocationID != nil && *origTask.PotentialLocationID == svcID) || origTask.ID == svcID) {
 						task.TaskType = "placement"
 						task.PotentialLocationID = origTask.PotentialLocationID
 						task.NewBinNumber = origTask.NewBinNumber
+						// Redeployment placement (no potential location): carry the move
+						// identity so the existing-task lookup below resolves via the
+						// move_request_id composite key instead of inserting a new row.
+						task.MoveRequestID = origTask.MoveRequestID
+						task.BinID = origTask.BinID
+						task.BinNumber = origTask.BinNumber
 						log.Printf("   ✅ Matched service→placement (preloaded bins): %s", svcID[:8])
 						matched = true
 						break
@@ -1458,7 +1490,15 @@ func optimizeRouteWithMapbox(
 				for _, placement := range req.Placements {
 					if stop.PlacementID == fmt.Sprintf("placement-%s", placement.ID) {
 						task.TaskType = "warehouse_stop"
-						task.PotentialLocationID = &placement.ID
+						// Carry the potential-location id only when the placement IS
+						// one — a redeployment placement's optimizer ID is its own
+						// route-task id (Phase 2), a foreign-domain id that must not
+						// persist onto the INSERTed warehouse row.
+						if origTask, ok := existingTasksMap[placement.ID+":placement"]; ok {
+							task.PotentialLocationID = origTask.PotentialLocationID
+						} else {
+							task.PotentialLocationID = &placement.ID
+						}
 						log.Printf("   ✅ Matched pickup to placement warehouse stop")
 						break
 					}
