@@ -59,6 +59,38 @@ func TestPurgeIncompleteWarehouseStops(t *testing.T) {
 	}
 }
 
+// CompleteWarehouseRun completes only the named warehouse_stop rows of the
+// shift (scoped by shift + type + incomplete + not-deleted + id IN list).
+func TestCompleteWarehouseRun(t *testing.T) {
+	db, mock := mockExtCreate(t)
+	defer db.Close()
+
+	// sqlx.In expands "id IN (?)" to a placeholder per id; arg order is
+	// now, now, shiftID, then the ids.
+	mock.ExpectExec(`UPDATE route_tasks SET is_completed = 1, completed_at = \$1, updated_at = \$2\s+WHERE shift_id = \$3 AND task_type = 'warehouse_stop'\s+AND is_completed = 0 AND is_deleted = false AND id IN \(\$4, \$5, \$6\)`).
+		WithArgs(int64(1700000000), int64(1700000000), "s1", "w1", "w2", "w3").
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	n, err := CompleteWarehouseRun(db, "s1", []string{"w1", "w2", "w3"}, 1700000000)
+	if err != nil || n != 3 {
+		t.Fatalf("CompleteWarehouseRun = (%d, %v), want (3, nil)", n, err)
+	}
+}
+
+// An empty id list is a no-op — no query, no error.
+func TestCompleteWarehouseRun_Empty(t *testing.T) {
+	db, mock := mockExtCreate(t)
+	defer db.Close()
+
+	n, err := CompleteWarehouseRun(db, "s1", nil, 1700000000)
+	if err != nil || n != 0 {
+		t.Fatalf("CompleteWarehouseRun(empty) = (%d, %v), want (0, nil)", n, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unexpected query on empty run: %v", err)
+	}
+}
+
 // SyncPlacementRemoval selects the affected placements, batch-soft-deletes via
 // RemoveByIDs, and returns them grouped by shift.
 func TestSyncPlacementRemoval(t *testing.T) {

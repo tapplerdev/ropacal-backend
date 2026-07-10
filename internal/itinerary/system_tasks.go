@@ -46,6 +46,34 @@ func CompleteWarehouseStops(ext sqlx.Ext, shiftID string, now int64) (int64, err
 	return n, nil
 }
 
+// CompleteWarehouseRun completes a SPECIFIC set of a shift's warehouse stops in
+// one write — the batch twin of Complete, for the driver finishing a whole
+// reload run (e.g. "Load 6 bins") with one gesture instead of six dialogs. The
+// rows persist individually (each is tagged to the placement it feeds, needed
+// for re-opt matching + cancel cascades), but all get the SAME completed_at.
+// Scoped hard: only warehouse_stop rows in this shift, incomplete, not deleted,
+// whose id is in the list — a caller can't complete arbitrary tasks through it.
+// Returns rows affected so the handler can 400 an empty/stale run.
+func CompleteWarehouseRun(ext sqlx.Ext, shiftID string, taskIDs []string, now int64) (int64, error) {
+	if len(taskIDs) == 0 {
+		return 0, nil
+	}
+	q, args, err := sqlx.In(`
+		UPDATE route_tasks SET is_completed = 1, completed_at = ?, updated_at = ?
+		WHERE shift_id = ? AND task_type = 'warehouse_stop'
+		  AND is_completed = 0 AND is_deleted = false AND id IN (?)`,
+		now, now, shiftID, taskIDs)
+	if err != nil {
+		return 0, fmt.Errorf("complete warehouse run: %w", err)
+	}
+	res, err := ext.Exec(ext.Rebind(q), args...)
+	if err != nil {
+		return 0, fmt.Errorf("complete warehouse run: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // AutoCompletePreloadedRedeploymentPickups completes a shift's redeployment
 // pickup legs when the driver starts with the bins already on the truck —
 // the warehouse fetch is physically done, so the persisted route must not
