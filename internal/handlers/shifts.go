@@ -164,6 +164,12 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 			log.Printf("🏭 Shift has %d placements + %d redeployments - will need bins prompt", placementCount, redeploymentCount)
 		}
 
+		// Truck capacity caps how many bins the driver can report as preloaded.
+		truckCapacity := 4
+		if shift.TruckBinCapacity != nil && *shift.TruckBinCapacity > 0 {
+			truckCapacity = *shift.TruckBinCapacity
+		}
+
 		log.Printf("✅ Preflight checks passed:")
 		log.Printf("   GPS Quality: %s (%.1fm)", checks["gps_quality"], accuracy)
 		log.Printf("   Location Cached: %v", checks["location_cached"])
@@ -179,6 +185,7 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 			"needs_warehouse_bins_prompt": needsWarehouseBins,
 			"placement_count":             placementCount,
 			"redeployment_count":          redeploymentCount,
+			"truck_bin_capacity":          truckCapacity,
 			"location": map[string]float64{
 				"latitude":  loc.Latitude,
 				"longitude": loc.Longitude,
@@ -202,12 +209,17 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 		log.Printf("   User: %s (%s)", userClaims.Email, userClaims.UserID)
 
 		var req struct {
+			// Legacy boolean ("are the bins loaded?"). New clients send
+			// bins_on_truck instead (the exact count).
 			BinsPreloaded bool `json:"bins_preloaded"`
+			// Exact number of bins already on the truck at start (0..capacity).
+			// Pointer so we can tell "not sent" (old client) from an explicit 0.
+			BinsOnTruck *int `json:"bins_on_truck"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			log.Printf("   ℹ️  No request body or parse error (ignored): %v", err)
 		}
-		log.Printf("   🚚 Bins preloaded: %v", req.BinsPreloaded)
+		log.Printf("   🚚 Bins preloaded: %v, bins_on_truck: %v", req.BinsPreloaded, req.BinsOnTruck)
 
 		// Check if driver has any existing active or paused shift
 		var existingShift models.Shift
@@ -311,6 +323,33 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			return
 		}
 
+		// ── Bins already on the truck at start ──
+		// New clients report the exact count (bins_on_truck); the legacy boolean
+		// "bins_preloaded" means a full truck. Clamp to [0, capacity] — a truck
+		// can't start with more bins than it holds, and an over-count makes the
+		// OR-Tools capacity dimension infeasible at the start line ("CP Solver
+		// fail"). Computed once here so the optimize call and the DB store agree.
+		truckCapacity := 4
+		if shift.TruckBinCapacity != nil && *shift.TruckBinCapacity > 0 {
+			truckCapacity = *shift.TruckBinCapacity
+		}
+		preloadedBins := 0
+		if req.BinsOnTruck != nil {
+			preloadedBins = *req.BinsOnTruck
+		} else if req.BinsPreloaded {
+			var count int
+			if e := db.Get(&count, `SELECT COUNT(*) FROM route_tasks WHERE shift_id = $1 AND task_type = 'placement' AND is_deleted = false`, shift.ID); e == nil {
+				preloadedBins = count
+			}
+		}
+		if preloadedBins > truckCapacity {
+			preloadedBins = truckCapacity
+		}
+		if preloadedBins < 0 {
+			preloadedBins = 0
+		}
+		log.Printf("📦 Bins on truck at start: %d (capacity=%d)", preloadedBins, truckCapacity)
+
 		// Smart Route Optimization Logic
 		// If lock_route_order is true, skip optimization (use manager's exact task order)
 		// If lock_route_order is false, run full route optimization with dynamic warehouse insertion
@@ -348,10 +387,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			}
 
 			// Run Mapbox v2 route optimization (capacity-aware, automatic warehouse trips)
-			capacity := 4 // Default capacity
-			if shift.TruckBinCapacity != nil {
-				capacity = *shift.TruckBinCapacity
-			}
+			capacity := truckCapacity
 
 			// For custom shifts with no warehouse, use 0 capacity (no bin constraints)
 			warehouseLat := 0.0
@@ -376,7 +412,7 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 				warehouseLat,
 				warehouseLon,
 				warehouseAddr,
-				req.BinsPreloaded,
+				preloadedBins,
 				true,                // isFirstOptimization = true (shift starting)
 				shift.StartLatitude, // Custom start location (nil for standard shifts)
 				shift.StartLongitude,
@@ -398,16 +434,8 @@ func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, cent
 			log.Printf("✅ Mapbox v2 route optimization complete")
 		}
 
-		// Calculate preloaded bins count
-		preloadedBins := 0
-		if req.BinsPreloaded {
-			var count int
-			err = db.Get(&count, `SELECT COUNT(*) FROM route_tasks WHERE shift_id = $1 AND task_type = 'placement' AND is_deleted = false`, shift.ID)
-			if err == nil {
-				preloadedBins = count
-			}
-			log.Printf("📦 Preloaded bins saved: %d", preloadedBins)
-		}
+		// preloadedBins was computed + clamped above; persist it for mid-shift
+		// re-optimization inventory math.
 
 		// Update shift to active
 		now := time.Now().Unix()

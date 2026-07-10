@@ -134,7 +134,7 @@ func PreviewShiftOptimization(db *sqlx.DB) http.HandlerFunc {
 			db, shiftID, capacity,
 			warehouseLat, warehouseLon, // driver start = warehouse (no GPS)
 			warehouseLat, warehouseLon, warehouseAddr,
-			false, // binsPreloaded: preview assumes a cold start
+			0, // bins on truck: preview assumes a cold start
 			shift.StartLatitude, shift.StartLongitude, shift.StartAddress,
 			shift.EndLatitude, shift.EndLongitude, shift.EndAddress,
 		)

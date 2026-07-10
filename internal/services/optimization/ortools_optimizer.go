@@ -358,12 +358,24 @@ func (o *ORToolsOptimizer) buildVehicle(req *RouteRequest, locIDToIdx map[string
 		capacity = bins
 	}
 
+	// A truck can't start with more bins than it holds. Clamp here — the single
+	// choke point every optimize path (start + re-optimize) flows through — so a
+	// stale/over-count initial load can never make the model infeasible
+	// (OR-Tools would return no solution → opaque "CP Solver fail").
+	initialLoad := v.StartupBins
+	if initialLoad > capacity {
+		initialLoad = capacity
+	}
+	if initialLoad < 0 {
+		initialLoad = 0
+	}
+
 	return ortoolsVehicle{
 		ID:              v.ID,
 		StartLocationID: v.StartLocation.ID,
 		EndLocationID:   v.EndLocation.ID,
 		Capacity:        capacity,
-		InitialLoad:     v.StartupBins,
+		InitialLoad:     initialLoad,
 	}
 }
 
