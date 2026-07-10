@@ -139,8 +139,12 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			utils.RespondError(w, http.StatusBadRequest, "driver_id is required")
 			return
 		}
-		if len(req.Tasks) == 0 {
-			utils.RespondError(w, http.StatusBadRequest, "tasks array cannot be empty")
+		// A shift needs SOMETHING to do, but warehouse deployments are work too —
+		// they mint their own pickup+dropoff task pairs downstream. Requiring a
+		// non-empty tasks array forced redeploy-only shifts to smuggle in a
+		// placeholder task (surfacing as a phantom "1 Warehouse" badge for drivers).
+		if len(req.Tasks) == 0 && len(req.WarehouseDeployments) == 0 {
+			utils.RespondError(w, http.StatusBadRequest, "shift needs at least one task or warehouse deployment")
 			return
 		}
 
