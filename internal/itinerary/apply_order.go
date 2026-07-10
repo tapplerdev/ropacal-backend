@@ -30,8 +30,8 @@ type OrderedStop struct {
 // stamping/inserting each stop in order, then normalizing to a dense 1..N.
 //
 //   - isFirst == false (mid-shift reopt): existing rows get a sequence-only UPDATE, new warehouse
-//     stops are inserted, then Resequence normalizes (completed-first, warehouse-last). The
-//     warehouse-last sort makes the bins-vs-warehouse interleaving irrelevant on this path.
+//     stops are inserted, then Resequence normalizes (completed-first, otherwise preserving the
+//     stamped optimizer order — including mid-route reload runs, whose position is load-bearing).
 //   - isFirst == true (shift start): existing rows also have their coordinates refreshed, and the
 //     renumber is the legacy first-opt rule — dense 1..N by (sequence_order ASC, created_at ASC),
 //     WITHOUT completed-first / warehouse-last. That preserves the optimizer's interleaving (e.g.

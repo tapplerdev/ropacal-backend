@@ -18,7 +18,8 @@ func warehouseStop(id string, lat, lng float64) OrderedStop {
 }
 
 // Reopt (isFirst=false): existing rows get a sequence-only UPDATE in order, warehouse stops are
-// inserted after, then Resequence (the warehouse-last renumber) runs — never the first-opt one.
+// inserted after, then Resequence (completed-first, order-preserving — NO warehouse-last, so
+// mid-route reload runs keep their position) runs — never the first-opt one.
 func TestApplyOrder_Reopt_SeqOnlyUpdatesInsertThenResequence(t *testing.T) {
 	db, mock := mockExt(t)
 	defer db.Close()
@@ -34,8 +35,8 @@ func TestApplyOrder_Reopt_SeqOnlyUpdatesInsertThenResequence(t *testing.T) {
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// Resequence = warehouse-last renumber
-	mock.ExpectExec(`(?s)ROW_NUMBER\(\) OVER \(\s*ORDER BY is_completed DESC.*warehouse_stop.*WHERE shift_id = \$1`).
+	// Resequence = completed-first, order-preserving renumber (NO warehouse-last CASE)
+	mock.ExpectExec(`(?s)ROW_NUMBER\(\) OVER \(\s*ORDER BY is_completed DESC,\s*sequence_order ASC, created_at ASC\s*\).*WHERE shift_id = \$1`).
 		WithArgs("shift-1").WillReturnResult(sqlmock.NewResult(0, 3))
 
 	stops := []OrderedStop{updateStop("a"), updateStop("b"), warehouseStop("wh", 37.1, -121.2)}
