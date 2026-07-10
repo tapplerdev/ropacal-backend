@@ -113,12 +113,12 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 - **users** — id, email, password, name, role (`driver`|`admin`)
 - **bins** — bin_number, address, city, status (`active`|`missing`|`retired`|`in_storage`|`pending_move`), fill_percentage, lat/lon, retirement tracking
 - **shifts** — driver_id, status (`inactive`|`ready`|`active`|`paused`|`ended`|`cancelled`), shift_type (`standard`|`custom`), custom start/end locations, scheduled_start/end, optimization_metadata
-- **route_tasks** — shift_id, task_type (`collection`|`placement`|`pickup`|`dropoff`|`warehouse_stop`|`service`), sequence_order, bin_id, time windows, service duration, completion tracking
+- **route_tasks** — shift_id, task_type (`collection`|`placement`|`pickup`|`dropoff`|`warehouse_stop`|`service`), sequence_order, bin_id, placement_source (`potential_location`|`redeployment`|legacy `warehouse`), move_request_id, time windows, service duration, completion tracking
 - **shift_bins** — shift_id, bin_id, sequence_order, stop_type (`collection`|`pickup`|`dropoff`), move_request_id
 - **shift_history** — completed shift archive with performance metrics, end_reason
 - **checks** — bin check-in records with fill_percentage, photo, shift linkage
 - **moves** — bin physical move history
-- **bin_move_requests** — scheduled moves with urgency, move_type (`store`|`pickup_only`|`relocation`), assignment tracking
+- **bin_move_requests** — scheduled moves with urgency, move_type (`store`|`pickup_only`|`relocation`|`redeployment`), assignment tracking (see "Moves & Redeployments" under Key Flows)
 - **potential_locations** — driver-suggested bin placement locations, conversion workflow
 - **no_go_zones** — geographic zones with conflict scores, incident tracking
 - **zone_incidents** — vandalism, theft, complaints linked to zones/bins/shifts
@@ -163,6 +163,45 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 - Driver publishes GPS to Centrifugo channel `driver:location:{driverId}`
 - Backend intercepts via publish proxy → saves to Redis → optionally snaps to road via OSRM → returns modified coords for broadcast
 - Dashboard subscribes to channels for live tracking
+
+### Moves & Redeployments — intent vs execution (two-layer model)
+
+Every bin move has TWO representations that must never be conflated:
+
+1. **`bin_move_requests` = INTENT** (manager-facing domain record): who requested,
+   urgency, scheduled date, assignment (driver/shift), full audit history
+   (`move_request_history`). All lifecycle machinery keys on it: one-open-move-per-bin
+   partial unique index (409 on double-booking), cancel-with-bin-revert, overdue
+   monitor, digest reports, the dashboard Move Requests table.
+2. **`route_tasks` = EXECUTION** (how the driver physically does it). The shape
+   depends on `move_type`:
+   - `relocation` / `store` / `pickup_only` → a **pickup + dropoff pair** (dropoff =
+     new location, or current warehouse for store/pickup_only).
+   - `redeployment` → **ONE `placement` task** (Phase 2, 2026-07): the bin leaves the
+     warehouse like any other placement, so the optimizer gets capacity math and
+     Load-N warehouse batching with zero special-casing.
+
+**Placement tasks therefore come in two live flavors — discriminate with
+`placement_source` (structural fallback: a placement carrying `move_request_id` is a
+redeployment):**
+
+| | new-bin placement | redeployment |
+|---|---|---|
+| `placement_source` | `'potential_location'` (or NULL on old rows) | `'redeployment'` |
+| identity | `potential_location_id` set, no move link | `bin_id` + `bin_number` + `move_request_id`, no PL |
+| completion | CREATES a bin (converts the potential location) | finalizes the move: move→completed, existing bin→active @ destination (atomic, in the CompleteTask tx) |
+| user-facing label | "Placement" | **"Redeployment · Bin #N"** — never expose that it's a placement internally |
+
+(`placement_source='warehouse'` is a third, LEGACY value from pre-move-request
+warehouse deployments — historical shifts only, slated for removal.)
+
+The layers are hard-linked so they can't drift: completing the placement finalizes
+the move; cancelling the move soft-deletes the task and reverts the bin to
+`in_storage`; removing the task from a shift releases the move back to the backlog.
+Any new code that branches on pickup/dropoff for moves MUST also handle the
+redeployment placement shape — key on `move_request_id != nil` / all-tasks-done per
+move group, not on task-type pairs (this bit us 4 times in review: progress counts,
+task removal, stale completion, warehouse-row minting).
 
 ## Conventions
 
