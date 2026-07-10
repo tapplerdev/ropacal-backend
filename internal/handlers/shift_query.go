@@ -603,6 +603,7 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 			// Placement fields
 			PotentialLocationID       *string `db:"potential_location_id" json:"potential_location_id"`
 			NewBinNumber              *int    `db:"new_bin_number"        json:"new_bin_number"`
+			PlacementSource           *string `db:"placement_source"      json:"placement_source"`
 			PlacementAddress          *string `db:"placement_address"     json:"placement_address"`
 			PlacementCreatedBinID     *string `db:"placement_created_bin_id" json:"placement_created_bin_id"`
 			PlacementCreatedBinNumber *int    `db:"placement_created_bin_number" json:"placement_created_bin_number"`
