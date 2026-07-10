@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -306,6 +307,12 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 		)
 		if err != nil {
 			log.Printf("❌ Error: %v", err)
+			if errors.Is(err, database.ErrTaskDescriptor) {
+				// Caller sent a malformed/unresolvable task descriptor — their
+				// fix to make, not a server fault.
+				utils.RespondError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			utils.RespondError(w, http.StatusInternalServerError, "Failed to create shift with tasks")
 			return
 		}
@@ -343,44 +350,26 @@ func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 			}
 
 			for moveReqID := range moveRequestUpdates {
-				log.Printf("   🚚 Updating move request %s", moveReqID)
-				log.Printf("      - Status: pending → assigned (shift is 'ready', not started yet)")
-				log.Printf("      - Assigned to shift: %s", shiftID)
-				log.Printf("      - Assigned to driver: %s (%s)", req.DriverID, driverName)
+				log.Printf("   🚚 Assigning move request %s to shift %s", moveReqID, shiftID)
 
-				// FIX: Set status to 'assigned' since newly created shifts have status 'ready'
-				// Only active shifts should set move requests to 'in_progress'
-				updateQuery := `UPDATE bin_move_requests
-								SET status = 'assigned',
-									assigned_shift_id = $1,
-									assigned_user_id = $2,
-									assignment_type = 'shift',
-									updated_at = $3
-								WHERE id = $4
-								AND status = 'pending'`
-
-				result, err := db.Exec(updateQuery, shiftID, req.DriverID, now, moveReqID)
-				if err != nil {
-					log.Printf("      ❌ Error updating move request %s: %v", moveReqID, err)
+				// Guarded domain transition. This replaces a raw UPDATE gated on
+				// status='pending', which silently skipped BACKLOG moves
+				// (status='assigned' — e.g. a cross-driver transfer: the removal
+				// releases the move to the old driver's backlog, so re-adding it
+				// here never repointed it). It also denormalized assigned_user_id,
+				// diverging from every other assignment path (#31: the shift's
+				// driver is derived, never stored). Terminal moves still refuse.
+				// Redeploy placements were already assigned in the create tx —
+				// this re-assert is idempotent for them.
+				if aErr := moverequest.AssignToShift(db, moveReqID, shiftID, string(moverequest.StatusAssigned), now); aErr != nil {
+					log.Printf("      ⚠️  Move request %s not assigned (already completed or cancelled): %v", moveReqID, aErr)
 					continue
 				}
+				log.Printf("      ✅ Move request %s assigned to shift", moveReqID)
 
-				rowsAffected, _ := result.RowsAffected()
-				if rowsAffected == 0 {
-					log.Printf("      ⚠️  Move request %s not updated (already assigned or not found)", moveReqID)
-				} else {
-					log.Printf("      ✅ Move request %s updated successfully", moveReqID)
-
-					// Log assignment history
-					log.Printf("      📝 Logging assignment to history...")
-					assignmentType := "shift"
-					err = moverequest.LogAssigned(db, moveReqID, managerID, managerName, "manager",
-						assignmentType, &req.DriverID, &driverName, &shiftID)
-					if err != nil {
-						log.Printf("      ⚠️  WARNING: Failed to log assignment history: %v", err)
-					} else {
-						log.Printf("      ✅ Assignment history logged successfully")
-					}
+				if lErr := moverequest.LogAssigned(db, moveReqID, managerID, managerName, "manager",
+					"shift", &req.DriverID, &driverName, &shiftID); lErr != nil {
+					log.Printf("      ⚠️  WARNING: Failed to log assignment history: %v", lErr)
 				}
 			}
 		} else {

@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -15,6 +16,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
+
+// ErrTaskDescriptor marks a create-with-tasks task descriptor the caller got
+// wrong (bad shape or reference). Handlers map it to a 400 with the wrapped
+// detail instead of a 500 — validate-at-boundary, never a silent skip.
+var ErrTaskDescriptor = errors.New("invalid task descriptor")
 
 // GetShiftTasks retrieves all active (non-deleted) tasks for a shift ordered by sequence
 func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
@@ -351,6 +357,63 @@ func CreateShiftWithTasks(
 		lon, _ := taskData["longitude"].(float64)
 
 		log.Printf("   🔍 Task #%d DEBUG: Received task_type='%s', lat=%.6f, lon=%.6f", i+1, taskType, lat, lon)
+
+		// Phase 2: a placement descriptor carrying a move is a REDEPLOYMENT
+		// ({task_type:'placement', move_request_id} — the shape dashboard
+		// transfers send). It cannot ride the generic path below: its bin is
+		// in_storage (which the inactive-bin guard would silently skip — the
+		// shell-shift bug) and the row + move assignment belong to the move
+		// domain. Mint via itinerary.AddMove and repoint the move in this tx.
+		if taskType == "placement" {
+			if moveReqID, _ := taskData["move_request_id"].(string); moveReqID != "" {
+				mrData, mrErr := itinerary.ResolveMoveEnrichment(tx, moveReqID)
+				if mrErr != nil {
+					if errors.Is(mrErr, sql.ErrNoRows) {
+						return "", 0, nil, nil, fmt.Errorf("%w: task #%d references unknown move request %s", ErrTaskDescriptor, i+1, moveReqID)
+					}
+					// Infra failure, not a caller mistake — surface as a 500 with cause.
+					return "", 0, nil, nil, fmt.Errorf("resolve move %s (task #%d): %w", moveReqID, i+1, mrErr)
+				}
+				if mrData.MoveType != "redeployment" {
+					return "", 0, nil, nil, fmt.Errorf("%w: task #%d: move %s is a %s — send its pickup/dropoff legs, not a placement", ErrTaskDescriptor, i+1, moveReqID, mrData.MoveType)
+				}
+				if mrData.NewLatitude == nil || mrData.NewLongitude == nil {
+					return "", 0, nil, nil, fmt.Errorf("%w: task #%d: redeployment %s has no destination coordinates", ErrTaskDescriptor, i+1, moveReqID)
+				}
+				if err := moverequest.AssignToShift(tx, moveReqID, shiftID, string(moverequest.StatusAssigned), now); err != nil {
+					if errors.Is(err, moverequest.ErrInvalidTransition) {
+						return "", 0, nil, nil, fmt.Errorf("%w: task #%d: move %s cannot be assigned (already completed or cancelled)", ErrTaskDescriptor, i+1, moveReqID)
+					}
+					return "", 0, nil, nil, fmt.Errorf("assign move %s (task #%d): %w", moveReqID, i+1, err)
+				}
+				binNum, _ := itinerary.ResolveBinNumber(tx, mrData.BinID)
+				destAddr := ""
+				if mrData.NewAddress != nil {
+					destAddr = *mrData.NewAddress
+				}
+				if _, err := itinerary.AddMove(tx, shiftID, itinerary.MovePlacement{
+					InsertSeq:      i + 1,
+					MoveRequestID:  moveReqID,
+					BinID:          mrData.BinID,
+					BinNumber:      binNum,
+					MoveType:       "redeployment",
+					DropoffLat:     *mrData.NewLatitude,
+					DropoffLng:     *mrData.NewLongitude,
+					DropoffAddress: destAddr,
+					Now:            now,
+				}); err != nil {
+					return "", 0, nil, nil, fmt.Errorf("failed to add redeployment placement (task #%d): %w", i+1, err)
+				}
+				log.Printf("   ✅ Task #%d: Redeployment placement minted for move %s (bin #%d)", i+1, moveReqID, binNum)
+				continue
+			}
+			// A placement must come from SOMEWHERE — a potential location (new
+			// bin), a move (redeployment), or explicit coordinates. Nothing at
+			// all used to silently insert a null-island row.
+			if plID, _ := taskData["potential_location_id"].(string); plID == "" && lat == 0 && lon == 0 {
+				return "", 0, nil, nil, fmt.Errorf("%w: task #%d: placement requires potential_location_id, move_request_id, or coordinates", ErrTaskDescriptor, i+1)
+			}
+		}
 
 		// For pickup tasks with 0,0 coordinates, look up bin coordinates
 		moveType, _ := taskData["move_type"].(string)

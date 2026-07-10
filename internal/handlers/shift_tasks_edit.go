@@ -830,6 +830,11 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					skippedCount++
 					continue
 				}
+				if addReq.TaskType == "placement" && addReq.MoveRequestID != nil && existingMoveRequestIDs[*addReq.MoveRequestID] {
+					log.Printf("   ⏭️  Skipping duplicate redeployment placement for move %s", *addReq.MoveRequestID)
+					skippedCount++
+					continue
+				}
 
 				log.Printf("   Creating task: type=%s", addReq.TaskType)
 
@@ -901,8 +906,92 @@ func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centr
 					})
 
 				case "placement":
+					// Phase 2: a placement carrying a move is a REDEPLOYMENT —
+					// assign the move to this shift (guarded transition) and mint
+					// its single placement task, mirroring assign-to-shift.
+					if addReq.MoveRequestID != nil {
+						var moveReq struct {
+							ID            string   `db:"id"`
+							BinID         string   `db:"bin_id"`
+							MoveType      string   `db:"move_type"`
+							BinNumber     *int     `db:"bin_number"`
+							DestLatitude  *float64 `db:"new_latitude"`
+							DestLongitude *float64 `db:"new_longitude"`
+							DestAddress   *string  `db:"new_address"`
+						}
+						err = tx.Get(&moveReq, `
+							SELECT mr.id, mr.bin_id, mr.move_type, b.bin_number,
+							       mr.new_latitude, mr.new_longitude, mr.new_address
+							FROM bin_move_requests mr
+							LEFT JOIN bins b ON b.id = mr.bin_id
+							WHERE mr.id = $1`, *addReq.MoveRequestID)
+						if err != nil {
+							log.Printf("❌ Error fetching move request: %v", err)
+							utils.RespondError(w, http.StatusBadRequest, "Move request not found")
+							return
+						}
+						if moveReq.MoveType != "redeployment" {
+							utils.RespondError(w, http.StatusBadRequest, fmt.Sprintf("move %s is a %s — add its pickup/dropoff legs, not a placement", moveReq.ID, moveReq.MoveType))
+							return
+						}
+						if moveReq.DestLatitude == nil || moveReq.DestLongitude == nil {
+							utils.RespondError(w, http.StatusBadRequest, "redeployment has no destination coordinates")
+							return
+						}
+						moveStatus := string(moverequest.StatusAssigned)
+						if shift.Status == "active" {
+							moveStatus = string(moverequest.StatusInProgress)
+						}
+						if err = moverequest.AssignToShift(tx, moveReq.ID, shiftID, moveStatus, now); err != nil {
+							if errors.Is(err, moverequest.ErrInvalidTransition) {
+								utils.RespondError(w, http.StatusBadRequest, "move request is already completed or cancelled")
+								return
+							}
+							log.Printf("❌ Error assigning move request: %v", err)
+							utils.RespondError(w, http.StatusInternalServerError, "Failed to assign move request")
+							return
+						}
+						if !loggedAssignments[moveReq.ID] {
+							loggedAssignments[moveReq.ID] = true
+							var driverName string
+							if e := tx.Get(&driverName, `SELECT name FROM users WHERE id = $1`, shift.DriverID); e != nil {
+								driverName = "Unknown Driver"
+							}
+							if logErr := moverequest.LogAssigned(tx, moveReq.ID, userClaims.UserID, userClaims.Email, "manager",
+								"shift", &shift.DriverID, &driverName, &shiftID); logErr != nil {
+								log.Printf("⚠️  Failed to log move assignment history: %v", logErr)
+							}
+						}
+						binNumber := 0
+						if moveReq.BinNumber != nil {
+							binNumber = *moveReq.BinNumber
+						}
+						destAddr := ""
+						if moveReq.DestAddress != nil {
+							destAddr = *moveReq.DestAddress
+						}
+						var reasonPtr *string
+						if req.Reason != "" {
+							reasonPtr = &req.Reason
+						}
+						_, err = itinerary.AddMove(tx, shiftID, itinerary.MovePlacement{
+							InsertSeq:      nextSeq,
+							MoveRequestID:  moveReq.ID,
+							BinID:          moveReq.BinID,
+							BinNumber:      binNumber,
+							MoveType:       "redeployment",
+							DropoffLat:     *moveReq.DestLatitude,
+							DropoffLng:     *moveReq.DestLongitude,
+							DropoffAddress: destAddr,
+							AddedBy:        &userClaims.UserID,
+							AdditionReason: reasonPtr,
+							Now:            now,
+						})
+						newTaskID = "redeployment placement (move " + moveReq.ID + ")"
+						break
+					}
 					if addReq.PotentialLocationID == nil {
-						utils.RespondError(w, http.StatusBadRequest, "potential_location_id required for placement task")
+						utils.RespondError(w, http.StatusBadRequest, "potential_location_id or move_request_id required for placement task")
 						return
 					}
 					// Fetch potential location details
