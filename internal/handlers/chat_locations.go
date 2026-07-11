@@ -712,10 +712,12 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		maxRate = 1
 	}
 
-	// v2: ESRI as pass/fail GATE — reject candidates in areas with bad demographics.
-	// Demographics decide WHERE to look (which neighborhoods). Site quality decides
-	// WHICH specific spot within that area. Mixing them in a weighted average dilutes
-	// both signals since ESRI returns identical values for same-city candidates.
+	// v2: ESRI as a RISK gate only (crime). The income and clothing-spend gates
+	// were removed 2026-07 after calibration against 93 live bins: median income
+	// correlated NEGATIVELY with fill-rate (ρ=−0.15) and apparel spend was null
+	// (ρ=−0.13) — the income floor was vetoing good candidates. Site quality
+	// (errand-retail density + anchor) is what predicts yield; crime stays as a
+	// safety screen, which the calibration doesn't speak to.
 	tier1Anchors := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowes", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree", "cvs", "walgreens"}
 	if useV2 && esriResults != nil {
 		var gatedCandidates []candidate
@@ -729,16 +731,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 						allCandidates[i].NearbyPOI, allCandidates[i].Lat, allCandidates[i].Lng)
 					continue
 				}
-				if e.MedianHouseholdIncome > 0 && e.MedianHouseholdIncome < 50000 {
-					log.Printf("🚫 [ESRI Gate] %s — income $%.0fk below $50k minimum", allCandidates[i].NearbyPOI, e.MedianHouseholdIncome/1000)
-					continue
-				}
 				if e.CrimeIndex > 200 {
 					log.Printf("🚫 [ESRI Gate] %s — crime index %.0f above 200 maximum", allCandidates[i].NearbyPOI, e.CrimeIndex)
-					continue
-				}
-				if e.AvgClothingSpend > 0 && e.AvgClothingSpend < 2500 {
-					log.Printf("🚫 [ESRI Gate] %s — clothing spend $%.0f below $2,500 minimum", allCandidates[i].NearbyPOI, e.AvgClothingSpend)
 					continue
 				}
 			}
@@ -1039,14 +1033,25 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				fillVal = 0.1
 			}
 
-			// Multiplicative: (density^0.5) × (anchor^0.3) × (fill^0.2) × 10
-			finalScore = math.Pow(densityScore, 0.5) * math.Pow(anchorScore, 0.3) * math.Pow(fillVal, 0.2) * 10
+			// Residential population, gently (^0.1): borderline signal in the
+			// 2026-07 calibration (ρ=+0.20). Free census zip cache — neutral 1.0
+			// when the zip is unknown so missing data never penalizes.
+			popVal := 1.0
+			if pop, ok := zipPopulation[stripZipPlus4(c.Zip)]; ok && pop > 0 {
+				popVal = math.Max(0.3, math.Min(float64(pop)/50000.0, 1.0))
+			}
+
+			// Multiplicative: (density^0.4) × (anchor^0.3) × (fill^0.2) × (pop^0.1) × 10
+			// Exponents re-set from the 2026-07 calibration (93 bins vs fill-rate):
+			// errand-retail density ρ=+0.39 leads, anchor ρ=+0.35 confirmed, pop
+			// borderline +0.20. Income was REMOVED entirely (ρ=−0.15, wrong sign).
+			finalScore = math.Pow(densityScore, 0.4) * math.Pow(anchorScore, 0.3) * math.Pow(fillVal, 0.2) * math.Pow(popVal, 0.1) * 10
 			finalScore = math.Round(finalScore*10) / 10 // round to 1 decimal
 			finalScore = math.Min(10, finalScore)
 
-			log.Printf("📊 [v2 Site] %s: %.1f (density=%.3f, anchor=%.2f, fill=%.2f, POIs=%d, d^.5=%.3f, a^.3=%.3f, f^.2=%.3f)",
-				c.NearbyPOI, finalScore, densityScore, anchorScore, fillVal, poiDensity,
-				math.Pow(densityScore, 0.5), math.Pow(anchorScore, 0.3), math.Pow(fillVal, 0.2))
+			log.Printf("📊 [v2 Site] %s: %.1f (density=%.3f, anchor=%.2f, fill=%.2f, pop=%.2f, POIs=%d, d^.4=%.3f, a^.3=%.3f, f^.2=%.3f, p^.1=%.3f)",
+				c.NearbyPOI, finalScore, densityScore, anchorScore, fillVal, popVal, poiDensity,
+				math.Pow(densityScore, 0.4), math.Pow(anchorScore, 0.3), math.Pow(fillVal, 0.2), math.Pow(popVal, 0.1))
 		} else {
 			// v1 fallback — census-based scoring
 			gapScore := math.Min(c.NearestBinDist, maxGapMiles) / maxGapMiles

@@ -263,7 +263,7 @@ Returns: total bins, active bins, clean bins, problematic bins, avg fill %, tota
 2. Finds geographic gaps between existing bins (underserved spots)
 3. AUTOMATICALLY filters out all active no-go zones (you do NOT need to check separately)
 4. AUTOMATICALLY filters out locations near malls and Safeway stores
-5. Scores by area demand, gap distance, and neighborhood income level
+5. Scores by SITE QUALITY: errand-retail density, anchor tenants (Target/Walmart tier), area fill history, and residential population — calibrated against live bin fill-rates. Income and apparel spend are NOT scored (calibration showed no predictive value); ESRI is used only as a crime safety gate.
 6. Reverse geocodes each recommendation to a real street address
 Always tell the user: "All locations have been verified clear of no-go zones and filtered to avoid malls/supermarkets."`),
 			InputSchema: anthropic.ToolInputSchemaParam{
@@ -271,7 +271,7 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 					"count":         map[string]any{"type": "integer", "description": "Number of locations to recommend (default 10, max 30)"},
 					"target_city":   map[string]any{"type": "string", "description": "Optional: focus recommendations on a specific city (e.g. 'San Jose')"},
 					"min_gap_miles": map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
-					"algorithm":     map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (ESRI GeoEnrichment with clothing spend, crime, income, growth)"},
+					"algorithm":     map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (site-quality: HERE retail density + anchors + fill + population; ESRI crime gate only — income/clothing-spend are not used)"},
 					"mode":          map[string]any{"type": "string", "description": "Placement mode: 'infill' (near existing high-performing bins, tighter spacing), 'expand' (new areas with good demographics, clustered for route efficiency), or 'auto' (default, mixed)"},
 				},
 			},

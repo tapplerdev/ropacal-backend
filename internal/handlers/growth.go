@@ -103,9 +103,14 @@ func GetGrowthBinYields(db *sqlx.DB) http.HandlerFunc {
 //	Cannibalization — how much of the prior comes from close (<800 m)
 //	                  neighbors that a new bin would split rather than grow
 //
-// Score = 100 × (0.40·YieldPrior + 0.25·Gap − 0.20·IncidentRisk − 0.15·Cannibalization),
-// clamped to [0,100]. RouteFit (OR-Tools insertion cost) and HostQuality
-// (address history) are deferred — noted so the omission is explicit.
+// Score = 100 × (0.55·YieldPrior + 0.45·Gap), clamped to [0,100].
+//
+// IncidentRisk and Cannibalization are still computed and emitted for the
+// dashboard, but no longer weigh on the score: the 2026-07 calibration
+// (93 live bins vs fill-rate %/day) measured both at ρ≈0 — risk stays a
+// HARD rule (inside a no-go zone still zeroes the score), not a gradient.
+// RouteFit (OR-Tools insertion cost) and HostQuality (address history) are
+// deferred — noted so the omission is explicit.
 // GET /api/analytics/growth/candidates
 func GetGrowthCandidates(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -223,8 +228,10 @@ func GetGrowthCandidates(db *sqlx.DB) http.HandlerFunc {
 			if c.InNoGoZone {
 				c.Score = 0
 			} else {
+				// Calibrated 2026-07: incident-risk & cannibalization dropped from
+				// the gradient (ρ≈0 vs fill-rate on 93 bins); no-go stays a hard zero.
 				c.Score = math.Max(0, math.Min(100,
-					100*(0.40*c.YieldPrior+0.25*c.Gap-0.20*c.IncidentRisk-0.15*c.Cannibalization)))
+					100*(0.55*c.YieldPrior+0.45*c.Gap)))
 			}
 			c.Score = math.Round(c.Score)
 		}
