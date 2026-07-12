@@ -124,16 +124,39 @@ func EnrichLocation(lat, lng float64) (*ESRIEnrichmentResult, error) {
 	return result, nil
 }
 
-// EnrichLocationsBatch enriches multiple locations in a single API call
-// ESRI supports multiple study areas in one request (saves API calls + cost)
+// EnrichLocationsBatch enriches multiple locations, chunked at 100 study
+// areas per request: GeoEnrichment caps study areas per call (~200), and a
+// single over-limit request used to fail the WHOLE enrichment — which
+// silently disabled the crime safety gate for the entire run. Chunking keeps
+// the gate alive as candidate counts grow (wider expansion search, 2026-07).
 func EnrichLocationsBatch(locations []struct{ Lat, Lng float64 }) ([]ESRIEnrichmentResult, error) {
+	if len(locations) == 0 {
+		return nil, nil
+	}
+	const chunkSize = 100
+	if len(locations) <= chunkSize {
+		return enrichLocationsChunk(locations)
+	}
+	results := make([]ESRIEnrichmentResult, 0, len(locations))
+	for start := 0; start < len(locations); start += chunkSize {
+		end := start + chunkSize
+		if end > len(locations) {
+			end = len(locations)
+		}
+		chunk, err := enrichLocationsChunk(locations[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("chunk %d-%d: %w", start, end, err)
+		}
+		results = append(results, chunk...)
+	}
+	return results, nil
+}
+
+// enrichLocationsChunk performs one GeoEnrichment request for <=100 points.
+func enrichLocationsChunk(locations []struct{ Lat, Lng float64 }) ([]ESRIEnrichmentResult, error) {
 	apiKey := os.Getenv("ESRI_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("ESRI_API_KEY not set")
-	}
-
-	if len(locations) == 0 {
-		return nil, nil
 	}
 
 	// Build study areas array

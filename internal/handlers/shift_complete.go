@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/itinerary"
@@ -617,6 +618,14 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 			moveCompletionSideEffects(db, hub, centrifugoClient, moveRequest, now, userClaims.UserID)
 		}
 
+		// A brand-new bin placed far from the rest of the network is an
+		// exploration bet with no demand evidence — auto-enroll it as a
+		// watchlist probe so the ops agent re-judges it in 14 days instead of
+		// letting a bad bet underperform quietly.
+		if placementBinID != nil {
+			enrollNewTerritoryProbe(db, *placementBinID)
+		}
+
 		// Create incident if reported
 		var createdIncidentID *string
 		if req.HasIncident && checkID != nil {
@@ -875,6 +884,81 @@ func applyMoveCompletion(ext sqlx.Ext, moveRequest models.BinMoveRequest, fin mo
 	}
 
 	return nil
+}
+
+// enrollNewTerritoryProbe puts a freshly created bin on the ops-agent
+// watchlist when it sits >3 km from every other active bin — i.e. it was an
+// expansion bet, not an infill. Baseline = the network's median fill rate, so
+// evaluateWatchlist's existing graduate/escalate pass judges the probe against
+// typical demand after 14 days. Best-effort post-commit; one open watch per
+// bin (same guard the agent's startWatch uses).
+func enrollNewTerritoryProbe(db *sqlx.DB, binID string) {
+	var b struct {
+		Lat *float64 `db:"latitude"`
+		Lng *float64 `db:"longitude"`
+	}
+	if err := db.Get(&b, `SELECT latitude, longitude FROM bins WHERE id = $1`, binID); err != nil || b.Lat == nil || b.Lng == nil {
+		return
+	}
+	var others []struct {
+		Lat float64 `db:"latitude"`
+		Lng float64 `db:"longitude"`
+	}
+	if err := db.Select(&others, `
+		SELECT latitude, longitude FROM bins
+		WHERE status = 'active' AND id != $1
+		  AND latitude IS NOT NULL AND longitude IS NOT NULL`, binID); err != nil {
+		return
+	}
+	nearest := math.MaxFloat64
+	for _, o := range others {
+		if d := geo.HaversineMeters(*b.Lat, *b.Lng, o.Lat, o.Lng); d < nearest {
+			nearest = d
+		}
+	}
+	if nearest <= 3000 {
+		return // infill placement — normal territory, no probe needed
+	}
+
+	var open int
+	_ = db.Get(&open, `SELECT COUNT(*) FROM bin_watchlist WHERE bin_id = $1 AND status = 'watching'`, binID)
+	if open > 0 {
+		return
+	}
+	// Network median fill rate (%/day) — the bar the probe is judged against.
+	// Same 30-day window evaluateWatchlist measures the probe with, so the bar
+	// and the measurement come from the same regime.
+	baseline := 2.0
+	_ = db.Get(&baseline, `
+		WITH pairs AS (
+			SELECT bin_id,
+			       fill_percentage - LAG(fill_percentage) OVER (PARTITION BY bin_id ORDER BY checked_on) AS dfill,
+			       (checked_on - LAG(checked_on) OVER (PARTITION BY bin_id ORDER BY checked_on)) / 86400.0 AS ddays
+			FROM checks WHERE fill_percentage IS NOT NULL
+			  AND checked_on > EXTRACT(EPOCH FROM NOW())::BIGINT - 30*86400
+		),
+		rates AS (
+			SELECT bin_id, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY dfill / ddays) AS r
+			FROM pairs WHERE dfill > 0 AND ddays > 0.25 GROUP BY bin_id
+		)
+		SELECT COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY r), 2.0) FROM rates`)
+
+	// Human-readable reason (renders raw on the Weekly Growth Plan card);
+	// evaluateWatchlist branches on the "New-territory probe" prefix.
+	reason := "New-territory probe: first active bin in the network"
+	if nearest < math.MaxFloat64 {
+		reason = fmt.Sprintf("New-territory probe: placed %.1f km from nearest active bin", nearest/1000)
+	}
+
+	nowTs := time.Now().Unix()
+	if _, err := db.Exec(`
+		INSERT INTO bin_watchlist (id, bin_id, reason, baseline_fill_rate, started_at, evaluate_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		uuid.New().String(), binID, reason, baseline, nowTs, nowTs+14*86400); err != nil {
+		log.Printf("⚠️ [Probe] Failed to enroll bin %s as new-territory probe: %v", binID, err)
+		return
+	}
+	log.Printf("🧭 [Probe] Bin %s: %s — enrolled as 14-day watchlist probe (baseline %.1f%%/day)", binID, reason, baseline)
 }
 
 // moveCompletionSideEffects runs the best-effort post-commit tail: history,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -529,6 +530,7 @@ func (a *AIOperationsAgent) evaluateWatchlist() {
 		ID        string   `db:"id"`
 		BinID     string   `db:"bin_id"`
 		BinNumber int      `db:"bin_number"`
+		Reason    string   `db:"reason"`
 		Baseline  *float64 `db:"baseline_fill_rate"`
 		Current   *float64 `db:"current_rate"`
 		OpenMoves int      `db:"open_moves"`
@@ -547,7 +549,7 @@ func (a *AIOperationsAgent) evaluateWatchlist() {
 			FROM pairs WHERE dfill > 0 AND ddays > 0.25 GROUP BY bin_id
 		)
 		SELECT w.id, w.bin_id, COALESCE(b.bin_number, 0) AS bin_number,
-		       w.baseline_fill_rate, rate.current_rate,
+		       w.reason, w.baseline_fill_rate, rate.current_rate,
 		       (SELECT COUNT(*) FROM bin_move_requests mr
 		        WHERE mr.bin_id = w.bin_id AND mr.status NOT IN ('completed','cancelled')) AS open_moves
 		FROM bin_watchlist w
@@ -573,7 +575,29 @@ func (a *AIOperationsAgent) evaluateWatchlist() {
 		if w.Current != nil {
 			current = *w.Current
 		}
-		improved := baseline > 0 && current >= baseline*1.2
+		// Two watch flavors share the table but NOT the semantics:
+		//  - cadence review: baseline = the bin's OWN prior rate; graduating
+		//    means genuinely improving (+20%).
+		//  - new-territory probe (enrollNewTerritoryProbe): baseline = the
+		//    NETWORK median; a probe succeeds by MEETING typical demand, not
+		//    beating it by 20%.
+		isProbe := strings.HasPrefix(w.Reason, "New-territory probe")
+
+		if isProbe && w.Current == nil {
+			// No usable fill data means nobody VISITED the probe — a routing
+			// gap, not a site verdict. Extend instead of escalating on absence
+			// of evidence (the stale-bin flagger surfaces unvisited bins).
+			a.db.Exec(`UPDATE bin_watchlist SET evaluate_at = $1 WHERE id = $2`, now+14*86400, w.ID)
+			log.Printf("🧭 [AIAgent] Probe bin #%d matured with no fill data — extending watch 14d (bin likely unvisited)", w.BinNumber)
+			continue
+		}
+
+		var improved bool
+		if isProbe {
+			improved = baseline > 0 && current >= baseline
+		} else {
+			improved = baseline > 0 && current >= baseline*1.2
+		}
 
 		status := "escalated"
 		if improved {
@@ -593,14 +617,25 @@ func (a *AIOperationsAgent) evaluateWatchlist() {
 		if existing > 0 {
 			continue
 		}
-		a.createRecommendation(
-			"bin_relocate", "bin", w.BinID,
-			fmt.Sprintf("Bin #%d didn't improve after its probation — relocate it", w.BinNumber),
-			fmt.Sprintf("Bin #%d was watched after a cadence review. Its fill rate is %.1f%%/day vs a %.1f%%/day baseline — the site, not the schedule, is the constraint.", w.BinNumber, current, baseline),
-			"medium",
-			"Relocate to a scored candidate location (use the suggested destinations picker)",
-			fmt.Sprintf("Watch matured without improvement: baseline %.1f%%/day, current %.1f%%/day (needs +20%% to graduate).", baseline, current),
-		)
+		if isProbe {
+			a.createRecommendation(
+				"bin_relocate", "bin", w.BinID,
+				fmt.Sprintf("New-territory bin #%d isn't filling — consider pulling it back", w.BinNumber),
+				fmt.Sprintf("Bin #%d was placed in unproven territory and enrolled as a 14-day probe. It fills %.1f%%/day vs the network's typical %.1f%%/day — the location isn't generating demand.", w.BinNumber, current, baseline),
+				"medium",
+				"Relocate to a scored candidate location, or return it to the warehouse",
+				fmt.Sprintf("New-territory probe matured below the network-median bar: %.1f%%/day vs %.1f%%/day typical.", current, baseline),
+			)
+		} else {
+			a.createRecommendation(
+				"bin_relocate", "bin", w.BinID,
+				fmt.Sprintf("Bin #%d didn't improve after its probation — relocate it", w.BinNumber),
+				fmt.Sprintf("Bin #%d was watched after a cadence review. Its fill rate is %.1f%%/day vs a %.1f%%/day baseline — the site, not the schedule, is the constraint.", w.BinNumber, current, baseline),
+				"medium",
+				"Relocate to a scored candidate location (use the suggested destinations picker)",
+				fmt.Sprintf("Watch matured without improvement: baseline %.1f%%/day, current %.1f%%/day (needs +20%% to graduate).", baseline, current),
+			)
+		}
 	}
 }
 

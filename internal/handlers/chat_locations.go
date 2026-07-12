@@ -610,7 +610,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 
 		var expJobs []searchJob
-		expKeywords := tier1Keywords // use anchor keywords for expansion
+		// Expansion formerly searched anchors only; the 2026-07 calibration
+		// showed errand-retail density is the strongest yield signal (ρ=+0.39,
+		// beats anchors), so new territory also sweeps daily-errand categories
+		// — anchor-less but errand-dense strips are exactly what anchors-only
+		// missed. (No "supermarket"/"dollar store": near-duplicates of the
+		// tier-1 anchor names — pure HERE-quota waste.)
+		expKeywords := append(append([]string{}, tier1Keywords...),
+			"grocery store", "pharmacy", "discount store", "laundromat",
+		)
 		if !useV2 {
 			expKeywords = v1Keywords
 		}
@@ -710,6 +718,28 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 	if maxRate <= 0 {
 		maxRate = 1
+	}
+
+	// Network-median fill prior for EXPANSION candidates: they have no nearby
+	// bins, so their fill term would bottom out at the 0.1 floor — a ~37%
+	// structural score penalty (0.1^0.2) for lacking evidence, which is
+	// backwards in the mode whose purpose is going where there's no evidence.
+	// Exploration carries the network's typical demand prior instead, shaved
+	// 10% so no-evidence never strictly beats real median evidence — and the
+	// watchlist probe (enrollNewTerritoryProbe) is the backstop for the bets
+	// this lets through.
+	medianFillVal := 0.5
+	{
+		var fills []float64
+		for _, c := range allCandidates {
+			if c.Source != "expansion" && c.NearestFillRate > 0 {
+				fills = append(fills, c.NearestFillRate/maxRate)
+			}
+		}
+		if len(fills) > 0 {
+			sort.Float64s(fills)
+			medianFillVal = fills[len(fills)/2] * 0.9
+		}
 	}
 
 	// v2: ESRI as a RISK gate only (crime). The income and clothing-spend gates
@@ -1029,6 +1059,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 			// Ensure fill score has a floor (expansion areas with 0 fill shouldn't zero out)
 			fillVal := fillScore
+			if c.Source == "expansion" {
+				// No evidence ≠ bad evidence: exploration gets the network-median
+				// prior, not the punitive floor (see medianFillVal above).
+				fillVal = medianFillVal
+			}
 			if fillVal < 0.1 {
 				fillVal = 0.1
 			}
