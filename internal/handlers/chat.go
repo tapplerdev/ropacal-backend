@@ -265,6 +265,7 @@ Returns: total bins, active bins, clean bins, problematic bins, avg fill %, tota
 4. AUTOMATICALLY filters out locations near malls and Safeway stores
 5. Scores by SITE QUALITY: errand-retail density, anchor tenants (Target/Walmart tier), area fill history, and residential population — calibrated against live bin fill-rates. Income and apparel spend are NOT scored (calibration showed no predictive value); ESRI is used only as a crime safety gate.
 6. Reverse geocodes each recommendation to a real street address
+7. QUALITY-FIRST, NEVER PADS: returns UP TO the requested count — only spots scoring >=4.0/10. The response includes "requested" vs "count", a "shortfall" map (rejection reason -> how many candidates died there: too_close_to_existing_bin, below_quality_bar, high_crime_area, city_diversity_cap, etc.), and up to 3 "near_misses" (labeled below-bar candidates, NOT recommendations). When count < requested, EXPLAIN the shortfall honestly from the shortfall map — never invent reasons and never present near-misses as recommendations; offer them only as "these just missed the bar, your call."
 Always tell the user: "All locations have been verified clear of no-go zones and filtered to avoid malls/supermarkets."`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{

@@ -178,8 +178,11 @@ func filterCandidates(
 	placementMode string,
 	useV2 bool,
 	perBinFillRate map[string]float64,
-) []candidate {
+) ([]candidate, map[string]int) {
 	var filtered []candidate
+	// dropped counts every rejection by reason — travels to the tool response
+	// so the chat can explain SHORTFALLS honestly instead of guessing.
+	dropped := map[string]int{}
 	binCities := map[string]bool{}
 	for _, b := range bins {
 		binCities[strings.ToLower(b.City)] = true
@@ -199,6 +202,7 @@ func filterCandidates(
 		}
 		if rejected {
 			log.Printf("🚫 [Filter] %s — %s", c.NearbyPOI, reason)
+			dropped["in_no_go_zone"]++
 			continue
 		}
 
@@ -213,12 +217,14 @@ func filterCandidates(
 		}
 		if rejected {
 			log.Printf("🚫 [Filter] %s — %s", c.NearbyPOI, reason)
+			dropped["b2b_business"]++
 			continue
 		}
 
 		// 3. Mall/Safeway filter
 		if strings.Contains(nameLower, "safeway") || strings.Contains(nameLower, "mall") {
 			log.Printf("🚫 [Filter] %s — mall/Safeway excluded", c.NearbyPOI)
+			dropped["mall_or_safeway"]++
 			continue
 		}
 
@@ -250,6 +256,7 @@ func filterCandidates(
 		}
 		if tooClose {
 			log.Printf("🚫 [Filter] %s — too close to Bin #%d (%.2f mi, min %.2f)", c.NearbyPOI, nearestNum, nearestDist, minGapMiles)
+			dropped["too_close_to_existing_bin"]++
 			continue
 		}
 
@@ -269,6 +276,7 @@ func filterCandidates(
 		}
 		if tooClose {
 			log.Printf("🚫 [Filter] %s — too close to existing potential location", c.NearbyPOI)
+			dropped["too_close_to_pending_spot"]++
 			continue
 		}
 
@@ -277,12 +285,14 @@ func filterCandidates(
 			if nearestDist > 5.0 {
 				// Definitely too far — skip OSRM call
 				log.Printf("🚫 [Filter/Infill] %s — %.1f mi from nearest bin #%d (>5 mi, skip drive-time check)", c.NearbyPOI, nearestDist, nearestNum)
+				dropped["beyond_infill_drive_limit"]++
 				continue
 			} else if nearestDist > 2.0 {
 				// Borderline — check actual drive time
 				driveTime := getOSRMDriveTimeMins(c.Lat, c.Lng, nearestBinLat, nearestBinLng)
 				if driveTime > 10.0 {
 					log.Printf("🚫 [Filter/Infill] %s — %.1f min drive from nearest bin #%d (>10 min cap)", c.NearbyPOI, driveTime, nearestNum)
+					dropped["beyond_infill_drive_limit"]++
 					continue
 				}
 				log.Printf("✅ [Filter/Infill] %s — %.1f mi / %.1f min drive from bin #%d (within 10 min)", c.NearbyPOI, nearestDist, driveTime, nearestNum)
@@ -293,6 +303,7 @@ func filterCandidates(
 		// 7. Expand mode: skip candidates in cities with existing bins
 		if placementMode == "expand" && binCities[strings.ToLower(c.City)] {
 			log.Printf("🚫 [Filter/Expand] %s — city %s already has bins", c.NearbyPOI, c.City)
+			dropped["city_already_has_bins"]++
 			continue
 		}
 
@@ -300,7 +311,7 @@ func filterCandidates(
 	}
 
 	log.Printf("📋 [Filter] %d → %d candidates after filtering (mode=%s)", len(candidates), len(filtered), placementMode)
-	return filtered
+	return filtered, dropped
 }
 
 func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, error) {
@@ -683,7 +694,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	for _, pl := range existingPotentials {
 		potFilters = append(potFilters, potentialLocFilter{Latitude: pl.Latitude, Longitude: pl.Longitude})
 	}
-	allCandidates := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2, perBinFillRate)
+	allCandidates, dropped := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2, perBinFillRate)
 	log.Printf("⏱️ [Timing] Filter: %v, %d → %d candidates", time.Since(tFilter), dedupCount, len(allCandidates))
 
 	if len(allCandidates) == 0 {
@@ -759,10 +770,12 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				if e.MedianHouseholdIncome == 0 && e.CrimeIndex == 0 && e.AvgClothingSpend == 0 {
 					log.Printf("🚫 [ESRI Gate] %s (%.4f,%.4f) — no ESRI data available, rejecting",
 						allCandidates[i].NearbyPOI, allCandidates[i].Lat, allCandidates[i].Lng)
+					dropped["no_demographic_data"]++
 					continue
 				}
 				if e.CrimeIndex > 200 {
 					log.Printf("🚫 [ESRI Gate] %s — crime index %.0f above 200 maximum", allCandidates[i].NearbyPOI, e.CrimeIndex)
+					dropped["high_crime_area"]++
 					continue
 				}
 			}
@@ -799,6 +812,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		topCount = len(allCandidates)
 	}
 	topCandidates := allCandidates[:topCount]
+	if skipped := len(allCandidates) - topCount; skipped > 0 {
+		dropped["not_scored_capacity"] += skipped
+	}
 
 	log.Printf("📍 [Recommend] %d candidates passed gates, selected top %d for POI enrichment", len(allCandidates), topCount)
 	for i, tc := range topCandidates {
@@ -854,6 +870,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	var recommendations []LocationRecommendation
 	gapResults, expResults := 0, 0
+	// Near-misses: candidates that survived every gate but scored below the
+	// 4.0 quality bar. Returned SEPARATELY (never mixed into recommendations)
+	// so a shortfall can be explained and a human can override with open eyes.
+	var nearMisses []LocationRecommendation
 	cityCount := map[string]int{} // track results per city for diversity cap
 	maxPerCity := count/2 + 1     // e.g., 20 placements → max 11 per city, 10 → max 6
 	if maxPerCity < 5 {
@@ -879,6 +899,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		cityKey := strings.ToLower(c.City)
 		if cityCount[cityKey] >= maxPerCity {
 			log.Printf("📍 [Diversity] Skipping %s in %s — city cap reached (%d/%d)", c.NearbyPOI, c.City, cityCount[cityKey], maxPerCity)
+			dropped["city_diversity_cap"]++
 			continue
 		}
 
@@ -903,12 +924,14 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// v2: anchor = auto-pass, else 4+ non-B2B businesses required
 			if !hasAnchor && poiDensity < 4 {
 				log.Printf("🚫 [v2] Filtered: %s — no anchor + only %d POIs (need 4+)", c.NearbyPOI, poiDensity)
+				dropped["too_few_nearby_businesses"]++
 				continue
 			}
 		} else {
 			// v1: retail ratio filter
 			if retailRatio < 0.4 && poiDensity < 6 {
 				log.Printf("🚫 [Recommend] Filtered: %s — retail ratio %.0f%% (need 40%%+)", c.NearbyPOI, retailRatio*100)
+				dropped["low_retail_ratio"]++
 				continue
 			}
 		}
@@ -930,6 +953,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				}
 			}
 			if !hasAnchor {
+				dropped["on_top_of_existing_bin"]++
 				continue // snapped onto existing bin, skip
 			}
 			hasAnchor = true // restore flag
@@ -959,6 +983,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		if c.Source != "business_search" && c.Source != "graphvenn_business" {
 			if isVagueAddress(address, c.City) || isBadAddressKeyword(address) {
 				log.Printf("🚫 [Recommend] Filtered: %q", address)
+				dropped["unusable_address"]++
 				continue
 			}
 		}
@@ -966,6 +991,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// HARD FILTER: minimum POI density (v2 already checked above with anchor logic)
 		if !useV2 && poiDensity < 3 {
 			log.Printf("🚫 [Recommend] Filtered: %s — only %d POIs within 300m (need 3+)", c.NearbyPOI, poiDensity)
+			dropped["too_few_nearby_businesses"]++
 			continue
 		}
 
@@ -1119,9 +1145,26 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// 	continue
 		// }
 
-		// Minimum score cutoff — below this is not worth recommending
+		// Minimum score cutoff — below this is not worth recommending as a
+		// pick, but it IS worth reporting: keep it as a labeled near-miss so
+		// "asked 10, got 8" comes with the 2 that just missed and why.
 		if finalScore < 4.0 {
 			log.Printf("🚫 [Recommend] Filtered: %s — score %.1f below 4.0 threshold", c.NearbyPOI, finalScore)
+			dropped["below_quality_bar"]++
+			nearMisses = append(nearMisses, LocationRecommendation{
+				Latitude:        math.Round(c.Lat*10000) / 10000,
+				Longitude:       math.Round(c.Lng*10000) / 10000,
+				Address:         address,
+				City:            c.City,
+				Zip:             c.Zip,
+				Score:           finalScore,
+				Reasoning:       fmt.Sprintf("BELOW QUALITY BAR (%.1f < 4.0) — shown for transparency, not recommended", finalScore),
+				NearestBinNum:   c.NearestBinNum,
+				NearestBinDist:  c.NearestBinDist,
+				AreaAvgFillRate: math.Round(c.NearestFillRate*10) / 10,
+				LocationType:    c.LocationType,
+				Source:          c.Source,
+			})
 			continue
 		}
 
@@ -1191,7 +1234,22 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	log.Printf("📍 [Recommend] Final: %d (gap_fill: %d, expansion: %d)", len(recommendations), gapResults, expResults)
 	log.Printf("⏱️ [Timing] TOTAL: %v, returning %d results", time.Since(tTotal), len(recommendations))
 
-	result, _ := json.Marshal(map[string]any{"count": len(recommendations), "recommendations": recommendations})
+	// Top 3 near-misses only — enough for a human override, not a second list.
+	sort.Slice(nearMisses, func(i, j int) bool { return nearMisses[i].Score > nearMisses[j].Score })
+	if len(nearMisses) > 3 {
+		nearMisses = nearMisses[:3]
+	}
+
+	// Shortfall accounting: quality-first means we return UP TO `count`, never
+	// padding with weak picks — but the caller deserves to know where the
+	// rest died. `shortfall` maps rejection reason -> candidates dropped.
+	result, _ := json.Marshal(map[string]any{
+		"count":           len(recommendations),
+		"requested":       count,
+		"recommendations": recommendations,
+		"shortfall":       dropped,
+		"near_misses":     nearMisses,
+	})
 	return string(result), nil
 }
 
