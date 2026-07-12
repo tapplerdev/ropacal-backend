@@ -191,6 +191,7 @@ func filterCandidates(
 	placementMode string,
 	useV2 bool,
 	perBinFillRate map[string]float64,
+	targeted bool,
 ) ([]candidate, map[string]int) {
 	var filtered []candidate
 	// dropped counts every rejection by reason — travels to the tool response
@@ -313,8 +314,12 @@ func filterCandidates(
 			// < 2.0 miles: always within 10 min drive, no need to check
 		}
 
-		// 7. Expand mode: skip candidates in cities with existing bins
-		if placementMode == "expand" && binCities[strings.ToLower(c.City)] {
+		// 7. Expand mode: skip candidates in cities with existing bins — BUT NOT
+		// when the user explicitly targeted an area. "Explore cities I don't cover"
+		// is the point of an UNtargeted New-Territory run; if they picked Hayward
+		// by name, honor it (too_close_to_existing_bin still prevents stacking on
+		// the bins already there).
+		if placementMode == "expand" && !targeted && binCities[strings.ToLower(c.City)] {
 			log.Printf("🚫 [Filter/Expand] %s — city %s already has bins", c.NearbyPOI, c.City)
 			dropped["city_already_has_bins"]++
 			continue
@@ -845,7 +850,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	for _, pl := range existingPotentials {
 		potFilters = append(potFilters, potentialLocFilter{Latitude: pl.Latitude, Longitude: pl.Longitude})
 	}
-	allCandidates, dropped := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2, perBinFillRate)
+	allCandidates, dropped := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2, perBinFillRate, area != nil)
 
 	// Geometric target filter with a CORE + HALO model. A candidate inside the
 	// core (real city polygon, or the district bbox) is "in_area". When the user
