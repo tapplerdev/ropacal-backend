@@ -54,14 +54,14 @@ func TestGetAreaBoundary(t *testing.T) {
 		t.Errorf("Berkeley: geometry missing")
 	}
 
-	// A district (Brentwood in LA) with real LA coordinates must NOT resolve to
-	// the Contra Costa city — found=false, no polygon.
-	if _, body := call("name=Brentwood&type=district&lat=34.0522&lng=-118.4740"); body["found"] != false {
-		t.Errorf("LA district Brentwood: found=%v, want false", body["found"])
+	// A district (Brentwood in LA) with real LA coordinates now resolves to the
+	// LA neighborhood polygon.
+	if _, body := call("name=Brentwood&type=district&lat=34.0522&lng=-118.4740"); body["found"] != true {
+		t.Errorf("LA district Brentwood: found=%v, want true", body["found"])
 	}
 
-	// Same name typed as a city but picked in LA: the geographic sanity check
-	// still rejects the far-away Contra Costa Brentwood.
+	// Same name typed as a CITY but picked in LA: the geographic sanity check
+	// still rejects the far-away Contra Costa Brentwood city.
 	if _, body := call("name=Brentwood&type=city&lat=34.0522&lng=-118.4740"); body["found"] != false {
 		t.Errorf("far same-name city: found=%v, want false", body["found"])
 	}

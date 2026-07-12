@@ -17,6 +17,15 @@ import (
 //go:embed data/ca_places.json
 var caPlacesJSON []byte
 
+// laDistrictsJSON is the compiled-in DISTRICT asset: 114 City-of-Los-Angeles
+// neighborhoods from the LA Times "Mapping L.A." set (LA GeoHub, CC-BY 4.0,
+// attribute "Los Angeles Times"), simplified to ~33 m. These are the canonical
+// colloquial neighborhood polygons (Brentwood, Bel-Air…) — the district layer
+// TIGER does not provide. Regenerate with scripts/build_la_districts.py.
+//
+//go:embed data/la_districts.json
+var laDistrictsJSON []byte
+
 // ring is a closed sequence of [lng, lat] vertices.
 type ring [][2]float64
 
@@ -27,13 +36,13 @@ type simplePolygon struct {
 	holes []ring
 }
 
-// Boundary is one city's true legal outline plus the raw GeoJSON geometry kept
+// Boundary is one area's true outline plus the raw GeoJSON geometry kept
 // verbatim for serving to map clients (no lossy re-encode of the parsed rings).
 type Boundary struct {
 	Name     string     `json:"name"`
 	NameNorm string     `json:"-"`
 	NameLSAD string     `json:"namelsad"`
-	Type     string     `json:"type"` // always "city" for TIGER places
+	Type     string     `json:"type"` // "city" (TIGER) or "district" (LA neighborhood)
 	BBox     [4]float64 `json:"bbox"` // west, south, east, north
 
 	polys       []simplePolygon
@@ -144,72 +153,99 @@ func pointInRing(x, y float64, r ring) bool {
 	return inside
 }
 
-// BoundaryStore is an in-memory index of city boundaries keyed by normalized
-// name. Loaded once at startup and read concurrently thereafter (never mutated
-// after Load, so no locking needed).
+// BoundaryStore is an in-memory index of boundaries keyed by normalized name,
+// split into cities (TIGER) and districts (LA neighborhoods). Loaded once at
+// startup and read concurrently thereafter (never mutated after Load, so no
+// locking needed).
 type BoundaryStore struct {
-	byNorm map[string]*Boundary
+	cityByNorm     map[string]*Boundary
+	districtByNorm map[string]*Boundary
 }
 
-// nonCityTypes are HERE area types that must never resolve to a TIGER city
-// polygon. Without this guard, picking the LA DISTRICT "Brentwood" would match
-// the Contra Costa CITY "Brentwood" and draw the wrong shape 400 miles away.
-var nonCityTypes = map[string]bool{
-	"district": true, "subdistrict": true, "county": true,
-	"administrativeArea": true, "postalCode": true, "state": true, "country": true,
+// districtTypes are HERE area types that resolve to a NEIGHBORHOOD polygon
+// (LA Times set) rather than a city.
+var districtTypes = map[string]bool{"district": true, "subdistrict": true}
+
+// rejectTypes are area types we never have an authoritative polygon for —
+// picking one must not fabricate a city/district shape.
+var rejectTypes = map[string]bool{
+	"county": true, "administrativeArea": true, "postalCode": true,
+	"state": true, "country": true,
 }
 
-// LoadBoundaries parses the embedded asset into a lookup store.
-func LoadBoundaries() (*BoundaryStore, error) {
+// loadRecords parses one embedded asset (cities or districts) into a
+// name-keyed map. First writer wins on a name collision (names are ~unique
+// within each layer; the lat/lng sanity check in Lookup catches the rest).
+func loadRecords(data []byte, typ, label string) (map[string]*Boundary, error) {
 	var records []struct {
 		Name     string          `json:"name"`
 		NameNorm string          `json:"name_norm"`
 		NameLSAD string          `json:"namelsad"`
+		Parent   string          `json:"parent"`
 		BBox     [4]float64      `json:"bbox"`
 		Geometry json.RawMessage `json:"geometry"`
 	}
-	if err := json.Unmarshal(caPlacesJSON, &records); err != nil {
-		return nil, fmt.Errorf("parse ca_places.json: %w", err)
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", label, err)
 	}
-	store := &BoundaryStore{byNorm: make(map[string]*Boundary, len(records))}
+	out := make(map[string]*Boundary, len(records))
 	for _, rec := range records {
 		polys, err := parseGeometry(rec.Geometry)
 		if err != nil {
 			return nil, fmt.Errorf("parse geometry for %q: %w", rec.Name, err)
 		}
-		b := &Boundary{
-			Name: rec.Name, NameNorm: rec.NameNorm, NameLSAD: rec.NameLSAD,
-			Type: "city", BBox: rec.BBox, polys: polys, rawGeometry: rec.Geometry,
+		lsad := rec.NameLSAD
+		if lsad == "" && rec.Parent != "" {
+			lsad = rec.Name + ", " + rec.Parent
 		}
-		// First writer wins on a name collision (place names are ~unique per
-		// state in TIGER); the lat/lng sanity check in Lookup catches the rest.
-		if _, exists := store.byNorm[b.NameNorm]; !exists {
-			store.byNorm[b.NameNorm] = b
+		b := &Boundary{
+			Name: rec.Name, NameNorm: rec.NameNorm, NameLSAD: lsad,
+			Type: typ, BBox: rec.BBox, polys: polys, rawGeometry: rec.Geometry,
+		}
+		if _, exists := out[b.NameNorm]; !exists {
+			out[b.NameNorm] = b
 		}
 	}
-	return store, nil
+	return out, nil
 }
 
-// Count returns the number of loaded city boundaries.
-func (s *BoundaryStore) Count() int { return len(s.byNorm) }
-
-// Lookup resolves a picked area to its city boundary, or nil when there is no
-// authoritative polygon (a district, a county, an unknown name, or a name that
-// collides with a city far from where the user actually picked).
-//
-// typ is the HERE area type; lat/lng is the picked center (pass 0,0 to skip the
-// geographic sanity check).
-func (s *BoundaryStore) Lookup(name, typ string, lat, lng float64) *Boundary {
-	if nonCityTypes[typ] {
-		return nil // TIGER covers cities only — never fake a district/county
+// LoadBoundaries parses the embedded city + district assets into a lookup store.
+func LoadBoundaries() (*BoundaryStore, error) {
+	cities, err := loadRecords(caPlacesJSON, "city", "ca_places.json")
+	if err != nil {
+		return nil, err
 	}
-	b := s.byNorm[normName(name)]
+	districts, err := loadRecords(laDistrictsJSON, "district", "la_districts.json")
+	if err != nil {
+		return nil, err
+	}
+	return &BoundaryStore{cityByNorm: cities, districtByNorm: districts}, nil
+}
+
+// Count returns the total number of loaded boundaries (cities + districts).
+func (s *BoundaryStore) Count() int { return len(s.cityByNorm) + len(s.districtByNorm) }
+
+// Lookup resolves a picked area to its boundary polygon, or nil when there is
+// none: a district-type name resolves against the neighborhood layer, a
+// city-type name against the city layer, and county/postal/etc. never resolve.
+// A same-name match far from where the user picked is rejected by the lat/lng
+// sanity check (pass 0,0 to skip it).
+func (s *BoundaryStore) Lookup(name, typ string, lat, lng float64) *Boundary {
+	if rejectTypes[typ] {
+		return nil
+	}
+	var b *Boundary
+	if districtTypes[typ] {
+		b = s.districtByNorm[normName(name)]
+	} else {
+		b = s.cityByNorm[normName(name)]
+	}
 	if b == nil {
 		return nil
 	}
-	// Reject a same-name city in a different part of the state: the picked
-	// center must sit inside the matched city's bbox (with a ~5.5 km margin for
-	// centers that HERE places just outside the legal line).
+	// Reject a same-name area elsewhere: the picked center must sit inside the
+	// matched boundary's bbox (with a ~5.5 km margin for centers HERE places
+	// just outside the line).
 	if lat != 0 || lng != 0 {
 		const margin = 0.05
 		if lng < b.BBox[0]-margin || lng > b.BBox[2]+margin ||

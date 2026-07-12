@@ -1146,13 +1146,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// Reverse geocode (with retries — HERE may throttle after parallel POI density burst)
 		// Small delay between geocode calls to avoid rate limiting
 		time.Sleep(100 * time.Millisecond)
-		address, zip := reverseGeocodeHERE(c.Lat, c.Lng)
+		address, zip, realCity := reverseGeocodeHERE(c.Lat, c.Lng)
 		isRawCoords := len(address) > 0 && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 		if isRawCoords {
 			// Retry up to 2 more times with increasing delay
 			for retry := 0; retry < 2 && isRawCoords; retry++ {
 				time.Sleep(time.Duration(300*(retry+1)) * time.Millisecond)
-				address, zip = reverseGeocodeHERE(c.Lat, c.Lng)
+				address, zip, realCity = reverseGeocodeHERE(c.Lat, c.Lng)
 				isRawCoords = len(address) > 0 && !strings.ContainsAny(address, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 			}
 			if isRawCoords {
@@ -1161,6 +1161,17 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 		if zip != "" {
 			c.Zip = zip
+		}
+		// Show the candidate's ACTUAL city, not the target area's name. Expansion
+		// candidates were minted with City = the area label (e.g. "Brentwood"), so
+		// a near_area pick in Santa Monica would otherwise display "Brentwood".
+		if realCity != "" {
+			c.City = realCity
+			// Keep the diversity counter honest: increment the REAL city so the
+			// per-city cap counts the municipality a pick actually lands in (the
+			// cap CHECK already ran pre-geocode on the minted name — unavoidable,
+			// geocoding is expensive — but the tally should reflect reality).
+			cityKey = strings.ToLower(c.City)
 		}
 		zip5 := stripZipPlus4(c.Zip)
 
@@ -2645,12 +2656,12 @@ func haversineDistMiles(lat1, lon1, lat2, lon2 float64) float64 {
 	return geo.HaversineMiles(lat1, lon1, lat2, lon2)
 }
 
-func reverseGeocodeHERE(lat, lng float64) (string, string) {
+func reverseGeocodeHERE(lat, lng float64) (address, zip, city string) {
 	url := fmt.Sprintf("https://revgeocode.search.hereapi.com/v1/revgeocode?at=%.6f,%.6f&apiKey=%s", lat, lng, HereAPIKey)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return fmt.Sprintf("%.4f, %.4f", lat, lng), ""
+		return fmt.Sprintf("%.4f, %.4f", lat, lng), "", ""
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -2659,13 +2670,15 @@ func reverseGeocodeHERE(lat, lng float64) (string, string) {
 			Address struct {
 				Label      string `json:"label"`
 				PostalCode string `json:"postalCode"`
+				City       string `json:"city"`
 			} `json:"address"`
 		} `json:"items"`
 	}
 	if json.Unmarshal(body, &result) != nil || len(result.Items) == 0 {
-		return fmt.Sprintf("%.4f, %.4f", lat, lng), ""
+		return fmt.Sprintf("%.4f, %.4f", lat, lng), "", ""
 	}
-	return result.Items[0].Address.Label, result.Items[0].Address.PostalCode
+	a := result.Items[0].Address
+	return a.Label, a.PostalCode, a.City
 }
 
 // callGraphVennService calls the GraphVenn Python microservice to get optimal demand hotspots.
