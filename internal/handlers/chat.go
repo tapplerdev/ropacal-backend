@@ -317,6 +317,7 @@ type chatRequest struct {
 
 type chatTargetArea struct {
 	Label string    `json:"label"`
+	Type  string    `json:"type,omitempty"` // HERE area type: city / district / county — gates the true-boundary lookup
 	Lat   float64   `json:"lat"`
 	Lng   float64   `json:"lng"`
 	BBox  []float64 `json:"bbox,omitempty"` // [west, south, east, north]
@@ -339,6 +340,9 @@ func injectTargetArea(input json.RawMessage, ta *chatTargetArea) json.RawMessage
 		return input
 	}
 	area := map[string]any{"label": ta.Label, "lat": ta.Lat, "lng": ta.Lng}
+	if ta.Type != "" {
+		area["type"] = ta.Type
+	}
 	if len(ta.BBox) == 4 {
 		area["bbox"] = ta.BBox
 	}

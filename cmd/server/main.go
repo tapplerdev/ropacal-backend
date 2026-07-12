@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/database"
+	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/handlers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/moverequest"
@@ -92,6 +93,16 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Println("✅ Database migrations completed")
+
+	// Load compiled-in city boundaries (TIGER CA places) for the target-area
+	// map overlay + recommender containment. Non-fatal: on failure the picker
+	// falls back to its search bbox everywhere.
+	if store, err := geo.LoadBoundaries(); err != nil {
+		log.Printf("⚠️ City boundaries failed to load (falling back to bbox): %v", err)
+	} else {
+		handlers.SetBoundaryStore(store)
+		log.Printf("🗺️  Loaded %d city boundaries (TIGER CA places)", store.Count())
+	}
 
 	// One-time (idempotent) backfill: address snapshots on checks that predate
 	// the snapshot columns. Non-fatal — a failure retries on the next boot.
@@ -265,8 +276,9 @@ func main() {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "ok",
-			"version": "target-area-picker-2",
+			"status":          "ok",
+			"version":         "city-boundaries",
+			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
@@ -359,10 +371,13 @@ func main() {
 
 		// Analytics endpoints
 		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
-		r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db)) // weekly operational buckets (Network Health tab)
-		r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))     // per-bin quadrant scorecard (Bin Performance tab)
-		r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))   // per-bin 90d yield proxy (Growth hex map)
-		r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db)) // scored deployment candidates (Growth tab)
+
+		// True city boundary (GeoJSON) for the target-area map overlay
+		r.Get("/areas/boundary", handlers.GetAreaBoundary())
+		r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db))      // weekly operational buckets (Network Health tab)
+		r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))          // per-bin quadrant scorecard (Bin Performance tab)
+		r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))    // per-bin 90d yield proxy (Growth hex map)
+		r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db))  // scored deployment candidates (Growth tab)
 		r.Get("/analytics/growth/weekly-plan", handlers.GetWeeklyGrowthPlan(db)) // the week's growth actions in one plan
 
 		// Potential Locations endpoints (managers can view all - no auth required)

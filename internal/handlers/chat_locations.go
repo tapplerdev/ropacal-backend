@@ -336,6 +336,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	if ta, ok := params["target_area"].(map[string]any); ok {
 		a := areaTarget{}
 		a.Label, _ = ta["label"].(string)
+		a.Type, _ = ta["type"].(string)
 		a.Lat, _ = ta["lat"].(float64)
 		a.Lng, _ = ta["lng"].(float64)
 		if bb, ok := ta["bbox"].([]any); ok && len(bb) == 4 {
@@ -378,6 +379,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			})
 			return string(out), nil
 		}
+	}
+	// Attach the true legal city polygon when we have one (cities only —
+	// districts stay bbox-based). This makes the containment filter agree with
+	// the shape the map draws: "inside San Jose" means inside its real limits,
+	// not its bounding rectangle.
+	if area != nil {
+		area.attachBoundary()
 	}
 
 	minGapMiles := 0.3
@@ -1629,6 +1637,11 @@ type areaTarget struct {
 	Lat   float64     `json:"lat"`
 	Lng   float64     `json:"lng"`
 	BBox  *[4]float64 `json:"bbox,omitempty"` // west, south, east, north
+
+	// boundary is the true legal city polygon (TIGER), attached at resolution
+	// when the target is a city we have geometry for. nil for districts and
+	// unknown cities — contains() then falls back to the bbox. Not serialized.
+	boundary *geo.Boundary
 }
 
 // areaShortLabel trims a full HERE title ("San Jose, CA, United States",
@@ -1641,11 +1654,29 @@ func areaShortLabel(label string) string {
 	return label
 }
 
-// contains reports whether (lat,lng) falls inside the area's bbox with a
-// ~2 km margin. Without a bbox, an 8 km radius around the center — matching
-// the HERE discover search radius so we don't spend quota on results we
-// then throw away as outside the target.
+// attachBoundary looks up the target's true legal city polygon (TIGER) and
+// attaches it for exact containment. Type-gated + geographically sanity-checked
+// inside Lookup, so a district ("Brentwood" in LA) never resolves to a
+// same-named city, and an unknown city simply stays bbox-based.
+func (a *areaTarget) attachBoundary() {
+	if b := lookupBoundary(areaShortLabel(a.Label), a.Type, a.Lat, a.Lng); b != nil {
+		a.boundary = b
+		if a.BBox == nil {
+			bb := b.BBox
+			a.BBox = &bb
+		}
+	}
+}
+
+// contains reports whether (lat,lng) falls inside the target area. When a true
+// city polygon is attached, it's an exact point-in-polygon test — the drawn
+// shape and the filter agree. Otherwise the area's bbox with a ~2 km margin,
+// or (no bbox) an 8 km radius matching the HERE discover search radius so we
+// don't spend quota on results we then throw away as outside the target.
 func (a *areaTarget) contains(lat, lng float64) bool {
+	if a.boundary != nil {
+		return a.boundary.Contains(lat, lng)
+	}
 	if a.BBox != nil {
 		const margin = 0.02 // ≈2.2 km latitude
 		return lng >= a.BBox[0]-margin && lng <= a.BBox[2]+margin &&
