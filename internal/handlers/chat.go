@@ -283,8 +283,8 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 					},
 					"include_nearby": map[string]any{"type": "boolean", "description": "When a target area is set: also surface profile-matching spots just outside it (core+halo, default true). Set false for strictly-inside-only. The dashboard's 'Strictly inside' toggle controls this; the recommender tags each result locality=in_area|near_area."},
 					"min_gap_miles":  map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
-					"algorithm":     map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (site-quality: HERE retail density + anchors + fill + population; ESRI crime gate only — income/clothing-spend are not used)"},
-					"mode":          map[string]any{"type": "string", "description": "Placement mode: 'infill' (near existing high-performing bins, tighter spacing), 'expand' (new areas with good demographics, clustered for route efficiency), or 'auto' (default, mixed)"},
+					"algorithm":      map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (site-quality: HERE retail density + anchors + fill + population; ESRI crime gate only — income/clothing-spend are not used)"},
+					"mode":           map[string]any{"type": "string", "description": "Placement mode: 'infill' (near existing high-performing bins, tighter spacing), 'expand' (new areas with good demographics, clustered for route efficiency), or 'auto' (default, mixed)"},
 				},
 			},
 		},
@@ -338,12 +338,12 @@ func injectTargetArea(input json.RawMessage, ta *chatTargetArea) json.RawMessage
 	if err := json.Unmarshal(input, &m); err != nil {
 		return input
 	}
-	if _, has := m["target_area"]; has {
-		return input
-	}
-	if tc, ok := m["target_city"].(string); ok && tc != "" {
-		return input
-	}
+	// A pinned target area is AUTHORITATIVE: force it onto EVERY
+	// recommend_bin_locations call and strip any model-guessed target_city. An
+	// agentic follow-up call would otherwise re-derive "Brentwood" from the area
+	// label and re-resolve that ambiguous name to a different same-named city
+	// (the Contra Costa city instead of the pinned LA district) — and the last
+	// tool call wins. The pin the user clicked must always take precedence.
 	area := map[string]any{"label": ta.Label, "lat": ta.Lat, "lng": ta.Lng}
 	if ta.Type != "" {
 		area["type"] = ta.Type
@@ -352,6 +352,7 @@ func injectTargetArea(input json.RawMessage, ta *chatTargetArea) json.RawMessage
 		area["bbox"] = ta.BBox
 	}
 	m["target_area"] = area
+	delete(m, "target_city")
 	out, err := json.Marshal(m)
 	if err != nil {
 		return input

@@ -82,21 +82,40 @@ func TestRefine_DropsSpatialOutlier(t *testing.T) {
 	}
 }
 
-func TestRefine_NoProfile_DropsNearby(t *testing.T) {
-	// Fewer than 3 in-area picks → can't build a profile → nearby dropped.
+func TestRefine_NoProfile_KeepsNearbyOnQuality(t *testing.T) {
+	// Fewer than 3 in-area picks → no similarity profile — but a nearby pick that
+	// cleared the quality bar and isn't an outlier is still KEPT (dropping it made
+	// "include nearby" return fewer than "strictly inside").
 	scored := []scoredRec{
 		inRec(37.33, -121.88),
 		nearRec(37.35, -121.90, featureVec{0.8, 0.7, 0.5, 1.0}),
 	}
 	dropped := map[string]int{}
 	out, in, near := refineByAreaProfile(scored, sjArea(), true, dropped)
-	if in != 1 || near != 0 {
-		t.Errorf("got in=%d near=%d, want in=1 near=0", in, near)
+	if in != 1 || near != 1 {
+		t.Errorf("got in=%d near=%d, want in=1 near=1", in, near)
 	}
-	if dropped["nearby_no_profile"] != 1 {
-		t.Errorf("nearby_no_profile = %d, want 1", dropped["nearby_no_profile"])
+	if len(out) != 2 {
+		t.Errorf("total = %d, want 2", len(out))
 	}
-	if len(out) != 1 {
-		t.Errorf("total = %d, want 1", len(out))
+}
+
+func TestRefine_NoProfile_StillDropsOutlier(t *testing.T) {
+	// Even without a profile, a nearby pick far from the cluster is dropped.
+	scored := []scoredRec{
+		inRec(37.33, -121.88),
+		inRec(37.34, -121.89),
+		nearRec(37.55, -121.70, featureVec{0.8, 0.7, 0.5, 1.0}), // ~25 km away
+	}
+	dropped := map[string]int{}
+	out, _, near := refineByAreaProfile(scored, sjArea(), true, dropped)
+	if near != 0 {
+		t.Errorf("nearby kept = %d, want 0 (outlier dropped without profile)", near)
+	}
+	if dropped["spatial_outlier"] != 1 {
+		t.Errorf("spatial_outlier = %d, want 1", dropped["spatial_outlier"])
+	}
+	if len(out) != 2 {
+		t.Errorf("total = %d, want 2", len(out))
 	}
 }

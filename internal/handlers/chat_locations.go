@@ -714,11 +714,28 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// city- or district-sized target gets swept, not sampled once at
 			// its centroid. Every origin carries the area label.
 			expandHalo := 0.0
+			maxOrigins := 12
 			if includeNearby {
 				expandHalo = haloKm
+				// Growing the box for the halo must NOT thin out the core: scale
+				// the origin budget by the area increase so core sampling density
+				// is preserved (else "include nearby" finds FEWER in-area picks
+				// than "strictly inside"). Capped for API cost.
+				if area.BBox != nil {
+					w, h := area.BBox[2]-area.BBox[0], area.BBox[3]-area.BBox[1]
+					if w > 0 && h > 0 {
+						dLat := haloKm / 111.0
+						dLng := haloKm / (111.0 * math.Cos(area.Lat*math.Pi/180))
+						grow := ((w + 2*dLng) * (h + 2*dLat)) / (w * h)
+						maxOrigins = int(math.Ceil(12 * grow))
+						if maxOrigins > 24 {
+							maxOrigins = 24
+						}
+					}
+				}
 			}
-			origins := area.searchOrigins(12, expandHalo)
-			log.Printf("📍 [Expand] Target area %q tiled into %d search origins (halo=%.1fkm)", area.Label, len(origins), expandHalo)
+			origins := area.searchOrigins(maxOrigins, expandHalo)
+			log.Printf("📍 [Expand] Target area %q tiled into %d search origins (halo=%.1fkm, maxOrigins=%d)", area.Label, len(origins), expandHalo, maxOrigins)
 			// FRESH slice — cities[:0] would alias and permanently corrupt the
 			// package-level expansionCities backing array (+ race across requests).
 			cities = make([]struct {
@@ -1882,12 +1899,18 @@ func refineByAreaProfile(scored []scoredRec, area *areaTarget, useV2 bool, dropp
 	if len(near) == 0 {
 		return final, inAreaCount, 0
 	}
-	// Without a definable profile we can't tell a genuine nearby match from the
-	// loose-bbox outlier this feature exists to prevent — so drop nearby rather
-	// than guess (reported via nearby_no_profile).
+	// Too few in-area picks to build a similarity profile. Rather than DROP every
+	// nearby pick (which made "include nearby" return fewer than "strictly
+	// inside" for sparse areas — exactly when nearby matters most), keep the ones
+	// that already cleared the quality bar and aren't spatial outliers, with the
+	// standard outside-the-area score shave. No profile ⇒ no AreaMatch.
 	if !useV2 || len(inArea) < 3 {
-		dropped["nearby_no_profile"] += len(near)
-		return final, inAreaCount, 0
+		keptNear := dropSpatialOutliers(final, near, dropped)
+		for i := range keptNear {
+			keptNear[i].rec.Score = math.Round(keptNear[i].rec.Score*0.9*10) / 10
+			final = append(final, keptNear[i].rec)
+		}
+		return final, inAreaCount, len(keptNear)
 	}
 
 	profile := medianFeature(featsOf(inArea))
