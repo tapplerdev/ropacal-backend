@@ -57,6 +57,7 @@ internal/
     potential_locations.go  — (870) Potential bin locations, conversion to bins
     centrifugo*.go          — Centrifugo auth proxy + GPS location publish proxy
     analytics.go            — Area/city performance metrics
+    chat_locations.go       — recommend_bin_locations: target area = CORE + HALO. Candidates tagged locality in_area (coreContains) | near_area (halo + profile match). refineByAreaProfile keeps near picks only if similar to the area's median calibrated-feature profile (sim≥0.6) AND not a spatial outlier (>max(2.5×median,3km) from centroid). include_nearby toggle; response carries locality/distance_from_area_mi/area_match + in_area/nearby counts.
     auth.go                 — Login (JWT-based)
     users.go                — User CRUD
     checks.go               — Bin check-in records
