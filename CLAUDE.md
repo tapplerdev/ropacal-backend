@@ -47,7 +47,7 @@ internal/
   itinerary/                — route_tasks DOMAIN (single writer): AddMove, RemoveByIDs, Resequence, ReconcileMove, CountStops/RecomputeShiftCounts, Parse{TaskType,TimeWindowType}
   shift/                    — shift enum domain: ParseType (shift_type)
   bindomain/                — bin enum domain: ParseStatus (bins.status); named bindomain to avoid shadowing local `bin` vars
-  geo/                      — haversine / distance helpers; boundaries.go = embedded TIGER 2025 CA city polygons (483 incorporated places, data/ca_places.json) with type-gated + geo-sanity-checked Lookup + point-in-polygon (holes + MultiPolygon)
+  geo/                      — haversine / distance helpers; boundaries.go = embedded boundary polygons: TIGER 2025 CA cities (483, data/ca_places.json) + LA Times LA neighborhoods (114 districts, data/la_districts.json, CC-BY). Lookup routes by HERE type (district→districts, county/postal/state→nil, else→cities) with geo-sanity check + point-in-polygon (holes/MultiPolygon) + DistanceMeters
   handlers/                 — HTTP handlers (thin; orchestrate the domains above)
     shifts.go               — (1.4k) Shift lifecycle; split into shift_{optimization,tasks_edit,query,complete,cancel}.go + driver_location.go
     bin_move_requests.go    — (400) Move request create/schedule; update/assign/cancel split into bin_move_{update,assignment,lifecycle}.go
