@@ -879,7 +879,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	log.Printf("⏱️ [Timing] Filter: %v, %d → %d candidates", time.Since(tFilter), dedupCount, len(allCandidates))
 
 	if len(allCandidates) == 0 {
-		return `{"count":0,"recommendations":[],"message":"No suitable locations found."}`, nil
+		// Every candidate was filtered out before scoring. Return the shortfall
+		// tally (too_close_to_existing_bin, outside_target_area, mall_or_safeway,
+		// …) so "no results" explains WHY instead of being a black box — a
+		// saturated city (bins already at every retail anchor) reads clearly.
+		out, _ := json.Marshal(map[string]any{
+			"count":           0,
+			"requested":       count,
+			"in_area_count":   0,
+			"nearby_count":    0,
+			"recommendations": []LocationRecommendation{},
+			"shortfall":       dropped,
+			"message":         "No qualifying locations — every candidate was filtered out before scoring (see shortfall for the breakdown).",
+		})
+		return string(out), nil
 	}
 
 	// ======================================================================
