@@ -281,7 +281,8 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 							"bbox":  map[string]any{"type": "array", "items": map[string]any{"type": "number"}, "description": "[west, south, east, north]"},
 						},
 					},
-					"min_gap_miles": map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
+					"include_nearby": map[string]any{"type": "boolean", "description": "When a target area is set: also surface profile-matching spots just outside it (core+halo, default true). Set false for strictly-inside-only. The dashboard's 'Strictly inside' toggle controls this; the recommender tags each result locality=in_area|near_area."},
+					"min_gap_miles":  map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
 					"algorithm":     map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (site-quality: HERE retail density + anchors + fill + population; ESRI crime gate only — income/clothing-spend are not used)"},
 					"mode":          map[string]any{"type": "string", "description": "Placement mode: 'infill' (near existing high-performing bins, tighter spacing), 'expand' (new areas with good demographics, clustered for route efficiency), or 'auto' (default, mixed)"},
 				},
@@ -313,6 +314,10 @@ type chatRequest struct {
 	// city/district with bounding box). Injected DETERMINISTICALLY into
 	// recommend_bin_locations tool calls — never smuggled through prose.
 	TargetArea *chatTargetArea `json:"target_area,omitempty"`
+	// IncludeNearby toggles the core+halo policy: when false, the recommender
+	// stays strictly inside the target area; when true (default), it also
+	// surfaces profile-matching spots just outside. nil = leave to the default.
+	IncludeNearby *bool `json:"include_nearby,omitempty"`
 }
 
 type chatTargetArea struct {
@@ -347,6 +352,21 @@ func injectTargetArea(input json.RawMessage, ta *chatTargetArea) json.RawMessage
 		area["bbox"] = ta.BBox
 	}
 	m["target_area"] = area
+	out, err := json.Marshal(m)
+	if err != nil {
+		return input
+	}
+	return out
+}
+
+// injectBool deterministically sets a boolean tool-input key from the request,
+// so a dashboard toggle (e.g. include_nearby) can't be dropped by the model.
+func injectBool(input json.RawMessage, key string, val bool) json.RawMessage {
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return input
+	}
+	m[key] = val
 	out, err := json.Marshal(m)
 	if err != nil {
 		return input
@@ -471,9 +491,15 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					toolCallsMade = append(toolCallsMade, variant.Name)
 
 					toolInput := json.RawMessage(variant.Input)
-					if variant.Name == "recommend_bin_locations" && req.TargetArea != nil {
-						toolInput = injectTargetArea(toolInput, req.TargetArea)
-						log.Printf("📍 [Chat] Injected target_area %q into recommend_bin_locations", req.TargetArea.Label)
+					if variant.Name == "recommend_bin_locations" {
+						if req.TargetArea != nil {
+							toolInput = injectTargetArea(toolInput, req.TargetArea)
+							log.Printf("📍 [Chat] Injected target_area %q into recommend_bin_locations", req.TargetArea.Label)
+						}
+						if req.IncludeNearby != nil {
+							toolInput = injectBool(toolInput, "include_nearby", *req.IncludeNearby)
+							log.Printf("📍 [Chat] Injected include_nearby=%v", *req.IncludeNearby)
+						}
 					}
 					result, toolErr := h.executeTool(variant.Name, toolInput)
 					// Capture structured recommendations for frontend

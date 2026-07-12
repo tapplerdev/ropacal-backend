@@ -33,6 +33,14 @@ type LocationRecommendation struct {
 	TrafficScore    float64 `json:"traffic_score,omitempty"`
 	LocationType    string  `json:"location_type,omitempty"`
 	Source          string  `json:"source,omitempty"` // "gap_fill" or "expansion"
+
+	// Core+halo enrichment — set only when a target area is resolved.
+	// Locality: "in_area" (inside the boundary) or "near_area" (just outside
+	// but a profile match). DistanceFromAreaMi: miles past the core edge (0 when
+	// inside). AreaMatch: 0..1 similarity to the area's profile (near_area only).
+	Locality           string  `json:"locality,omitempty"`
+	DistanceFromAreaMi float64 `json:"distance_from_area_mi,omitempty"`
+	AreaMatch          float64 `json:"area_match,omitempty"`
 }
 
 type existingBin struct {
@@ -65,9 +73,14 @@ type candidate struct {
 	LocationType    string
 	NearbyPOI       string // name of the whitelisted POI that matched (e.g. "Chevron Gas")
 	Source          string // "gap_fill" or "expansion"
+
+	// Core+halo classification vs the target area (set during target filtering).
+	Locality  string  // "in_area" | "near_area" | "" (no target)
+	DistMiles float64 // miles past the core edge; 0 when inside the core
 }
 
 const maxGapMiles = 2.0
+const metersPerMileChat = 1609.34
 const minBinsPerCity = 1
 const minDedupeDistMiles = 0.15
 
@@ -408,6 +421,19 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		placementMode = pm
 	}
 
+	// Core+halo: when a target area is set, also surface spots just outside it
+	// that match the area's profile ("near_area"), instead of a hard in/out box.
+	// Default ON with a 2 km halo; the dashboard's "Strictly inside" toggle sets
+	// include_nearby=false. No effect when no area is targeted.
+	includeNearby := true
+	if in, ok := params["include_nearby"].(bool); ok {
+		includeNearby = in
+	}
+	haloKm := 2.0
+	if hk, ok := params["halo_km"].(float64); ok && hk > 0 && hk <= 10 {
+		haloKm = hk
+	}
+
 	// Adjust parameters based on mode
 	if useV2 && placementMode == "infill" {
 		minGapMiles = 0.15 // tighter spacing OK near proven locations
@@ -687,8 +713,12 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// Tile the area's bbox into search origins (~1.8 km grid) so a
 			// city- or district-sized target gets swept, not sampled once at
 			// its centroid. Every origin carries the area label.
-			origins := area.searchOrigins(12)
-			log.Printf("📍 [Expand] Target area %q tiled into %d search origins", area.Label, len(origins))
+			expandHalo := 0.0
+			if includeNearby {
+				expandHalo = haloKm
+			}
+			origins := area.searchOrigins(12, expandHalo)
+			log.Printf("📍 [Expand] Target area %q tiled into %d search origins (halo=%.1fkm)", area.Label, len(origins), expandHalo)
 			// FRESH slice — cities[:0] would alias and permanently corrupt the
 			// package-level expansionCities backing array (+ race across requests).
 			cities = make([]struct {
@@ -800,19 +830,33 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 	allCandidates, dropped := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2, perBinFillRate)
 
-	// Geometric target filter: with a resolved area, membership is a bbox
-	// test — not a city-name string comparison (districts report their postal
-	// city, e.g. Brentwood candidates say "Los Angeles").
+	// Geometric target filter with a CORE + HALO model. A candidate inside the
+	// core (real city polygon, or the district bbox) is "in_area". When the user
+	// opts into nearby matches, a candidate in the halo ring (≤ haloKm past the
+	// edge) is kept as a tentative "near_area" — later gated by how well it
+	// matches the area's profile (see refineByAreaProfile). Everything else is
+	// dropped. Membership is geometric, never a city-name comparison (districts
+	// report their postal city, e.g. Brentwood candidates say "Los Angeles").
 	if area != nil {
 		kept := allCandidates[:0]
+		var inN, nearN int
 		for _, c := range allCandidates {
-			if area.contains(c.Lat, c.Lng) {
+			if area.coreContains(c.Lat, c.Lng) {
+				c.Locality = "in_area"
+				c.DistMiles = 0
 				kept = append(kept, c)
+				inN++
+			} else if includeNearby && area.haloContains(c.Lat, c.Lng, haloKm) {
+				c.Locality = "near_area"
+				c.DistMiles = area.distanceToCoreMeters(c.Lat, c.Lng) / metersPerMileChat
+				kept = append(kept, c)
+				nearN++
 			} else {
 				dropped["outside_target_area"]++
 			}
 		}
-		log.Printf("📍 [Recommend] Target-area filter %q: %d → %d candidates", area.Label, len(allCandidates), len(kept))
+		log.Printf("📍 [Recommend] Core+halo filter %q (nearby=%v, halo=%.1fkm): %d → %d (in=%d, near=%d)",
+			area.Label, includeNearby, haloKm, len(allCandidates), len(kept), inN, nearN)
 		allCandidates = kept
 	}
 	log.Printf("⏱️ [Timing] Filter: %v, %d → %d candidates", time.Since(tFilter), dedupCount, len(allCandidates))
@@ -988,7 +1032,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 	log.Printf("⏱️ [Timing] POI density enrichment (%d candidates, 8 workers): %v", len(topCandidates), time.Since(tEnrichStart))
 
-	var recommendations []LocationRecommendation
+	// scored accumulates accepted picks WITH their calibrated feature vector, so
+	// the post-loop core+halo refinement can build the area profile and gate
+	// "near_area" picks by similarity. Extracted into `recommendations` after.
+	var scored []scoredRec
 	gapResults, expResults := 0, 0
 	// Near-misses: candidates that survived every gate but scored below the
 	// 4.0 quality bar. Returned SEPARATELY (never mixed into recommendations)
@@ -1158,6 +1205,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		fillScore := c.NearestFillRate / maxRate
 
 		var finalScore float64
+		// Hoisted to loop scope so the core+halo profile can read this pick's
+		// calibrated feature vector after scoring (density is already loop-scoped).
+		var anchorScore, fillVal, popVal float64
 
 		if useV2 {
 			// v2: multiplicative site quality scoring
@@ -1166,7 +1216,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// A Target in a dead zone scores worse than a Target at a busy plaza.
 
 			// Tiered anchor score: national anchor > regional chain > non-anchor
-			anchorScore := 0.15 // non-anchor floor (prevents zero from killing score)
+			anchorScore = 0.15 // non-anchor floor (prevents zero from killing score)
 			nameLower := strings.ToLower(c.NearbyPOI)
 			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
 			// Tier 1 national anchors — highest foot traffic
@@ -1204,7 +1254,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 
 			// Ensure fill score has a floor (expansion areas with 0 fill shouldn't zero out)
-			fillVal := fillScore
+			fillVal = fillScore
 			if c.Source == "expansion" {
 				// No evidence ≠ bad evidence: exploration gets the network-median
 				// prior, not the punitive floor (see medianFillVal above).
@@ -1217,7 +1267,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// Residential population, gently (^0.1): borderline signal in the
 			// 2026-07 calibration (ρ=+0.20). Free census zip cache — neutral 1.0
 			// when the zip is unknown so missing data never penalizes.
-			popVal := 1.0
+			popVal = 1.0
 			if pop, ok := zipPopulation[stripZipPlus4(c.Zip)]; ok && pop > 0 {
 				popVal = math.Max(0.3, math.Min(float64(pop)/50000.0, 1.0))
 			}
@@ -1324,34 +1374,41 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		reasoning := strings.Join(reasoningParts, " · ")
 
 		rec := LocationRecommendation{
-			Latitude:        math.Round(c.Lat*10000) / 10000,
-			Longitude:       math.Round(c.Lng*10000) / 10000,
-			Address:         address,
-			City:            c.City,
-			Zip:             c.Zip,
-			Score:           finalScore,
-			Reasoning:       reasoning,
-			NearestBinNum:   c.NearestBinNum,
-			NearestBinDist:  c.NearestBinDist,
-			AreaAvgFillRate: math.Round(c.NearestFillRate*10) / 10,
-			MedianIncome:    zipIncome[zip5],
-			TrafficScore:    math.Round(trafficJam*10) / 10,
-			LocationType:    c.LocationType,
-			Source:          c.Source,
+			Latitude:           math.Round(c.Lat*10000) / 10000,
+			Longitude:          math.Round(c.Lng*10000) / 10000,
+			Address:            address,
+			City:               c.City,
+			Zip:                c.Zip,
+			Score:              finalScore,
+			Reasoning:          reasoning,
+			NearestBinNum:      c.NearestBinNum,
+			NearestBinDist:     c.NearestBinDist,
+			AreaAvgFillRate:    math.Round(c.NearestFillRate*10) / 10,
+			MedianIncome:       zipIncome[zip5],
+			TrafficScore:       math.Round(trafficJam*10) / 10,
+			LocationType:       c.LocationType,
+			Source:             c.Source,
+			Locality:           c.Locality,
+			DistanceFromAreaMi: math.Round(c.DistMiles*100) / 100,
 		}
-		recommendations = append(recommendations, rec)
+		scored = append(scored, scoredRec{rec: rec, feat: featureVec{densityScore, anchorScore, fillVal, popVal}})
 		cityCount[cityKey]++
 		if c.Source != "expansion" {
 			gapResults++
 		} else {
 			expResults++
 		}
-		log.Printf("✅ [Recommend] #%d [%s]: %s (score %.1f, %s, traffic %.1f)",
-			len(recommendations), c.Source, address, finalScore, c.LocationType, trafficJam)
+		log.Printf("✅ [Recommend] #%d [%s/%s]: %s (score %.1f, %s, traffic %.1f)",
+			len(scored), c.Source, c.Locality, address, finalScore, c.LocationType, trafficJam)
 	}
 
+	// Core+halo refinement: build the area's profile from its in-area picks and
+	// keep only the near_area picks that match it, then guard against spatial
+	// outliers. No-op when there's no target area. See refineByAreaProfile.
+	recommendations, inAreaCount, nearbyCount := refineByAreaProfile(scored, area, useV2, dropped)
+
 	sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
-	log.Printf("📍 [Recommend] Final: %d (gap_fill: %d, expansion: %d)", len(recommendations), gapResults, expResults)
+	log.Printf("📍 [Recommend] Final: %d (gap_fill: %d, expansion: %d, in_area: %d, nearby: %d)", len(recommendations), gapResults, expResults, inAreaCount, nearbyCount)
 	log.Printf("⏱️ [Timing] TOTAL: %v, returning %d results", time.Since(tTotal), len(recommendations))
 
 	// Top 3 near-misses only — enough for a human override, not a second list.
@@ -1366,6 +1423,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	result, _ := json.Marshal(map[string]any{
 		"count":           len(recommendations),
 		"requested":       count,
+		"in_area_count":   inAreaCount,
+		"nearby_count":    nearbyCount,
 		"recommendations": recommendations,
 		"shortfall":       dropped,
 		"near_misses":     nearMisses,
@@ -1685,16 +1744,231 @@ func (a *areaTarget) contains(lat, lng float64) bool {
 	return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= 8000
 }
 
+// coreContains is the TIGHT membership test — the real area, no halo margin: the
+// city polygon when attached, else the HERE bbox with no margin, else a 5 km
+// radius around the center. This defines "in_area".
+func (a *areaTarget) coreContains(lat, lng float64) bool {
+	if a.boundary != nil {
+		return a.boundary.Contains(lat, lng)
+	}
+	if a.BBox != nil {
+		return lng >= a.BBox[0] && lng <= a.BBox[2] && lat >= a.BBox[1] && lat <= a.BBox[3]
+	}
+	return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= 5000
+}
+
+// distanceToCoreMeters is 0 inside the core, else the great-circle distance to
+// the nearest point of the core's bounding box (a good proxy for "how far past
+// the edge" — exact for bbox cores, approximate for polygon cores). Used to
+// classify the halo ring and to report distance_from_area_mi.
+func (a *areaTarget) distanceToCoreMeters(lat, lng float64) float64 {
+	if a.coreContains(lat, lng) {
+		return 0
+	}
+	if a.BBox != nil {
+		cLng := math.Max(a.BBox[0], math.Min(lng, a.BBox[2]))
+		cLat := math.Max(a.BBox[1], math.Min(lat, a.BBox[3]))
+		return haversineMetersChat(lat, lng, cLat, cLng)
+	}
+	return math.Max(0, haversineMetersChat(lat, lng, a.Lat, a.Lng)-5000)
+}
+
+// haloContains reports whether (lat,lng) is inside the core OR within haloKm of
+// its edge — the "nearby" band the recommender may spill into when the user
+// opts in.
+func (a *areaTarget) haloContains(lat, lng, haloKm float64) bool {
+	if a.coreContains(lat, lng) {
+		return true
+	}
+	return a.distanceToCoreMeters(lat, lng) <= haloKm*1000
+}
+
+// featureVec is a pick's calibrated site-quality signals, in the same order as
+// the v2 score exponents: density, anchor, fill, population.
+type featureVec [4]float64
+
+// scoredRec bundles an accepted recommendation with its feature vector so the
+// core+halo pass can measure how well a "near_area" pick matches the area.
+type scoredRec struct {
+	rec  LocationRecommendation
+	feat featureVec
+}
+
+// profileWeights bias the area-match toward the signals that actually
+// characterize a neighborhood's retail texture — errand density and anchor mix
+// lead, same ordering as the score. Sum = 1, so similarity stays in [0,1].
+var profileWeights = featureVec{0.5, 0.35, 0.1, 0.05}
+
+// medianFeature returns the per-dimension median of a set of feature vectors.
+func medianFeature(vs []featureVec) featureVec {
+	var out featureVec
+	if len(vs) == 0 {
+		return out
+	}
+	for d := 0; d < 4; d++ {
+		col := make([]float64, len(vs))
+		for i, v := range vs {
+			col[i] = v[d]
+		}
+		sort.Float64s(col)
+		n := len(col)
+		if n%2 == 1 {
+			out[d] = col[n/2]
+		} else {
+			out[d] = (col[n/2-1] + col[n/2]) / 2
+		}
+	}
+	return out
+}
+
+// similarity is the weighted per-dimension agreement in [0,1]: 1 minus the
+// weighted mean absolute difference. Every feature dim is already 0..1.
+func similarity(a, b featureVec) float64 {
+	var agree float64
+	for d := 0; d < 4; d++ {
+		agree += profileWeights[d] * (1 - math.Abs(a[d]-b[d]))
+	}
+	return agree
+}
+
+func featsOf(ss []scoredRec) []featureVec {
+	out := make([]featureVec, len(ss))
+	for i, s := range ss {
+		out[i] = s.feat
+	}
+	return out
+}
+
+// refineByAreaProfile applies the core+halo policy:
+//   - no target area -> everything passes through unchanged.
+//   - in_area picks are always kept.
+//   - near_area picks are kept only when the area has a definable profile
+//     (v2 + at least 3 in-area picks), the pick matches it (similarity >=
+//     threshold), and it isn't a spatial outlier from the kept cluster. A kept
+//     near pick takes a modest score penalty and records its match strength.
+//
+// Returns final recommendations plus in-area / nearby counts; dropped is
+// updated with per-reason tallies (dissimilar_neighbor, nearby_no_profile,
+// spatial_outlier).
+func refineByAreaProfile(scored []scoredRec, area *areaTarget, useV2 bool, dropped map[string]int) ([]LocationRecommendation, int, int) {
+	if area == nil {
+		out := make([]LocationRecommendation, len(scored))
+		for i, s := range scored {
+			out[i] = s.rec
+		}
+		return out, 0, 0
+	}
+
+	var inArea, near []scoredRec
+	for _, s := range scored {
+		if s.rec.Locality == "near_area" {
+			near = append(near, s)
+		} else {
+			inArea = append(inArea, s)
+		}
+	}
+
+	final := make([]LocationRecommendation, 0, len(scored))
+	for _, s := range inArea {
+		final = append(final, s.rec)
+	}
+	inAreaCount := len(inArea)
+
+	if len(near) == 0 {
+		return final, inAreaCount, 0
+	}
+	// Without a definable profile we can't tell a genuine nearby match from the
+	// loose-bbox outlier this feature exists to prevent — so drop nearby rather
+	// than guess (reported via nearby_no_profile).
+	if !useV2 || len(inArea) < 3 {
+		dropped["nearby_no_profile"] += len(near)
+		return final, inAreaCount, 0
+	}
+
+	profile := medianFeature(featsOf(inArea))
+	const simThreshold = 0.6
+	var keptNear []scoredRec
+	for _, s := range near {
+		sim := similarity(s.feat, profile)
+		if sim < simThreshold {
+			dropped["dissimilar_neighbor"]++
+			continue
+		}
+		s.rec.AreaMatch = math.Round(sim*100) / 100
+		s.rec.Score = math.Round(s.rec.Score*0.9*10) / 10 // modest penalty for being outside the area
+		keptNear = append(keptNear, s)
+	}
+
+	keptNear = dropSpatialOutliers(final, keptNear, dropped)
+	for _, s := range keptNear {
+		final = append(final, s.rec)
+	}
+	return final, inAreaCount, len(keptNear)
+}
+
+// dropSpatialOutliers removes near_area picks that sit far from the centroid of
+// the kept set — the "lonely" placement. In-area picks are never outliers.
+// Threshold = max(2.5x median distance, 3 km) so a compact cluster isn't
+// over-pruned.
+func dropSpatialOutliers(inArea []LocationRecommendation, near []scoredRec, dropped map[string]int) []scoredRec {
+	if len(near) == 0 {
+		return near
+	}
+	var sumLat, sumLng float64
+	var n int
+	for _, r := range inArea {
+		sumLat += r.Latitude
+		sumLng += r.Longitude
+		n++
+	}
+	if n == 0 { // no in-area anchors — center on the near set itself
+		for _, s := range near {
+			sumLat += s.rec.Latitude
+			sumLng += s.rec.Longitude
+			n++
+		}
+	}
+	cLat, cLng := sumLat/float64(n), sumLng/float64(n)
+
+	all := append([]LocationRecommendation{}, inArea...)
+	for _, s := range near {
+		all = append(all, s.rec)
+	}
+	dists := make([]float64, len(all))
+	for i, r := range all {
+		dists[i] = haversineMetersChat(r.Latitude, r.Longitude, cLat, cLng)
+	}
+	sort.Float64s(dists)
+	threshold := math.Max(2.5*dists[len(dists)/2], 3000)
+
+	kept := near[:0]
+	for _, s := range near {
+		if haversineMetersChat(s.rec.Latitude, s.rec.Longitude, cLat, cLng) > threshold {
+			dropped["spatial_outlier"]++
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept
+}
+
 // searchOrigins tiles the bbox into a grid of HERE-search centers so an area
 // the size of a city or LA district gets swept, not sampled once at its
 // centroid. Grid density targets ~1.8 km spacing but ADAPTS to the cap: a
 // huge area gets an evenly spread (sparser) grid across the WHOLE box rather
 // than a dense strip along its southern edge. No bbox -> the center alone.
-func (a *areaTarget) searchOrigins(maxOrigins int) []struct{ Lat, Lng float64 } {
+func (a *areaTarget) searchOrigins(maxOrigins int, haloKm float64) []struct{ Lat, Lng float64 } {
 	if a.BBox == nil {
 		return []struct{ Lat, Lng float64 }{{a.Lat, a.Lng}}
 	}
 	west, south, east, north := a.BBox[0], a.BBox[1], a.BBox[2], a.BBox[3]
+	// Grow the tiling box by the halo so the "nearby" ring actually gets
+	// searched, not just the core. Same origin budget, spread wider.
+	if haloKm > 0 {
+		dLat := haloKm / 111.0
+		dLng := haloKm / (111.0 * math.Cos(a.Lat*math.Pi/180))
+		west, south, east, north = west-dLng, south-dLat, east+dLng, north+dLat
+	}
 	height, width := north-south, east-west
 	if height <= 0 || width <= 0 {
 		return []struct{ Lat, Lng float64 }{{a.Lat, a.Lng}}
