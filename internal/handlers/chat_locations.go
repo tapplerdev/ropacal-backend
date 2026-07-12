@@ -1006,7 +1006,17 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// Sort by score and take top candidates
 	sort.Slice(allCandidates, func(i, j int) bool { return allCandidates[i].Score > allCandidates[j].Score })
 
-	topCount := count * 6 // 6x buffer — city cap + POI filter + score cutoff need headroom
+	// Score up to 10x the requested count (capped at 120). The preliminary score
+	// (anchor name + fill gap) can't see POI density — the strongest real signal
+	// — so the top slice survives the POI/quality gates at only ~10-15%. A 6x
+	// buffer left broad untargeted runs returning a fraction (7 of 10) while 100+
+	// gated candidates sat unscored. The scoring loop still breaks early once it
+	// reaches `count`, so this only spends more on runs that actually need it; the
+	// cap bounds POI-enrichment + reverse-geocode cost on huge candidate pools.
+	topCount := count * 10
+	if topCount > 120 {
+		topCount = 120
+	}
 	if topCount > len(allCandidates) {
 		topCount = len(allCandidates)
 	}
