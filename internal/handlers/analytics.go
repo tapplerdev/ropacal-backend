@@ -310,13 +310,13 @@ func GetAnalyticsTimeseries(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		type WeekRow struct {
-			WeekStart           string   `db:"week_start" json:"week_start"` // YYYY-MM-DD (Monday)
-			Collections         int      `db:"collections" json:"collections"`
-			MedianFill          *float64 `db:"median_fill" json:"median_fill_at_collection"`
-			Incidents           int      `db:"incidents" json:"incidents"`
-			ShiftsCompleted     int      `db:"shifts_completed" json:"shifts_completed"`
-			AvgCompletionRate   *float64 `db:"avg_completion_rate" json:"avg_completion_rate"`
-			Moves               int      `db:"moves" json:"moves"`
+			WeekStart         string   `db:"week_start" json:"week_start"` // YYYY-MM-DD (Monday)
+			Collections       int      `db:"collections" json:"collections"`
+			MedianFill        *float64 `db:"median_fill" json:"median_fill_at_collection"`
+			Incidents         int      `db:"incidents" json:"incidents"`
+			ShiftsCompleted   int      `db:"shifts_completed" json:"shifts_completed"`
+			AvgCompletionRate *float64 `db:"avg_completion_rate" json:"avg_completion_rate"`
+			Moves             int      `db:"moves" json:"moves"`
 		}
 
 		var rows []WeekRow

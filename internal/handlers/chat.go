@@ -269,8 +269,18 @@ Returns: total bins, active bins, clean bins, problematic bins, avg fill %, tota
 Always tell the user: "All locations have been verified clear of no-go zones and filtered to avoid malls/supermarkets."`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
-					"count":         map[string]any{"type": "integer", "description": "Number of locations to recommend (default 10, max 30)"},
-					"target_city":   map[string]any{"type": "string", "description": "Optional: focus recommendations on a specific city (e.g. 'San Jose')"},
+					"count":       map[string]any{"type": "integer", "description": "Number of locations to recommend (default 10, max 30)"},
+					"target_city": map[string]any{"type": "string", "description": "Optional: focus on a named city/district. If the name is AMBIGUOUS (e.g. 'Brentwood' is both an LA district and a Contra Costa city) the tool returns disambiguation_needed with options — ASK the user which they meant, then re-call with target_area set to the chosen option (it includes lat/lng/bbox)."},
+					"target_area": map[string]any{
+						"type":        "object",
+						"description": "Optional: a resolved geographic target (from the dashboard area picker or a disambiguation option). Preferred over target_city — searches tile the bbox and candidates are filtered geometrically, so district vs city naming doesn't matter.",
+						"properties": map[string]any{
+							"label": map[string]any{"type": "string"},
+							"lat":   map[string]any{"type": "number"},
+							"lng":   map[string]any{"type": "number"},
+							"bbox":  map[string]any{"type": "array", "items": map[string]any{"type": "number"}, "description": "[west, south, east, north]"},
+						},
+					},
 					"min_gap_miles": map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
 					"algorithm":     map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (site-quality: HERE retail density + anchors + fill + population; ESRI crime gate only — income/clothing-spend are not used)"},
 					"mode":          map[string]any{"type": "string", "description": "Placement mode: 'infill' (near existing high-performing bins, tighter spacing), 'expand' (new areas with good demographics, clustered for route efficiency), or 'auto' (default, mixed)"},
@@ -299,6 +309,45 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 type chatRequest struct {
 	Message        string `json:"message"`
 	ConversationID string `json:"conversation_id,omitempty"`
+	// TargetArea is the dashboard's area-picker selection (HERE-geocoded
+	// city/district with bounding box). Injected DETERMINISTICALLY into
+	// recommend_bin_locations tool calls — never smuggled through prose.
+	TargetArea *chatTargetArea `json:"target_area,omitempty"`
+}
+
+type chatTargetArea struct {
+	Label string    `json:"label"`
+	Lat   float64   `json:"lat"`
+	Lng   float64   `json:"lng"`
+	BBox  []float64 `json:"bbox,omitempty"` // [west, south, east, north]
+}
+
+// injectTargetArea merges the request-level area selection into a
+// recommend_bin_locations tool input so the model can't drop or mangle it —
+// UNLESS the model already carries a location intent of its own (the user
+// typed "try Brentwood instead" with a stale chip pinned, or this is a
+// disambiguation re-call passing target_area). Typed intent wins.
+func injectTargetArea(input json.RawMessage, ta *chatTargetArea) json.RawMessage {
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return input
+	}
+	if _, has := m["target_area"]; has {
+		return input
+	}
+	if tc, ok := m["target_city"].(string); ok && tc != "" {
+		return input
+	}
+	area := map[string]any{"label": ta.Label, "lat": ta.Lat, "lng": ta.Lng}
+	if len(ta.BBox) == 4 {
+		area["bbox"] = ta.BBox
+	}
+	m["target_area"] = area
+	out, err := json.Marshal(m)
+	if err != nil {
+		return input
+	}
+	return out
 }
 
 type chatResponse struct {
@@ -408,7 +457,12 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					log.Printf("🔧 [Chat] Tool call: %s", variant.Name)
 					toolCallsMade = append(toolCallsMade, variant.Name)
 
-					result, toolErr := h.executeTool(variant.Name, variant.Input)
+					toolInput := json.RawMessage(variant.Input)
+					if variant.Name == "recommend_bin_locations" && req.TargetArea != nil {
+						toolInput = injectTargetArea(toolInput, req.TargetArea)
+						log.Printf("📍 [Chat] Injected target_area %q into recommend_bin_locations", req.TargetArea.Label)
+					}
+					result, toolErr := h.executeTool(variant.Name, toolInput)
 					// Capture structured recommendations for frontend
 					if variant.Name == "recommend_bin_locations" && toolErr == nil {
 						rawRecommendations = json.RawMessage(result)

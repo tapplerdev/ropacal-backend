@@ -326,6 +326,60 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	if tc, ok := params["target_city"].(string); ok {
 		targetCity = tc
 	}
+
+	// Resolve the geographic target. Preferred: a structured target_area
+	// (dashboard picker / disambiguation re-call). Fallback: geocode the
+	// typed city name — and if it's ambiguous (Brentwood the LA district vs
+	// Brentwood the Contra Costa CITY), return the options instead of
+	// silently running against the first hit.
+	var area *areaTarget
+	if ta, ok := params["target_area"].(map[string]any); ok {
+		a := areaTarget{}
+		a.Label, _ = ta["label"].(string)
+		a.Lat, _ = ta["lat"].(float64)
+		a.Lng, _ = ta["lng"].(float64)
+		if bb, ok := ta["bbox"].([]any); ok && len(bb) == 4 {
+			var box [4]float64
+			valid := true
+			for i, v := range bb {
+				f, ok := v.(float64)
+				if !ok {
+					valid = false
+					break
+				}
+				box[i] = f
+			}
+			if valid {
+				a.BBox = &box
+			}
+		}
+		if a.Lat != 0 || a.Lng != 0 {
+			area = &a
+			if targetCity == "" {
+				targetCity = areaShortLabel(a.Label) // short name — full HERE titles never match bins.City or city caps
+			}
+			log.Printf("📍 [Recommend] Structured target area: %q center=(%.4f,%.4f) bbox=%v", a.Label, a.Lat, a.Lng, a.BBox != nil)
+		}
+	}
+	if area == nil && targetCity != "" {
+		options, geoErr := geocodeAreaHERE(targetCity)
+		if geoErr != nil {
+			log.Printf("⚠️ [Recommend] Area geocode failed for %q: %v — falling back to legacy city handling", targetCity, geoErr)
+		} else if len(options) == 1 {
+			area = &options[0]
+			log.Printf("📍 [Recommend] %q resolved to %q (%s)", targetCity, area.Label, area.Type)
+		} else {
+			// Ambiguous — hand the options back so the model ASKS the user.
+			out, _ := json.Marshal(map[string]any{
+				"disambiguation_needed": true,
+				"query":                 targetCity,
+				"options":               options,
+				"instruction":           "Multiple places match. Ask the user which one they meant, then call this tool again with target_area set to the chosen option.",
+			})
+			return string(out), nil
+		}
+	}
+
 	minGapMiles := 0.3
 	if mg, ok := params["min_gap_miles"].(float64); ok && mg > 0 {
 		minGapMiles = mg
@@ -366,9 +420,19 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		return "", fmt.Errorf("failed to fetch bins: %w", err)
 	}
 
-	// For search origins: use only target city bins (if specified), otherwise all bins
+	// For search origins: use only target-area/city bins (if specified),
+	// otherwise all bins. With a resolved area this is a GEOMETRIC test —
+	// name matching breaks on districts (bins in Brentwood say city "Los
+	// Angeles") and on HERE's full titles ("San Jose, CA, United States").
 	var searchBins []existingBin
-	if targetCity != "" {
+	if area != nil {
+		for _, b := range allBins {
+			if area.contains(b.Latitude, b.Longitude) {
+				searchBins = append(searchBins, b)
+			}
+		}
+		log.Printf("📍 [Recommend] Found %d active bins total, %d inside target area %q for search origins", len(allBins), len(searchBins), area.Label)
+	} else if targetCity != "" {
 		for _, b := range allBins {
 			if strings.EqualFold(b.City, targetCity) {
 				searchBins = append(searchBins, b)
@@ -600,13 +664,40 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	tExpStart := time.Now()
 	var expCandidates []candidate
+	// With a resolved area, always sweep it (except pure infill): the whole
+	// point of targeting is "search HERE" — name-based has-bins checks don't
+	// apply to a geometric target.
 	shouldExpand := placementMode == "expand" || (placementMode != "infill" && (targetCity == "" || !hasBinsInCity(bins, targetCity)))
+	if area != nil && placementMode != "infill" {
+		shouldExpand = true
+	}
 
 	if shouldExpand {
 		// Build expansion jobs using same fanOutSearch pattern
 		cities := expansionCities
-		if targetCity != "" {
-			// Geocode the target city to get real coordinates
+		if area != nil {
+			// Tile the area's bbox into search origins (~1.8 km grid) so a
+			// city- or district-sized target gets swept, not sampled once at
+			// its centroid. Every origin carries the area label.
+			origins := area.searchOrigins(12)
+			log.Printf("📍 [Expand] Target area %q tiled into %d search origins", area.Label, len(origins))
+			// FRESH slice — cities[:0] would alias and permanently corrupt the
+			// package-level expansionCities backing array (+ race across requests).
+			cities = make([]struct {
+				City string
+				Lat  float64
+				Lng  float64
+			}, 0, len(origins))
+			for _, o := range origins {
+				cities = append(cities, struct {
+					City string
+					Lat  float64
+					Lng  float64
+				}{areaShortLabel(area.Label), o.Lat, o.Lng})
+			}
+			targetCity = areaShortLabel(area.Label) // short name for labels/caps — never the full HERE title
+		} else if targetCity != "" {
+			// Legacy path (geocode failed): single-point search at first hit.
 			cityCoords, geoErr := geocodeCityHERE(targetCity)
 			if geoErr != nil {
 				log.Printf("⚠️ [Expand] Failed to geocode %s: %v", targetCity, geoErr)
@@ -638,16 +729,21 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			if targetCity != "" && !strings.EqualFold(ec.City, targetCity) {
 				continue
 			}
-			hasBins := false
-			for _, b := range bins {
-				if strings.EqualFold(b.City, ec.City) {
-					hasBins = true
-					break
+			// A geometric target is explicit — don't second-guess it with
+			// name-based has-bins checks (a district's postal city may say
+			// "Los Angeles" and false-positive anyway).
+			if area == nil {
+				hasBins := false
+				for _, b := range bins {
+					if strings.EqualFold(b.City, ec.City) {
+						hasBins = true
+						break
+					}
 				}
-			}
-			if hasBins {
-				log.Printf("📍 [Expand] Skipping %s — already has bins", ec.City)
-				continue
+				if hasBins {
+					log.Printf("📍 [Expand] Skipping %s — already has bins", ec.City)
+					continue
+				}
 			}
 			for _, kw := range expKeywords {
 				expJobs = append(expJobs, searchJob{
@@ -695,6 +791,22 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		potFilters = append(potFilters, potentialLocFilter{Latitude: pl.Latitude, Longitude: pl.Longitude})
 	}
 	allCandidates, dropped := filterCandidates(rawCandidates, bins, potFilters, zones, minGapMiles, placementMode, useV2, perBinFillRate)
+
+	// Geometric target filter: with a resolved area, membership is a bbox
+	// test — not a city-name string comparison (districts report their postal
+	// city, e.g. Brentwood candidates say "Los Angeles").
+	if area != nil {
+		kept := allCandidates[:0]
+		for _, c := range allCandidates {
+			if area.contains(c.Lat, c.Lng) {
+				kept = append(kept, c)
+			} else {
+				dropped["outside_target_area"]++
+			}
+		}
+		log.Printf("📍 [Recommend] Target-area filter %q: %d → %d candidates", area.Label, len(allCandidates), len(kept))
+		allCandidates = kept
+	}
 	log.Printf("⏱️ [Timing] Filter: %v, %d → %d candidates", time.Since(tFilter), dedupCount, len(allCandidates))
 
 	if len(allCandidates) == 0 {
@@ -879,8 +991,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	if maxPerCity < 5 {
 		maxPerCity = 5
 	}
-	if targetCity != "" {
-		maxPerCity = count // no cap when user explicitly asked for a specific city
+	if targetCity != "" || area != nil {
+		maxPerCity = count // no cap when user explicitly asked for a specific city/area
 	}
 
 	for idx, c := range topCandidates {
@@ -1508,6 +1620,156 @@ func findCommercialPOIs(defaultLat, defaultLng float64, city string) []struct {
 }
 
 // geocodeCityHERE returns the center coordinates of a city
+// areaTarget is a resolved geographic target: a city or district with its
+// center and (when HERE provides one) bounding box. It replaces raw
+// city-name string matching everywhere a target is set.
+type areaTarget struct {
+	Label string      `json:"label"`
+	Type  string      `json:"type,omitempty"` // locality / district / administrativeArea
+	Lat   float64     `json:"lat"`
+	Lng   float64     `json:"lng"`
+	BBox  *[4]float64 `json:"bbox,omitempty"` // west, south, east, north
+}
+
+// areaShortLabel trims a full HERE title ("San Jose, CA, United States",
+// "Brentwood, Los Angeles, CA…") to its leading place name — the form every
+// bins.City value, city cap, and potential_locations row uses.
+func areaShortLabel(label string) string {
+	if i := strings.Index(label, ","); i > 0 {
+		return strings.TrimSpace(label[:i])
+	}
+	return label
+}
+
+// contains reports whether (lat,lng) falls inside the area's bbox with a
+// ~2 km margin. Without a bbox, an 8 km radius around the center — matching
+// the HERE discover search radius so we don't spend quota on results we
+// then throw away as outside the target.
+func (a *areaTarget) contains(lat, lng float64) bool {
+	if a.BBox != nil {
+		const margin = 0.02 // ≈2.2 km latitude
+		return lng >= a.BBox[0]-margin && lng <= a.BBox[2]+margin &&
+			lat >= a.BBox[1]-margin && lat <= a.BBox[3]+margin
+	}
+	return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= 8000
+}
+
+// searchOrigins tiles the bbox into a grid of HERE-search centers so an area
+// the size of a city or LA district gets swept, not sampled once at its
+// centroid. Grid density targets ~1.8 km spacing but ADAPTS to the cap: a
+// huge area gets an evenly spread (sparser) grid across the WHOLE box rather
+// than a dense strip along its southern edge. No bbox -> the center alone.
+func (a *areaTarget) searchOrigins(maxOrigins int) []struct{ Lat, Lng float64 } {
+	if a.BBox == nil {
+		return []struct{ Lat, Lng float64 }{{a.Lat, a.Lng}}
+	}
+	west, south, east, north := a.BBox[0], a.BBox[1], a.BBox[2], a.BBox[3]
+	height, width := north-south, east-west
+	if height <= 0 || width <= 0 {
+		return []struct{ Lat, Lng float64 }{{a.Lat, a.Lng}}
+	}
+	minStepLat := 1.8 / 111.0 // ~1.8 km in degrees latitude
+	minStepLng := minStepLat / math.Cos(a.Lat*math.Pi/180)
+	nLat := int(height/minStepLat) + 1
+	nLng := int(width/minStepLng) + 1
+	for nLat*nLng > maxOrigins {
+		if nLat >= nLng && nLat > 1 {
+			nLat--
+		} else if nLng > 1 {
+			nLng--
+		} else {
+			break
+		}
+	}
+	stepLat, stepLng := height/float64(nLat), width/float64(nLng)
+	var out []struct{ Lat, Lng float64 }
+	for i := 0; i < nLat; i++ {
+		for j := 0; j < nLng; j++ {
+			out = append(out, struct{ Lat, Lng float64 }{
+				south + (float64(i)+0.5)*stepLat,
+				west + (float64(j)+0.5)*stepLng,
+			})
+		}
+	}
+	return out
+}
+
+// geocodeAreaHERE resolves a typed place name to candidate AREAS (cities,
+// districts, counties) — up to 5, so ambiguity ("Brentwood" the LA district
+// vs "Brentwood" the Contra Costa city) surfaces as a choice instead of a
+// silent first-hit-wins. Constrained to California like the legacy geocoder:
+// the fleet is CA-only, and without the constraint every common city name
+// (Fremont, Concord…) goes multi-state ambiguous and dead-ends the headless
+// consumers (placement planner, AI-suggest dialog) that can't answer a
+// disambiguation question.
+func geocodeAreaHERE(q string) ([]areaTarget, error) {
+	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,CA,USA&in=countryCode:USA&limit=5&apiKey=%s",
+		strings.ReplaceAll(q, " ", "+"), HereAPIKey)
+	client := &http.Client{Timeout: 6 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Items []struct {
+			Title      string `json:"title"`
+			ResultType string `json:"resultType"`
+			// HERE v7: districts arrive as resultType=locality with
+			// localityType=district; counties/states as administrativeArea
+			// with administrativeAreaType.
+			LocalityType           string `json:"localityType"`
+			AdministrativeAreaType string `json:"administrativeAreaType"`
+			Position               struct {
+				Lat float64 `json:"lat"`
+				Lng float64 `json:"lng"`
+			} `json:"position"`
+			MapView struct {
+				West  float64 `json:"west"`
+				South float64 `json:"south"`
+				East  float64 `json:"east"`
+				North float64 `json:"north"`
+			} `json:"mapView"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	var out []areaTarget
+	seen := map[string]bool{}
+	for _, it := range result.Items {
+		if it.ResultType != "locality" && it.ResultType != "administrativeArea" {
+			continue
+		}
+		// A state (or country) is not a placement target — its bbox would
+		// degrade tiling into a meaningless sparse sample.
+		if it.AdministrativeAreaType == "state" || it.AdministrativeAreaType == "country" {
+			continue
+		}
+		if seen[it.Title] {
+			continue
+		}
+		seen[it.Title] = true
+		typ := it.ResultType
+		if it.LocalityType != "" {
+			typ = it.LocalityType // city | district | postalCode
+		} else if it.AdministrativeAreaType != "" {
+			typ = it.AdministrativeAreaType // county
+		}
+		a := areaTarget{Label: it.Title, Type: typ, Lat: it.Position.Lat, Lng: it.Position.Lng}
+		if it.MapView.East != 0 || it.MapView.West != 0 {
+			bb := [4]float64{it.MapView.West, it.MapView.South, it.MapView.East, it.MapView.North}
+			a.BBox = &bb
+		}
+		out = append(out, a)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no city/district match for %q", q)
+	}
+	return out, nil
+}
+
 func geocodeCityHERE(city string) (struct{ Lat, Lng float64 }, error) {
 	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,CA,USA&limit=1&apiKey=%s",
 		strings.ReplaceAll(city, " ", "+"), HereAPIKey)
