@@ -47,7 +47,7 @@ internal/
   itinerary/                — route_tasks DOMAIN (single writer): AddMove, RemoveByIDs, Resequence, ReconcileMove, CountStops/RecomputeShiftCounts, Parse{TaskType,TimeWindowType}
   shift/                    — shift enum domain: ParseType (shift_type)
   bindomain/                — bin enum domain: ParseStatus (bins.status); named bindomain to avoid shadowing local `bin` vars
-  geo/                      — haversine / distance helpers
+  geo/                      — haversine / distance helpers; boundaries.go = embedded TIGER 2025 CA city polygons (483 incorporated places, data/ca_places.json) with type-gated + geo-sanity-checked Lookup + point-in-polygon (holes + MultiPolygon)
   handlers/                 — HTTP handlers (thin; orchestrate the domains above)
     shifts.go               — (1.4k) Shift lifecycle; split into shift_{optimization,tasks_edit,query,complete,cancel}.go + driver_location.go
     bin_move_requests.go    — (400) Move request create/schedule; update/assign/cancel split into bin_move_{update,assignment,lifecycle}.go
@@ -131,7 +131,7 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 
 ## API Auth
 
-- **Public endpoints:** health, geocoding, directions, bins (read), routes, zones, analytics, potential locations
+- **Public endpoints:** health, geocoding, directions, bins (read), routes, zones, analytics, potential locations, `GET /api/areas/boundary` (true city polygon for the target-area overlay; requires name+lat+lng so the geo-sanity guard arms; districts/unknowns → found=false)
 - **Driver endpoints:** JWT Bearer token required (`middleware.Auth`)
 - **Manager endpoints:** JWT + `admin` role required (`middleware.RequireRole("admin")`)
 - **Internal endpoints:** `INTERNAL_API_KEY` header (FindMy bridge)
