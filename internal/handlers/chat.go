@@ -394,9 +394,18 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	session.LastUsed = time.Now()
 
-	// Append new user message
+	// Append new user message. If the dashboard pinned a target area, tell
+	// the model — injection only fires when the tool is CALLED, and a model
+	// that sees no location in the prose will otherwise ask "where?" instead
+	// of calling recommend_bin_locations.
+	userText := req.Message
+	if req.TargetArea != nil {
+		userText += fmt.Sprintf(
+			"\n\n[UI context: the user has pinned a target area in the dashboard: %q. For location recommendations, call recommend_bin_locations directly — the pinned area is attached to the tool call automatically. Do not ask the user for a location unless they name a different one.]",
+			req.TargetArea.Label)
+	}
 	session.Messages = append(session.Messages, anthropic.NewUserMessage(
-		anthropic.NewTextBlock(req.Message),
+		anthropic.NewTextBlock(userText),
 	))
 
 	// Keep only last 10 messages (5 exchanges) to stay within token limits.
