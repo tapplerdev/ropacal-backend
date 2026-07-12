@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -65,6 +66,60 @@ func (b *Boundary) Contains(lat, lng float64) bool {
 		}
 	}
 	return false
+}
+
+// DistanceMeters returns 0 when (lat,lng) is inside the city, else the distance
+// to the nearest point on its boundary — the true "how far past the edge",
+// accurate for polygon cities where the bounding box would read 0 for a point
+// in an interior gap.
+func (b *Boundary) DistanceMeters(lat, lng float64) float64 {
+	if b.Contains(lat, lng) {
+		return 0
+	}
+	best := math.MaxFloat64
+	cosLat := math.Cos(lat * math.Pi / 180)
+	for _, p := range b.polys {
+		if d := ringDistMeters(lat, lng, cosLat, p.outer); d < best {
+			best = d
+		}
+		for _, h := range p.holes {
+			if d := ringDistMeters(lat, lng, cosLat, h); d < best {
+				best = d
+			}
+		}
+	}
+	return best
+}
+
+// ringDistMeters is the min distance (meters) from (lat,lng) to any edge of a
+// ring, via a local equirectangular projection — exact enough at city scale.
+func ringDistMeters(lat, lng, cosLat float64, r ring) float64 {
+	const mPerDeg = 111320.0
+	best := math.MaxFloat64
+	for i := 0; i+1 < len(r); i++ {
+		// Project both endpoints to planar meters with the target at the origin.
+		ax := (r[i][0] - lng) * mPerDeg * cosLat
+		ay := (r[i][1] - lat) * mPerDeg
+		bx := (r[i+1][0] - lng) * mPerDeg * cosLat
+		by := (r[i+1][1] - lat) * mPerDeg
+		if d := distToSegment(ax, ay, bx, by); d < best {
+			best = d
+		}
+	}
+	return best
+}
+
+// distToSegment is the distance from the origin to segment (ax,ay)-(bx,by).
+func distToSegment(ax, ay, bx, by float64) float64 {
+	dx, dy := bx-ax, by-ay
+	l2 := dx*dx + dy*dy
+	if l2 == 0 {
+		return math.Hypot(ax, ay)
+	}
+	t := -(ax*dx + ay*dy) / l2
+	t = math.Max(0, math.Min(1, t))
+	px, py := ax+t*dx, ay+t*dy
+	return math.Hypot(px, py)
 }
 
 // pointInRing runs the standard even-odd ray-casting test. x=lng, y=lat.

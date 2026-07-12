@@ -1765,6 +1765,11 @@ func (a *areaTarget) distanceToCoreMeters(lat, lng float64) float64 {
 	if a.coreContains(lat, lng) {
 		return 0
 	}
+	// A real city polygon measures to its actual edge — the bbox would read 0
+	// for a point in an interior gap (inside the box, outside the city).
+	if a.boundary != nil {
+		return a.boundary.DistanceMeters(lat, lng)
+	}
 	if a.BBox != nil {
 		cLng := math.Max(a.BBox[0], math.Min(lng, a.BBox[2]))
 		cLat := math.Max(a.BBox[1], math.Min(lat, a.BBox[3]))

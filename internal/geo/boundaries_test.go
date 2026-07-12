@@ -75,6 +75,28 @@ func TestLookup_TypeGate(t *testing.T) {
 	}
 }
 
+func TestDistanceMeters(t *testing.T) {
+	store := loadOrFail(t)
+	b := store.Lookup("Berkeley", "city", 37.8715, -122.2730)
+	if b == nil {
+		t.Fatal("Berkeley not found")
+	}
+	// Inside → 0.
+	if d := b.DistanceMeters(37.8715, -122.2730); d != 0 {
+		t.Errorf("inside distance = %.0f, want 0", d)
+	}
+	// Downtown Oakland (proven outside Berkeley in TestContains) is a few km
+	// south of the border — a positive, finite distance.
+	dOak := b.DistanceMeters(37.8044, -122.2712)
+	if dOak <= 200 || dOak > 20000 {
+		t.Errorf("Oakland distance = %.0f, want a sane positive value", dOak)
+	}
+	// The SF Ferry Building (across the bay) is farther still.
+	if dSF := b.DistanceMeters(37.7955, -122.3937); dSF <= dOak {
+		t.Errorf("SF distance %.0f should exceed Oakland %.0f", dSF, dOak)
+	}
+}
+
 func TestLookup_NameNormalization(t *testing.T) {
 	store := loadOrFail(t)
 	for _, name := range []string{"san jose", "SAN JOSE", "  San   Jose  "} {
