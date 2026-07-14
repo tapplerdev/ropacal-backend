@@ -830,9 +830,22 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			log.Printf("✅ [UPDATE-BIN] Cancelled pending move %s (superseded by manual edit)", mvID)
 		}
 
+		// A deactivated bin (missing/retired/in_storage) must drop off every route
+		// template immediately — only active bins belong on a collection route. In-tx,
+		// so the status change and the template prune commit together.
+		if req.Status == "missing" || req.Status == "retired" || req.Status == "in_storage" {
+			if pruned, pruneErr := bindomain.PruneFromRouteTemplates(tx, id, now.Unix()); pruneErr != nil {
+				log.Printf("❌ [UPDATE-BIN] Failed to prune bin %s from route templates: %v", id, pruneErr)
+				http.Error(w, "Failed to update route templates", http.StatusInternalServerError)
+				return
+			} else if pruned > 0 {
+				log.Printf("🧹 [UPDATE-BIN] Pruned bin %s from %d route template(s)", id, pruned)
+			}
+		}
+
 		// Commit transaction — all writes above (bin update, check record,
 		// potential-location snapshot/status, no-go zone + incident, change log,
-		// route_task cascade, superseded move cancellations) are now persisted atomically.
+		// route_task cascade, template prune, superseded move cancellations) are now persisted atomically.
 		log.Printf("💾 [UPDATE-BIN] Committing transaction")
 		if err := tx.Commit(); err != nil {
 			log.Printf("❌ [UPDATE-BIN] Failed to commit transaction: %v", err)

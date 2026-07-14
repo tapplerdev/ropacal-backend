@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"ropacal-backend/internal/bindomain"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 
@@ -293,8 +294,17 @@ func RetireBin(db *sqlx.DB) http.HandlerFunc {
 			newStatus = "in_storage"
 		}
 
-		// Update bin
-		result, err := db.Exec(`
+		// Deactivating the bin (retire/store) and pruning it from every route template
+		// must be atomic — a stored/retired bin can never remain on a collection route.
+		tx, err := db.Beginx()
+		if err != nil {
+			log.Printf("❌ [RETIRE-BIN] Failed to begin transaction: %v", err)
+			http.Error(w, "Failed to retire bin", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+
+		result, err := tx.Exec(`
 			UPDATE bins
 			SET status = $1,
 			    retired_at = $2,
@@ -303,7 +313,6 @@ func RetireBin(db *sqlx.DB) http.HandlerFunc {
 			WHERE id = $4
 			AND status = 'active'
 		`, newStatus, now, userID, binID)
-
 		if err != nil {
 			log.Printf("❌ [RETIRE-BIN] Database update failed: %v", err)
 			http.Error(w, "Failed to retire bin", http.StatusInternalServerError)
@@ -316,9 +325,22 @@ func RetireBin(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// A retired/stored bin leaves the field — drop it from all route templates.
+		if _, err = bindomain.PruneFromRouteTemplates(tx, binID, now); err != nil {
+			log.Printf("❌ [RETIRE-BIN] Failed to prune bin %s from route templates: %v", binID, err)
+			http.Error(w, "Failed to retire bin", http.StatusInternalServerError)
+			return
+		}
+
+		if err = tx.Commit(); err != nil {
+			log.Printf("❌ [RETIRE-BIN] Failed to commit transaction: %v", err)
+			http.Error(w, "Failed to retire bin", http.StatusInternalServerError)
+			return
+		}
+
 		log.Printf("✅ [RETIRE-BIN] Bin %s retired by user %s (action: %s)", binID, userID, req.DisposalAction)
 
-		// Write to bin_change_log for audit trail
+		// Write to bin_change_log for audit trail (best-effort, post-commit)
 		oldJSON := `{"status":"active"}`
 		newJSON := fmt.Sprintf(`{"status":"%s"}`, newStatus)
 		var reasonNotes *string

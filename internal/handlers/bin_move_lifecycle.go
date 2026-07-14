@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"ropacal-backend/internal/bindomain"
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/moverequest"
@@ -103,6 +104,16 @@ func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 			log.Printf("Error reverting bin status on cancel: %v", err)
 			http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
 			return
+		}
+
+		// A redeployment reverting to in_storage has left the field — drop it from
+		// every route template (only active bins belong on a collection route). In-tx.
+		if revertStatus == "in_storage" {
+			if _, err = bindomain.PruneFromRouteTemplates(tx, moveRequest.BinID, now); err != nil {
+				log.Printf("Error pruning reverted bin from route templates on cancel: %v", err)
+				http.Error(w, "Failed to cancel move request", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// Soft-delete only THIS move's incomplete tasks on its shift (audited).
@@ -270,6 +281,15 @@ func ManuallyCompleteMoveRequest(store moverequest.Store, db *sqlx.DB) http.Hand
 			}
 
 			log.Printf("[MANUAL MOVE] ✅ Bin status updated to %s", newStatus)
+
+			// Stored/retired bin leaves the field — prune from all route templates.
+			// Best-effort: this handler is not yet transactional (documented hardening
+			// follow-up); the shift build-time skip remains a backstop.
+			if newStatus == "retired" || newStatus == "in_storage" {
+				if _, pruneErr := bindomain.PruneFromRouteTemplates(db, moveRequest.BinID, now); pruneErr != nil {
+					log.Printf("[MANUAL MOVE] ⚠️  Failed to prune bin from route templates: %v", pruneErr)
+				}
+			}
 
 		} else if moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment" {
 			// Update bin location to new coordinates

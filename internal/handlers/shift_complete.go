@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"ropacal-backend/internal/bindomain"
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
@@ -686,6 +687,12 @@ func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.
 					log.Printf("[DIAGNOSTIC] ⚠️  Failed to mark bin %s as missing: %v", binIDForCheck, updateErr)
 				} else {
 					log.Printf("[DIAGNOSTIC] 🔍 Bin %s marked as missing", binIDForCheck)
+					// Drop the now-missing bin from all route templates (best-effort:
+					// the flip already committed, and the shift build-time skip is the
+					// backstop). Only active bins belong on a collection route.
+					if _, pruneErr := bindomain.PruneFromRouteTemplates(db, binIDForCheck, now); pruneErr != nil {
+						log.Printf("[DIAGNOSTIC] ⚠️  Failed to prune missing bin %s from route templates: %v", binIDForCheck, pruneErr)
+					}
 					if centrifugoClient != nil {
 						var updatedBin models.Bin
 						if fetchErr := db.Get(&updatedBin, "SELECT * FROM bins WHERE id = $1", binIDForCheck); fetchErr == nil {
@@ -880,6 +887,15 @@ func applyMoveCompletion(ext sqlx.Ext, moveRequest models.BinMoveRequest, fin mo
 			WHERE id = $7
 		`, moveRequest.NewLatitude, moveRequest.NewLongitude, fin.relStreet, fin.relCity, fin.relZip, now, moveRequest.BinID); err != nil {
 			return fmt.Errorf("failed to relocate bin: %w", err)
+		}
+	}
+
+	// A store/pickup completion just deactivated the bin (in_storage/retired) — drop it
+	// from every route template so a stored bin never lingers on a collection route.
+	// Atomic on the caller's ext. (Relocation/redeployment keep the bin active → no prune.)
+	if fin.isStore {
+		if _, err := bindomain.PruneFromRouteTemplates(ext, moveRequest.BinID, now); err != nil {
+			return fmt.Errorf("failed to prune stored bin from route templates: %w", err)
 		}
 	}
 
