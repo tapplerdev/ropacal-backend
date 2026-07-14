@@ -96,6 +96,9 @@ func (a *AIOperationsAgent) runCycle() {
 	// Check for stale bins (not checked in 30+ days)
 	a.checkStaleBins()
 
+	// Chronic "No bin" no-shows: active bins drivers keep failing to find
+	a.checkMissingCandidates()
+
 	// Check route performance
 	a.checkRoutePerformance()
 
@@ -227,6 +230,71 @@ func (a *AIOperationsAgent) checkStaleBins() {
 		a.createRecommendation("bin_retire", "bin", bin.ID, title, description, "low",
 			"Retire this bin and redeploy to a higher-performing location",
 			fmt.Sprintf("Bin has been at 0%% for %.0f days, suggesting the location has very low donation activity.", bin.DaysSinceCheck))
+	}
+}
+
+// checkMissingCandidates flags ACTIVE bins that drivers have repeatedly skipped
+// with a "No bin" reason on recent shifts — a strong signal the bin is actually
+// gone. This is the first consumer of route_tasks.task_data->>'skip_reason'.
+// Suggests marking the bin missing (which also flags a no-go zone at the spot and
+// removes it from future routing), pending manager confirmation.
+func (a *AIOperationsAgent) checkMissingCandidates() {
+	const windowDays = 45
+	const threshold = 3 // distinct shifts where the bin was a "No bin" no-show
+
+	type cand struct {
+		ID            string `db:"id"`
+		BinNumber     int    `db:"bin_number"`
+		CurrentStreet string `db:"current_street"`
+		City          string `db:"city"`
+		NoBinShifts   int    `db:"no_bin_shifts"`
+	}
+
+	var bins []cand
+	err := a.db.Select(&bins, `
+		SELECT b.id, b.bin_number, b.current_street, b.city,
+		       COUNT(DISTINCT rt.shift_id) AS no_bin_shifts
+		FROM route_tasks rt
+		JOIN shifts s ON s.id = rt.shift_id
+		JOIN bins b   ON b.id = rt.bin_id
+		WHERE rt.skipped = true
+		  AND rt.is_deleted = false
+		  AND b.status = 'active'
+		  AND rt.task_data->>'skip_reason' ILIKE '%no bin%'
+		  AND s.created_at > (EXTRACT(EPOCH FROM NOW())::BIGINT - $1)
+		GROUP BY b.id, b.bin_number, b.current_street, b.city
+		HAVING COUNT(DISTINCT rt.shift_id) >= $2
+	`, windowDays*86400, threshold)
+	if err != nil {
+		log.Printf("❌ [AIAgent] checkMissingCandidates query failed: %v", err)
+		return
+	}
+	if len(bins) > 0 {
+		log.Printf("🤖 [AIAgent] Found %d chronic 'No bin' no-show bin(s)", len(bins))
+	}
+
+	for _, bin := range bins {
+		title := fmt.Sprintf("Bin #%d reported \"No bin\" on %d shifts — likely missing", bin.BinNumber, bin.NoBinShifts)
+		description := fmt.Sprintf("Bin #%d at %s, %s was a \"No bin\" no-show on %d separate shifts in the last %d days but is still marked active — so it keeps getting routed. It's probably gone or moved.",
+			bin.BinNumber, bin.CurrentStreet, bin.City, bin.NoBinShifts, windowDays)
+		reasoning := fmt.Sprintf("Drivers could not find the bin on %d distinct shifts in %d days while it remained active. Repeated \"No bin\" reports strongly indicate the bin is no longer at this location.", bin.NoBinShifts, windowDays)
+
+		// If a pending rec already exists, REFRESH its count/text and extend its life
+		// rather than skip. Unlike other rules, the no-show count IS the primary urgency
+		// signal here (3 vs 10 no-shows changes the decision), so it must not freeze at
+		// its first value while the bin keeps getting missed.
+		var existingID string
+		if err := a.db.Get(&existingID, `SELECT id FROM ai_recommendations WHERE entity_id = $1 AND type = 'bin_missing_candidate' AND status = 'pending' LIMIT 1`, bin.ID); err == nil && existingID != "" {
+			if _, uerr := a.db.Exec(`UPDATE ai_recommendations SET title = $1, description = $2, reasoning = $3, expires_at = $4 WHERE id = $5`,
+				title, description, reasoning, time.Now().Unix()+7*86400, existingID); uerr != nil {
+				log.Printf("❌ [AIAgent] failed to refresh missing-candidate rec %s: %v", existingID, uerr)
+			}
+			continue
+		}
+
+		a.createRecommendation("bin_missing_candidate", "bin", bin.ID, title, description, "medium",
+			"Mark this bin missing — removes it from routing and flags the location as a no-go zone",
+			reasoning)
 	}
 }
 
