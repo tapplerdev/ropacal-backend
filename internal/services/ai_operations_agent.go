@@ -262,6 +262,21 @@ func (a *AIOperationsAgent) checkMissingCandidates() {
 		  AND b.status = 'active'
 		  AND rt.task_data->>'skip_reason' ILIKE '%no bin%'
 		  AND s.created_at > (EXTRACT(EPOCH FROM NOW())::BIGINT - $1)
+		  -- Only count no-shows AFTER the bin's most recent relocation, so a bin
+		  -- that was moved/redeployed doesn't drag stale "No bin" reports from its
+		  -- OLD location (which would false-flag a freshly-placed bin as missing).
+		  AND s.created_at > GREATEST(
+		        COALESCE((SELECT MAX(cl.created_at) FROM bin_change_log cl
+		                  WHERE cl.bin_id = b.id
+		                    AND cl.change_type IN ('address_change','coordinates_change')), 0),
+		        COALESCE((SELECT MAX(mr.updated_at) FROM bin_move_requests mr
+		                  WHERE mr.bin_id = b.id AND mr.status = 'completed'
+		                    AND mr.move_type IN ('relocation','redeployment')), 0),
+		        -- The legacy driver-app relocation path (POST /bins/{id}/moves) logs the
+		        -- move ONLY in the moves table (no bin_change_log / bin_move_requests row),
+		        -- so read the physical-move log too: any row means the bin changed location.
+		        COALESCE((SELECT MAX(m.moved_on) FROM moves m WHERE m.bin_id = b.id), 0)
+		      )
 		GROUP BY b.id, b.bin_number, b.current_street, b.city
 		HAVING COUNT(DISTINCT rt.shift_id) >= $2
 	`, windowDays*86400, threshold)
