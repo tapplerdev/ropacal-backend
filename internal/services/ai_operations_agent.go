@@ -9,11 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"ropacal-backend/internal/services/centrifugo"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"ropacal-backend/internal/services/centrifugo"
 )
 
 type AIOperationsAgent struct {
@@ -98,6 +99,9 @@ func (a *AIOperationsAgent) runCycle() {
 
 	// Chronic "No bin" no-shows: active bins drivers keep failing to find
 	a.checkMissingCandidates()
+
+	// Bins drivers repeatedly can't reach (silent service failures)
+	a.checkChronicallyInaccessible()
 
 	// Check route performance
 	a.checkRoutePerformance()
@@ -313,6 +317,84 @@ func (a *AIOperationsAgent) checkMissingCandidates() {
 	}
 }
 
+// checkChronicallyInaccessible flags ACTIVE bins that drivers repeatedly can't reach.
+// An "inaccessible" incident completes the task WITHOUT a fill reading or photo (the
+// bin couldn't be opened), so the stop silently shows as "collected/0%" while the bin
+// keeps filling — a failure that never surfaces on the shift view. ≥3 inaccessible
+// reports in the window means the location itself is the problem (gated, blocked,
+// no-entry), not a one-off. Same relocation guard as checkMissingCandidates: only count
+// incidents AFTER the bin's last move, so a relocated bin doesn't drag stale reports
+// from its old spot. Mirrors [[bin-ops-gotchas]] chronic-signal pattern.
+func (a *AIOperationsAgent) checkChronicallyInaccessible() {
+	const windowDays = 45
+	const threshold = 3 // distinct "inaccessible" incidents
+
+	type cand struct {
+		ID              string `db:"id"`
+		BinNumber       int    `db:"bin_number"`
+		CurrentStreet   string `db:"current_street"`
+		City            string `db:"city"`
+		AccessIncidents int    `db:"access_incidents"`
+	}
+
+	var bins []cand
+	err := a.db.Select(&bins, `
+		SELECT b.id, b.bin_number, b.current_street, b.city,
+		       COUNT(DISTINCT zi.shift_id) AS access_incidents
+		FROM zone_incidents zi
+		JOIN bins b ON b.id = zi.bin_id
+		WHERE zi.incident_type = 'inaccessible'
+		  -- Only DRIVER shift reports: a real service attempt that failed. Manager desk
+		  -- reports + field observations have shift_id=NULL and aren't "couldn't service
+		  -- it on a run", so they must not trip this rule (which claims "on N shifts").
+		  AND zi.shift_id IS NOT NULL
+		  AND b.status = 'active'
+		  AND zi.reported_at > (EXTRACT(EPOCH FROM NOW())::BIGINT - $1)
+		  -- Only count access failures AFTER the bin's most recent relocation, so a
+		  -- moved bin doesn't carry stale "inaccessible" reports from its old location.
+		  AND zi.reported_at > GREATEST(
+		        COALESCE((SELECT MAX(cl.created_at) FROM bin_change_log cl
+		                  WHERE cl.bin_id = b.id
+		                    AND cl.change_type IN ('address_change','coordinates_change')), 0),
+		        COALESCE((SELECT MAX(mr.updated_at) FROM bin_move_requests mr
+		                  WHERE mr.bin_id = b.id AND mr.status = 'completed'
+		                    AND mr.move_type IN ('relocation','redeployment')), 0),
+		        COALESCE((SELECT MAX(m.moved_on) FROM moves m WHERE m.bin_id = b.id), 0)
+		      )
+		GROUP BY b.id, b.bin_number, b.current_street, b.city
+		HAVING COUNT(DISTINCT zi.shift_id) >= $2
+	`, windowDays*86400, threshold)
+	if err != nil {
+		log.Printf("❌ [AIAgent] checkChronicallyInaccessible query failed: %v", err)
+		return
+	}
+	if len(bins) > 0 {
+		log.Printf("🤖 [AIAgent] Found %d chronically-inaccessible bin(s)", len(bins))
+	}
+
+	for _, bin := range bins {
+		title := fmt.Sprintf("Bin #%d inaccessible on %d shifts — can't be serviced", bin.BinNumber, bin.AccessIncidents)
+		description := fmt.Sprintf("Bin #%d at %s, %s was reported inaccessible on %d separate shifts in the last %d days but is still active and routed. Each visit fails silently (no collection, shows as 0%%), so it's likely overflowing. Relocate it or resolve access with the property.",
+			bin.BinNumber, bin.CurrentStreet, bin.City, bin.AccessIncidents, windowDays)
+		reasoning := fmt.Sprintf("Drivers reported \"inaccessible\" on %d distinct shifts in %d days while the bin stayed active. Repeated access failures mean the bin cannot be serviced at this location.", bin.AccessIncidents, windowDays)
+
+		// Refresh an existing pending rec (the incident count is the load-bearing
+		// urgency signal, so it must track upward, not freeze at its first value).
+		var existingID string
+		if err := a.db.Get(&existingID, `SELECT id FROM ai_recommendations WHERE entity_id = $1 AND type = 'bin_access_issue' AND status = 'pending' LIMIT 1`, bin.ID); err == nil && existingID != "" {
+			if _, uerr := a.db.Exec(`UPDATE ai_recommendations SET title = $1, description = $2, reasoning = $3, expires_at = $4 WHERE id = $5`,
+				title, description, reasoning, time.Now().Unix()+7*86400, existingID); uerr != nil {
+				log.Printf("❌ [AIAgent] failed to refresh access-issue rec %s: %v", existingID, uerr)
+			}
+			continue
+		}
+
+		a.createRecommendation("bin_access_issue", "bin", bin.ID, title, description, "high",
+			"Relocate this bin or resolve access with the property — drivers repeatedly can't reach it",
+			reasoning)
+	}
+}
+
 // checkRoutePerformance checks shift history for underperforming routes
 func (a *AIOperationsAgent) checkRoutePerformance() {
 	type routePerf struct {
@@ -358,8 +440,10 @@ func (a *AIOperationsAgent) checkRoutePerformance() {
 // checkUnderperformingBins applies the demand-vs-cadence QUADRANT rule.
 // Low fill AT COLLECTION alone is ambiguous — it splits on the site's own
 // demand (median fill %/day between checks):
-//   weak site    (fills slowly too)      -> relocation candidate
-//   over-visited (fills fine, we're early) -> reduce cadence, NOT a move
+//
+//	weak site    (fills slowly too)      -> relocation candidate
+//	over-visited (fills fine, we're early) -> reduce cadence, NOT a move
+//
 // Relocation recs are suppressed when the bin already has an open move
 // (one-open-move invariant) and for bins with <5 collections (small sample).
 func (a *AIOperationsAgent) checkUnderperformingBins() {

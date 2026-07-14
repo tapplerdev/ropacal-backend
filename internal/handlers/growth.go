@@ -321,13 +321,14 @@ func GetWeeklyGrowthPlan(db *sqlx.DB) http.HandlerFunc {
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
-				"watching":            watching,
-				"escalations":         loadRecs("bin_relocate"),
-				"redeploys":           loadRecs("bin_redeploy"),
-				"cadence_ups":         loadRecs("bin_increase_cadence"),
-				"missing_candidates":  loadRecs("bin_missing_candidate"),
-				"applied_7d":          applied,
-				"generated_at":        now,
+				"watching":           watching,
+				"escalations":        loadRecs("bin_relocate"),
+				"redeploys":          loadRecs("bin_redeploy"),
+				"cadence_ups":        loadRecs("bin_increase_cadence"),
+				"missing_candidates": loadRecs("bin_missing_candidate"),
+				"access_issues":      loadRecs("bin_access_issue"),
+				"applied_7d":         applied,
+				"generated_at":       now,
 			},
 		})
 	}

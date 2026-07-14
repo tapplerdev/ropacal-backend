@@ -18,26 +18,26 @@ type ShiftBin struct {
 
 // ShiftBinWithDetails extends ShiftBin with bin details for API responses
 type ShiftBinWithDetails struct {
-	ID                    string   `db:"id" json:"id"`
-	ShiftID               string   `db:"shift_id" json:"shift_id"`
-	BinID                 string   `db:"bin_id" json:"bin_id"`
-	SequenceOrder         int      `db:"sequence_order" json:"sequence_order"`
-	IsCompleted           int      `db:"is_completed" json:"is_completed"`
-	CompletedAt           *int64   `db:"completed_at" json:"completed_at"`
-	UpdatedFillPercentage *int     `db:"updated_fill_percentage" json:"updated_fill_percentage"`
-	CreatedAt             int64    `db:"created_at" json:"created_at"`
-	BinNumber             int      `db:"bin_number" json:"bin_number"`
-	CurrentStreet         string   `db:"current_street" json:"current_street"`
-	City                  string   `db:"city" json:"city"`
-	Zip                   string   `db:"zip" json:"zip"`
-	FillPercentage        int      `db:"fill_percentage" json:"fill_percentage"`
-	Latitude              float64  `db:"latitude" json:"latitude"`
-	Longitude             float64  `db:"longitude" json:"longitude"`
-	StopType              string   `db:"stop_type" json:"stop_type"`
-	MoveRequestID         *string  `db:"move_request_id" json:"move_request_id"`
-	OriginalAddress       *string  `db:"original_address" json:"original_address"`
-	NewAddress            *string  `db:"new_address" json:"new_address"`
-	MoveType              *string  `db:"move_type" json:"move_type"`
+	ID                    string  `db:"id" json:"id"`
+	ShiftID               string  `db:"shift_id" json:"shift_id"`
+	BinID                 string  `db:"bin_id" json:"bin_id"`
+	SequenceOrder         int     `db:"sequence_order" json:"sequence_order"`
+	IsCompleted           int     `db:"is_completed" json:"is_completed"`
+	CompletedAt           *int64  `db:"completed_at" json:"completed_at"`
+	UpdatedFillPercentage *int    `db:"updated_fill_percentage" json:"updated_fill_percentage"`
+	CreatedAt             int64   `db:"created_at" json:"created_at"`
+	BinNumber             int     `db:"bin_number" json:"bin_number"`
+	CurrentStreet         string  `db:"current_street" json:"current_street"`
+	City                  string  `db:"city" json:"city"`
+	Zip                   string  `db:"zip" json:"zip"`
+	FillPercentage        int     `db:"fill_percentage" json:"fill_percentage"`
+	Latitude              float64 `db:"latitude" json:"latitude"`
+	Longitude             float64 `db:"longitude" json:"longitude"`
+	StopType              string  `db:"stop_type" json:"stop_type"`
+	MoveRequestID         *string `db:"move_request_id" json:"move_request_id"`
+	OriginalAddress       *string `db:"original_address" json:"original_address"`
+	NewAddress            *string `db:"new_address" json:"new_address"`
+	MoveType              *string `db:"move_type" json:"move_type"`
 
 	// Placement task fields
 	PotentialLocationID *string `db:"potential_location_id" json:"potential_location_id"`
@@ -50,4 +50,10 @@ type ShiftBinWithDetails struct {
 	// Skip tracking fields
 	Skipped  bool             `db:"skipped" json:"skipped"`
 	TaskData *json.RawMessage `db:"task_data" json:"task_data,omitempty"`
+
+	// Incident (from zone_incidents reported on THIS shift for this bin). An incident
+	// completion (e.g. 'inaccessible', 'damaged') closes the task WITHOUT a fill reading
+	// or photos, so the UI must show the incident instead of a misleading "0% Fill".
+	IncidentType     *string `db:"incident_type" json:"incident_type,omitempty"`
+	IncidentPhotoURL *string `db:"incident_photo_url" json:"incident_photo_url,omitempty"`
 }

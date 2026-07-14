@@ -1051,9 +1051,21 @@ func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWit
 			rt.warehouse_action,
 			rt.bins_to_load,
 			rt.skipped,
-			rt.task_data
+			rt.task_data,
+			inc.incident_type AS incident_type,
+			inc.photo_url AS incident_photo_url
 		FROM route_tasks rt
 		LEFT JOIN bins b ON rt.bin_id = b.id
+		-- Latest incident reported on THIS shift for this bin (inaccessible/damaged/etc.).
+		-- An incident completion has no fill/photo, so the shift view uses this to show the
+		-- incident instead of a misleading "0% Fill" on a stop the driver couldn't service.
+		LEFT JOIN LATERAL (
+			SELECT zi.incident_type, zi.photo_url
+			FROM zone_incidents zi
+			WHERE zi.shift_id = rt.shift_id AND zi.bin_id = rt.bin_id
+			ORDER BY zi.reported_at DESC
+			LIMIT 1
+		) inc ON true
 		WHERE rt.shift_id = $1 AND rt.is_deleted = false
 		ORDER BY rt.sequence_order ASC`
 
