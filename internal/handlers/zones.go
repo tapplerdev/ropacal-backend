@@ -648,7 +648,7 @@ func createZoneAndIncident(
 	source *string,
 	moveRequestID *string,
 ) (string, error) {
-	return createZoneAndIncidentExt(
+	incidentID, _, err := createZoneAndIncidentExt(
 		db,
 		lat, lng,
 		zoneName,
@@ -666,6 +666,7 @@ func createZoneAndIncident(
 		source,
 		moveRequestID,
 	)
+	return incidentID, err
 }
 
 // createZoneAndIncidentExt is the sqlx.Ext-based implementation of
@@ -690,19 +691,19 @@ func createZoneAndIncidentExt(
 	now int64,
 	source *string,
 	moveRequestID *string,
-) (string, error) {
+) (incidentID string, zoneID string, err error) {
 	// 1. Always create a new zone for this incident
-	zoneID := uuid.New().String()
+	zoneID = uuid.New().String()
 	if _, err := ext.Exec(`
 		INSERT INTO no_go_zones (id, name, center_latitude, center_longitude, radius_meters, conflict_score, status, created_by_user_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, 0, 0, 'active', $5, $6, $6)
 	`, zoneID, zoneName, lat, lng, reportedByUserID, now); err != nil {
-		return "", fmt.Errorf("failed to create zone: %w", err)
+		return "", "", fmt.Errorf("failed to create zone: %w", err)
 	}
 	log.Printf("✅ [createZoneAndIncident] Created zone %s (%s)", zoneID, zoneName)
 
 	// 2. Insert incident record
-	incidentID := uuid.New().String()
+	incidentID = uuid.New().String()
 	if _, err := ext.Exec(`
 		INSERT INTO zone_incidents (
 			id, zone_id, bin_id, incident_type,
@@ -722,11 +723,11 @@ func createZoneAndIncidentExt(
 		isFieldObservation, "open",
 		source, moveRequestID,
 	); err != nil {
-		return "", fmt.Errorf("failed to insert incident: %w", err)
+		return "", "", fmt.Errorf("failed to insert incident: %w", err)
 	}
 	log.Printf("✅ [createZoneAndIncident] Incident %s created (zone: %s, type: %s)", incidentID, zoneID, incidentType)
 
-	return incidentID, nil
+	return incidentID, zoneID, nil
 }
 
 // CreateManagerIncidentReport allows a manager/admin to file an incident report

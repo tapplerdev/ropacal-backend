@@ -666,26 +666,33 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 			}
 
 			// A relocation/address edit flags the OLD location because the bin moved
-			// away from it. A store/retire (pulled_from_service) doesn't change the
-			// bin's coordinates in this handler, so status_change is the trigger and
-			// the zone is flagged at the bin's current (soon-to-be-vacated) location.
+			// away from it. A status change that vacates the location in place —
+			// storing/retiring, OR marking the bin missing — doesn't change coords, so
+			// status_change is the trigger and the zone is flagged at the bin's current
+			// (soon-to-be-vacated) location. Marking missing mirrors the driver "missing"
+			// incident path (shift_complete.go), which always flags a zone.
+			statusVacatesLocation := changeType == "status_change" &&
+				(isStoring || req.Status == "missing")
 			zoneEligibleChange := changeType == "address_change" || changeType == "coordinates_change" ||
-				(isStoring && changeType == "status_change")
+				statusVacatesLocation
 
 			if shouldCreateZone && zoneEligibleChange &&
 				existing.Latitude != nil && existing.Longitude != nil {
 				zoneName := fmt.Sprintf("%s, %s", existing.CurrentStreet, existing.City)
 				adminBinChangeSource := "admin_bin_change"
 				var incidentDesc string
-				if isStoring {
+				switch {
+				case req.Status == "missing" && changeType == "status_change":
+					incidentDesc = fmt.Sprintf("Bin #%d marked missing by manager. Location flagged — %s", existing.BinNumber, formatIncidentTypeLabel(*req.ReasonCategory))
+				case isStoring:
 					incidentDesc = fmt.Sprintf("Bin #%d pulled from service by manager. Location flagged — %s", existing.BinNumber, formatIncidentTypeLabel(*req.ReasonCategory))
-				} else {
+				default:
 					incidentDesc = fmt.Sprintf("Bin #%d address updated by manager. Previous location flagged — %s", existing.BinNumber, formatIncidentTypeLabel(*req.ReasonCategory))
 				}
 				binIDCopy := id
 				// Run on the same transaction so the zone + incident are atomic
 				// with the bin update and change-log write below.
-				_, zoneErr := createZoneAndIncidentExt(
+				_, createdZoneID, zoneErr := createZoneAndIncidentExt(
 					tx,
 					*existing.Latitude, *existing.Longitude,
 					zoneName,
@@ -708,15 +715,11 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 					return
 				}
 				noGoZoneCreated = true
-				// Fetch the zone ID just created (nearest active zone at old coords)
-				var fetchedZoneID string
-				if fetchErr := tx.QueryRow(
-					`SELECT id FROM no_go_zones WHERE status='active'
-					 ORDER BY (center_latitude - $1)^2 + (center_longitude - $2)^2 ASC LIMIT 1`,
-					*existing.Latitude, *existing.Longitude,
-				).Scan(&fetchedZoneID); fetchErr == nil {
-					noGoZoneID = &fetchedZoneID
-				}
+				// Link the change log to the EXACT zone just created. (Previously this
+				// re-derived the id via a nearest-active-zone-at-coords query, which
+				// mis-linked when two active zones shared these coordinates — e.g. a bin
+				// toggled missing twice.)
+				noGoZoneID = &createdZoneID
 				log.Printf("✅ [UPDATE-BIN] No-go zone created at old location (%s)", zoneName)
 			}
 
