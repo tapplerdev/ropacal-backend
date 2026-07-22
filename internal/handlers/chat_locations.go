@@ -372,6 +372,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				a.BBox = &box
 			}
 		}
+		// A street/address-level target arrives with a near-degenerate bbox. Using it
+		// as the tight "core" box leaves almost nothing in_area (a strictly-inside run
+		// → silent 0), so drop a tiny box and let the point + 5km/8km radius fallback
+		// handle it — i.e. "good spots near this address." Also covers very small towns.
+		if a.BBox != nil && a.BBox[2]-a.BBox[0] < 0.02 && a.BBox[3]-a.BBox[1] < 0.02 { // < ~2 km across
+			a.BBox = nil
+		}
 		if a.Lat != 0 || a.Lng != 0 {
 			area = &a
 			if targetCity == "" {
@@ -2069,13 +2076,13 @@ func (a *areaTarget) searchOrigins(maxOrigins int, haloKm float64) []struct{ Lat
 // geocodeAreaHERE resolves a typed place name to candidate AREAS (cities,
 // districts, counties) — up to 5, so ambiguity ("Brentwood" the LA district
 // vs "Brentwood" the Contra Costa city) surfaces as a choice instead of a
-// silent first-hit-wins. Constrained to California like the legacy geocoder:
-// the fleet is CA-only, and without the constraint every common city name
-// (Fremont, Concord…) goes multi-state ambiguous and dead-ends the headless
-// consumers (placement planner, AI-suggest dialog) that can't answer a
-// disambiguation question.
+// silent first-hit-wins. US-wide — Binly places bins nationwide, so a common
+// name that exists in several states (Fremont, Springfield…) returns multiple
+// options and the caller surfaces the choice (see disambiguation_needed) instead
+// of guessing; the state gets picked explicitly. The dashboard picker's
+// per-option title already carries the state, so most calls arrive pre-resolved.
 func geocodeAreaHERE(q string) ([]areaTarget, error) {
-	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,CA,USA&in=countryCode:USA&limit=5&apiKey=%s",
+	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,USA&in=countryCode:USA&limit=5&apiKey=%s",
 		strings.ReplaceAll(q, " ", "+"), HereAPIKey)
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Get(url)
@@ -2143,7 +2150,7 @@ func geocodeAreaHERE(q string) ([]areaTarget, error) {
 }
 
 func geocodeCityHERE(city string) (struct{ Lat, Lng float64 }, error) {
-	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,CA,USA&limit=1&apiKey=%s",
+	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,USA&limit=1&apiKey=%s",
 		strings.ReplaceAll(city, " ", "+"), HereAPIKey)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
