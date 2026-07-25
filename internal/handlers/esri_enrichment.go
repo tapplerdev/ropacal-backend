@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,11 @@ import (
 	"os"
 	"time"
 )
+
+// ErrESRIAuth marks a credential failure (missing/invalid/expired ESRI_API_KEY) as
+// distinct from a transient API error. Callers MUST surface this: when it fires, the
+// demographic + crime safety gate is not running at all.
+var ErrESRIAuth = errors.New("ESRI credential failure")
 
 // ESRIEnrichmentResult contains demographic and economic data for a location
 type ESRIEnrichmentResult struct {
@@ -49,7 +55,8 @@ var esriAnalysisVariables = []string{
 func EnrichLocation(lat, lng float64) (*ESRIEnrichmentResult, error) {
 	apiKey := os.Getenv("ESRI_API_KEY")
 	if apiKey == "" {
-		return nil, fmt.Errorf("ESRI_API_KEY not set")
+		log.Printf("🚨 [ESRI] ESRI_API_KEY is NOT SET — demographic + CRIME SAFETY GATE IS DISABLED.")
+		return nil, fmt.Errorf("%w: ESRI_API_KEY not set", ErrESRIAuth)
 	}
 
 	// Build analysis variables JSON array
@@ -156,7 +163,8 @@ func EnrichLocationsBatch(locations []struct{ Lat, Lng float64 }) ([]ESRIEnrichm
 func enrichLocationsChunk(locations []struct{ Lat, Lng float64 }) ([]ESRIEnrichmentResult, error) {
 	apiKey := os.Getenv("ESRI_API_KEY")
 	if apiKey == "" {
-		return nil, fmt.Errorf("ESRI_API_KEY not set")
+		log.Printf("🚨 [ESRI] ESRI_API_KEY is NOT SET — demographic + CRIME SAFETY GATE IS DISABLED.")
+		return nil, fmt.Errorf("%w: ESRI_API_KEY not set", ErrESRIAuth)
 	}
 
 	// Build study areas array
@@ -210,6 +218,16 @@ func enrichLocationsChunk(locations []struct{ Lat, Lng float64 }) ([]ESRIEnrichm
 	}
 
 	if esriResp.Error != nil {
+		// Credential failures (498 invalid / 499 missing token) are the dangerous ones:
+		// the enrichment returns nothing, the crime gate is skipped, and the run LOOKS
+		// normal. Name them explicitly and shout — an expired ESRI token silently
+		// disabled the safety screen for weeks before (2026-07).
+		if esriResp.Error.Code == 498 || esriResp.Error.Code == 499 {
+			log.Printf("🚨 [ESRI] CREDENTIAL FAILURE (%d: %s) — the ESRI_API_KEY is invalid or "+
+				"expired. Demographic + CRIME SAFETY GATE IS DISABLED until it is replaced.",
+				esriResp.Error.Code, esriResp.Error.Message)
+			return nil, fmt.Errorf("%w: %d: %s", ErrESRIAuth, esriResp.Error.Code, esriResp.Error.Message)
+		}
 		return nil, fmt.Errorf("ESRI API error %d: %s", esriResp.Error.Code, esriResp.Error.Message)
 	}
 

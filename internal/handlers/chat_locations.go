@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -922,8 +923,21 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	// Batch enrich (handles up to ~200 in one call)
 	esriResults, esriErr := EnrichLocationsBatch(esriLocs)
+	// safetyGate travels to the RESPONSE, not just the logs: enrichment fails OPEN
+	// (every candidate sails past the crime screen), so a silent failure looks like a
+	// perfectly normal run. An expired ESRI token disabled the gate for weeks before
+	// anyone noticed — this makes the next expiry announce itself.
+	safetyGate := "active"
 	if esriErr != nil {
-		log.Printf("⚠️ [ESRI] Batch enrichment failed: %v — falling back to fill rate scoring", esriErr)
+		safetyGate = "degraded_api_error"
+		if errors.Is(esriErr, ErrESRIAuth) {
+			safetyGate = "DISABLED_credential_failure"
+			log.Printf("🚨🚨 [ESRI] CRIME SAFETY GATE IS DISABLED — credential failure: %v. "+
+				"Recommendations are UNSCREENED for crime/demographics until ESRI_API_KEY is fixed.", esriErr)
+		} else {
+			log.Printf("🚨 [ESRI] Batch enrichment failed: %v — crime safety gate SKIPPED for this run "+
+				"(falling back to fill-rate scoring; candidates are unscreened).", esriErr)
+		}
 	}
 
 	// Find normalization values
@@ -1483,7 +1497,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// Shortfall accounting: quality-first means we return UP TO `count`, never
 	// padding with weak picks — but the caller deserves to know where the
 	// rest died. `shortfall` maps rejection reason -> candidates dropped.
-	result, _ := json.Marshal(map[string]any{
+	out := map[string]any{
 		"count":           len(recommendations),
 		"requested":       count,
 		"in_area_count":   inAreaCount,
@@ -1491,7 +1505,15 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		"recommendations": recommendations,
 		"shortfall":       dropped,
 		"near_misses":     nearMisses,
-	})
+		"safety_gate":     safetyGate, // "active" | "degraded_api_error" | "DISABLED_credential_failure"
+	}
+	// Make a disabled gate impossible to miss — the model relays this to the operator
+	// instead of presenting unscreened picks as if they'd passed the safety screen.
+	if safetyGate != "active" {
+		out["safety_warning"] = "ESRI enrichment failed — these candidates were NOT screened for " +
+			"crime or demographics. Tell the user the safety screen did not run, and flag ESRI_API_KEY."
+	}
+	result, _ := json.Marshal(out)
 	return string(result), nil
 }
 
