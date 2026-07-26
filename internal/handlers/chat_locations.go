@@ -571,8 +571,14 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		Longitude float64 `db:"longitude"`
 	}
 	var existingPotentials []potentialLoc
-	h.db.Select(&existingPotentials, `SELECT latitude, longitude FROM potential_locations WHERE latitude IS NOT NULL AND longitude IS NOT NULL`)
-	log.Printf("📍 [Recommend] %d existing potential locations to avoid", len(existingPotentials))
+	// Exclude potentials that ALREADY BECAME BINS: the bin itself is in `bins` and blocks
+	// this spot via the gap check, so keeping the converted suggestion around blocks the
+	// same location a second time. 75 of 266 rows were these ghosts (2026-07), and stale
+	// pending spots out-rejected real bins 35-to-11 on a live Hayward run.
+	// Un-converted suggestions are deliberately still honoured — they're real reservations.
+	h.db.Select(&existingPotentials, `SELECT latitude, longitude FROM potential_locations
+		WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND converted_to_bin_id IS NULL`)
+	log.Printf("📍 [Recommend] %d unconverted potential locations to avoid", len(existingPotentials))
 	log.Printf("⏱️ [Timing] DB setup: %v (%d bins, %d fill rates, %d zones, %d census)",
 		time.Since(tDB), len(bins), len(perBinFillRate), len(zones), len(census))
 
@@ -608,9 +614,31 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// v2: cluster bins into search origins, build job queue, fan out
 		origins := clusterSearchOrigins(searchBins, perBinFillRate)
 		log.Printf("📍 [Search] Clustered %d bins into %d search origins", len(bins), len(origins))
+
+		// INFILL evidence gate. Infill's premise is "this spot draws more than one bin can
+		// hold", so it only makes sense next to a bin that demonstrably performs. Ungated, it
+		// happily drops a second bin 0.15 mi from a 2%/day bin and splits a weak stream in
+		// two. AUTO is deliberately NOT gated — there "search near where we already operate"
+		// is a weaker, still-reasonable claim, and auto is now expansion-led anyway.
+		if placementMode == "infill" {
+			var proven []searchOrigin
+			for _, o := range origins {
+				if o.MaxFillRate >= strongBinFillRate {
+					proven = append(proven, o)
+				}
+			}
+			if len(proven) == 0 {
+				log.Printf("⚠️ [Mode] INFILL — no origin clears %.1f%%/day; nothing here justifies densifying. "+
+					"Falling back to all %d origins so the call still returns something.", strongBinFillRate, len(origins))
+			} else {
+				log.Printf("📍 [Mode] INFILL evidence gate: %d/%d origins clear %.1f%%/day", len(proven), len(origins), strongBinFillRate)
+				origins = proven
+			}
+		}
+
 		for i, o := range origins {
 			kwCount := len(tier1Keywords)
-			if o.MaxFillRate >= 40 {
+			if o.MaxFillRate >= strongBinFillRate {
 				kwCount = len(allKeywords)
 			}
 			if i < 15 { // log first 15 origins
@@ -623,7 +651,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		var jobs []searchJob
 		for _, origin := range origins {
 			keywords := tier1Keywords
-			if origin.MaxFillRate >= 40 {
+			if origin.MaxFillRate >= strongBinFillRate {
 				keywords = allKeywords
 			}
 			for _, kw := range keywords {
@@ -705,7 +733,12 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		expansionCount = 0 // no expansion results
 		gapCount = count
 	} else {
-		expansionCount = int(math.Ceil(float64(count) * 0.3)) // default: 30% expansion
+		// AUTO is expansion-led (70/30), inverted from the old 30/70 infill-led split.
+		// Infill assumes a location out-draws one bin's capacity; on the real fleet only
+		// a handful of bins ever overflow, so the old default routed the MAJORITY of every
+		// batch through the mode with the narrowest justification. Expansion is the
+		// mode that matches where the fleet actually needs to go.
+		expansionCount = int(math.Ceil(float64(count) * 0.7))
 		gapCount = count - expansionCount
 	}
 
@@ -1554,6 +1587,18 @@ type searchJob struct {
 	City     string
 	Source   string // "business_search" or "expansion"
 }
+
+// strongBinFillRate is the bar a bin must clear to count as a "proven performer",
+// in PERCENTAGE POINTS PER DAY (the unit perBinFillRate is computed in).
+//
+// Grounded in the real distribution over the 100 bins that have enough check history
+// (2026-07): min 2.1, p25 5.4, median 7.4, p75 9.2, p90 11.5, MAX 17.1. So 10.0/day
+// ≈ reaches 50% in 5 days ≈ the top ~20% of the fleet.
+//
+// This replaces a hardcoded `>= 40` that was on the wrong scale — it read as a fill
+// PERCENTAGE, not a rate. Nothing can reach 40/day (the source query itself caps rates
+// at <50), so 0 of 100 bins ever qualified and the tier-3 keyword branch was dead code.
+const strongBinFillRate = 10.0
 
 // clusterSearchOrigins groups bins by proximity (0.5mi) and returns deduplicated search origins.
 // Bins are sorted by fill rate (highest first) so high-performing bins become cluster centers.
