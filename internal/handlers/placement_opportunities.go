@@ -145,12 +145,16 @@ func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
 			demand := cs.AvgFill / 100.0                                       // 0-1, higher = more demand
 			estimatedNeed := math.Max(float64(pop)/25000.0, 2)                 // at least 2 bins per city
 			coverageGap := math.Max(0, 1.0-float64(cs.BinCount)/estimatedNeed) // 0-1, higher = more underserved
-			incomeFactor := math.Min(float64(income)/150000.0, 1.0)            // 0-1
 
 			// Multiplicative: high demand AND coverage gap = high score
 			// Either being low tanks the score (same logic as placement algorithm)
 			demandCoverage := math.Sqrt(demand * coverageGap) // geometric mean, 0-1
-			score := math.Round((demandCoverage*0.7+incomeFactor*0.3)*100) / 10
+			// INCOME IS NOT SCORED. It used to carry 30% of this number, but calibration
+			// against live fill-rates put income at rho=-0.15 — no predictive value, and
+			// if anything the wrong sign. chat_locations.go dropped it then; this endpoint
+			// did not, so the two live scorers disagreed about whether income predicts
+			// yield. It stays in the RESPONSE as context for a human, just not in the math.
+			score := math.Round(demandCoverage*100) / 10
 
 			// Recommended additional bins
 			recommended := int(math.Max(0, math.Ceil(estimatedNeed)-float64(cs.BinCount)))

@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,12 @@ import (
 
 	"ropacal-backend/internal/geo"
 )
+
+// mallNameRe matches "mall"/"malls" as a WHOLE WORD. A plain
+// strings.Contains(name, "mall") also fires on "small" — so "Small World
+// Books", "Smallcakes Cupcakery" and every other business with "small" in its
+// name were being silently dropped as shopping malls.
+var mallNameRe = regexp.MustCompile(`(?i)\bmalls?\b`)
 
 type LocationRecommendation struct {
 	Latitude        float64 `json:"latitude"`
@@ -237,7 +244,7 @@ func filterCandidates(
 		}
 
 		// 3. Mall/Safeway filter
-		if strings.Contains(nameLower, "safeway") || strings.Contains(nameLower, "mall") {
+		if strings.Contains(nameLower, "safeway") || mallNameRe.MatchString(nameLower) {
 			log.Printf("🚫 [Filter] %s — mall/Safeway excluded", c.NearbyPOI)
 			dropped["mall_or_safeway"]++
 			continue
@@ -447,10 +454,54 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		haloKm = hk
 	}
 
+	// RELOCATE mode — "Bin #47 is underperforming, find it a better home."
+	// Seeds the search at the bin's OWN coordinates instead of a city, and drops
+	// that bin from the gap check below. That exclusion is the whole trick: left
+	// in, the bin being moved blocks every candidate within minGapMiles of
+	// itself — which is exactly the ground you want to search when the verdict
+	// is "good area, bad spot" and the fix is to shift a few hundred yards.
+	relocatingBinID, relocatingBinNum := "", 0
+	relocateRadiusMi := 3.0
+	if rr, ok := params["relocate_radius_miles"].(float64); ok && rr > 0 && rr <= 15 {
+		relocateRadiusMi = rr
+	}
+	if rb, ok := params["relocate_bin_number"].(float64); ok && rb > 0 {
+		var rbin []existingBin
+		err := h.db.Select(&rbin, `SELECT id, bin_number, latitude, longitude, city, zip, fill_percentage
+			FROM bins WHERE bin_number = $1 AND status = 'active'
+			  AND latitude IS NOT NULL AND longitude IS NOT NULL LIMIT 1`, int(rb))
+		if err != nil || len(rbin) == 0 {
+			out, _ := json.Marshal(map[string]any{
+				"error": fmt.Sprintf("no ACTIVE bin #%d with coordinates", int(rb)),
+				"instruction": "Tell the user that bin number isn't an active, geocoded bin. " +
+					"Do NOT fall back to a city-wide search and do NOT invent recommendations.",
+			})
+			return string(out), nil
+		}
+		b := rbin[0]
+		relocatingBinID, relocatingBinNum = b.ID, b.BinNumber
+		placementMode = "relocate"
+		targetCity = b.City
+		area = &areaTarget{
+			Label:   fmt.Sprintf("within %.1f mi of Bin #%d", relocateRadiusMi, b.BinNumber),
+			Lat:     b.Latitude,
+			Lng:     b.Longitude,
+			radiusM: relocateRadiusMi * 1609.34,
+		}
+	}
+
+	// expansionOnly modes skip the per-bin business sweep and let the AREA drive
+	// the search — for relocate that "area" is the circle around the bin itself.
+	expansionOnly := placementMode == "expand" || placementMode == "relocate"
+
 	// Adjust parameters based on mode
 	if useV2 && placementMode == "infill" {
 		minGapMiles = 0.15 // tighter spacing OK near proven locations
 		log.Printf("📍 [Mode] INFILL — searching near existing high performers, gap=%.2f mi", minGapMiles)
+	} else if useV2 && placementMode == "relocate" {
+		minGapMiles = 0.3
+		log.Printf("📍 [Mode] RELOCATE — rehoming Bin #%d within %.1f mi (that bin is excluded from its own gap check)",
+			relocatingBinNum, relocateRadiusMi)
 	} else if useV2 && placementMode == "expand" {
 		minGapMiles = 0.3 // standard gap for new areas
 		log.Printf("📍 [Mode] EXPAND — searching new areas with good demographics")
@@ -493,6 +544,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	// Use allBins for gap checking, searchBins for search origins
 	bins := allBins // gap checking, nearest bin, etc. see the full fleet
+	if relocatingBinID != "" {
+		// The bin we are MOVING must not block its own replacement: it is about to
+		// vacate this spot, so treating it as an occupied position would rule out
+		// every candidate within minGapMiles — the exact ground a reposition needs.
+		kept := make([]existingBin, 0, len(allBins))
+		for _, b := range allBins {
+			if b.ID != relocatingBinID {
+				kept = append(kept, b)
+			}
+		}
+		bins = kept
+		log.Printf("📍 [Relocate] Bin #%d excluded from gap check (%d -> %d blocking bins)",
+			relocatingBinNum, len(allBins), len(bins))
+	}
 
 	// Step 2: Per-bin fill rates from ALL bins (active + retired + missing) — full history
 	type binRate struct {
@@ -610,7 +675,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	client := &http.Client{Timeout: 8 * time.Second}
 
-	if useV2 && placementMode != "expand" {
+	if useV2 && !expansionOnly {
 		// v2: cluster bins into search origins, build job queue, fan out
 		origins := clusterSearchOrigins(searchBins, perBinFillRate)
 		log.Printf("📍 [Search] Clustered %d bins into %d search origins", len(bins), len(origins))
@@ -726,8 +791,8 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// STRATEGY B: Expansion candidates — new areas
 	// ======================================================================
 	var expansionCount, gapCount int
-	if useV2 && placementMode == "expand" {
-		expansionCount = count // all results from expansion
+	if useV2 && expansionOnly {
+		expansionCount = count // all results from expansion (expand + relocate)
 		gapCount = 0
 	} else if useV2 && placementMode == "infill" {
 		expansionCount = 0 // no expansion results
@@ -747,7 +812,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// With a resolved area, always sweep it (except pure infill): the whole
 	// point of targeting is "search HERE" — name-based has-bins checks don't
 	// apply to a geometric target.
-	shouldExpand := placementMode == "expand" || (placementMode != "infill" && (targetCity == "" || !hasBinsInCity(bins, targetCity)))
+	shouldExpand := expansionOnly || (placementMode != "infill" && (targetCity == "" || !hasBinsInCity(bins, targetCity)))
 	if area != nil && placementMode != "infill" {
 		shouldExpand = true
 	}
@@ -1540,6 +1605,26 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		"near_misses":     nearMisses,
 		"safety_gate":     safetyGate, // "active" | "degraded_api_error" | "DISABLED_credential_failure"
 	}
+	// Relocation context: a replacement spot is only worth the truck roll if it
+	// beats what the bin already does, so hand the caller the incumbent's measured
+	// rate to compare against rather than letting "score 4.2" read as an upgrade.
+	if relocatingBinID != "" {
+		rc := map[string]any{
+			"bin_number":       relocatingBinNum,
+			"search_radius_mi": relocateRadiusMi,
+		}
+		if r, ok := perBinFillRate[relocatingBinID]; ok && r > 0 {
+			rc["current_fill_rate_pct_per_day"] = math.Round(r*10) / 10
+			rc["current_days_to_50pct"] = math.Round(500/r) / 10
+			rc["instruction"] = fmt.Sprintf("Bin #%d currently fills at %.1f%%/day (%.1f days to half full). "+
+				"Only present spots you believe beat that — say plainly if none of them clearly do.",
+				relocatingBinNum, r, 50/r)
+		} else {
+			rc["instruction"] = fmt.Sprintf("Bin #%d has too little check history to measure a fill rate. "+
+				"Say so — there is no baseline to beat yet.", relocatingBinNum)
+		}
+		out["relocating"] = rc
+	}
 	// Make a disabled gate impossible to miss — the model relays this to the operator
 	// instead of presenting unscreened picks as if they'd passed the safety screen.
 	if safetyGate != "active" {
@@ -1843,6 +1928,13 @@ type areaTarget struct {
 	Lng   float64     `json:"lng"`
 	BBox  *[4]float64 `json:"bbox,omitempty"` // west, south, east, north
 
+	// radiusM, when > 0, makes this a pure POINT target with a caller-chosen
+	// radius in metres — used by relocate mode ("within 3 mi of Bin #47").
+	// Takes precedence over every other containment rule, and collapses core
+	// and outer to the same circle: if you asked for within N miles, a result
+	// is either within N miles or it isn't. Unexported so it never serialises.
+	radiusM float64
+
 	// boundary is the true legal city polygon (TIGER), attached at resolution
 	// when the target is a city we have geometry for. nil for districts and
 	// unknown cities — contains() then falls back to the bbox. Not serialized.
@@ -1866,7 +1958,7 @@ func areaShortLabel(label string) string {
 func (a *areaTarget) attachBoundary() {
 	// An address must never inherit its city's polygon — that is exactly the bug
 	// this type exists to prevent (ask for one building, get the whole municipality).
-	if a.Type == areaTypeAddress {
+	if a.Type == areaTypeAddress || a.radiusM > 0 {
 		return
 	}
 	if b := lookupBoundary(areaShortLabel(a.Label), a.Type, a.Lat, a.Lng); b != nil {
@@ -1887,6 +1979,9 @@ func (a *areaTarget) contains(lat, lng float64) bool {
 	if a.boundary != nil {
 		return a.boundary.Contains(lat, lng)
 	}
+	if a.radiusM > 0 {
+		return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= a.radiusM
+	}
 	if a.Type == areaTypeAddress {
 		return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= addressOuterMeters
 	}
@@ -1904,6 +1999,9 @@ func (a *areaTarget) contains(lat, lng float64) bool {
 func (a *areaTarget) coreContains(lat, lng float64) bool {
 	if a.boundary != nil {
 		return a.boundary.Contains(lat, lng)
+	}
+	if a.radiusM > 0 {
+		return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= a.radiusM
 	}
 	if a.Type == areaTypeAddress {
 		return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= addressCoreMeters
@@ -2354,7 +2452,7 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 		}
 
 		// Check for mall or Safeway
-		if strings.Contains(titleLower, "mall") || strings.Contains(titleLower, "safeway") {
+		if mallNameRe.MatchString(titleLower) || strings.Contains(titleLower, "safeway") {
 			nearMallOrSafeway = true
 			log.Printf("   🚫 %s (%s, %dm) — MALL/SAFEWAY", item.Title, primaryCat, item.Distance)
 		}
@@ -2834,144 +2932,6 @@ func reverseGeocodeHERE(lat, lng float64) (address, zip, city string) {
 	}
 	a := result.Items[0].Address
 	return a.Label, a.PostalCode, a.City
-}
-
-// callGraphVennService calls the GraphVenn Python microservice to get optimal demand hotspots.
-// Builds a demand surface from bin fill rates (radiated outward in rings) and sends it
-// to the service for optimal placement computation.
-func callGraphVennService(serviceURL string, bins []existingBin, perBinFillRate map[string]float64, zones []noGoZone, count int) []candidate {
-	// Build demand surface: each bin radiates demand in a ring at 0.5, 1.0, 1.5 miles
-	type demandPoint struct {
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
-		Weight    float64 `json:"weight"`
-		Label     string  `json:"label,omitempty"`
-	}
-	type existBin struct {
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
-		BinNumber int     `json:"bin_number"`
-	}
-	type noGoReq struct {
-		CenterLatitude  float64 `json:"center_latitude"`
-		CenterLongitude float64 `json:"center_longitude"`
-		RadiusMeters    int     `json:"radius_meters"`
-	}
-
-	var demandPoints []demandPoint
-	for _, b := range bins {
-		fill := 10.0 // default
-		if b.FillPercentage != nil {
-			fill = float64(*b.FillPercentage)
-		}
-		// Also use per-bin fill rate if available (better signal)
-		if rate, ok := perBinFillRate[b.ID]; ok && rate > 0 {
-			fill = rate * 10 // scale fill rate to weight
-		}
-		weight := math.Max(fill/100.0, 0.1)
-
-		// Generate demand ring: 8 directions at 3 distances
-		for _, distMiles := range []float64{0.5, 1.0, 1.5} {
-			distDeg := distMiles / 69.0
-			for angleDeg := 0; angleDeg < 360; angleDeg += 45 {
-				angleRad := float64(angleDeg) * math.Pi / 180
-				dlat := distDeg * math.Cos(angleRad)
-				dlng := distDeg * math.Sin(angleRad) / math.Cos(b.Latitude*math.Pi/180)
-				distWeight := weight * (1.0 - distMiles/2.0)
-
-				demandPoints = append(demandPoints, demandPoint{
-					Latitude:  math.Round((b.Latitude+dlat)*1e6) / 1e6,
-					Longitude: math.Round((b.Longitude+dlng)*1e6) / 1e6,
-					Weight:    math.Round(distWeight*1000) / 1000,
-					Label:     fmt.Sprintf("Near Bin #%d", b.BinNumber),
-				})
-			}
-		}
-	}
-
-	var existBins []existBin
-	for _, b := range bins {
-		existBins = append(existBins, existBin{
-			Latitude: b.Latitude, Longitude: b.Longitude, BinNumber: b.BinNumber,
-		})
-	}
-
-	var noGoReqs []noGoReq
-	for _, z := range zones {
-		noGoReqs = append(noGoReqs, noGoReq{
-			CenterLatitude: z.CenterLat, CenterLongitude: z.CenterLng, RadiusMeters: z.RadiusMeters,
-		})
-	}
-
-	reqBody := map[string]any{
-		"demand_points":                 demandPoints,
-		"existing_bins":                 existBins,
-		"no_go_zones":                   noGoReqs,
-		"count":                         count * 2, // request 2x for filtering buffer
-		"radius_meters":                 400,
-		"min_distance_from_bins_meters": 500,
-		"strategy":                      "greedy",
-		"precision":                     3,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		log.Printf("⚠️ [GraphVenn] Failed to marshal request: %v", err)
-		return nil
-	}
-
-	log.Printf("📍 [GraphVenn] Calling service at %s with %d demand points, %d bins", serviceURL, len(demandPoints), len(bins))
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Post(serviceURL+"/recommend", "application/json", bytes.NewReader(body))
-	if err != nil {
-		log.Printf("⚠️ [GraphVenn] Service call failed: %v", err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("⚠️ [GraphVenn] Service returned HTTP %d: %s", resp.StatusCode, string(respBody)[:200])
-		return nil
-	}
-
-	var gvResp struct {
-		Success   bool `json:"success"`
-		Locations []struct {
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
-			Score     float64 `json:"score"`
-			Rank      int     `json:"rank"`
-		} `json:"locations"`
-		CoveragePercentage float64 `json:"coverage_percentage"`
-		SolverRuntimeMs    int     `json:"solver_runtime_ms"`
-	}
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(respBody, &gvResp); err != nil {
-		log.Printf("⚠️ [GraphVenn] Failed to parse response: %v", err)
-		return nil
-	}
-
-	if !gvResp.Success || len(gvResp.Locations) == 0 {
-		log.Printf("⚠️ [GraphVenn] No results returned")
-		return nil
-	}
-
-	log.Printf("✅ [GraphVenn] Got %d hotspots in %dms (%.1f%% coverage)",
-		len(gvResp.Locations), gvResp.SolverRuntimeMs, gvResp.CoveragePercentage)
-
-	// Convert to candidates
-	var candidates []candidate
-	for _, loc := range gvResp.Locations {
-		candidates = append(candidates, candidate{
-			Lat:    loc.Latitude,
-			Lng:    loc.Longitude,
-			Source: "graphvenn",
-		})
-	}
-	return candidates
 }
 
 // osrmRouteResult holds both distance and duration from OSRM
