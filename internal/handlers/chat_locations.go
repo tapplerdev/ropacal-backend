@@ -488,6 +488,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			Lng:     b.Longitude,
 			radiusM: relocateRadiusMi * 1609.34,
 		}
+		// No halo on a relocate: the radius IS the request. Spilling 2 km past it
+		// turns "keep this bin in the same plaza" into "anywhere in the next town",
+		// which is the opposite of what a reposition asks for. The caller widens the
+		// search by raising relocate_radius_miles, not by leaking past it.
+		includeNearby = false
 	}
 
 	// expansionOnly modes skip the per-bin business sweep and let the AREA drive
@@ -2030,7 +2035,17 @@ func (a *areaTarget) distanceToCoreMeters(lat, lng float64) float64 {
 		cLat := math.Max(a.BBox[1], math.Min(lat, a.BBox[3]))
 		return haversineMetersChat(lat, lng, cLat, cLng)
 	}
-	return math.Max(0, haversineMetersChat(lat, lng, a.Lat, a.Lng)-5000)
+	// Point targets: measure past the ACTUAL core radius. This used to subtract a
+	// hardcoded 5000 m, which silently swallowed every tighter radius — a 1 mi
+	// relocate target reported distance 0 for anything inside 5 km, so the halo
+	// then waved through picks 2.5 mi from a bin the user asked to stay within 1 mi.
+	core := 5000.0
+	if a.radiusM > 0 {
+		core = a.radiusM
+	} else if a.Type == areaTypeAddress {
+		core = addressCoreMeters
+	}
+	return math.Max(0, haversineMetersChat(lat, lng, a.Lat, a.Lng)-core)
 }
 
 // haloContains reports whether (lat,lng) is inside the core OR within haloKm of
