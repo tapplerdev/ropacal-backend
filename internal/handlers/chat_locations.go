@@ -1820,9 +1820,25 @@ func findCommercialPOIs(defaultLat, defaultLng float64, city string) []struct {
 // areaTarget is a resolved geographic target: a city or district with its
 // center and (when HERE provides one) bounding box. It replaces raw
 // city-name string matching everywhere a target is set.
+// areaTypeAddress marks a target that is a STREET ADDRESS, not a place. "Near
+// 22320 Foothill Blvd" must mean within a couple of miles of that building —
+// not "somewhere in Hayward". Address targets carry no bbox, so containment
+// falls through to the radii below and searchOrigins sweeps from the point.
+const areaTypeAddress = "address"
+
+// Radii for an address target. Deliberately much tighter than the 5 km/8 km
+// place-target fallbacks: those exist to approximate a CITY when HERE gave us
+// no box, whereas here the point IS the intent. ~1.9 mi core / ~3.1 mi outer
+// keeps a usable candidate pool (plazas sit ~0.5-1 mi apart) while staying
+// recognisably "near" the address the user typed.
+const (
+	addressCoreMeters  = 3000.0
+	addressOuterMeters = 5000.0
+)
+
 type areaTarget struct {
 	Label string      `json:"label"`
-	Type  string      `json:"type,omitempty"` // locality / district / administrativeArea
+	Type  string      `json:"type,omitempty"` // locality / district / administrativeArea / address
 	Lat   float64     `json:"lat"`
 	Lng   float64     `json:"lng"`
 	BBox  *[4]float64 `json:"bbox,omitempty"` // west, south, east, north
@@ -1848,6 +1864,11 @@ func areaShortLabel(label string) string {
 // inside Lookup, so a district ("Brentwood" in LA) never resolves to a
 // same-named city, and an unknown city simply stays bbox-based.
 func (a *areaTarget) attachBoundary() {
+	// An address must never inherit its city's polygon — that is exactly the bug
+	// this type exists to prevent (ask for one building, get the whole municipality).
+	if a.Type == areaTypeAddress {
+		return
+	}
 	if b := lookupBoundary(areaShortLabel(a.Label), a.Type, a.Lat, a.Lng); b != nil {
 		a.boundary = b
 		if a.BBox == nil {
@@ -1866,6 +1887,9 @@ func (a *areaTarget) contains(lat, lng float64) bool {
 	if a.boundary != nil {
 		return a.boundary.Contains(lat, lng)
 	}
+	if a.Type == areaTypeAddress {
+		return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= addressOuterMeters
+	}
 	if a.BBox != nil {
 		const margin = 0.02 // ≈2.2 km latitude
 		return lng >= a.BBox[0]-margin && lng <= a.BBox[2]+margin &&
@@ -1880,6 +1904,9 @@ func (a *areaTarget) contains(lat, lng float64) bool {
 func (a *areaTarget) coreContains(lat, lng float64) bool {
 	if a.boundary != nil {
 		return a.boundary.Contains(lat, lng)
+	}
+	if a.Type == areaTypeAddress {
+		return haversineMetersChat(lat, lng, a.Lat, a.Lng) <= addressCoreMeters
 	}
 	if a.BBox != nil {
 		return lng >= a.BBox[0] && lng <= a.BBox[2] && lat >= a.BBox[1] && lat <= a.BBox[3]
@@ -2183,9 +2210,28 @@ func geocodeAreaHERE(q string) ([]areaTarget, error) {
 		return nil, err
 	}
 	var out []areaTarget
+	// Address-level hits are kept ASIDE and only used when nothing resolved as a
+	// place. Previously they were dropped outright, so "22320 Foothill Blvd,
+	// Hayward" errored out, fell back to legacy city handling, and silently became
+	// "anywhere in Hayward" — results landed up to 3.7 mi from the requested spot
+	// while the reply still claimed they were "near" it.
+	var addrFallback []areaTarget
 	seen := map[string]bool{}
 	for _, it := range result.Items {
 		if it.ResultType != "locality" && it.ResultType != "administrativeArea" {
+			switch it.ResultType {
+			case "houseNumber", "street", "intersection", "place", "postalCodePoint":
+				if (it.Position.Lat != 0 || it.Position.Lng != 0) && !seen[it.Title] {
+					seen[it.Title] = true
+					// No BBox on purpose: HERE hands back a near-degenerate box for an
+					// address, and leaving it nil routes containment through the tight
+					// address radii and searchOrigins through the single-point path.
+					addrFallback = append(addrFallback, areaTarget{
+						Label: it.Title, Type: areaTypeAddress,
+						Lat: it.Position.Lat, Lng: it.Position.Lng,
+					})
+				}
+			}
 			continue
 		}
 		// A state (or country) is not a placement target — its bbox would
@@ -2211,6 +2257,13 @@ func geocodeAreaHERE(q string) ([]areaTarget, error) {
 		out = append(out, a)
 	}
 	if len(out) == 0 {
+		if len(addrFallback) > 0 {
+			// Exactly ONE, so the caller takes the unambiguous path: a full street
+			// address isn't a "which Springfield did you mean" situation.
+			log.Printf("📍 [Geocode] %q is an ADDRESS, not a place — targeting a %.1f mi radius around %q instead of its city",
+				q, addressCoreMeters/1609.34, addrFallback[0].Label)
+			return addrFallback[:1], nil
+		}
 		return nil, fmt.Errorf("no city/district match for %q", q)
 	}
 	return out, nil

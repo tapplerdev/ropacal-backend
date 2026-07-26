@@ -272,7 +272,7 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"count":       map[string]any{"type": "integer", "description": "Number of locations to recommend (default 10, max 30)"},
-					"target_city": map[string]any{"type": "string", "description": "Optional: focus on a named city/district. If the name is AMBIGUOUS (e.g. 'Brentwood' is both an LA district and a Contra Costa city) the tool returns disambiguation_needed with options — ASK the user which they meant, then re-call with target_area set to the chosen option (it includes lat/lng/bbox)."},
+					"target_city": map[string]any{"type": "string", "description": "Optional: focus on a named city/district, OR a full street address. If the user names a specific address ('near 22320 Foothill Blvd, Hayward'), pass that WHOLE address here verbatim — do NOT reduce it to just the city. The tool resolves an address to a tight ~2 mi radius around that exact point; passing only the city instead silently widens the search to the entire municipality and returns spots miles from where the user asked. If a place name is AMBIGUOUS (e.g. 'Brentwood' is both an LA district and a Contra Costa city) the tool returns disambiguation_needed with options — ASK the user which they meant, then re-call with target_area set to the chosen option (it includes lat/lng/bbox)."},
 					"target_area": map[string]any{
 						"type":        "object",
 						"description": "Optional: a resolved geographic target (from the dashboard area picker or a disambiguation option). Preferred over target_city — searches tile the bbox and candidates are filtered geometrically, so district vs city naming doesn't matter.",
