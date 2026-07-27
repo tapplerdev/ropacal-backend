@@ -199,12 +199,20 @@ func GetAreaPerformance(db *sqlx.DB) http.HandlerFunc {
 
 		var groupColumn string
 		var selectCity string
+		// groupByClause is deliberately NOT groupColumn+selectCity: when grouping by
+		// city, selectCity is the literal "NULL AS city", and interpolating that into
+		// GROUP BY produced `GROUP BY b.city, NULL AS city` — a Postgres syntax error.
+		// group_by=city 500'd on every request; only group_by=zip (where selectCity is
+		// a real column) ever worked.
+		var groupByClause string
 		if groupBy == "city" {
 			groupColumn = "b.city"
 			selectCity = "NULL AS city"
+			groupByClause = groupColumn // the bare NULL needs no grouping
 		} else {
 			groupColumn = "b.zip"
 			selectCity = "b.city"
+			groupByClause = groupColumn + ", " + selectCity
 		}
 
 		var orderBy string
@@ -265,7 +273,7 @@ func GetAreaPerformance(db *sqlx.DB) http.HandlerFunc {
 				) AS area_score
 			FROM bins b
 			WHERE b.status = 'active'
-			GROUP BY %s, %s
+			GROUP BY %s
 			ORDER BY %s
 			LIMIT $1
 		`, groupColumn, selectCity,
@@ -273,11 +281,14 @@ func GetAreaPerformance(db *sqlx.DB) http.HandlerFunc {
 			groupColumn, groupColumn,
 			groupColumn, groupColumn,
 			groupColumn, groupColumn,
-			groupColumn, selectCity, orderBy)
+			groupByClause, orderBy)
 
 		var results []AreaPerformance
 		err := db.Select(&results, query, limit)
 		if err != nil {
+			// Log the driver error: swallowing it is why a hard SQL syntax error sat
+			// in the city grouping unnoticed, surfacing only as an opaque 500.
+			log.Printf("❌ [Analytics] area performance query failed (group_by=%s, metric=%s): %v", groupBy, metric, err)
 			http.Error(w, "Failed to fetch area performance", http.StatusInternalServerError)
 			return
 		}
