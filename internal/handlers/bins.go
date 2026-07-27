@@ -464,6 +464,19 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 
 		log.Printf("✅ [UPDATE-BIN] Bin updated successfully")
 
+		// An address edit here IS a physical move, so it has to land in `moves`.
+		// It previously only wrote a bin_change_log row — an audit trail, not
+		// movement history — so a bin relocated from the dashboard left no record
+		// analytics could use, and its fill rate silently blended the old pitch
+		// with the new one. Same transaction as the address write: the move
+		// history and the address can never disagree.
+		if addrChanged {
+			from := strings.TrimSpace(existing.CurrentStreet + ", " + existing.City + " " + existing.Zip)
+			to := strings.TrimSpace(strings.TrimSpace(req.CurrentStreet) + ", " +
+				strings.TrimSpace(req.City) + " " + strings.TrimSpace(req.Zip))
+			recordMove(tx, id, from, to, "manual", time.Now().Unix(), nil, nil)
+		}
+
 		// If becoming checked, insert check record
 		if becomingChecked {
 			log.Printf("✓ [UPDATE-BIN] Bin is becoming checked, creating check record")

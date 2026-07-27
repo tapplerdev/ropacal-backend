@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jmoiron/sqlx"
+
 	"ropacal-backend/internal/geo"
 )
 
@@ -564,30 +566,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			relocatingBinNum, len(allBins), len(bins))
 	}
 
-	// Step 2: Per-bin fill rates from ALL bins (active + retired + missing) — full history
-	type binRate struct {
-		BinID   string  `db:"bin_id"`
-		AvgRate float64 `db:"avg_rate"`
-	}
-	var binRates []binRate
-	h.db.Select(&binRates, `
-		WITH ordered_checks AS (
-			SELECT bin_id, fill_percentage, checked_on,
-				LAG(fill_percentage) OVER (PARTITION BY bin_id ORDER BY checked_on) as prev_fill,
-				LAG(checked_on) OVER (PARTITION BY bin_id ORDER BY checked_on) as prev_checked_on
-			FROM checks WHERE fill_percentage IS NOT NULL
-		)
-		SELECT bin_id, AVG((fill_percentage - prev_fill)::float / GREATEST(1, (checked_on - prev_checked_on)::float / 86400)) as avg_rate
-		FROM ordered_checks
-		WHERE prev_fill IS NOT NULL AND fill_percentage > prev_fill
-			AND (checked_on - prev_checked_on) > 3600
-			AND (fill_percentage - prev_fill)::float / GREATEST(1, (checked_on - prev_checked_on)::float / 86400) < 50
-		GROUP BY bin_id HAVING COUNT(*) >= 2
-	`)
-	perBinFillRate := map[string]float64{}
-	for _, r := range binRates {
-		perBinFillRate[r.BinID] = r.AvgRate
-	}
+	// Step 2: Per-bin fill rates, scoped to the pitch each bin occupies RIGHT NOW.
+	// This replaced a whole-life AVG over every check a bin ever had. That query
+	// merged every location a bin has occupied — including spells parked at the
+	// warehouse — into a single "how fast does this bin fill" number, which is
+	// meaningless once a bin has moved. Bin 78's 11.5%/day, for instance, came
+	// ENTIRELY from checks taken while it sat in the yard.
+	perBinFillRate := h.currentPitchFillRates()
 
 	// Also compute per-zip average fill rate (from all bins, including retired)
 	type zipRate struct {
@@ -1676,6 +1661,137 @@ type searchJob struct {
 	Query    string
 	City     string
 	Source   string // "business_search" or "expansion"
+}
+
+// placeAbbrev folds the spelling variants HERE returns for one address so that
+// re-geocodes of a single pitch ("900 North 1st Street" one week, "911 N First St"
+// the next) normalise to the same key.
+var placeAbbrev = map[string]string{
+	"street": "st", "avenue": "ave", "road": "rd", "boulevard": "blvd",
+	"drive": "dr", "lane": "ln", "court": "ct", "place": "pl", "parkway": "pkwy",
+	"expressway": "expy", "highway": "hwy", "circle": "cir", "square": "sq",
+	"north": "n", "south": "s", "east": "e", "west": "w",
+	"first": "1st", "second": "2nd", "third": "3rd", "fourth": "4th", "fifth": "5th",
+}
+
+// normalizePlace turns a check's bin_address_snapshot into a stable "which pitch
+// is this" key: street only, no house number, folded abbreviations. The house
+// number is dropped because it drifts across re-geocodes of the same spot; the
+// cost is that a move along the SAME street reads as one pitch, which is a much
+// smaller error than splitting one pitch into two.
+func normalizePlace(snapshot string) string {
+	head := strings.ToLower(snapshot)
+	if i := strings.Index(head, ","); i >= 0 {
+		head = head[:i]
+	}
+	var b strings.Builder
+	for _, r := range head {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune(' ')
+		}
+	}
+	toks := strings.Fields(b.String())
+	// leading pure-digit token is a house number
+	if len(toks) > 1 {
+		allDigit := true
+		for _, r := range toks[0] {
+			if r < '0' || r > '9' {
+				allDigit = false
+				break
+			}
+		}
+		if allDigit {
+			toks = toks[1:]
+		}
+	}
+	for i, t := range toks {
+		if v, ok := placeAbbrev[t]; ok {
+			toks[i] = v
+		}
+	}
+	return strings.Join(toks, " ")
+}
+
+// currentPitchFillRates returns, per bin, the fill rate measured ONLY at the
+// location that bin occupies now — segmented from each check's own address
+// snapshot rather than bins.last_moved, because the moves table has historically
+// missed relocations (32 recorded rows against 104 address changes visible in
+// check history as of 2026-07) and a stale last_moved silently averages two
+// pitches together. Bins currently sitting at the warehouse are omitted: a bin in
+// the yard has no field rate, and its 100%-full readings would otherwise read as
+// spectacular demand.
+func (h *ChatHandler) currentPitchFillRates() map[string]float64 {
+	type chk struct {
+		BinID string  `db:"bin_id"`
+		Fill  float64 `db:"fill_percentage"`
+		At    int64   `db:"checked_on"`
+		Snap  string  `db:"snap"`
+	}
+	var rows []chk
+	if err := h.db.Select(&rows, `
+		SELECT bin_id, fill_percentage, checked_on, COALESCE(bin_address_snapshot,'') AS snap
+		FROM checks WHERE fill_percentage IS NOT NULL
+		ORDER BY bin_id, checked_on`); err != nil {
+		log.Printf("⚠️ [FillRate] per-pitch query failed: %v", err)
+		return map[string]float64{}
+	}
+
+	warehouse := strings.ToLower(warehouseAddressHint(h.db))
+	out := map[string]float64{}
+	for i := 0; i < len(rows); {
+		j := i
+		for j < len(rows) && rows[j].BinID == rows[i].BinID {
+			j++
+		}
+		bin := rows[i:j] // one bin, time-ordered
+		// walk back to the start of the final pitch
+		start := len(bin) - 1
+		last := normalizePlace(bin[start].Snap)
+		for start > 0 && normalizePlace(bin[start-1].Snap) == last {
+			start--
+		}
+		cur := bin[start:]
+		if warehouse != "" && strings.Contains(last, normalizePlace(warehouse)) {
+			i = j
+			continue // parked in the yard — no field rate
+		}
+		var sum float64
+		var n int
+		for k := 1; k < len(cur); k++ {
+			dt := float64(cur[k].At-cur[k-1].At) / 86400.0
+			if cur[k].Fill <= cur[k-1].Fill || cur[k].At-cur[k-1].At <= 3600 {
+				continue
+			}
+			if r := (cur[k].Fill - cur[k-1].Fill) / math.Max(1, dt); r < 50 {
+				sum += r
+				n++
+			}
+		}
+		if n >= 2 { // same 2-cycle floor the old query used
+			out[bin[0].BinID] = sum / float64(n)
+		}
+		i = j
+	}
+	log.Printf("📍 [FillRate] %d bins have a current-pitch fill rate (warehouse spells excluded)", len(out))
+	return out
+}
+
+// warehouseAddressHint reads the configured warehouse street so yard time can be
+// recognised without hardcoding an address.
+func warehouseAddressHint(db *sqlx.DB) string {
+	var raw []byte
+	if err := db.Get(&raw, `SELECT value FROM config WHERE key = 'warehouse_location'`); err != nil {
+		return ""
+	}
+	var v struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
+	}
+	return v.Address
 }
 
 // strongBinFillRate is the bar a bin must clear to count as a "proven performer",

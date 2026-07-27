@@ -854,6 +854,43 @@ func prepareMoveCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest) moveF
 // request completed and move the bin — running on the CALLER's transaction,
 // atomic with the dropoff task's own completion (closing the historical torn
 // write: a completed dropoff whose move never finalized, error swallowed).
+// splitMoveAddress splits "123 Main St, Hayward 94544" into street/city/zip for the
+// moves table. Package-level so the relocation and STORE paths parse identically.
+func splitMoveAddress(addr string) (*string, *string, *string) {
+	parts := strings.Split(addr, ", ")
+	if len(parts) < 2 {
+		return nil, nil, nil
+	}
+	street := parts[0]
+	cityZipParts := strings.Split(strings.TrimSpace(parts[1]), " ")
+	if len(cityZipParts) < 2 {
+		return &street, nil, nil
+	}
+	city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
+	zip := cityZipParts[len(cityZipParts)-1]
+	return &street, &city, &zip
+}
+
+// recordMove writes one row of physical bin-movement history. Every path that
+// changes a bin's address MUST call this — analytics reconstruct "which checks
+// belong to which location" from it, and a missing row silently merges two
+// locations into one fill rate.
+func recordMove(ext sqlx.Ext, binID, from, to, moveType string, now int64,
+	moveRequestID, shiftID *string) {
+	fs, fc, fz := splitMoveAddress(from)
+	ts, tc, tz := splitMoveAddress(to)
+	if _, err := ext.Exec(`
+		INSERT INTO moves (
+			bin_id, moved_from, moved_to, moved_on,
+			move_type, from_street, from_city, from_zip,
+			to_street, to_city, to_zip,
+			move_request_id, shift_id
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	`, binID, from, to, now, moveType, fs, fc, fz, ts, tc, tz, moveRequestID, shiftID); err != nil {
+		log.Printf("[MOVE] ⚠️  Failed to record move for bin %s (%s -> %s): %v", binID, from, to, err)
+	}
+}
+
 func applyMoveCompletion(ext sqlx.Ext, moveRequest models.BinMoveRequest, fin moveFinalization, now int64) error {
 	if _, err := ext.Exec(`
 		UPDATE bin_move_requests
@@ -878,6 +915,15 @@ func applyMoveCompletion(ext sqlx.Ext, moveRequest models.BinMoveRequest, fin mo
 				fin.storeStatus, now, moveRequest.BinID); err != nil {
 				return fmt.Errorf("failed to update bin status: %w", err)
 			}
+		}
+		// A store/pickup moved the bin to the yard — record it. This used to be
+		// skipped entirely (the moves INSERT downstream is guarded by isRelocation),
+		// so a bin's trip OFF a pitch left no trace: the moves table held 32 rows
+		// against 104 address changes visible in check history, and analytics then
+		// averaged a bin's field performance together with its time in storage.
+		if fin.warehouseOK {
+			recordMove(ext, moveRequest.BinID, moveRequest.OriginalAddress, fin.warehouse.Address,
+				"shift", now, &moveRequest.ID, moveRequest.AssignedShiftID)
 		}
 	} else if fin.isRelocation {
 		if _, err := ext.Exec(`
@@ -1049,20 +1095,7 @@ func moveCompletionSideEffects(db *sqlx.DB, hub *websocket.Hub, centrifugoClient
 
 		// Record the move in the moves table (best-effort — the move is already committed)
 		var fromStreet, fromCity, fromZip, toStreet, toCity, toZip *string
-		parseAddr := func(addr string) (*string, *string, *string) {
-			parts := strings.Split(addr, ", ")
-			if len(parts) < 2 {
-				return nil, nil, nil
-			}
-			street := parts[0]
-			cityZipParts := strings.Split(strings.TrimSpace(parts[1]), " ")
-			if len(cityZipParts) < 2 {
-				return &street, nil, nil
-			}
-			city := strings.Join(cityZipParts[:len(cityZipParts)-1], " ")
-			zip := cityZipParts[len(cityZipParts)-1]
-			return &street, &city, &zip
-		}
+		parseAddr := splitMoveAddress
 		if moveRequest.OriginalAddress != "" {
 			fromStreet, fromCity, fromZip = parseAddr(moveRequest.OriginalAddress)
 		}
