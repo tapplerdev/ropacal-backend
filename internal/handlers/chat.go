@@ -434,20 +434,26 @@ func (h *ChatHandler) handle(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("💬 [Chat] Received: %s", req.Message)
 
-	// Load or create conversation session
+	// Load or create conversation session.
 	if req.ConversationID == "" {
 		req.ConversationID = uuid.New().String()
 	}
+	// Sessions are keyed org-first: ConversationID is CLIENT-SUPPLIED, so keying
+	// on it alone would let a caller from org B who obtains org A's conversation
+	// UUID inherit A's history — prior tool results (A's fleet data) would ride
+	// into the LLM context even though new queries stay B-scoped. Dark mode has
+	// one implicit org and the prefix is a constant — behavior unchanged.
+	sessionKey := h.db.OrgID() + ":" + req.ConversationID
 
 	h.sessions.mu.Lock()
-	session, exists := h.sessions.m[req.ConversationID]
+	session, exists := h.sessions.m[sessionKey]
 	if !exists {
 		session = &chatSession{
 			Messages:  []anthropic.MessageParam{},
 			CreatedAt: time.Now(),
 			LastUsed:  time.Now(),
 		}
-		h.sessions.m[req.ConversationID] = session
+		h.sessions.m[sessionKey] = session
 	}
 	session.LastUsed = time.Now()
 
@@ -568,7 +574,7 @@ func (h *ChatHandler) handle(w http.ResponseWriter, r *http.Request) {
 
 		// Save assistant response to session history
 		h.sessions.mu.Lock()
-		if s, ok := h.sessions.m[req.ConversationID]; ok {
+		if s, ok := h.sessions.m[sessionKey]; ok {
 			s.Messages = append(s.Messages, response.ToParam())
 			// Cap at 20
 			if len(s.Messages) > 20 {

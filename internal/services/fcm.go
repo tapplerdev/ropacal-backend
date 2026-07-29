@@ -35,6 +35,11 @@ type FCMService struct {
 
 // SetDB provides a database handle for automatic dead-token cleanup.
 // Call this after construction in main.go.
+// TENANCY NOTE: FCM keeps the RAW pool deliberately — dead-token cleanup deletes
+// by the globally-unique token value (fcm_tokens.token is global per migration 6c,
+// a device install is not a tenant). Under the non-superuser app role RLS makes
+// these deletes inert (dead tokens accumulate, harmless); a system-role sweep can
+// reclaim them later. Do NOT hand this service an org-bound handle.
 func (s *FCMService) SetDB(db *sqlx.DB) {
 	s.db = db
 }
@@ -389,8 +394,8 @@ func (s *FCMService) SendMulticast(tokens []string, title, body string, data map
 
 	for _, token := range tokens {
 		msg := fcmMessage{
-			Token: token,
-			Data:  data,
+			Token:   token,
+			Data:    data,
 			Android: &fcmAndroidConfig{Priority: "high"},
 			APNS: &fcmAPNSConfig{
 				Headers: map[string]string{

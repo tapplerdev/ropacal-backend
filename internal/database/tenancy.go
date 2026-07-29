@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"ropacal-backend/internal/orgdb"
 
@@ -57,6 +58,15 @@ func AssertRLSEnforced(db *sqlx.DB) error {
 		return fmt.Errorf("rls assertion: reading current role privileges: %w", err)
 	}
 	if role.Super || role.Bypass {
+		// A bypassing role makes every policy inert — the probe below would prove
+		// nothing. With ONE org that's a warning (single tenant, nothing to leak
+		// yet). With MORE than one org it is a guaranteed cross-tenant leak, so we
+		// REFUSE TO SERVE unless ops explicitly breaks glass with
+		// TENANCY_ALLOW_BYPASSRLS=1 (e.g. for a supervised recovery session).
+		var orgCount int
+		if err := db.Get(&orgCount, `SELECT COUNT(*) FROM organizations`); err != nil {
+			return fmt.Errorf("rls assertion: counting organizations: %w", err)
+		}
 		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Println("🚨 [RLS] WARNING: TENANCY IS LIVE BUT THIS CONNECTION ROLE BYPASSES RLS")
 		log.Printf("   current_user is superuser=%v bypassrls=%v — every org-isolation policy", role.Super, role.Bypass)
@@ -64,6 +74,11 @@ func AssertRLSEnforced(db *sqlx.DB) error {
 		log.Println("   Point DATABASE_URL at a non-superuser app role without BYPASSRLS")
 		log.Println("   (see migrations/add_multi_tenancy_rls.sql Part 9).")
 		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		if orgCount > 1 && os.Getenv("TENANCY_ALLOW_BYPASSRLS") != "1" {
+			return fmt.Errorf("rls assertion: %d organizations exist but the connection role "+
+				"bypasses RLS — refusing to serve a multi-tenant database with isolation off "+
+				"(set TENANCY_ALLOW_BYPASSRLS=1 to break glass deliberately)", orgCount)
+		}
 		return nil
 	}
 

@@ -801,7 +801,9 @@ func Migrate(db *sqlx.DB) error {
 			updated_by VARCHAR(255),
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_config_key ON config(key)`,
+		// idx_config_key removed: it exactly duplicated the config_key_key unique
+		// index pre-migration, and the tenancy migration (Part 6a) drops it — recreating
+		// it at boot would undo that. Lookups use config_key_key / the composite key.
 
 		// Notification log table — records every sent notification for audit trail
 		`CREATE TABLE IF NOT EXISTS notification_log (

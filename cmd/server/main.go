@@ -18,6 +18,7 @@ import (
 	"ropacal-backend/internal/handlers"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -119,29 +120,38 @@ func main() {
 
 	// One-time (idempotent) backfill: address snapshots on checks that predate
 	// the snapshot columns. Non-fatal — a failure retries on the next boot.
-	if err := database.BackfillCheckAddressSnapshots(db); err != nil {
-		log.Printf("⚠️  Check address-snapshot backfill failed (will retry next boot): %v", err)
-	}
+	// Seeds and backfill run ONLY pre-migration: under tenancy + the non-superuser
+	// app role, RLS hides every row, the count-gates read 0, and the seeds would
+	// INSERT without organization_id -> NOT NULL violation -> log.Fatal -> boot
+	// loop, triggered precisely when ops flips DATABASE_URL to the correct role.
+	// Post-migration, org/user provisioning has its own flow (Deploy F).
+	if !orgdb.Migrated() {
+		if err := database.BackfillCheckAddressSnapshots(db); err != nil {
+			log.Printf("⚠️  Check address-snapshot backfill failed (will retry next boot): %v", err)
+		}
 
-	// Seed database
-	log.Println("🌱 Seeding database with initial data...")
-	if err := database.SeedUsers(db); err != nil {
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Println("❌ FATAL ERROR: User seeding failed")
-		log.Printf("   Error: %v", err)
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Fatal(err)
-	}
-	log.Println("✅ Users seeded successfully")
+		// Seed database
+		log.Println("🌱 Seeding database with initial data...")
+		if err := database.SeedUsers(db); err != nil {
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Println("❌ FATAL ERROR: User seeding failed")
+			log.Printf("   Error: %v", err)
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Fatal(err)
+		}
+		log.Println("✅ Users seeded successfully")
 
-	if err := database.SeedBins(db); err != nil {
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Println("❌ FATAL ERROR: Bins seeding failed")
-		log.Printf("   Error: %v", err)
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Fatal(err)
+		if err := database.SeedBins(db); err != nil {
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Println("❌ FATAL ERROR: Bins seeding failed")
+			log.Printf("   Error: %v", err)
+			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Fatal(err)
+		}
+		log.Println("✅ Bins seeded successfully")
+	} else {
+		log.Println("🛡️  Tenancy live — boot seeds/backfill skipped (provisioning owns org data)")
 	}
-	log.Println("✅ Bins seeded successfully")
 
 	// Initialize Firebase Cloud Messaging
 	// Supports both file path and base64-encoded credentials (for Railway/cloud deployments)
