@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -379,9 +380,16 @@ func GetCentrifugoToken(centrifugoClient *centrifugo.Client) http.HandlerFunc {
 
 		userID := userClaims.UserID
 
+		// The caller's organization rides in the Centrifugo token's `meta`
+		// claim so the proxy endpoints (server-to-server, no user JWT) can
+		// re-establish tenant scope. Empty while tenancy is dark (the request
+		// handle is a passthrough) → the claim is omitted and the token is
+		// byte-identical to the pre-tenancy shape.
+		orgID := orgdb.From(r).OrgID()
+
 		// Generate token valid for 24 hours
 		expiresAt := time.Now().Add(24 * time.Hour)
-		token, err := centrifugoClient.GenerateConnectionToken(userID, expiresAt)
+		token, err := centrifugoClient.GenerateConnectionToken(userID, orgID, expiresAt)
 		if err != nil {
 			log.Printf("❌ [Centrifugo] Failed to generate token for user %s: %v", userID, err)
 			http.Error(w, "failed to generate token", http.StatusInternalServerError)
