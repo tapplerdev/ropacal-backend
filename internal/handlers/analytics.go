@@ -256,21 +256,21 @@ func GetAreaPerformance(db *sqlx.DB) http.HandlerFunc {
 				 JOIN bins b2 ON zi.bin_id = b2.id
 				 WHERE %s = %s) AS total_incidents,
 				ROUND(
-					(COUNT(DISTINCT CASE
+					((COUNT(DISTINCT CASE
 						WHEN NOT EXISTS (SELECT 1 FROM zone_incidents zi WHERE zi.bin_id = b.id)
 						THEN b.id
-					END)::float / NULLIF(COUNT(DISTINCT b.id)::float, 0)) * 100,
+					END)::float / NULLIF(COUNT(DISTINCT b.id)::float, 0)) * 100)::numeric,
 					2
-				) AS success_rate,
+				)::float AS success_rate,
 				AVG((EXTRACT(EPOCH FROM NOW())::BIGINT - b.created_at) / 86400) AS avg_days_active,
 				ROUND(
-					(COUNT(DISTINCT CASE
+					((COUNT(DISTINCT CASE
 						WHEN NOT EXISTS (SELECT 1 FROM zone_incidents zi WHERE zi.bin_id = b.id)
 						THEN b.id
 					END)::float / NULLIF(COUNT(DISTINCT b.id)::float, 0)) * 100 *
-					GREATEST(1, (SELECT COUNT(*) FROM checks c JOIN bins b3 ON c.bin_id = b3.id WHERE %s = %s)::float / NULLIF(COUNT(DISTINCT b.id)::float * 4, 0)),
+					GREATEST(1, (SELECT COUNT(*) FROM checks c JOIN bins b3 ON c.bin_id = b3.id WHERE %s = %s)::float / NULLIF(COUNT(DISTINCT b.id)::float * 4, 0)))::numeric,
 					2
-				) AS area_score
+				)::float AS area_score
 			FROM bins b
 			WHERE b.status = 'active'
 			GROUP BY %s
