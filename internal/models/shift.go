@@ -30,6 +30,7 @@ type OptimizationMetadata struct {
 // Shift represents a driver's work shift
 type Shift struct {
 	ID                   string                `json:"id" db:"id"`
+	OrganizationID       string                `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
 	DriverID             string                `json:"driver_id" db:"driver_id"`
 	RouteID              *string               `json:"route_id" db:"route_id"`
 	Status               ShiftStatus           `json:"status" db:"status"`
@@ -67,12 +68,13 @@ type Shift struct {
 
 // FCMToken represents a Firebase Cloud Messaging token for a user
 type FCMToken struct {
-	ID         int    `json:"id" db:"id"`
-	UserID     string `json:"user_id" db:"user_id"`
-	Token      string `json:"token" db:"token"`
-	DeviceType string `json:"device_type" db:"device_type"` // "ios" or "android"
-	CreatedAt  int64  `json:"created_at" db:"created_at"`
-	UpdatedAt  int64  `json:"updated_at" db:"updated_at"`
+	ID             int    `json:"id" db:"id"`
+	OrganizationID string `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
+	UserID         string `json:"user_id" db:"user_id"`
+	Token          string `json:"token" db:"token"`
+	DeviceType     string `json:"device_type" db:"device_type"` // "ios" or "android"
+	CreatedAt      int64  `json:"created_at" db:"created_at"`
+	UpdatedAt      int64  `json:"updated_at" db:"updated_at"`
 }
 
 // GetActiveShiftDuration calculates the active duration excluding pauses

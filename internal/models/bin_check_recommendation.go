@@ -4,6 +4,7 @@ package models
 // Simple time-based system: bins not checked in 7+ days are flagged (no priority levels)
 type BinCheckRecommendation struct {
 	ID               string  `json:"id" db:"id"`
+	OrganizationID   string  `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
 	BinID            string  `json:"bin_id" db:"bin_id"`
 	Reason           string  `json:"reason" db:"reason"` // 'time_based' or 'manual_flag'
 	FlaggedAt        int64   `json:"flagged_at" db:"flagged_at"`
