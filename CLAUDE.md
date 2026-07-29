@@ -25,6 +25,7 @@ Go backend for the Ropacal/Binly bin management and logistics platform. Deployed
 
 See `.env.example`. Key vars:
 - `DATABASE_URL` — PostgreSQL connection string (required)
+- `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` / `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME` — pool tuning (defaults 20 / 10 / 30m / 5m; logged at boot). This process owns the only pool against the DB (Railway allows ~100 conns, no PgBouncer)
 - `APP_JWT_SECRET` — JWT signing secret (required)
 - `APP_SHARED_PASSWORD` — shared login password
 - `REDIS_URL` — Redis connection (defaults to `redis://localhost:6379`)
