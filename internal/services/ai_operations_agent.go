@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -18,7 +19,8 @@ import (
 )
 
 type AIOperationsAgent struct {
-	db               *sqlx.DB
+	root             *sqlx.DB  // unscoped pool — org enumeration only
+	db               *orgdb.DB // org-bound handle for the CURRENT per-org pass (see runCycle)
 	client           anthropic.Client
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
@@ -31,7 +33,8 @@ func NewAIOperationsAgent(db *sqlx.DB, fcmService *FCMService, centrifugoClient 
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	return &AIOperationsAgent{
-		db:               db,
+		root:             db,
+		db:               orgdb.Passthrough(db),
 		client:           client,
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
@@ -91,6 +94,23 @@ func (a *AIOperationsAgent) runCycle() {
 	log.Printf("🤖 [AIAgent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("🤖 [AIAgent] Running cycle at %s", now.Format("3:04 PM"))
 
+	// One full analysis pass per active organization: every read, every
+	// dedup (`WHERE entity_id = $1 AND status = 'pending'`), every
+	// ai_recommendations / bin_watchlist write, and the alert fan-out all
+	// resolve through the org-bound handle.
+	orgdb.ForEachActiveOrg(a.root, "AIAgent", func(d *orgdb.DB) error {
+		o := *a // shallow copy: shared clients/ticker, per-org db
+		o.db = d
+		o.runChecksOrg()
+		return nil
+	})
+
+	log.Printf("🤖 [AIAgent] Cycle complete")
+	log.Printf("🤖 [AIAgent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+}
+
+// runChecksOrg runs the nine analysis passes against one organization.
+func (a *AIOperationsAgent) runChecksOrg() {
 	// Check for critical bins
 	a.checkCriticalBins()
 
@@ -117,9 +137,6 @@ func (a *AIOperationsAgent) runCycle() {
 
 	// Watchlist probation: matured watches graduate or escalate
 	a.evaluateWatchlist()
-
-	log.Printf("🤖 [AIAgent] Cycle complete")
-	log.Printf("🤖 [AIAgent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
 
 // checkCriticalBins finds bins estimated to be at 90%+ fill with no active shift covering them

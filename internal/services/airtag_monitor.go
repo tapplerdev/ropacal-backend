@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -21,7 +22,8 @@ import (
 // AirtagMonitor periodically checks AirTag positions against stored bin locations.
 // If a bin has drifted >0.5mi (~805m) and is NOT in transit, it alerts admins via Centrifugo + FCM.
 type AirtagMonitor struct {
-	db               *sqlx.DB
+	root             *sqlx.DB  // unscoped pool — org enumeration only
+	db               *orgdb.DB // org-bound handle for the CURRENT per-org pass (see checkDrift)
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
 	bridgeURL        string
@@ -97,7 +99,8 @@ const defaultDriftThresholdMeters = 1609.0 // 1 mile — conservative threshold 
 func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *AirtagMonitor {
 	bridgeURL := os.Getenv("FINDMY_BRIDGE_URL")
 	return &AirtagMonitor{
-		db:               db,
+		root:             db,
+		db:               orgdb.Passthrough(db),
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
 		bridgeURL:        bridgeURL,
@@ -134,7 +137,20 @@ func (m *AirtagMonitor) Stop() {
 	m.stopChan <- true
 }
 
+// checkDrift runs one drift sweep per active organization. AirTag rows, the
+// bin map they join against (by bin_number — NOT unique across tenants, which
+// is exactly why the join must happen inside one org's scope), settings, and
+// the alert recipients all resolve through the org-bound handle.
 func (m *AirtagMonitor) checkDrift() {
+	orgdb.ForEachActiveOrg(m.root, "AirtagMonitor", func(d *orgdb.DB) error {
+		o := *m // shallow copy: shared clients/ticker, per-org db
+		o.db = d
+		o.checkDriftOrg()
+		return nil
+	})
+}
+
+func (m *AirtagMonitor) checkDriftOrg() {
 	ctx := context.Background()
 
 	// 0. Read notification settings — skip if drift alerts disabled

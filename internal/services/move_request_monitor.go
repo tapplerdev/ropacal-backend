@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -17,7 +18,8 @@ import (
 // MoveRequestMonitor periodically checks for overdue and due-soon move requests
 // and sends individual real-time alerts to admins. Follows the same pattern as AirtagMonitor.
 type MoveRequestMonitor struct {
-	db               *sqlx.DB
+	root             *sqlx.DB  // unscoped pool — org enumeration only
+	db               *orgdb.DB // org-bound handle for the CURRENT per-org pass (see checkMoveRequests)
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
 	ticker           *time.Ticker
@@ -27,7 +29,8 @@ type MoveRequestMonitor struct {
 // NewMoveRequestMonitor creates a new monitor that checks every 15 minutes (configurable via settings).
 func NewMoveRequestMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *MoveRequestMonitor {
 	return &MoveRequestMonitor{
-		db:               db,
+		root:             db,
+		db:               orgdb.Passthrough(db),
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
 		ticker:           time.NewTicker(15 * time.Minute),
@@ -63,7 +66,20 @@ func (m *MoveRequestMonitor) Stop() {
 	m.stopChan <- true
 }
 
+// checkMoveRequests runs one overdue/due-soon sweep per active organization.
+// Settings, the actionable-move working set, the 24h dedup, and the admin
+// recipient list all resolve through the org-bound handle, so each tenant's
+// alerts reach only that tenant's admins.
 func (m *MoveRequestMonitor) checkMoveRequests() {
+	orgdb.ForEachActiveOrg(m.root, "MoveRequestMonitor", func(d *orgdb.DB) error {
+		o := *m // shallow copy: shared clients/ticker, per-org db
+		o.db = d
+		o.checkMoveRequestsOrg()
+		return nil
+	})
+}
+
+func (m *MoveRequestMonitor) checkMoveRequestsOrg() {
 	ctx := context.Background()
 
 	// Load settings
