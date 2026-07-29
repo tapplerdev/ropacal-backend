@@ -302,10 +302,6 @@ func main() {
 	//
 	// Registered alongside them but NOT user-authenticated routes:
 	//
-	//   GET  /ws              legacy WebSocket — validates the app JWT
-	//                         in-handler via ?token= (browsers cannot set
-	//                         headers on WS upgrades); removal is scheduled
-	//                         for a later deploy
 	//   POST /api/centrifugo/{subscribe,publish,publish-location}
 	//                         called by the Centrifugo SERVER, not clients —
 	//                         guarded by the CENTRIFUGO_PROXY_SECRET shared
@@ -337,8 +333,13 @@ func main() {
 	// Authentication routes (no auth required)
 	r.Post("/api/auth/login", handlers.Login(db))
 
-	// WebSocket endpoint (authentication handled in handler via query param)
-	r.Get("/ws", websocket.HandleWebSocket(wsHub, db))
+	// Legacy /ws WebSocket: route CLOSED (2026-07, tenancy Tier 0). Dashboard
+	// and the Flutter app both use Centrifugo exclusively (verified by the
+	// realtime research — zero clients), and every hub DB write is org-blind
+	// under RLS. The websocket package and wsHub wiring stay for now (its
+	// Broadcast* calls are no-ops to zero clients, exactly as before); full
+	// deletion is a later cleanup. One-line revert if anything surfaces:
+	// r.Get("/ws", websocket.HandleWebSocket(wsHub, db))
 
 	// Centrifugo proxy endpoints — called by the CENTRIFUGO SERVER (never by
 	// clients), so they carry no user JWT. Guarded by a shared static secret

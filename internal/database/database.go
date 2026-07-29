@@ -3,10 +3,79 @@ package database
 import (
 	"fmt"
 	"log"
+	"os"
+	"strconv"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 )
+
+// Connection-pool defaults. Overridable via env (see configurePool).
+//
+// database/sql's defaults are unlimited open connections — fine while every
+// statement was a bare pool call, but the orgdb tenancy wrapper runs each
+// statement inside its own BEGIN/set_config/COMMIT, which holds connections
+// slightly longer and makes an explicit ceiling important: Railway Postgres
+// ships max_connections ≈ 100 with no PgBouncer in front, and this process
+// owns the only pool against it (verified: database.Connect is the sole
+// sqlx.Connect/sql.Open site; workers, handlers and proxies all share it).
+// 20 open conns is generous for today's traffic while leaving ample headroom
+// for redeploy overlap and support psql sessions.
+const (
+	defaultMaxOpenConns    = 20
+	defaultMaxIdleConns    = 10
+	defaultConnMaxLifetime = 30 * time.Minute
+	defaultConnMaxIdleTime = 5 * time.Minute
+)
+
+// envInt reads an integer env var, falling back to def on absence or garbage
+// (garbage warns — a typo'd limit must not silently become unlimited).
+func envInt(key string, def int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("⚠️  %s=%q is not an integer — using default %d", key, raw, def)
+		return def
+	}
+	return n
+}
+
+// envDuration reads a Go duration env var (e.g. "30m", "1h"), falling back
+// to def on absence or garbage.
+func envDuration(key string, def time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("⚠️  %s=%q is not a duration (try \"30m\") — using default %s", key, raw, def)
+		return def
+	}
+	return d
+}
+
+// configurePool applies the connection-pool limits, env-tunable via
+// DB_MAX_OPEN_CONNS, DB_MAX_IDLE_CONNS, DB_CONN_MAX_LIFETIME and
+// DB_CONN_MAX_IDLE_TIME.
+func configurePool(db *sqlx.DB) {
+	maxOpen := envInt("DB_MAX_OPEN_CONNS", defaultMaxOpenConns)
+	maxIdle := envInt("DB_MAX_IDLE_CONNS", defaultMaxIdleConns)
+	maxLifetime := envDuration("DB_CONN_MAX_LIFETIME", defaultConnMaxLifetime)
+	maxIdleTime := envDuration("DB_CONN_MAX_IDLE_TIME", defaultConnMaxIdleTime)
+
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(maxLifetime)
+	db.SetConnMaxIdleTime(maxIdleTime)
+
+	log.Printf("🏊 DB pool: max_open=%d max_idle=%d conn_max_lifetime=%s conn_max_idle_time=%s",
+		maxOpen, maxIdle, maxLifetime, maxIdleTime)
+}
 
 func Connect(dbURL string) (*sqlx.DB, error) {
 	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -37,6 +106,8 @@ func Connect(dbURL string) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 	log.Println("✅ Step 2 Complete: Ping() succeeded")
+
+	configurePool(db)
 
 	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Println("✅ DATABASE CONNECTION SUCCESSFUL")

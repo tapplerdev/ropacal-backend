@@ -12,6 +12,7 @@ import (
 
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/itinerary"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -29,6 +30,9 @@ type LocationPublishProxyRequest struct {
 	User      string                 `json:"user"`    // Driver ID
 	Channel   string                 `json:"channel"` // driver:location:{driverId}
 	Data      map[string]interface{} `json:"data"`    // GPS data
+	// Meta: connection meta forwarded by Centrifugo
+	// (proxy_include_connection_meta) — see CentrifugoSubscribeRequest.Meta.
+	Meta json.RawMessage `json:"meta,omitempty"`
 }
 
 // LocationData represents the GPS data structure
@@ -42,14 +46,14 @@ type LocationData struct {
 	Timestamp int64   `json:"timestamp"`
 }
 
-// TENANCY NOTE: this file deliberately keeps the raw *sqlx.DB pool (no
-// orgdb shadow). Its endpoints carry no user JWT (server-to-server /
-// INTERNAL_API_KEY paths), so there is no organization to bind — under RLS
-// with a non-superuser role their queries fail closed (zero rows / NOT NULL
-// on insert) rather than crossing tenants. Scoping these paths needs a
-// caller-identity -> org mapping first (see the tenancy workers audit,
-// sections 4E/4F) and is tracked as follow-up work; do NOT "fix" them by
-// adding an unscoped bypass inside orgdb.
+// TENANCY: org context comes from the Centrifugo connection meta, exactly as
+// in centrifugo.go (see the TENANCY block there). The org-bound handle is
+// threaded through EVERY DB touch in this file — the shift-ownership check,
+// the proximity auto-end read/write path (shifts, route_tasks, shift_history,
+// bin_move_requests), and the FCM recipient queries (fcm_tokens) — so under
+// RLS the reads scope to the driver's tenant and the writes inherit
+// organization_id from the app.org_id GUC (migration Part 4's DEFAULT).
+// While tenancy is dark the handle is a passthrough: raw pool, byte-identical.
 
 // CentrifugoLocationPublishProxy handles location publish requests from drivers
 // This is called by Centrifugo BEFORE broadcasting the message
@@ -71,6 +75,20 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 
 		// log.Printf("📍 [LocationProxy] Received location from user=%s channel=%s",
 		// req.User, req.Channel)
+
+		// 0. Tenant scope for every DB touch below (shift-ownership check +
+		// the proximity goroutine) — from the connection meta. Denied before
+		// any side effect when tenancy is live and the connection has no org.
+		odb, ok := proxyOrgDB(db, req.Meta)
+		if !ok {
+			log.Printf("🚫 [LocationProxy] Publish denied — no org in connection meta (pre-flip connection?): user=%s channel=%s",
+				req.User, req.Channel)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+				Error: centrifugoOrgDenied,
+			})
+			return
+		}
 
 		// 1. Validate channel format: driver:location:{driverId}
 		parts := strings.Split(req.Channel, ":")
@@ -127,7 +145,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		// shift_history, so a forged (user, shift_id) pair must never reach it.
 		if locationData.ShiftID != nil {
 			var shiftDriverID sql.NullString
-			err := db.Get(&shiftDriverID, `SELECT driver_id FROM shifts WHERE id = $1`, *locationData.ShiftID)
+			err := odb.Get(&shiftDriverID, `SELECT driver_id FROM shifts WHERE id = $1`, *locationData.ShiftID)
 			if err == sql.ErrNoRows {
 				log.Printf("🚫 [LocationProxy] Publish rejected — shift %s not found (driver=%s)",
 					*locationData.ShiftID, driverID)
@@ -180,9 +198,13 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 			}
 		}
 
-		// 4.5 Check warehouse proximity for auto-end (non-blocking)
+		// 4.5 Check warehouse proximity for auto-end (non-blocking).
+		// odb is safe to hand to the goroutine: each statement opens its own
+		// transaction (nothing is shared but the pool), and this path uses
+		// only statement-scoped calls (Get/Select/Exec/Beginx — no Queryx
+		// parking).
 		if locationData.ShiftID != nil && centrifugoClient != nil {
-			go checkWarehouseProximity(db, centrifugoClient, fcmService, driverID, *locationData.ShiftID, locationData.Latitude, locationData.Longitude)
+			go checkWarehouseProximity(odb, centrifugoClient, fcmService, driverID, *locationData.ShiftID, locationData.Latitude, locationData.Longitude)
 		}
 
 		// 5. Broadcast the RAW fix — no synchronous OSRM snap.
@@ -279,7 +301,9 @@ const autoEndTimeoutMinutes = 5
 
 // checkWarehouseProximity checks if a driver is near the warehouse with all tasks done.
 // If so, prompts the driver to end the shift. If ignored for 5 minutes, auto-ends.
-func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService, driverID string, shiftID string, driverLat, driverLon float64) {
+// db is the org-bound handle resolved from the connection meta (passthrough
+// while tenancy is dark), so every read/write here is tenant-scoped under RLS.
+func checkWarehouseProximity(db *orgdb.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService, driverID string, shiftID string, driverLat, driverLon float64) {
 	// Runs in a fire-and-forget goroutine — recover from any panic (e.g. a nil
 	// deref) so it can't take down the whole server.
 	defer func() {
@@ -400,7 +424,8 @@ func checkWarehouseProximity(db *sqlx.DB, centrifugoClient *centrifugo.Client, f
 }
 
 // proximityAutoEndShift auto-ends a shift after the driver ignored the proximity prompt.
-func proximityAutoEndShift(db *sqlx.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService, shiftID string, driverID string) {
+// db: org-bound handle (see checkWarehouseProximity).
+func proximityAutoEndShift(db *orgdb.DB, centrifugoClient *centrifugo.Client, fcmService *services.FCMService, shiftID string, driverID string) {
 	now := time.Now().Unix()
 
 	// Get full shift for archiving

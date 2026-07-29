@@ -25,12 +25,14 @@ Go backend for the Ropacal/Binly bin management and logistics platform. Deployed
 
 See `.env.example`. Key vars:
 - `DATABASE_URL` — PostgreSQL connection string (required)
+- `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` / `DB_CONN_MAX_LIFETIME` / `DB_CONN_MAX_IDLE_TIME` — pool tuning (defaults 20 / 10 / 30m / 5m; logged at boot). This process owns the only pool against the DB (Railway allows ~100 conns, no PgBouncer)
 - `APP_JWT_SECRET` — JWT signing secret (required)
 - `APP_SHARED_PASSWORD` — shared login password
 - `REDIS_URL` — Redis connection (defaults to `redis://localhost:6379`)
 - `FIREBASE_CREDENTIALS_BASE64` or `FIREBASE_CREDENTIALS_FILE` — FCM push notifications
 - `CENTRIFUGO_API_URL`, `CENTRIFUGO_API_KEY` — Centrifugo real-time messaging
-- `CENTRIFUGO_PROXY_SECRET` — shared secret Centrifugo must send (header `X-Centrifugo-Proxy-Secret`) on its `/api/centrifugo/*` proxy calls; unset = proxies UNPROTECTED (transitional, loud boot warning)
+- `CENTRIFUGO_PROXY_SECRET` — shared secret Centrifugo must send (header `X-Centrifugo-Proxy-Secret`) on its `/api/centrifugo/*` proxy calls. **REQUIRED once tenancy is live.** Unset + tenancy dark = proxies unprotected (historical status quo, loud boot warning). Unset + tenancy LIVE = every proxy request is DENIED, because the tenant comes from attacker-controllable request-body `meta`, so fail-open would mean anyone could name a victim org and forge GPS into it
+- **CENTRIFUGO SERVICE CONFIG (ops, set BOTH together on the external Centrifugo service):** (1) the static `X-Centrifugo-Proxy-Secret` header on the subscribe/publish/publish-location proxy config, matching `CENTRIFUGO_PROXY_SECRET`; (2) **`proxy_include_connection_meta: true`** so proxy requests carry the connection's `meta` (the `{"org_id": ...}` claim minted into connection tokens). Without (2), once the tenancy migration is live EVERY proxy request is denied with "organization context required" — realtime subscriptions, publishes, and driver GPS all stop. (Key names are Centrifugo v4-style; on v5+ granular proxies the per-proxy equivalents are `include_connection_meta` and `static_http_headers`.)
 - `MAPBOX_ACCESS_TOKEN` — only the comparison optimizer (the active OR-Tools optimizer runs in-process, no token needed)
 - `HERE_API_KEY` — geocoding
 - `INTERNAL_API_KEY` — secures internal endpoints (FindMy bridge)
@@ -103,7 +105,7 @@ internal/
     notification_helpers.go — Notification building helpers
     geocoding*.go           — HERE Maps geocoding service
     route_optimizer.go      — Route optimization orchestration
-  websocket/                — Native WebSocket hub (legacy, alongside Centrifugo)
+  websocket/                — Native WebSocket hub (legacy; /ws route CLOSED 2026-07 — zero clients, broadcasts are no-ops; package pending deletion)
 pkg/utils/response.go      — HTTP response helpers
 migrations/                 — 20 SQL migration files (applied via database.go)
 ```
@@ -136,8 +138,8 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 - **Public endpoints (the complete list):** `GET /health`, `POST /api/auth/login`, `/api/internal/*` (`INTERNAL_API_KEY` header — FindMy bridge). Everything else requires an identity.
 - **Everything else under /api:** JWT Bearer token required (`middleware.Auth`) — including all reads (bins, routes, zones, analytics, potential locations, `GET /api/areas/boundary`) and the geocoding/directions proxies (no tenant data, but paid API quota)
 - **Admin endpoints:** JWT + `admin` role (`middleware.RequireRole("admin")`) — the `/api/manager/*` surface plus `PATCH /api/config/warehouse` and the route-template writes (`POST/PATCH/DELETE /api/routes*`)
-- **Centrifugo proxies** (`POST /api/centrifugo/*`): called by the Centrifugo SERVER, not clients — guarded by the `CENTRIFUGO_PROXY_SECRET` shared header (`X-Centrifugo-Proxy-Secret`); fail-open with a loud boot warning until ops set it. Payload `user` identity is only trustworthy behind that guard.
-- **`GET /ws`:** legacy WebSocket, validates the app JWT in-handler via `?token=`; scheduled for removal in a later deploy
+- **Centrifugo proxies** (`POST /api/centrifugo/*`): called by the Centrifugo SERVER, not clients — guarded by the `CENTRIFUGO_PROXY_SECRET` shared header (`X-Centrifugo-Proxy-Secret`) — fail-open (warning only) while tenancy is dark, MANDATORY once tenancy is live (unset then = all proxy requests denied). Payload `user` identity is only trustworthy behind that guard. Tenant scope comes from the connection `meta` (`{"org_id": ...}`, minted into the connection token) which Centrifugo forwards only when its service config sets `proxy_include_connection_meta` — see the CENTRIFUGO SERVICE CONFIG note under Environment Variables. Tenancy live + no org in meta = clean Centrifugo-shaped denial.
+- **`GET /ws`:** REMOVED (route closed 2026-07; both clients are Centrifugo-only). The `websocket` package + hub wiring remain as dead code pending full deletion; revert = re-register the one route line in main.go
 - JWT uses HMAC signing with `APP_JWT_SECRET`, includes user_id/email/role claims
 
 ## Background Workers (started in main.go)

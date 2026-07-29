@@ -210,8 +210,17 @@ func (c *Client) PublishCompanyEvent(ctx context.Context, eventType string, data
 	return nil
 }
 
-// GenerateConnectionToken generates a JWT token for Centrifugo connection
-func (c *Client) GenerateConnectionToken(userID string, expiresAt time.Time) (string, error) {
+// GenerateConnectionToken generates a JWT token for Centrifugo connection.
+//
+// orgID (the caller's organizations.id) rides in the token's `meta` claim as
+// {"org_id": "..."}. Centrifugo attaches `meta` to the connection SERVER-SIDE
+// (it is never exposed to the client) and forwards it to the backend proxy
+// endpoints when the Centrifugo service is configured with
+// proxy_include_connection_meta — that is how the subscribe/publish proxies
+// (which carry no user JWT) learn which tenant they are authorizing for.
+// Empty orgID (single-tenant dark mode) omits the claim entirely, keeping the
+// token byte-identical to the pre-tenancy shape.
+func (c *Client) GenerateConnectionToken(userID string, orgID string, expiresAt time.Time) (string, error) {
 	claims := jwt.MapClaims{
 		"sub": userID,                // User ID
 		"exp": expiresAt.Unix(),      // Expiration time
@@ -219,6 +228,11 @@ func (c *Client) GenerateConnectionToken(userID string, expiresAt time.Time) (st
 		"info": map[string]interface{}{ // Optional user info
 			"user_id": userID,
 		},
+	}
+	if orgID != "" {
+		claims["meta"] = map[string]interface{}{
+			"org_id": orgID,
+		}
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
