@@ -32,14 +32,14 @@ type locationEntry struct {
 	BatteryStatus int     `json:"battery_status"`
 }
 
-// TENANCY NOTE: this file deliberately keeps the raw *sqlx.DB pool (no
-// orgdb shadow). Its endpoints carry no user JWT (server-to-server /
-// INTERNAL_API_KEY paths), so there is no organization to bind — under RLS
-// with a non-superuser role their queries fail closed (zero rows / NOT NULL
-// on insert) rather than crossing tenants. Scoping these paths needs a
-// caller-identity -> org mapping first (see the tenancy workers audit,
-// sections 4E/4F) and is tracked as follow-up work; do NOT "fix" them by
-// adding an unscoped bypass inside orgdb.
+// TENANCY: no user JWT here (INTERNAL_API_KEY only) — each row's owning org
+// is RESOLVED by probing the active orgs' scopes (existing airtag row by id,
+// airtag_keys by tag name, bins by bin_number) with an in-process 1h cache;
+// see airtag_org.go for the contract. Dark mode short-circuits to the single
+// passthrough handle: no probes, byte-identical behavior. Unresolvable rows
+// (owned by no org, or ambiguously by several) are skipped loudly, mirroring
+// this endpoint's established per-row error handling; a batch where NOTHING
+// resolves returns 404.
 
 // UpsertAirtagLocations receives AirTag locations from the FindMy bridge and stores them in the DB.
 func UpsertAirtagLocations(db *sqlx.DB) http.HandlerFunc {
@@ -59,6 +59,16 @@ func UpsertAirtagLocations(db *sqlx.DB) http.HandlerFunc {
 
 		now := time.Now().Unix()
 		upserted := 0
+		resolved := 0
+
+		// Orgs that received rows this sync, for the per-org last-sync stamp.
+		// Dark mode pre-seeds the single passthrough so the stamp is written
+		// unconditionally, exactly as today (SyncedAt set + zero rows still
+		// stamps).
+		touched := map[string]*orgdb.DB{}
+		if !orgdb.Migrated() {
+			touched[""] = orgdb.Passthrough(db)
+		}
 
 		// Upsert matched bin locations
 		for _, loc := range payload.Locations {
@@ -66,7 +76,17 @@ func UpsertAirtagLocations(db *sqlx.DB) http.HandlerFunc {
 			if id == "" && loc.BinNumber != nil {
 				id = fmt.Sprintf("%d", *loc.BinNumber)
 			}
-			_, err := db.Exec(`
+			odb, found, err := resolveAirtagOrg(db, "airtag_loc:"+id, airtagLocationProbe(id, loc.Name, loc.BinNumber))
+			if err != nil {
+				log.Printf("❌ [AirtagLocations] Org resolution failed for %s: %v", id, err)
+				continue
+			}
+			if !found {
+				log.Printf("🚫 [AirtagLocations] No single organization owns %s (name=%q) — row skipped", id, loc.Name)
+				continue
+			}
+			resolved++
+			_, err = odb.Exec(`
 				INSERT INTO airtag_locations (id, bin_number, name, latitude, longitude, address, city, last_seen, battery_status, is_matched, updated_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, TRUE, $10)
 				ON CONFLICT (id) DO UPDATE SET
@@ -87,12 +107,23 @@ func UpsertAirtagLocations(db *sqlx.DB) http.HandlerFunc {
 				continue
 			}
 			upserted++
+			touched[odb.OrgID()] = odb
 		}
 
 		// Upsert unmatched tag locations
 		for _, loc := range payload.Unmatched {
 			id := "unmatched:" + sanitizeTagName(loc.Name)
-			_, err := db.Exec(`
+			odb, found, err := resolveAirtagOrg(db, "airtag_loc:"+id, airtagLocationProbe(id, loc.Name, nil))
+			if err != nil {
+				log.Printf("❌ [AirtagLocations] Org resolution failed for unmatched %s: %v", id, err)
+				continue
+			}
+			if !found {
+				log.Printf("🚫 [AirtagLocations] No single organization owns unmatched %s (name=%q) — row skipped", id, loc.Name)
+				continue
+			}
+			resolved++
+			_, err = odb.Exec(`
 				INSERT INTO airtag_locations (id, bin_number, name, latitude, longitude, address, city, last_seen, battery_status, is_matched, updated_at)
 				VALUES ($1, NULL, $2, $3, $4, $5, $6, $7::timestamptz, $8, FALSE, $9)
 				ON CONFLICT (id) DO UPDATE SET
@@ -112,24 +143,33 @@ func UpsertAirtagLocations(db *sqlx.DB) http.HandlerFunc {
 				continue
 			}
 			upserted++
+			touched[odb.OrgID()] = odb
 		}
 
-		// Store last sync timestamp in config table. The conflict target is
-		// (key) pre-migration and (organization_id, key) once tenancy is live
-		// (config's UNIQUE constraint becomes composite). NOTE: this endpoint
-		// runs on the root pool with no org, so once tenancy is live the
-		// INSERT arm fails organization_id NOT NULL — loudly logged below —
-		// until the FindMy bridge carries a tenant identity (see the TENANCY
-		// note at the top of this file).
+		// Absent everywhere: tenancy is live, the batch had entries, and not
+		// one belongs to any active org. Tell the bridge so the failure is a
+		// visible 404, not a quietly-empty 200.
+		if orgdb.Migrated() && len(payload.Locations)+len(payload.Unmatched) > 0 && resolved == 0 {
+			http.Error(w, "No organization owns any of the submitted airtags", http.StatusNotFound)
+			return
+		}
+
+		// Store last sync timestamp in config, per touched tenant (the single
+		// passthrough while dark — one write, exactly as before). The conflict
+		// target is (key) pre-migration and (organization_id, key) once
+		// tenancy is live; organization_id itself is filled by the migration's
+		// GUC DEFAULT through the org-bound handle.
 		if payload.SyncedAt != "" {
 			syncValue := fmt.Sprintf(`{"last_sync_at": "%s"}`, payload.SyncedAt)
-			_, err := db.Exec(fmt.Sprintf(`
-				INSERT INTO config (key, value, updated_by)
-				VALUES ('airtag_last_sync', $1::jsonb, 'bridge')
-				ON CONFLICT %s DO UPDATE SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP
-			`, orgdb.ConfigConflictTarget()), syncValue)
-			if err != nil {
-				log.Printf("❌ [AirtagLocations] Failed to update last_sync config: %v", err)
+			for _, h := range touched {
+				_, err := h.Exec(fmt.Sprintf(`
+					INSERT INTO config (key, value, updated_by)
+					VALUES ('airtag_last_sync', $1::jsonb, 'bridge')
+					ON CONFLICT %s DO UPDATE SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP
+				`, orgdb.ConfigConflictTarget()), syncValue)
+				if err != nil {
+					log.Printf("❌ [AirtagLocations] Failed to update last_sync config: %v", err)
+				}
 			}
 		}
 
