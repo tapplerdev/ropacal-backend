@@ -239,7 +239,7 @@ func (m *AirtagMonitor) checkDrift() {
 
 // GetAirtagLocationsFromDB reads matched AirTag locations from the database.
 // Shared by AirtagMonitor, DigestScheduler, and the GetAirtagLocations handler.
-func GetAirtagLocationsFromDB(db *sqlx.DB) ([]AirtagEntry, error) {
+func GetAirtagLocationsFromDB(db Querier) ([]AirtagEntry, error) {
 	var rows []struct {
 		ID            string  `db:"id"`
 		BinNumber     *int    `db:"bin_number"`
@@ -286,7 +286,7 @@ func GetAirtagLocationsFromDB(db *sqlx.DB) ([]AirtagEntry, error) {
 }
 
 // GetUnmatchedAirtagLocationsFromDB reads unmatched AirTag locations from the database.
-func GetUnmatchedAirtagLocationsFromDB(db *sqlx.DB) ([]AirtagEntry, error) {
+func GetUnmatchedAirtagLocationsFromDB(db Querier) ([]AirtagEntry, error) {
 	var rows []struct {
 		ID            string  `db:"id"`
 		Name          string  `db:"name"`

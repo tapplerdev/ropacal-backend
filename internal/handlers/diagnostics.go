@@ -19,7 +19,7 @@ type DiagnosticLog struct {
 
 // ReceiveDiagnosticLog handles diagnostic logs from the mobile app
 // POST /api/logs/diagnostic
-func ReceiveDiagnosticLog(db *sqlx.DB) http.HandlerFunc {
+func ReceiveDiagnosticLog(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse request body
 		var logEntry DiagnosticLog

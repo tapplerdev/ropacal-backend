@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
@@ -15,8 +16,9 @@ import (
 
 // GET /api/manager/bins/daily-priorities
 // Returns bins sorted by predicted fill level, grouped by urgency and city.
-func GetDailyPriorities(db *sqlx.DB) http.HandlerFunc {
+func GetDailyPriorities(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/manager/bins/daily-priorities")
 
 		_, ok := middleware.GetUserFromContext(r)

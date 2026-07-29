@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
@@ -77,12 +79,28 @@ When analyzing bin performance:
 When the user asks a follow-up about data you already discussed:
 - Reference your prior response directly — do NOT ask the user to repeat information.`
 
+// ChatHandler serves POST /api/manager/chat.
+//
+// TENANCY: the prototype handler is built once at boot, but Handle makes a
+// shallow per-request copy whose db field is the caller's org-bound handle —
+// so every h.db query in chat.go / chat_tools.go / chat_locations.go runs
+// under the requester's app.org_id without threading a parameter through the
+// tool call chain. Shared mutable state (the session map and its mutex) lives
+// behind the sessions POINTER so copies share it; keep it that way, and keep
+// any new mutable field behind a pointer too.
 type ChatHandler struct {
-	db       *sqlx.DB
+	root     *sqlx.DB // unscoped pool; seeds the boot-time passthrough only
+	db       *orgdb.DB
 	client   anthropic.Client
 	tools    []anthropic.ToolUnionParam
-	sessions map[string]*chatSession
-	mu       sync.RWMutex
+	sessions *chatSessions
+}
+
+// chatSessions is the process-wide conversation cache, shared (by pointer)
+// across the per-request ChatHandler copies.
+type chatSessions struct {
+	mu sync.RWMutex
+	m  map[string]*chatSession
 }
 
 type chatSession struct {
@@ -100,9 +118,10 @@ func NewChatHandler(db *sqlx.DB) *ChatHandler {
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	h := &ChatHandler{
-		db:       db,
+		root:     db,
+		db:       orgdb.Passthrough(db),
 		client:   client,
-		sessions: make(map[string]*chatSession),
+		sessions: &chatSessions{m: make(map[string]*chatSession)},
 	}
 	h.tools = h.buildToolDefinitions()
 
@@ -118,12 +137,12 @@ func NewChatHandler(db *sqlx.DB) *ChatHandler {
 }
 
 func (h *ChatHandler) cleanStaleSessions() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.sessions.mu.Lock()
+	defer h.sessions.mu.Unlock()
 	cutoff := time.Now().Add(-30 * time.Minute)
-	for id, s := range h.sessions {
+	for id, s := range h.sessions.m {
 		if s.LastUsed.Before(cutoff) {
-			delete(h.sessions, id)
+			delete(h.sessions.m, id)
 		}
 	}
 }
@@ -386,7 +405,16 @@ type chatResponse struct {
 	Recommendations json.RawMessage `json:"recommendations,omitempty"`
 }
 
+// Handle binds the request's organization and delegates to handle. The copy
+// is shallow: client/tools are immutable after boot and sessions is a shared
+// pointer, so the only per-request state is the org-bound db handle.
 func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	hr := *h
+	hr.db = orgdb.From(r)
+	hr.handle(w, r)
+}
+
+func (h *ChatHandler) handle(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -411,15 +439,15 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		req.ConversationID = uuid.New().String()
 	}
 
-	h.mu.Lock()
-	session, exists := h.sessions[req.ConversationID]
+	h.sessions.mu.Lock()
+	session, exists := h.sessions.m[req.ConversationID]
 	if !exists {
 		session = &chatSession{
 			Messages:  []anthropic.MessageParam{},
 			CreatedAt: time.Now(),
 			LastUsed:  time.Now(),
 		}
-		h.sessions[req.ConversationID] = session
+		h.sessions.m[req.ConversationID] = session
 	}
 	session.LastUsed = time.Now()
 
@@ -454,7 +482,7 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Copy messages for this request
 	messages := make([]anthropic.MessageParam, len(session.Messages))
 	copy(messages, session.Messages)
-	h.mu.Unlock()
+	h.sessions.mu.Unlock()
 
 	// Build dynamic system prompt with live fleet stats
 	dynamicPrompt := h.buildDynamicSystemPrompt()
@@ -539,15 +567,15 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Save assistant response to session history
-		h.mu.Lock()
-		if s, ok := h.sessions[req.ConversationID]; ok {
+		h.sessions.mu.Lock()
+		if s, ok := h.sessions.m[req.ConversationID]; ok {
 			s.Messages = append(s.Messages, response.ToParam())
 			// Cap at 20
 			if len(s.Messages) > 20 {
 				s.Messages = s.Messages[len(s.Messages)-20:]
 			}
 		}
-		h.mu.Unlock()
+		h.sessions.mu.Unlock()
 
 		log.Printf("✅ [Chat] Response generated (%d tool calls, session %s)", len(toolCallsMade), req.ConversationID[:8])
 

@@ -8,6 +8,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -16,8 +17,9 @@ import (
 
 // FlagStaleBins creates recommendations for bins that haven't been checked in 7+ days
 // This is typically run as a daily cron job or can be triggered manually by managers
-func FlagStaleBins(db *sqlx.DB) http.HandlerFunc {
+func FlagStaleBins(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		now := time.Now().Unix()
 		sevenDaysAgo := now - (7 * 24 * 60 * 60)
 
@@ -129,8 +131,9 @@ func FlagStaleBins(db *sqlx.DB) http.HandlerFunc {
 
 // GetBinCheckRecommendations retrieves pending check recommendations
 // Optional query params: status (pending/resolved/dismissed), bin_id
-func GetBinCheckRecommendations(db *sqlx.DB) http.HandlerFunc {
+func GetBinCheckRecommendations(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		status := r.URL.Query().Get("status")
 		if status == "" {
 			status = "pending" // Default to pending recommendations
@@ -221,8 +224,9 @@ func GetBinCheckRecommendations(db *sqlx.DB) http.HandlerFunc {
 
 // DismissBinCheckRecommendation allows managers to dismiss a recommendation
 // (e.g., if they manually verified the bin is fine)
-func DismissBinCheckRecommendation(db *sqlx.DB) http.HandlerFunc {
+func DismissBinCheckRecommendation(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		recommendationID := chi.URLParam(r, "id")
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -277,7 +281,7 @@ func DismissBinCheckRecommendation(db *sqlx.DB) http.HandlerFunc {
 
 // autoResolveCheckRecommendation is a helper function called when a bin is checked
 // It marks any pending recommendations for that bin as resolved
-func autoResolveCheckRecommendation(db *sqlx.DB, binID string, userID string, now int64) {
+func autoResolveCheckRecommendation(db *orgdb.DB, binID string, userID string, now int64) {
 	result, err := db.Exec(`
 		UPDATE bin_check_recommendations
 		SET status = 'resolved',

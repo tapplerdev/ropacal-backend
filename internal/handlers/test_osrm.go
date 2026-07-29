@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/roads"
 	"ropacal-backend/internal/websocket"
 
@@ -39,8 +40,9 @@ type TestOSRMResponse struct {
 // TestOSRM is a test endpoint to verify OSRM integration
 // Requires JWT authentication (driver login)
 // POST /api/test/osrm
-func TestOSRM(db *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
+func TestOSRM(root *sqlx.DB, hub *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Get user from JWT token (set by Auth middleware)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {

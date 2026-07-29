@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
@@ -26,8 +27,9 @@ type UserNotificationPreferences struct {
 }
 
 // GetNotificationPreferences returns the current user's notification preferences.
-func GetNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
+func GetNotificationPreferences(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		user, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -58,8 +60,9 @@ func GetNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
 }
 
 // UpdateNotificationPreferences updates the current user's notification preferences.
-func UpdateNotificationPreferences(db *sqlx.DB) http.HandlerFunc {
+func UpdateNotificationPreferences(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		user, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")

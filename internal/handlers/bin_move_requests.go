@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
@@ -27,7 +28,7 @@ import (
 // ok=false if unset/unparseable/null-island). store & pickup_only moves drop the bin off
 // here, so their route dropoff must use the current warehouse — never a possibly-stale
 // move.new_latitude — matching CreateShiftWithTasks's store-destination override.
-func resolveCurrentWarehouse(db *sqlx.DB) (lat, lng float64, addr string, ok bool) {
+func resolveCurrentWarehouse(db *orgdb.DB) (lat, lng float64, addr string, ok bool) {
 	var raw []byte
 	if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&raw); err != nil {
 		return 0, 0, "", false
@@ -45,6 +46,10 @@ func resolveCurrentWarehouse(db *sqlx.DB) (lat, lng float64, addr string, ok boo
 // GET /api/manager/bins/{binId}/active-move-requests
 func GetBinActiveMoveRequests(store moverequest.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Rebuild the store around the request's org-bound handle (the
+		// boot-built argument wraps the raw pool; see the sibling handlers'
+		// `store := moverequest.NewSQLStore(db)` shadows).
+		store := moverequest.NewSQLStore(orgdb.From(r))
 		binID := chi.URLParam(r, "binId")
 		if binID == "" {
 			http.Error(w, "Missing bin ID", http.StatusBadRequest)
@@ -86,8 +91,10 @@ func respondOpenMoveConflict(w http.ResponseWriter, binNumber int, existing *mov
 
 // ScheduleBinMove creates a new bin move request (urgent or future scheduled)
 // POST /api/manager/bins/schedule-move
-func ScheduleBinMove(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func ScheduleBinMove(store moverequest.Store, root *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
+		store := moverequest.NewSQLStore(db)
 		var req models.CreateBinMoveRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)

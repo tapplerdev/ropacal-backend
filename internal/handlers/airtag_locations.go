@@ -5,14 +5,16 @@ import (
 	"log"
 	"net/http"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 
 	"github.com/jmoiron/sqlx"
 )
 
 // GetAirtagLocations reads AirTag locations from the database (written by the FindMy bridge).
-func GetAirtagLocations(db *sqlx.DB) http.HandlerFunc {
+func GetAirtagLocations(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		entries, err := services.GetAirtagLocationsFromDB(db)
 		if err != nil {
 			log.Printf("❌ [AirtagLocations] DB query failed: %v", err)

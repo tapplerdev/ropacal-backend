@@ -8,13 +8,15 @@ import (
 	"time"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 )
 
-func GetChecks(db *sqlx.DB) http.HandlerFunc {
+func GetChecks(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -85,8 +87,9 @@ func GetChecks(db *sqlx.DB) http.HandlerFunc {
 //   - has_photo: filter checks with photos (true/false)
 //   - limit: max number of results (default 100, max 500)
 //   - offset: pagination offset (default 0)
-func GetAllChecks(db *sqlx.DB) http.HandlerFunc {
+func GetAllChecks(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Parse query parameters
 		driverID := r.URL.Query().Get("driver_id")
 		startDate := r.URL.Query().Get("start_date")

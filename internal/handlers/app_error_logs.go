@@ -9,6 +9,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -17,8 +18,9 @@ import (
 
 // LogAppError handles diagnostic/error logs from the mobile app
 // POST /api/logs/app-error
-func LogAppError(db *sqlx.DB) http.HandlerFunc {
+func LogAppError(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var req models.CreateAppErrorLogRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -163,8 +165,9 @@ func LogAppError(db *sqlx.DB) http.HandlerFunc {
 
 // GetAppErrorLogs retrieves error logs with filtering and pagination
 // GET /manager/logs/app-errors
-func GetAppErrorLogs(db *sqlx.DB) http.HandlerFunc {
+func GetAppErrorLogs(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Parse query parameters
 		driverID := r.URL.Query().Get("driver_id")
 		shiftID := r.URL.Query().Get("shift_id")
@@ -274,8 +277,9 @@ func GetAppErrorLogs(db *sqlx.DB) http.HandlerFunc {
 
 // ResolveAppErrorLog marks an error log as resolved
 // PATCH /manager/logs/app-errors/:id/resolve
-func ResolveAppErrorLog(db *sqlx.DB) http.HandlerFunc {
+func ResolveAppErrorLog(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		errorLogID := chi.URLParam(r, "id")
 		if errorLogID == "" {
 			http.Error(w, "Error log ID required", http.StatusBadRequest)
@@ -331,8 +335,9 @@ func ResolveAppErrorLog(db *sqlx.DB) http.HandlerFunc {
 
 // GetAppErrorStats retrieves error statistics for dashboard
 // GET /manager/logs/app-error-stats
-func GetAppErrorStats(db *sqlx.DB) http.HandlerFunc {
+func GetAppErrorStats(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Get stats for last 24 hours, 7 days, and 30 days
 		query := `
 			SELECT

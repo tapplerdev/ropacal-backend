@@ -208,8 +208,9 @@ func Login(root *sqlx.DB) http.HandlerFunc {
 }
 
 // GetAuthStatus returns the current authenticated user's information
-func GetAuthStatus(db *sqlx.DB) http.HandlerFunc {
+func GetAuthStatus(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/auth/status")
 
 		// Extract user claims from context (set by Auth middleware)

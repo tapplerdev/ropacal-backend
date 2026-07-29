@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
@@ -52,8 +53,9 @@ type routeStats struct {
 }
 
 // POST /api/manager/routes/generate-smart
-func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
+func GenerateSmartRoutes(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/manager/routes/generate-smart")
 
 		_, ok := middleware.GetUserFromContext(r)

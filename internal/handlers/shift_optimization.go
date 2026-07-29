@@ -7,6 +7,7 @@ import (
 	"log"
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/optimization"
 	"ropacal-backend/internal/services/redis"
@@ -14,10 +15,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 )
 
-func ReoptimizeActiveShift(db *sqlx.DB, redisClient *redis.Client, shiftID string, centrifugoClient *centrifugo.Client, skipGates bool) error {
+func ReoptimizeActiveShift(db *orgdb.DB, redisClient *redis.Client, shiftID string, centrifugoClient *centrifugo.Client, skipGates bool) error {
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("🔄 [REOPTIMIZE] Starting re-optimization for shift %s", shiftID)
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -685,7 +685,7 @@ func min(a, b int) int {
 //
 // Returns (nil, nil, nil) when the shift has no tasks to optimize.
 func buildAndOptimizeShiftRoute(
-	db *sqlx.DB,
+	db *orgdb.DB,
 	shiftID string,
 	capacity int,
 	driverLat, driverLon float64,
@@ -1125,7 +1125,7 @@ func buildAndOptimizeShiftRoute(
 // isFirstOptimization: true = shift starting (UPDATE tasks), false = mid-shift
 // reoptimization (DELETE+CREATE tasks).
 func optimizeRouteWithMapbox(
-	db *sqlx.DB,
+	db *orgdb.DB,
 	shiftID string,
 	capacity int,
 	driverLat, driverLon float64,
@@ -1565,7 +1565,7 @@ func truncateAddress(addr *string) string {
 // NotifyDriverOfRouteUpdate sends a Centrifugo notification to a driver when their shift tasks change
 // This is used when managers edit bins, move requests, or potential locations that affect active shifts
 func NotifyDriverOfRouteUpdate(
-	db *sqlx.DB,
+	db *orgdb.DB,
 	centrifugoClient *centrifugo.Client,
 	shiftID string,
 	changeType string,

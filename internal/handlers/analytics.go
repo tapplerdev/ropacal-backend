@@ -8,14 +8,16 @@ import (
 	"strconv"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
 )
 
 // GetTopPerformingBins returns top bins by various metrics
-func GetTopPerformingBins(db *sqlx.DB) http.HandlerFunc {
+func GetTopPerformingBins(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		metric := r.URL.Query().Get("metric") // reliability, fill_rate, uptime, check_count
 		limitStr := r.URL.Query().Get("limit")
 
@@ -162,8 +164,9 @@ func GetTopPerformingBins(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetAreaPerformance returns area/ZIP code performance metrics
-func GetAreaPerformance(db *sqlx.DB) http.HandlerFunc {
+func GetAreaPerformance(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		groupBy := r.URL.Query().Get("group_by") // zip, city
 		metric := r.URL.Query().Get("metric")    // success_rate, fill_rate, check_frequency
 		limitStr := r.URL.Query().Get("limit")
@@ -311,8 +314,9 @@ func GetAreaPerformance(db *sqlx.DB) http.HandlerFunc {
 // max 52) controls the window; empty weeks are filled with zero rows so
 // charts don't skip gaps.
 // GET /api/analytics/timeseries?weeks=12
-func GetAnalyticsTimeseries(db *sqlx.DB) http.HandlerFunc {
+func GetAnalyticsTimeseries(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		weeks := 12
 		if v := r.URL.Query().Get("weeks"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 52 {
@@ -415,8 +419,9 @@ func GetAnalyticsTimeseries(db *sqlx.DB) http.HandlerFunc {
 // last 6 collections), recency, projection, and the quadrant classification
 // the recommendation rules use — so the table and the recs never disagree.
 // GET /api/analytics/bin-scorecard
-func GetBinScorecard(db *sqlx.DB) http.HandlerFunc {
+func GetBinScorecard(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		type row struct {
 			ID             string   `db:"id" json:"id"`
 			BinNumber      int      `db:"bin_number" json:"bin_number"`

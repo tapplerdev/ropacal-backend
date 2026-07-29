@@ -12,6 +12,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
@@ -21,8 +22,10 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func AssignMoveToShift(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func AssignMoveToShift(store moverequest.Store, root *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
+		store := moverequest.NewSQLStore(db)
 		moveRequestID := chi.URLParam(r, "id")
 		log.Printf("🚚 [ASSIGN TO SHIFT] Starting assignment for move request: %s", moveRequestID)
 		if moveRequestID == "" {
@@ -113,7 +116,7 @@ func AssignMoveToShift(store moverequest.Store, db *sqlx.DB, wsHub *websocket.Hu
 }
 
 // assignMoveToShift inserts move at specified position in shift and re-optimizes route
-func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string, insertAfterBinID *string, insertPosition *string, managerID string, managerName string) error {
+func assignMoveToShift(db *orgdb.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, bin models.Bin, shiftID *string, insertAfterBinID *string, insertPosition *string, managerID string, managerName string) error {
 	log.Printf("🚚 ASSIGN MOVE: Assigning move request for bin #%d to shift", bin.BinNumber)
 
 	// Store previous assignment info for history logging
@@ -490,8 +493,10 @@ func assignMoveToShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.F
 // GetBinMoveRequest returns a single move request by ID
 // GET /api/manager/bins/move-requests/:id
 
-func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
+func AssignMoveToUser(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
+		store := moverequest.NewSQLStore(db)
 		id := chi.URLParam(r, "id")
 		log.Printf("👤 [ASSIGN TO USER] Starting assignment for move request: %s", id)
 		if id == "" {
@@ -643,8 +648,10 @@ func AssignMoveToUser(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 // ManuallyCompleteMoveRequest marks a move request as manually completed
 // PUT /api/manager/bins/move-requests/:id/complete-manually
 
-func ClearMoveAssignment(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
+func ClearMoveAssignment(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
+		store := moverequest.NewSQLStore(db)
 		id := chi.URLParam(r, "id")
 		log.Printf("🔄 [CLEAR ASSIGNMENT] Starting for move request: %s", id)
 		if id == "" {

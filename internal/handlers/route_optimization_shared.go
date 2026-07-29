@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jmoiron/sqlx"
+	"ropacal-backend/internal/orgdb"
 )
 
 // errORToolsParse marks an OR-Tools failure that occurred while parsing the
@@ -42,7 +42,7 @@ const (
 // latitude/longitude, falling back to the hardcoded default when the row is
 // missing, unparseable, or has a zero latitude (matching the prior behavior of
 // both handlers).
-func fetchWarehouseLocation(db *sqlx.DB) (lat, lng float64) {
+func fetchWarehouseLocation(db *orgdb.DB) (lat, lng float64) {
 	lat, lng = defaultWarehouseLat, defaultWarehouseLng
 	var whJSON []byte
 	if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&whJSON); err == nil {

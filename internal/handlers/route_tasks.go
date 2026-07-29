@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	shiftdomain "ropacal-backend/internal/shift"
@@ -24,8 +25,9 @@ import (
 )
 
 // GetShiftTasks retrieves all tasks for a shift
-func GetShiftTasks(db *sqlx.DB) http.HandlerFunc {
+func GetShiftTasks(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/shifts/:shiftId/tasks")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -53,8 +55,9 @@ func GetShiftTasks(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetShiftTasksDetailed retrieves tasks with JOINed data
-func GetShiftTasksDetailed(db *sqlx.DB) http.HandlerFunc {
+func GetShiftTasksDetailed(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/shifts/:shiftId/tasks/detailed")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -82,8 +85,9 @@ func GetShiftTasksDetailed(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetShiftTasksWithHistory retrieves ALL tasks including deleted ones for audit/history view
-func GetShiftTasksWithHistory(db *sqlx.DB) http.HandlerFunc {
+func GetShiftTasksWithHistory(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/manager/shifts/:shiftId/tasks/history")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -111,8 +115,9 @@ func GetShiftTasksWithHistory(db *sqlx.DB) http.HandlerFunc {
 }
 
 // CreateShiftWithTasks creates a new shift with tasks (Manager only)
-func CreateShiftWithTasks(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
+func CreateShiftWithTasks(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/manager/shifts/create-with-tasks")
 
 		userClaims, ok := middleware.GetUserFromContext(r)

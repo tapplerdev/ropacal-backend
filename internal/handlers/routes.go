@@ -15,6 +15,7 @@ import (
 
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/optimization"
 
@@ -32,8 +33,9 @@ var (
 )
 
 // GetRoutes returns all route blueprints
-func GetRoutes(db *sqlx.DB) http.HandlerFunc {
+func GetRoutes(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var routes []models.Route
 		err := db.Select(&routes, `
 			SELECT id, name, description, geographic_area, schedule_pattern,
@@ -53,8 +55,9 @@ func GetRoutes(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetRoute returns a single route with its bins
-func GetRoute(db *sqlx.DB) http.HandlerFunc {
+func GetRoute(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		routeID := chi.URLParam(r, "id")
 
 		// Get route
@@ -117,8 +120,9 @@ func GetRoute(db *sqlx.DB) http.HandlerFunc {
 }
 
 // CreateRoute creates a new route blueprint
-func CreateRoute(db *sqlx.DB) http.HandlerFunc {
+func CreateRoute(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var req models.CreateRouteRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -218,8 +222,9 @@ func CreateRoute(db *sqlx.DB) http.HandlerFunc {
 }
 
 // UpdateRoute updates an existing route
-func UpdateRoute(db *sqlx.DB) http.HandlerFunc {
+func UpdateRoute(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		routeID := chi.URLParam(r, "id")
 
 		var req models.UpdateRouteRequest
@@ -343,8 +348,9 @@ func UpdateRoute(db *sqlx.DB) http.HandlerFunc {
 }
 
 // DeleteRoute deletes a route blueprint
-func DeleteRoute(db *sqlx.DB) http.HandlerFunc {
+func DeleteRoute(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		routeID := chi.URLParam(r, "id")
 
 		result, err := db.Exec("DELETE FROM routes WHERE id = $1", routeID)
@@ -364,8 +370,9 @@ func DeleteRoute(db *sqlx.DB) http.HandlerFunc {
 }
 
 // DuplicateRoute creates a copy of an existing route
-func DuplicateRoute(db *sqlx.DB) http.HandlerFunc {
+func DuplicateRoute(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		sourceRouteID := chi.URLParam(r, "id")
 
 		var req models.DuplicateRouteRequest
@@ -487,8 +494,9 @@ func DuplicateRoute(db *sqlx.DB) http.HandlerFunc {
 }
 
 // OptimizeRoutePreview returns an optimized route order using Mapbox Optimization API
-func OptimizeRoutePreview(db *sqlx.DB) http.HandlerFunc {
+func OptimizeRoutePreview(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var req struct {
 			BinIDs        []string `json:"bin_ids"`
 			StartLocation *struct {
@@ -694,8 +702,9 @@ func haversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
 
 // TestHereOptimization - Test endpoint for HERE Waypoints Sequence API with raw coordinates
 // This endpoint doesn't require database bins - just send coordinates directly
-func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
+func TestHereOptimization(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var req struct {
 			Locations []struct {
 				Name      string  `json:"name"`
@@ -980,8 +989,9 @@ func TestHereOptimization(db *sqlx.DB) http.HandlerFunc {
 }
 
 // TestMapboxOptimization - Test endpoint for Mapbox Optimization API v1
-func TestMapboxOptimization(db *sqlx.DB) http.HandlerFunc {
+func TestMapboxOptimization(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Same request structure as HERE test endpoint
 		var req struct {
 			Locations []struct {
@@ -1163,8 +1173,9 @@ type BinBatchGeocodeRequest struct {
 }
 
 // BatchGeocodeBins - Batch geocode all bins and compare with existing coordinates
-func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
+func BatchGeocodeBins(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📍 Starting batch geocoding operation...")
 
 		// Parse request
@@ -1322,8 +1333,9 @@ func BatchGeocodeBins(db *sqlx.DB) http.HandlerFunc {
 
 // GetRoutePerformance aggregates shift_history by route_id to provide
 // performance metrics for each route template.
-func GetRoutePerformance(db *sqlx.DB) http.HandlerFunc {
+func GetRoutePerformance(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		type RoutePerf struct {
 			RouteID             string   `db:"route_id" json:"route_id"`
 			ShiftsCompleted     int      `db:"shifts_completed" json:"shifts_completed"`
@@ -1378,8 +1390,9 @@ func GetRoutePerformance(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetBinCollectionStats returns per-bin avg fill at collection from checks data.
-func GetBinCollectionStats(db *sqlx.DB) http.HandlerFunc {
+func GetBinCollectionStats(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		type BinStat struct {
 			BinID      string  `db:"bin_id" json:"bin_id"`
 			AvgFill    float64 `db:"avg_fill" json:"avg_fill"`
@@ -1415,8 +1428,9 @@ func GetBinCollectionStats(db *sqlx.DB) http.HandlerFunc {
 
 // EstimateRouteDuration takes a list of bin_ids, calls OSRM to get
 // driving duration/distance, and returns estimates.
-func EstimateRouteDuration(db *sqlx.DB) http.HandlerFunc {
+func EstimateRouteDuration(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var req struct {
 			BinIDs []string `json:"bin_ids"`
 		}

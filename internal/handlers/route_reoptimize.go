@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -42,8 +43,9 @@ type reoptRoute struct {
 // SmartReoptimize takes existing route template IDs, fetches all active bins,
 // runs OR-Tools CVRP to redistribute bins optimally across the same number
 // of templates, and returns the proposed new assignments.
-func SmartReoptimize(db *sqlx.DB) http.HandlerFunc {
+func SmartReoptimize(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var req struct {
 			RouteIDs           []string `json:"route_ids"`
 			MaxBinsPerRoute    int      `json:"max_bins_per_route"`

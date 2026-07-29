@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/optimization"
 	"ropacal-backend/pkg/utils"
 
@@ -66,8 +67,9 @@ type shiftPreviewResponse struct {
 // last leg can shift slightly — the dashboard surfaces this caveat.
 //
 // GET/POST /api/manager/shifts/{shiftId}/optimize-preview
-func PreviewShiftOptimization(db *sqlx.DB) http.HandlerFunc {
+func PreviewShiftOptimization(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "shiftId")
 		if shiftID == "" {
 			utils.RespondError(w, http.StatusBadRequest, "Missing shift id")

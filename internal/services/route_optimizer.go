@@ -1,7 +1,6 @@
 package services
 
 import (
-	"database/sql"
 	"encoding/json"
 	"log"
 	"math"
@@ -19,15 +18,13 @@ import (
 
 // GetWarehouseLocation fetches warehouse location from database config
 // Falls back to default San Jose location if not configured
-func GetWarehouseLocation(db interface {
-	QueryRow(query string, args ...interface{}) *sql.Row
-}) OptimizerLocation {
+func GetWarehouseLocation(db Querier) OptimizerLocation {
 	var configValue []byte
-	err := db.QueryRow(`
+	err := db.Get(&configValue, `
 		SELECT value
 		FROM config
 		WHERE key = 'warehouse_location'
-	`).Scan(&configValue)
+	`)
 
 	if err != nil {
 		// Fallback to default warehouse location if not found

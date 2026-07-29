@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
@@ -14,8 +15,9 @@ import (
 )
 
 // GetWarehouseLocation returns the current warehouse location from config
-func GetWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
+func GetWarehouseLocation(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var configValue []byte
 		err := db.QueryRow(`
 			SELECT value
@@ -48,8 +50,9 @@ func GetWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // UpdateWarehouseLocation updates the warehouse location in config
-func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func UpdateWarehouseLocation(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var input models.WarehouseLocation
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			http.Error(w, `{"error":"Invalid request body"}`, http.StatusBadRequest)

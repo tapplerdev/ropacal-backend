@@ -17,9 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jmoiron/sqlx"
-
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/orgdb"
 )
 
 // mallNameRe matches "mall"/"malls" as a WHOLE WORD. A plain
@@ -1780,7 +1779,7 @@ func (h *ChatHandler) currentPitchFillRates() map[string]float64 {
 
 // warehouseAddressHint reads the configured warehouse street so yard time can be
 // recognised without hardcoding an address.
-func warehouseAddressHint(db *sqlx.DB) string {
+func warehouseAddressHint(db *orgdb.DB) string {
 	var raw []byte
 	if err := db.Get(&raw, `SELECT value FROM config WHERE key = 'warehouse_location'`); err != nil {
 		return ""

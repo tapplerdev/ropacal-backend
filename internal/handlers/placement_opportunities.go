@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"ropacal-backend/internal/orgdb"
+
 	"encoding/json"
 	"fmt"
 	"log"
@@ -34,8 +36,9 @@ type OpportunitiesResponse struct {
 	AllocationReasoning string            `json:"allocation_reasoning"`
 }
 
-func GetPlacementOpportunities(db *sqlx.DB) http.HandlerFunc {
+func GetPlacementOpportunities(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		tStart := time.Now()
 
 		// 1. Get all active bins grouped by city

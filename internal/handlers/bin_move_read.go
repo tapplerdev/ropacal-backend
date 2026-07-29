@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"strings"
 	"time"
 
@@ -15,8 +16,10 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func GetBinMoveRequest(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
+func GetBinMoveRequest(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
+		store := moverequest.NewSQLStore(db)
 		id := chi.URLParam(r, "id")
 		log.Printf("🔍 [GET_MOVE_REQUEST] Fetching move request ID: %s", id)
 
@@ -112,8 +115,9 @@ func GetBinMoveRequest(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
 
 // GetBinMoveRequests returns all bin move requests with optional filtering
 // GET /api/manager/bins/move-requests?status=pending&urgency=urgent
-func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
+func GetBinMoveRequests(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/manager/bins/move-requests")
 
 		// Parse query params
@@ -271,8 +275,9 @@ func GetBinMoveRequests(db *sqlx.DB) http.HandlerFunc {
 
 // GetBinMoveRequestsByBinID returns all move requests for a specific bin
 // GET /api/bins/:id/move-requests
-func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
+func GetBinMoveRequestsByBinID(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Missing bin ID", http.StatusBadRequest)
@@ -414,8 +419,9 @@ func GetBinMoveRequestsByBinID(db *sqlx.DB) http.HandlerFunc {
 // UpdateBinMoveRequest updates move request details (date, notes, location, assignment, etc.)
 // PUT /api/manager/bins/move-requests/:id
 
-func GetMoveRequestHistory(db *sqlx.DB) http.HandlerFunc {
+func GetMoveRequestHistory(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, "Missing move request ID", http.StatusBadRequest)
@@ -437,8 +443,9 @@ func GetMoveRequestHistory(db *sqlx.DB) http.HandlerFunc {
 
 // GetDriverPendingMoves returns pending/assigned/overdue move requests for a specific driver.
 // Used by shift creation to show move request awareness banners.
-func GetDriverPendingMoves(db *sqlx.DB) http.HandlerFunc {
+func GetDriverPendingMoves(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		driverID := chi.URLParam(r, "id")
 		if driverID == "" {
 			http.Error(w, "Missing driver ID", http.StatusBadRequest)

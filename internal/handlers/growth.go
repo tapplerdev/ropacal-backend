@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/geo"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
@@ -31,7 +32,7 @@ type binYieldRow struct {
 	YieldPerWeek float64 `db:"-" json:"yield_per_bin_week"`
 }
 
-func loadBinYields(db *sqlx.DB) ([]binYieldRow, error) {
+func loadBinYields(db *orgdb.DB) ([]binYieldRow, error) {
 	var rows []binYieldRow
 	err := db.Select(&rows, `
 		SELECT b.id, b.bin_number, b.current_street, b.city, b.latitude, b.longitude,
@@ -77,8 +78,9 @@ func loadBinYields(db *sqlx.DB) ([]binYieldRow, error) {
 // hex map. Hex bucketing happens client-side (h3-js) — the backend stays free
 // of the cgo H3 bindings.
 // GET /api/analytics/growth/bin-yield
-func GetGrowthBinYields(db *sqlx.DB) http.HandlerFunc {
+func GetGrowthBinYields(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		rows, err := loadBinYields(db)
 		if err != nil {
 			log.Printf("❌ Error loading bin yields: %v", err)
@@ -112,8 +114,9 @@ func GetGrowthBinYields(db *sqlx.DB) http.HandlerFunc {
 // RouteFit (OR-Tools insertion cost) and HostQuality (address history) are
 // deferred — noted so the omission is explicit.
 // GET /api/analytics/growth/candidates
-func GetGrowthCandidates(db *sqlx.DB) http.HandlerFunc {
+func GetGrowthCandidates(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		bins, err := loadBinYields(db)
 		if err != nil {
 			log.Printf("❌ Error loading bin yields for scoring: %v", err)
@@ -257,8 +260,9 @@ func GetGrowthCandidates(db *sqlx.DB) http.HandlerFunc {
 // as destination picker), warehouse redeploys, and last week's applied
 // outcomes — so the plan grades itself over time.
 // GET /api/analytics/growth/weekly-plan
-func GetWeeklyGrowthPlan(db *sqlx.DB) http.HandlerFunc {
+func GetWeeklyGrowthPlan(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		now := time.Now().Unix()
 
 		type watchRow struct {
