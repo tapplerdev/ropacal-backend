@@ -16,6 +16,7 @@ import (
 
 type AIRecommendation struct {
 	ID                string  `json:"id" db:"id"`
+	OrganizationID    string  `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
 	Type              string  `json:"type" db:"type"`
 	EntityType        string  `json:"entity_type" db:"entity_type"`
 	EntityID          *string `json:"entity_id,omitempty" db:"entity_id"`

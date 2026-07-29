@@ -76,6 +76,7 @@ func GetNoGoZones(db *sqlx.DB) http.HandlerFunc {
 
 		var zones []struct {
 			ID               string  `db:"id"`
+			OrganizationID   string  `db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
 			Name             string  `db:"name"`
 			CenterLatitude   float64 `db:"center_latitude"`
 			CenterLongitude  float64 `db:"center_longitude"`
@@ -168,6 +169,7 @@ func GetNoGoZone(db *sqlx.DB) http.HandlerFunc {
 
 		var zone struct {
 			ID               string  `db:"id"`
+			OrganizationID   string  `db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
 			Name             string  `db:"name"`
 			CenterLatitude   float64 `db:"center_latitude"`
 			CenterLongitude  float64 `db:"center_longitude"`

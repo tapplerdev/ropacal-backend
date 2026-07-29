@@ -4,6 +4,7 @@ import "time"
 
 type NoGoZone struct {
 	ID               string  `json:"id" db:"id"`
+	OrganizationID   string  `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
 	Name             string  `json:"name" db:"name"`
 	CenterLatitude   float64 `json:"center_latitude" db:"center_latitude"`
 	CenterLongitude  float64 `json:"center_longitude" db:"center_longitude"`

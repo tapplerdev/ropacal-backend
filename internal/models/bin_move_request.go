@@ -6,12 +6,13 @@ import (
 )
 
 type BinMoveRequest struct {
-	ID            string `json:"id" db:"id"`
-	BinID         string `json:"bin_id" db:"bin_id"`
-	ScheduledDate int64  `json:"scheduled_date" db:"scheduled_date"` // Unix timestamp
-	Urgency       string `json:"urgency" db:"urgency"`               // 'urgent' or 'scheduled'
-	RequestedBy   string `json:"requested_by" db:"requested_by"`     // User ID
-	Status        string `json:"status" db:"status"`                 // 'pending', 'in_progress', 'completed', 'cancelled'
+	ID             string `json:"id" db:"id"`
+	OrganizationID string `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
+	BinID          string `json:"bin_id" db:"bin_id"`
+	ScheduledDate  int64  `json:"scheduled_date" db:"scheduled_date"` // Unix timestamp
+	Urgency        string `json:"urgency" db:"urgency"`               // 'urgent' or 'scheduled'
+	RequestedBy    string `json:"requested_by" db:"requested_by"`     // User ID
+	Status         string `json:"status" db:"status"`                 // 'pending', 'in_progress', 'completed', 'cancelled'
 
 	// Original location
 	OriginalLatitude  float64 `json:"original_latitude" db:"original_latitude"`
@@ -24,11 +25,11 @@ type BinMoveRequest struct {
 	NewAddress   *string  `json:"new_address,omitempty" db:"new_address"`
 
 	// Move metadata
-	MoveType                  string  `json:"move_type" db:"move_type"`                                             // 'store', 'relocation', or 'redeployment'
-	DisposalAction            *string `json:"disposal_action,omitempty" db:"disposal_action"`                       // DEPRECATED: kept for backward compatibility
+	MoveType                  string  `json:"move_type" db:"move_type"`                       // 'store', 'relocation', or 'redeployment'
+	DisposalAction            *string `json:"disposal_action,omitempty" db:"disposal_action"` // DEPRECATED: kept for backward compatibility
 	Reason                    *string `json:"reason,omitempty" db:"reason"`
-	ReasonCategory            *string `json:"reason_category,omitempty" db:"reason_category"`                       // 'landlord_complaint', 'theft', 'vandalism', 'missing', 'relocation_request', 'other'
-	CreateNoGoZone            *bool   `json:"create_no_go_zone,omitempty" db:"create_no_go_zone"`                   // Opt-in for creating no-go zone
+	ReasonCategory            *string `json:"reason_category,omitempty" db:"reason_category"`     // 'landlord_complaint', 'theft', 'vandalism', 'missing', 'relocation_request', 'other'
+	CreateNoGoZone            *bool   `json:"create_no_go_zone,omitempty" db:"create_no_go_zone"` // Opt-in for creating no-go zone
 	Notes                     *string `json:"notes,omitempty" db:"notes"`
 	SourcePotentialLocationID *string `json:"source_potential_location_id,omitempty" db:"source_potential_location_id"` // For warehouse redeployments to potential locations
 	NoGoZoneID                *string `json:"no_go_zone_id,omitempty" db:"no_go_zone_id"`                               // Links to created no-go zone if applicable
@@ -46,9 +47,9 @@ type BinMoveRequest struct {
 
 // BinMoveRequestResponse includes ISO formatted timestamps for client
 type BinMoveRequestResponse struct {
-	ID               string `json:"id"`
-	BinID            string `json:"bin_id"`
-	ScheduledDate    int64  `json:"scheduled_date"` // Unix timestamp (for frontend date math)
+	ID               string  `json:"id"`
+	BinID            string  `json:"bin_id"`
+	ScheduledDate    int64   `json:"scheduled_date"` // Unix timestamp (for frontend date math)
 	ScheduledDateIso string  `json:"scheduled_date_iso"`
 	Urgency          string  `json:"urgency"`
 	RequestedBy      string  `json:"requested_by"`
@@ -62,12 +63,12 @@ type BinMoveRequestResponse struct {
 	Zip           string `json:"zip"`
 
 	// Original location
-	OriginalStreet    *string  `json:"original_street,omitempty"`
-	OriginalCity      *string  `json:"original_city,omitempty"`
-	OriginalZip       *string  `json:"original_zip,omitempty"`
-	OriginalLatitude  float64  `json:"original_latitude"`
-	OriginalLongitude float64  `json:"original_longitude"`
-	OriginalAddress   string   `json:"original_address"`
+	OriginalStreet    *string `json:"original_street,omitempty"`
+	OriginalCity      *string `json:"original_city,omitempty"`
+	OriginalZip       *string `json:"original_zip,omitempty"`
+	OriginalLatitude  float64 `json:"original_latitude"`
+	OriginalLongitude float64 `json:"original_longitude"`
+	OriginalAddress   string  `json:"original_address"`
 
 	// New location
 	NewStreet    *string  `json:"new_street,omitempty"`
@@ -88,12 +89,12 @@ type BinMoveRequestResponse struct {
 	NoGoZoneID                *string `json:"no_go_zone_id,omitempty"`
 
 	// Assignment (shift-based or manual)
-	AssignmentType     *string `json:"assignment_type,omitempty"`     // 'shift' or 'manual', NULL for unassigned
+	AssignmentType     *string `json:"assignment_type,omitempty"` // 'shift' or 'manual', NULL for unassigned
 	AssignedShiftID    *string `json:"assigned_shift_id,omitempty"`
 	AssignedDriverName *string `json:"assigned_driver_name,omitempty"` // Driver's full name (populated when assigned to shift)
 	AssignedUserID     *string `json:"assigned_user_id,omitempty"`
 	AssignedUserName   *string `json:"assigned_user_name,omitempty"` // User's full name (populated when assigned manually)
-	DriverName         *string `json:"driver_name,omitempty"`         // Unified field: returns driver or user name (whichever is set)
+	DriverName         *string `json:"driver_name,omitempty"`        // Unified field: returns driver or user name (whichever is set)
 	CompletedAtIso     *string `json:"completed_at_iso,omitempty"`
 
 	// Timestamps
@@ -137,18 +138,18 @@ type CreateBinMoveRequest struct {
 // ToBinMoveRequestResponse converts BinMoveRequest to BinMoveRequestResponse
 func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 	resp := BinMoveRequestResponse{
-		ID:                bmr.ID,
-		BinID:             bmr.BinID,
-		ScheduledDate:     bmr.ScheduledDate, // Include Unix timestamp
-		ScheduledDateIso:  time.Unix(bmr.ScheduledDate, 0).Format(time.RFC3339),
-		Urgency:           bmr.Urgency,
-		RequestedBy:       bmr.RequestedBy,
-		Status:            bmr.Status,
-		OriginalLatitude:  bmr.OriginalLatitude,
-		OriginalLongitude: bmr.OriginalLongitude,
-		OriginalAddress:   bmr.OriginalAddress,
-		NewLatitude:       bmr.NewLatitude,
-		NewLongitude:      bmr.NewLongitude,
+		ID:                        bmr.ID,
+		BinID:                     bmr.BinID,
+		ScheduledDate:             bmr.ScheduledDate, // Include Unix timestamp
+		ScheduledDateIso:          time.Unix(bmr.ScheduledDate, 0).Format(time.RFC3339),
+		Urgency:                   bmr.Urgency,
+		RequestedBy:               bmr.RequestedBy,
+		Status:                    bmr.Status,
+		OriginalLatitude:          bmr.OriginalLatitude,
+		OriginalLongitude:         bmr.OriginalLongitude,
+		OriginalAddress:           bmr.OriginalAddress,
+		NewLatitude:               bmr.NewLatitude,
+		NewLongitude:              bmr.NewLongitude,
 		NewAddress:                bmr.NewAddress,
 		MoveType:                  bmr.MoveType,
 		DisposalAction:            bmr.DisposalAction,
@@ -159,10 +160,10 @@ func (bmr *BinMoveRequest) ToBinMoveRequestResponse() BinMoveRequestResponse {
 		SourcePotentialLocationID: bmr.SourcePotentialLocationID,
 		NoGoZoneID:                bmr.NoGoZoneID,
 		AssignmentType:            bmr.AssignmentType,
-		AssignedShiftID:   bmr.AssignedShiftID,
-		AssignedUserID:    bmr.AssignedUserID,
-		CreatedAtIso:      time.Unix(bmr.CreatedAt, 0).Format(time.RFC3339),
-		UpdatedAtIso:      time.Unix(bmr.UpdatedAt, 0).Format(time.RFC3339),
+		AssignedShiftID:           bmr.AssignedShiftID,
+		AssignedUserID:            bmr.AssignedUserID,
+		CreatedAtIso:              time.Unix(bmr.CreatedAt, 0).Format(time.RFC3339),
+		UpdatedAtIso:              time.Unix(bmr.UpdatedAt, 0).Format(time.RFC3339),
 	}
 
 	if bmr.CompletedAt != nil {

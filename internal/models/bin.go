@@ -4,6 +4,7 @@ import "time"
 
 type Bin struct {
 	ID                        string   `json:"id" db:"id"`
+	OrganizationID            string   `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
 	BinNumber                 int      `json:"bin_number" db:"bin_number"`
 	CurrentStreet             string   `json:"current_street" db:"current_street"`
 	City                      string   `json:"city" db:"city"`

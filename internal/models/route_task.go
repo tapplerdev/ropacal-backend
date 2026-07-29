@@ -21,13 +21,14 @@ const (
 // Supports all task types: collections, placements, move requests, and warehouse stops
 type RouteTask struct {
 	// Core fields
-	ID            string   `json:"id" db:"id"`
-	ShiftID       string   `json:"shift_id" db:"shift_id"`
-	SequenceOrder int      `json:"sequence_order" db:"sequence_order"`
-	TaskType      TaskType `json:"task_type" db:"task_type"`
-	Latitude      float64  `json:"latitude" db:"latitude"`
-	Longitude     float64  `json:"longitude" db:"longitude"`
-	Address       *string  `json:"address,omitempty" db:"address"`
+	ID             string   `json:"id" db:"id"`
+	OrganizationID string   `json:"organization_id,omitempty" db:"organization_id"` // Owning tenant (multi-tenancy; column added by migrations/add_multi_tenancy_rls.sql)
+	ShiftID        string   `json:"shift_id" db:"shift_id"`
+	SequenceOrder  int      `json:"sequence_order" db:"sequence_order"`
+	TaskType       TaskType `json:"task_type" db:"task_type"`
+	Latitude       float64  `json:"latitude" db:"latitude"`
+	Longitude      float64  `json:"longitude" db:"longitude"`
+	Address        *string  `json:"address,omitempty" db:"address"`
 
 	// Collection task fields
 	BinID          *string `json:"bin_id,omitempty" db:"bin_id"`
