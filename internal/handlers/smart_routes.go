@@ -193,7 +193,11 @@ func GenerateSmartRoutes(root *sqlx.DB) http.HandlerFunc {
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// Step 4: Fetch warehouse location
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		warehouseLat, warehouseLng := fetchWarehouseLocation(db)
+		warehouseLat, warehouseLng, whOK := fetchWarehouseLocation(db)
+		if !whOK {
+			http.Error(w, `{"error":"warehouse location is not configured"}`, http.StatusPreconditionFailed)
+			return
+		}
 		log.Printf("🏭 Warehouse: (%.6f, %.6f)", warehouseLat, warehouseLng)
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

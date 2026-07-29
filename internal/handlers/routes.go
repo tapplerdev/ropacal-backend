@@ -547,7 +547,11 @@ func OptimizeRoutePreview(root *sqlx.DB) http.HandlerFunc {
 		// the vehicle starts at start_location (default warehouse) and
 		// always ends at the warehouse — so the drawn order is the order
 		// the driver will actually get.
-		warehouseLoc := services.GetWarehouseLocation(db)
+		warehouseLoc, whOK := services.GetWarehouseLocation(db)
+		if !whOK {
+			http.Error(w, "Warehouse location is not configured — set it before optimizing routes", http.StatusPreconditionFailed)
+			return
+		}
 		warehouseLocation := optimization.Location{
 			ID:        "warehouse",
 			Name:      "Warehouse",
@@ -751,7 +755,11 @@ func TestHereOptimization(root *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get warehouse location
-		warehouseLoc := services.GetWarehouseLocation(db)
+		warehouseLoc, whOK := services.GetWarehouseLocation(db)
+		if !whOK {
+			http.Error(w, "Warehouse location is not configured — set it before optimizing routes", http.StatusPreconditionFailed)
+			return
+		}
 
 		// Build HERE Waypoints Sequence API v8 request
 		// Format: start=warehouse;lat,lng&destination1=name;lat,lng&end=warehouse;lat,lng
@@ -1021,7 +1029,11 @@ func TestMapboxOptimization(root *sqlx.DB) http.HandlerFunc {
 		log.Printf("🧪 Testing Mapbox route optimization for %d locations", len(req.Locations))
 
 		// Get warehouse location
-		warehouseLoc := services.GetWarehouseLocation(db)
+		warehouseLoc, whOK := services.GetWarehouseLocation(db)
+		if !whOK {
+			http.Error(w, "Warehouse location is not configured — set it before optimizing routes", http.StatusPreconditionFailed)
+			return
+		}
 		log.Printf("📍 Warehouse: lat=%.6f, lng=%.6f", warehouseLoc.Latitude, warehouseLoc.Longitude)
 
 		// Build Mapbox Optimization API URL
@@ -1462,17 +1474,13 @@ func EstimateRouteDuration(root *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get warehouse location
-		var warehouseLat, warehouseLng float64 = 37.6368013, -122.1269379
-		var whJSON []byte
-		if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&whJSON); err == nil {
-			var wh struct {
-				Lat float64 `json:"latitude"`
-				Lng float64 `json:"longitude"`
-			}
-			if json.Unmarshal(whJSON, &wh) == nil {
-				warehouseLat, warehouseLng = wh.Lat, wh.Lng
-			}
+		// Get warehouse location (shared helper; NO hardcoded fallback — a
+		// missing config row must fail loudly, never estimate against a
+		// depot in the wrong city)
+		warehouseLat, warehouseLng, whOK := fetchWarehouseLocation(db)
+		if !whOK {
+			http.Error(w, `{"error":"warehouse location is not configured"}`, http.StatusPreconditionFailed)
+			return
 		}
 
 		// Build OSRM route request: warehouse → bins → warehouse

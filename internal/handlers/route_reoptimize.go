@@ -124,7 +124,11 @@ func SmartReoptimize(root *sqlx.DB) http.HandlerFunc {
 		}
 
 		// Get warehouse location
-		warehouseLat, warehouseLng := fetchWarehouseLocation(db)
+		warehouseLat, warehouseLng, whOK := fetchWarehouseLocation(db)
+		if !whOK {
+			http.Error(w, `{"error":"warehouse location is not configured"}`, http.StatusPreconditionFailed)
+			return
+		}
 
 		// Build OSRM distance/duration matrix
 		n := len(activeBins) + 1
