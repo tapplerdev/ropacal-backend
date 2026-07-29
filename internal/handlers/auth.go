@@ -143,9 +143,20 @@ func Login(root *sqlx.DB) http.HandlerFunc {
 				return
 			}
 			org = resolved
+			// The users lookup must run ORG-BOUND: under RLS the raw pool has no
+			// app.org_id, the users policy fail-closes, and every login would 401
+			// (this exact break was caught in the pre-flip gate check, 2026-07-29).
+			// orgdb.System sets the GUC for the resolved org; dark mode returns a
+			// passthrough so pre-migration behavior is untouched.
+			odb, oerr := orgdb.System(root, org.ID)
+			if oerr != nil {
+				log.Printf("❌ Login org handle for %q: %v", org.Slug, oerr)
+				writeLoginJSON(w, http.StatusInternalServerError, LoginResponse{OK: false})
+				return
+			}
 			// Explicit column list: users now also carries organization_id,
 			// which models.User deliberately does not scan.
-			err := root.Get(&user,
+			err := odb.Get(&user,
 				`SELECT id, email, password, name, role, created_at, updated_at
 				 FROM users WHERE organization_id = $1 AND email = $2`,
 				org.ID, req.Email)

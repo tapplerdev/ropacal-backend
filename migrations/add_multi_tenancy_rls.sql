@@ -683,7 +683,15 @@ BEGIN
     END LOOP;
 END $$;
 
--- The organizations table itself: a tenant may see only its own row.
+-- The organizations table itself: a tenant may WRITE only its own row, but the
+-- catalog is READABLE by the app process. Two consumers run before any org
+-- context exists and are load-bearing (verified against the live code 2026-07-29):
+--   * login: resolveLoginOrg looks organizations up BY SLUG pre-authentication —
+--     with a tenant-scoped read policy it sees zero rows and EVERY login 401s;
+--   * the six background workers: ForEachActiveOrg enumerates active orgs.
+-- Org rows are platform metadata (name/slug/status), not tenant data, and no
+-- API endpoint exposes the list; login deliberately returns identical 401s for
+-- unknown slugs, so readability here does not enable slug enumeration.
 ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE organizations FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS org_isolation_organizations ON organizations;
@@ -691,9 +699,13 @@ CREATE POLICY org_isolation_organizations ON organizations
     AS PERMISSIVE FOR ALL TO PUBLIC
     USING      (id = NULLIF(current_setting('app.org_id', true), ''))
     WITH CHECK (id = NULLIF(current_setting('app.org_id', true), ''));
--- NOTE: this makes tenant provisioning and the per-tenant background-worker loop
--- ("SELECT id FROM organizations") invisible to the app role. Run those as
--- postgres, or add a second permissive read policy for a dedicated admin role.
+DROP POLICY IF EXISTS org_catalog_read ON organizations;
+CREATE POLICY org_catalog_read ON organizations
+    AS PERMISSIVE FOR SELECT TO PUBLIC
+    USING (true);
+-- Writes stay tenant-scoped via org_isolation_organizations (policies OR only
+-- within the same command type; INSERT/UPDATE/DELETE gain nothing from a
+-- SELECT-only policy). Provisioning new orgs still runs as postgres.
 
 
 -- ============================================================================
