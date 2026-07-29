@@ -8,6 +8,7 @@ import (
 
 	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -31,8 +32,9 @@ type DriverShiftDetailResponse struct {
 }
 
 // GetDriverShiftDetails returns detailed shift information for a specific driver (manager view)
-func GetDriverShiftDetails(db *sqlx.DB) http.HandlerFunc {
+func GetDriverShiftDetails(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		driverID := r.URL.Query().Get("driver_id")
 		if driverID == "" {
 			w.Header().Set("Content-Type", "application/json")

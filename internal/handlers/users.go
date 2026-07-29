@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/google/uuid"
@@ -29,8 +30,9 @@ type CreateUserResponse struct {
 
 // CreateUser creates a new user (admin/manager/driver)
 // Requires admin authentication
-func CreateUser(db *sqlx.DB) http.HandlerFunc {
+func CreateUser(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Println("📥 REQUEST: POST /api/users - Create new user")
 
@@ -136,8 +138,9 @@ func CreateUser(db *sqlx.DB) http.HandlerFunc {
 
 // GetAllUsers returns all users (drivers, managers, admins)
 // GET /api/users
-func GetAllUsers(db *sqlx.DB) http.HandlerFunc {
+func GetAllUsers(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Println("📤 REQUEST: GET /api/users - Fetch all users")
 
 		// Fetch all users

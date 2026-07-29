@@ -42,6 +42,15 @@ type LocationData struct {
 	Timestamp int64   `json:"timestamp"`
 }
 
+// TENANCY NOTE: this file deliberately keeps the raw *sqlx.DB pool (no
+// orgdb shadow). Its endpoints carry no user JWT (server-to-server /
+// INTERNAL_API_KEY paths), so there is no organization to bind — under RLS
+// with a non-superuser role their queries fail closed (zero rows / NOT NULL
+// on insert) rather than crossing tenants. Scoping these paths needs a
+// caller-identity -> org mapping first (see the tenancy workers audit,
+// sections 4E/4F) and is tracked as follow-up work; do NOT "fix" them by
+// adding an unscoped bypass inside orgdb.
+
 // CentrifugoLocationPublishProxy handles location publish requests from drivers
 // This is called by Centrifugo BEFORE broadcasting the message
 // We process the GPS data (save to Redis, snap to roads) and return modified data

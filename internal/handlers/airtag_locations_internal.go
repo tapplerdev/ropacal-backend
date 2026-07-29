@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
+
 	"github.com/jmoiron/sqlx"
 )
 
@@ -29,6 +31,15 @@ type locationEntry struct {
 	LastSeen      string  `json:"last_seen"`
 	BatteryStatus int     `json:"battery_status"`
 }
+
+// TENANCY NOTE: this file deliberately keeps the raw *sqlx.DB pool (no
+// orgdb shadow). Its endpoints carry no user JWT (server-to-server /
+// INTERNAL_API_KEY paths), so there is no organization to bind — under RLS
+// with a non-superuser role their queries fail closed (zero rows / NOT NULL
+// on insert) rather than crossing tenants. Scoping these paths needs a
+// caller-identity -> org mapping first (see the tenancy workers audit,
+// sections 4E/4F) and is tracked as follow-up work; do NOT "fix" them by
+// adding an unscoped bypass inside orgdb.
 
 // UpsertAirtagLocations receives AirTag locations from the FindMy bridge and stores them in the DB.
 func UpsertAirtagLocations(db *sqlx.DB) http.HandlerFunc {
@@ -103,14 +114,20 @@ func UpsertAirtagLocations(db *sqlx.DB) http.HandlerFunc {
 			upserted++
 		}
 
-		// Store last sync timestamp in config table
+		// Store last sync timestamp in config table. The conflict target is
+		// (key) pre-migration and (organization_id, key) once tenancy is live
+		// (config's UNIQUE constraint becomes composite). NOTE: this endpoint
+		// runs on the root pool with no org, so once tenancy is live the
+		// INSERT arm fails organization_id NOT NULL — loudly logged below —
+		// until the FindMy bridge carries a tenant identity (see the TENANCY
+		// note at the top of this file).
 		if payload.SyncedAt != "" {
 			syncValue := fmt.Sprintf(`{"last_sync_at": "%s"}`, payload.SyncedAt)
-			_, err := db.Exec(`
+			_, err := db.Exec(fmt.Sprintf(`
 				INSERT INTO config (key, value, updated_by)
 				VALUES ('airtag_last_sync', $1::jsonb, 'bridge')
-				ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP
-			`, syncValue)
+				ON CONFLICT %s DO UPDATE SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP
+			`, orgdb.ConfigConflictTarget()), syncValue)
 			if err != nil {
 				log.Printf("❌ [AirtagLocations] Failed to update last_sync config: %v", err)
 			}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/go-chi/chi/v5"
@@ -29,8 +30,9 @@ type UserNotification struct {
 }
 
 // GetUserNotifications returns paginated notifications for the current user.
-func GetUserNotifications(db *sqlx.DB) http.HandlerFunc {
+func GetUserNotifications(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		user, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -74,8 +76,9 @@ func GetUserNotifications(db *sqlx.DB) http.HandlerFunc {
 
 // GetNotificationByID returns a single notification for the current user.
 // Accepts both user_notification IDs (un_*) and notification_log IDs (notif_*).
-func GetNotificationByID(db *sqlx.DB) http.HandlerFunc {
+func GetNotificationByID(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		user, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -114,8 +117,9 @@ func GetNotificationByID(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetUnreadCount returns the unread notification count for the current user.
-func GetUnreadCount(db *sqlx.DB) http.HandlerFunc {
+func GetUnreadCount(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		user, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -132,8 +136,9 @@ func GetUnreadCount(db *sqlx.DB) http.HandlerFunc {
 }
 
 // MarkNotificationRead marks a single notification as read.
-func MarkNotificationRead(db *sqlx.DB) http.HandlerFunc {
+func MarkNotificationRead(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		user, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -163,8 +168,9 @@ func MarkNotificationRead(db *sqlx.DB) http.HandlerFunc {
 }
 
 // MarkAllNotificationsRead marks all notifications as read for the current user.
-func MarkAllNotificationsRead(db *sqlx.DB) http.HandlerFunc {
+func MarkAllNotificationsRead(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		user, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -186,8 +192,9 @@ func MarkAllNotificationsRead(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetNotificationRecipients returns per-user delivery details for a notification log entry (admin only).
-func GetNotificationRecipients(db *sqlx.DB) http.HandlerFunc {
+func GetNotificationRecipients(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		logID := chi.URLParam(r, "id")
 
 		type recipientRow struct {

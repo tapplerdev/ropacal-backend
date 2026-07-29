@@ -802,12 +802,6 @@ func Migrate(db *sqlx.DB) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_config_key ON config(key)`,
-		`INSERT INTO config (key, value, updated_by)
-		VALUES (
-			'warehouse_location',
-			'{"latitude": 37.3009357, "longitude": -121.9493848, "address": "1185 Campbell Ave, San Jose, CA 95126, United States"}'::jsonb,
-			'system'
-		) ON CONFLICT (key) DO NOTHING`,
 
 		// Notification log table — records every sent notification for audit trail
 		`CREATE TABLE IF NOT EXISTS notification_log (
@@ -1073,6 +1067,29 @@ func Migrate(db *sqlx.DB) error {
 		if _, err := db.Exec(migration); err != nil {
 			return fmt.Errorf("migration failed: %w", err)
 		}
+	}
+
+	// Single-tenant warehouse seed. Once the multi-tenancy migration is live
+	// (organizations table exists), config.organization_id is NOT NULL with a
+	// DEFAULT taken from app.org_id — which is unset during boot — so this
+	// INSERT would fail, and a global default warehouse is meaningless anyway
+	// (each tenant's warehouse is provisioned with the tenant). Pre-migration
+	// it behaves exactly as it always has.
+	var tenancyLive bool
+	if err := db.Get(&tenancyLive, `SELECT to_regclass('public.organizations') IS NOT NULL`); err != nil {
+		return fmt.Errorf("migration failed: tenancy detection: %w", err)
+	}
+	if !tenancyLive {
+		if _, err := db.Exec(`INSERT INTO config (key, value, updated_by)
+		VALUES (
+			'warehouse_location',
+			'{"latitude": 37.3009357, "longitude": -121.9493848, "address": "1185 Campbell Ave, San Jose, CA 95126, United States"}'::jsonb,
+			'system'
+		) ON CONFLICT (key) DO NOTHING`); err != nil {
+			return fmt.Errorf("migration failed: warehouse seed: %w", err)
+		}
+	} else {
+		log.Println("🏢 [Migrate] Tenancy live — skipping single-tenant warehouse_location seed (per-org provisioning owns it)")
 	}
 
 	log.Println("✓ Database migrations completed")

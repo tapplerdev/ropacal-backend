@@ -14,6 +14,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
@@ -25,8 +26,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func CompleteTask(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CompleteTask(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("[DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Printf("[DIAGNOSTIC] 📥 REQUEST: POST /api/driver/shift/complete-task")
 
@@ -799,7 +801,7 @@ type moveFinalization struct {
 
 // prepareMoveCompletion resolves everything applyMoveCompletion will write —
 // config reads + reverse geocoding — on the pool, pre-tx.
-func prepareMoveCompletion(db *sqlx.DB, moveRequest models.BinMoveRequest) moveFinalization {
+func prepareMoveCompletion(db *orgdb.DB, moveRequest models.BinMoveRequest) moveFinalization {
 	log.Printf("[MOVE] 🚚 Preparing move request completion (type: %s)", moveRequest.MoveType)
 
 	isStore := moveRequest.MoveType == "store" || moveRequest.MoveType == "pickup_only"
@@ -954,7 +956,7 @@ func applyMoveCompletion(ext sqlx.Ext, moveRequest models.BinMoveRequest, fin mo
 // evaluateWatchlist's existing graduate/escalate pass judges the probe against
 // typical demand after 14 days. Best-effort post-commit; one open watch per
 // bin (same guard the agent's startWatch uses).
-func enrollNewTerritoryProbe(db *sqlx.DB, binID string) {
+func enrollNewTerritoryProbe(db *orgdb.DB, binID string) {
 	var b struct {
 		Lat *float64 `db:"latitude"`
 		Lng *float64 `db:"longitude"`
@@ -1025,7 +1027,7 @@ func enrollNewTerritoryProbe(db *sqlx.DB, binID string) {
 
 // moveCompletionSideEffects runs the best-effort post-commit tail: history,
 // dashboard broadcasts, potential-location conversion, the moves record.
-func moveCompletionSideEffects(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, now int64, driverID string) {
+func moveCompletionSideEffects(db *orgdb.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client, moveRequest models.BinMoveRequest, now int64, driverID string) {
 	log.Printf("[MOVE] ✅ Move request %s completed + bin %s updated (atomic with task completion)", moveRequest.ID, moveRequest.BinID)
 	isRelocation := moveRequest.MoveType == "relocation" || moveRequest.MoveType == "redeployment"
 

@@ -12,9 +12,9 @@ import (
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 )
 
 // ErrTaskDescriptor marks a create-with-tasks task descriptor the caller got
@@ -23,7 +23,7 @@ import (
 var ErrTaskDescriptor = errors.New("invalid task descriptor")
 
 // GetShiftTasks retrieves all active (non-deleted) tasks for a shift ordered by sequence
-func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
+func GetShiftTasks(db *orgdb.DB, shiftID string) ([]models.RouteTask, error) {
 	var tasks []models.RouteTask
 	query := `
 		SELECT
@@ -52,7 +52,7 @@ func GetShiftTasks(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
 }
 
 // GetShiftTasksWithDeleted retrieves ALL tasks for a shift including deleted ones (for audit/history)
-func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, error) {
+func GetShiftTasksWithDeleted(db *orgdb.DB, shiftID string) ([]models.RouteTask, error) {
 	var tasks []models.RouteTask
 	query := `
 		SELECT
@@ -120,7 +120,7 @@ func GetShiftTasksWithDeleted(db *sqlx.DB, shiftID string) ([]models.RouteTask, 
 }
 
 // GetShiftTasksDetailed retrieves tasks with JOINed data from related tables
-func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{}, error) {
+func GetShiftTasksDetailed(db *orgdb.DB, shiftID string) ([]map[string]interface{}, error) {
 	// Query route_tasks directly and LEFT JOIN with bins table to get bin_number for collection tasks
 	// Also LEFT JOIN with checks table to get photo_url for completed tasks
 	query := `
@@ -251,7 +251,7 @@ func GetShiftTasksDetailed(db *sqlx.DB, shiftID string) ([]map[string]interface{
 // same transaction; their ids are returned so the handler can log history
 // post-commit. managerID stamps requested_by on those minted moves.
 func CreateShiftWithTasks(
-	db *sqlx.DB,
+	db *orgdb.DB,
 	driverID string,
 	managerID string,
 	truckBinCapacity int,
@@ -867,7 +867,7 @@ func CreateShiftWithTasks(
 }
 
 // GetNextIncompleteTask gets the next task to complete in a shift
-func GetNextIncompleteTask(db *sqlx.DB, shiftID string) (*models.RouteTask, error) {
+func GetNextIncompleteTask(db *orgdb.DB, shiftID string) (*models.RouteTask, error) {
 	var task models.RouteTask
 	query := `
 		SELECT * FROM route_tasks

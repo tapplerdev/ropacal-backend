@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/services/roads"
@@ -36,8 +37,9 @@ type LocationUpdateRequest struct {
 
 // PostDriverLocation handles location updates from drivers
 // Flow: Save to DB → OSRM snap → Publish to Centrifugo
-func PostDriverLocation(db *sqlx.DB, centrifugoClient *centrifugo.Client, roadsClient *roads.OSRMClient) http.HandlerFunc {
+func PostDriverLocation(root *sqlx.DB, centrifugoClient *centrifugo.Client, roadsClient *roads.OSRMClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Get authenticated user
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -206,7 +208,7 @@ func isNullIsland(lat, lng float64) bool {
 // can never disagree on what "located" means. Returns errNoDriverLocation /
 // errDriverLocationStale for client conditions, or a wrapped error for real
 // faults (the caller maps to 4xx vs 5xx).
-func resolveDriverStartLocation(ctx context.Context, db *sqlx.DB, redisClient *redis.Client, driverID string) (driverStartLocation, error) {
+func resolveDriverStartLocation(ctx context.Context, db *orgdb.DB, redisClient *redis.Client, driverID string) (driverStartLocation, error) {
 	var loc driverStartLocation
 
 	// Primary: Redis (live).
@@ -256,8 +258,9 @@ func resolveDriverStartLocation(ctx context.Context, db *sqlx.DB, redisClient *r
 
 // StartShift starts an assigned shift
 
-func CheckShiftDriverProximity(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
+func CheckShiftDriverProximity(root *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "id")
 		if shiftID == "" {
 			http.Error(w, "Shift ID is required", http.StatusBadRequest)
@@ -396,8 +399,9 @@ func CheckShiftDriverProximity(db *sqlx.DB, redisClient *redis.Client) http.Hand
 // calculateLogicalBinCounts groups move request pickup+dropoff as one logical bin
 // Returns (logicalTotal, logicalCompleted)
 
-func RegisterFCMToken(db *sqlx.DB) http.HandlerFunc {
+func RegisterFCMToken(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -458,8 +462,9 @@ func RegisterFCMToken(db *sqlx.DB) http.HandlerFunc {
 
 // ClearAllShifts deletes all shifts from the database (for testing purposes)
 
-func UpdateLocation(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func UpdateLocation(root *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -663,8 +668,9 @@ func getFloat64Value(val *float64) float64 {
 // Drivers without active shifts will show status as 'inactive'
 // Location data comes from Redis (real-time current position)
 // GET /api/manager/drivers
-func GetAllDrivers(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
+func GetAllDrivers(root *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Println("📋 GetAllDrivers: Fetching all drivers...")
 
 		ctx := context.Background()

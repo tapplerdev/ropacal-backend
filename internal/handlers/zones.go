@@ -13,6 +13,7 @@ import (
 
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/pkg/utils"
 
@@ -67,8 +68,9 @@ type ZoneIncidentResponse struct {
 }
 
 // GetNoGoZones returns all no-go zones (optionally filtered by status)
-func GetNoGoZones(db *sqlx.DB) http.HandlerFunc {
+func GetNoGoZones(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/no-go-zones")
 
 		status := r.URL.Query().Get("status")
@@ -162,8 +164,9 @@ func GetNoGoZones(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetNoGoZone returns a single zone by ID
-func GetNoGoZone(db *sqlx.DB) http.HandlerFunc {
+func GetNoGoZone(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		zoneID := r.PathValue("id")
 		log.Printf("📥 REQUEST: GET /api/no-go-zones/%s", zoneID)
 
@@ -228,8 +231,9 @@ func GetNoGoZone(db *sqlx.DB) http.HandlerFunc {
 
 // GetZoneIncidents returns all incidents for a specific zone
 // Supports ?include_merged=true to include incidents from zones that were merged into this one
-func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
+func GetZoneIncidents(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		zoneID := r.PathValue("id")
 		includeMerged := r.URL.Query().Get("include_merged") == "true"
 		log.Printf("📥 REQUEST: GET /api/no-go-zones/%s/incidents (include_merged: %v)", zoneID, includeMerged)
@@ -324,8 +328,9 @@ func GetZoneIncidents(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetShiftIncidents returns all incidents reported during a specific shift
-func GetShiftIncidents(db *sqlx.DB) http.HandlerFunc {
+func GetShiftIncidents(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := r.PathValue("id")
 		log.Printf("📥 REQUEST: GET /api/shifts/%s/incidents", shiftID)
 
@@ -407,8 +412,9 @@ func GetShiftIncidents(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetFieldObservations returns field observations for manager review
-func GetFieldObservations(db *sqlx.DB) http.HandlerFunc {
+func GetFieldObservations(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/field-observations")
 
 		statusFilter := r.URL.Query().Get("status") // all, pending, verified
@@ -515,8 +521,9 @@ func GetFieldObservations(db *sqlx.DB) http.HandlerFunc {
 }
 
 // VerifyFieldObservation marks a field observation as verified by a manager
-func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
+func VerifyFieldObservation(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		incidentID := r.PathValue("id")
 		log.Printf("📥 REQUEST: PATCH /api/field-observations/%s/verify", incidentID)
 
@@ -560,8 +567,9 @@ func VerifyFieldObservation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetBinIncidents returns all zone incidents associated with a specific bin
-func GetBinIncidents(db *sqlx.DB) http.HandlerFunc {
+func GetBinIncidents(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			utils.RespondError(w, http.StatusBadRequest, "missing bin ID")
@@ -632,7 +640,7 @@ func formatIncidentTypeLabel(t string) string {
 // on the bare *sqlx.DB pool. Callers that need the writes to participate in an
 // existing transaction should call createZoneAndIncidentExt with their tx.
 func createZoneAndIncident(
-	db *sqlx.DB,
+	db *orgdb.DB,
 	centrifugoClient *centrifugo.Client,
 	lat, lng float64,
 	zoneName string,
@@ -748,8 +756,9 @@ func createZoneAndIncidentExt(
 //	  "address":        "123 Main St, NYC",     // required if no bin_id (used as zone name)
 //	  "photo_url":      "https://..."           // optional
 //	}
-func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CreateManagerIncidentReport(root *sqlx.DB, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/manager/incident-report")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -888,8 +897,9 @@ func CreateManagerIncidentReport(db *sqlx.DB, centrifugoClient *centrifugo.Clien
 //	  "status":            "resolved",                      // optional: active, monitoring, resolved
 //	  "resolution_notes":  "Issue resolved by landlord"     // optional
 //	}
-func UpdateNoGoZone(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func UpdateNoGoZone(root *sqlx.DB, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		zoneID := chi.URLParam(r, "id")
 		log.Printf("📥 REQUEST: PATCH /api/manager/no-go-zones/%s", zoneID)
 
@@ -1046,8 +1056,9 @@ func UpdateNoGoZone(db *sqlx.DB, centrifugoClient *centrifugo.Client) http.Handl
 // Used by the frontend to show proximity warnings when placing bins or move destinations.
 //
 // Query params: lat, lng, radius (meters, default 800)
-func GetNearbyIncidents(db *sqlx.DB) http.HandlerFunc {
+func GetNearbyIncidents(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		latStr := r.URL.Query().Get("lat")
 		lngStr := r.URL.Query().Get("lng")
 		radiusStr := r.URL.Query().Get("radius")

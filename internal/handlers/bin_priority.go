@@ -12,6 +12,7 @@ import (
 	"ropacal-backend/internal/bindomain"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -73,8 +74,9 @@ func calculateBinPriority(bin models.Bin, moveRequest *models.BinMoveRequest, ha
 //   - filter: next_move_request, longest_unchecked, high_fill, has_check_recommendation, all (default)
 //   - status: active (default), all, retired, pending_move, in_storage
 //   - limit: max results (default: 100)
-func GetBinsWithPriority(db *sqlx.DB) http.HandlerFunc {
+func GetBinsWithPriority(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		sortBy := r.URL.Query().Get("sort")
 		if sortBy == "" {
 			sortBy = "priority"
@@ -256,8 +258,9 @@ func GetBinsWithPriority(db *sqlx.DB) http.HandlerFunc {
 // RetireBin marks a bin as retired
 // POST /api/manager/bins/{id}/retire
 // Body: { "reason": "optional reason", "disposal_action": "retire|store" }
-func RetireBin(db *sqlx.DB) http.HandlerFunc {
+func RetireBin(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Bin ID is required", http.StatusBadRequest)
@@ -361,8 +364,9 @@ func RetireBin(db *sqlx.DB) http.HandlerFunc {
 
 // ReactivateBin unretires a bin and sets its location
 // POST /api/manager/bins/{id}/reactivate
-func ReactivateBin(db *sqlx.DB) http.HandlerFunc {
+func ReactivateBin(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Bin ID is required", http.StatusBadRequest)

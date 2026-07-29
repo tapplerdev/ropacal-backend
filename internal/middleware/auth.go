@@ -19,10 +19,18 @@ type UserClaims struct {
 	UserID string `json:"user_id"`
 	Email  string `json:"email"`
 	Role   string `json:"role"`
+	// OrgID is the tenant the token was minted for (organizations.id). Empty
+	// on tokens minted before the multi-tenancy migration; middleware.Org
+	// decides what that means (nothing while single-tenant, 401 once live).
+	OrgID string `json:"org_id"`
 }
 
-// Auth middleware validates JWT token and adds user claims to context
+// Auth middleware validates JWT token and adds user claims to context.
+// It then hands off through Org, which binds the caller's organization-scoped
+// database handle (a no-op passthrough until the tenancy migration is live) —
+// so every Auth'd route group gets org context with no wiring changes.
 func Auth(next http.Handler) http.Handler {
+	next = Org(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		// log.Printf("🔐 AUTH MIDDLEWARE: %s %s", r.Method, r.URL.Path)
@@ -140,11 +148,24 @@ func Auth(next http.Handler) http.Handler {
 
 		// log.Printf("   ✓ Claims extracted: %v", claims)
 
-		// Convert to UserClaims struct
+		// Convert to UserClaims struct. Comma-ok assertions: a token missing a
+		// required claim must 401, never panic into Recoverer as a 500 — and
+		// pre-tenancy tokens legitimately have no org_id claim at all.
+		userID, okID := claims["user_id"].(string)
+		email, okEmail := claims["email"].(string)
+		role, okRole := claims["role"].(string)
+		if !okID || !okEmail || !okRole {
+			log.Printf("❌ Token missing required claims (user_id=%t email=%t role=%t)", okID, okEmail, okRole)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		orgID, _ := claims["org_id"].(string)
+
 		userClaims := UserClaims{
-			UserID: claims["user_id"].(string),
-			Email:  claims["email"].(string),
-			Role:   claims["role"].(string),
+			UserID: userID,
+			Email:  email,
+			Role:   role,
+			OrgID:  orgID,
 		}
 
 		// log.Printf("✅ Authenticated: %s (%s)", userClaims.Email, userClaims.Role)

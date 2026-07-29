@@ -9,6 +9,7 @@ import (
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 	"ropacal-backend/pkg/utils"
@@ -28,8 +29,9 @@ import (
 // the placement it feeds) — only the driver's gesture collapses, not the data.
 //
 // POST /api/driver/shift/complete-warehouse-run   body: { "task_ids": [...] }
-func CompleteWarehouseRun(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CompleteWarehouseRun(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -142,8 +144,9 @@ func CompleteWarehouseRun(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *cen
 // the driver's reason recorded on every row (same task_data shape as SkipTask).
 //
 // POST /api/driver/shift/skip-warehouse-run   body: { "task_ids": [...], "reason": "..." }
-func SkipWarehouseRun(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func SkipWarehouseRun(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")

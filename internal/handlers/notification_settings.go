@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"ropacal-backend/internal/orgdb"
+
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -84,8 +86,9 @@ type NotificationLogEntry struct {
 }
 
 // GetNotificationSettings returns current notification preferences
-func GetNotificationSettings(db *sqlx.DB) http.HandlerFunc {
+func GetNotificationSettings(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var configValue []byte
 		err := db.QueryRow(`SELECT value FROM config WHERE key = 'notification_settings'`).Scan(&configValue)
 
@@ -109,8 +112,9 @@ func GetNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 }
 
 // UpdateNotificationSettings saves notification preferences
-func UpdateNotificationSettings(db *sqlx.DB) http.HandlerFunc {
+func UpdateNotificationSettings(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Partial update (#14): start from the currently-stored settings (or defaults) so a
 		// partial PATCH overrides ONLY the fields it sends — json.Decode into a pre-populated
 		// struct leaves omitted fields at their existing values instead of blanking them to
@@ -197,14 +201,18 @@ func UpdateNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		_, err = db.Exec(`
+		// Conflict target flips to (organization_id, key) once tenancy is live
+		// (the migration replaces config's UNIQUE(key) with a composite). The
+		// INSERT arm's organization_id then comes from the column DEFAULT,
+		// fed by this request's app.org_id.
+		_, err = db.Exec(fmt.Sprintf(`
 			INSERT INTO config (key, value, updated_by, updated_at)
 			VALUES ('notification_settings', $1::jsonb, 'admin', CURRENT_TIMESTAMP)
-			ON CONFLICT (key) DO UPDATE SET
+			ON CONFLICT %s DO UPDATE SET
 				value = $1::jsonb,
 				updated_by = 'admin',
 				updated_at = CURRENT_TIMESTAMP
-		`, string(valueJSON))
+		`, orgdb.ConfigConflictTarget()), string(valueJSON))
 
 		if err != nil {
 			log.Printf("❌ Failed to save notification settings: %v", err)
@@ -221,8 +229,9 @@ func UpdateNotificationSettings(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetNotificationLog returns paginated notification history
-func GetNotificationLog(db *sqlx.DB) http.HandlerFunc {
+func GetNotificationLog(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		if page < 1 {
 			page = 1
@@ -288,7 +297,7 @@ func GetNotificationLog(db *sqlx.DB) http.HandlerFunc {
 }
 
 // LogNotification inserts a notification into the log table
-func LogNotification(db *sqlx.DB, notifType, title, body string, data interface{}, recipientsCount int) {
+func LogNotification(db *orgdb.DB, notifType, title, body string, data interface{}, recipientsCount int) {
 	dataJSON, _ := json.Marshal(data)
 	id := fmt.Sprintf("notif_%d", time.Now().UnixNano())
 

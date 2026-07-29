@@ -15,6 +15,7 @@ import (
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/websocket"
@@ -26,8 +27,9 @@ import (
 
 // GetPotentialLocations returns all potential locations (active or converted based on status query param)
 // GET /api/potential-locations?status=active|converted
-func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
+func GetPotentialLocations(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		status := r.URL.Query().Get("status")
 		log.Printf("🔍 [GET-POTENTIAL-LOCATIONS] Request for status: '%s'", status)
 
@@ -138,8 +140,9 @@ func GetPotentialLocations(db *sqlx.DB) http.HandlerFunc {
 // POST /api/potential-locations (requires authentication)
 // Accepts either a single object or an array of objects
 // Always returns an array of created locations
-func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CreatePotentialLocation(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Get user from context (set by auth middleware)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
@@ -282,8 +285,9 @@ func CreatePotentialLocation(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient
 
 // DeletePotentialLocation removes a potential location (hard delete)
 // DELETE /api/potential-locations/:id (requires admin role)
-func DeletePotentialLocation(db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func DeletePotentialLocation(root *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, "Missing location ID", http.StatusBadRequest)
@@ -387,8 +391,9 @@ func DeletePotentialLocation(db *sqlx.DB, redisClient *redis.Client, wsHub *webs
 
 // ConvertPotentialLocationToBin converts a potential location to an active bin
 // POST /api/potential-locations/:id/convert (requires admin role)
-func ConvertPotentialLocationToBin(db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func ConvertPotentialLocationToBin(root *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		id := chi.URLParam(r, "id")
 		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] ========== START ==========")
 		log.Printf("🔄 [CONVERT-POTENTIAL-LOCATION] Request received for location ID: %s", id)
@@ -652,8 +657,9 @@ func ConvertPotentialLocationToBin(db *sqlx.DB, redisClient *redis.Client, wsHub
 // GetNearbyPotentialLocations finds active potential locations within a radius of a bin's coordinates.
 // GET /api/bins/{binId}/nearby-potential-locations?max_distance=500
 // Requires: admin auth
-func GetNearbyPotentialLocations(db *sqlx.DB) http.HandlerFunc {
+func GetNearbyPotentialLocations(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "binId")
 		if binID == "" {
 			http.Error(w, "Missing bin ID", http.StatusBadRequest)

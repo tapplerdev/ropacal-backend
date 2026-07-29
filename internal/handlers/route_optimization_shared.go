@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/jmoiron/sqlx"
+	"ropacal-backend/internal/orgdb"
 )
 
 // errORToolsParse marks an OR-Tools failure that occurred while parsing the
@@ -31,30 +32,30 @@ var errOSRMRequest = errors.New("osrm request error")
 // int-matrix conversion, the OR-Tools CVRP request/response, and the
 // directional ("South"/"Central"/"North"/"Area %d") route naming.
 
-// defaultWarehouseLat / defaultWarehouseLng are the hardcoded fallback used when
-// the config table has no usable warehouse_location row.
-const (
-	defaultWarehouseLat = 37.6368013
-	defaultWarehouseLng = -122.1269379
-)
-
-// fetchWarehouseLocation reads the warehouse_location config row and returns its
-// latitude/longitude, falling back to the hardcoded default when the row is
-// missing, unparseable, or has a zero latitude (matching the prior behavior of
-// both handlers).
-func fetchWarehouseLocation(db *sqlx.DB) (lat, lng float64) {
-	lat, lng = defaultWarehouseLat, defaultWarehouseLng
+// fetchWarehouseLocation reads the warehouse_location config row and returns
+// its latitude/longitude. ok=false when the row is missing, unparseable, or
+// has a zero latitude — callers must respond with an error, never optimize.
+//
+// The old hardcoded Hayward fallback constants are DELETED on purpose: under
+// row-level security a tenant with no config row would have every route
+// silently anchored to a depot in the wrong city (plausible-looking output,
+// zero errors). Missing warehouse = loud failure, same contract as
+// resolveCurrentWarehouse.
+func fetchWarehouseLocation(db *orgdb.DB) (lat, lng float64, ok bool) {
 	var whJSON []byte
-	if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&whJSON); err == nil {
-		var wh struct {
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
-		}
-		if json.Unmarshal(whJSON, &wh) == nil && wh.Latitude != 0 {
-			lat, lng = wh.Latitude, wh.Longitude
-		}
+	if err := db.QueryRow(`SELECT value FROM config WHERE key = 'warehouse_location'`).Scan(&whJSON); err != nil {
+		log.Printf("❌ Warehouse location unavailable from config (NO fallback — configure the warehouse): %v", err)
+		return 0, 0, false
 	}
-	return lat, lng
+	var wh struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+	if err := json.Unmarshal(whJSON, &wh); err != nil || wh.Latitude == 0 {
+		log.Printf("❌ Warehouse location config unusable (parse err: %v, lat: %v) — NO fallback", err, wh.Latitude)
+		return 0, 0, false
+	}
+	return wh.Latitude, wh.Longitude, true
 }
 
 // osrmServerURL returns the configured OSRM server URL or the public default.

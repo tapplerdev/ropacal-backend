@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/redis"
 
 	"github.com/go-chi/chi/v5"
@@ -49,7 +50,7 @@ type AffectedTask struct {
 // originating bin or move-request ID). The returned map is keyed by shift ID.
 func queryActiveShiftDependencies(
 	w http.ResponseWriter,
-	db *sqlx.DB,
+	db *orgdb.DB,
 	filterClause string,
 	arg interface{},
 	enrichTask func(task *AffectedTask),
@@ -142,8 +143,9 @@ func dependenciesFromShiftMap(shiftMap map[string]*ActiveShiftDependency) []Acti
 
 // CheckBinDependencies checks if a bin is referenced in any active shifts
 // GET /api/bins/:id/active-shift-dependencies
-func CheckBinDependencies(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
+func CheckBinDependencies(root *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 
 		shiftMap, ok := queryActiveShiftDependencies(w, db, "rt.bin_id = $1", binID, func(task *AffectedTask) {
@@ -232,8 +234,9 @@ func CheckBinDependencies(db *sqlx.DB, redisClient *redis.Client) http.HandlerFu
 
 // CheckMoveRequestDependencies checks if a move request is referenced in any active shifts
 // GET /api/manager/bins/move-requests/:id/active-shift-dependencies
-func CheckMoveRequestDependencies(db *sqlx.DB) http.HandlerFunc {
+func CheckMoveRequestDependencies(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		moveRequestID := chi.URLParam(r, "id")
 
 		shiftMap, ok := queryActiveShiftDependencies(w, db, "rt.move_request_id = $1", moveRequestID, func(task *AffectedTask) {
@@ -250,8 +253,9 @@ func CheckMoveRequestDependencies(db *sqlx.DB) http.HandlerFunc {
 
 // CheckPotentialLocationDependencies checks if a potential location is referenced in any active shifts
 // GET /api/potential-locations/:id/active-shift-dependencies
-func CheckPotentialLocationDependencies(db *sqlx.DB) http.HandlerFunc {
+func CheckPotentialLocationDependencies(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		potentialLocationID := chi.URLParam(r, "id")
 
 		// Only placement tasks reference a potential location.

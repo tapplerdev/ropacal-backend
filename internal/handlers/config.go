@@ -3,10 +3,12 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
 
@@ -14,8 +16,9 @@ import (
 )
 
 // GetWarehouseLocation returns the current warehouse location from config
-func GetWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
+func GetWarehouseLocation(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var configValue []byte
 		err := db.QueryRow(`
 			SELECT value
@@ -48,8 +51,9 @@ func GetWarehouseLocation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // UpdateWarehouseLocation updates the warehouse location in config
-func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func UpdateWarehouseLocation(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var input models.WarehouseLocation
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			http.Error(w, `{"error":"Invalid request body"}`, http.StatusBadRequest)
@@ -85,16 +89,19 @@ func UpdateWarehouseLocation(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *
 			return
 		}
 
-		// Update or insert warehouse location (no user tracking for now)
-		_, err = db.Exec(`
+		// Update or insert warehouse location (no user tracking for now).
+		// Conflict target flips to (organization_id, key) once tenancy is
+		// live; the INSERT arm's organization_id then comes from the column
+		// DEFAULT, fed by this request's app.org_id.
+		_, err = db.Exec(fmt.Sprintf(`
 			INSERT INTO config (key, value, updated_by, updated_at)
 			VALUES ('warehouse_location', $1, 'system', CURRENT_TIMESTAMP)
-			ON CONFLICT (key)
+			ON CONFLICT %s
 			DO UPDATE SET
 				value = EXCLUDED.value,
 				updated_by = 'system',
 				updated_at = CURRENT_TIMESTAMP
-		`, warehouseJSON)
+		`, orgdb.ConfigConflictTarget()), warehouseJSON)
 
 		if err != nil {
 			log.Printf("❌ Failed to update warehouse location: %v", err)

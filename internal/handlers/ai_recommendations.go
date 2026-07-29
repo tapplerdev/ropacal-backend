@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	pkg "ropacal-backend/pkg/utils"
 
 	"github.com/go-chi/chi/v5"
@@ -35,8 +36,9 @@ type AIRecommendation struct {
 }
 
 // GetAIRecommendations returns filtered list of AI recommendations
-func GetAIRecommendations(db *sqlx.DB) http.HandlerFunc {
+func GetAIRecommendations(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		status := r.URL.Query().Get("status")
 		recType := r.URL.Query().Get("type")
 		limit := r.URL.Query().Get("limit")
@@ -113,8 +115,9 @@ func GetAIRecommendations(db *sqlx.DB) http.HandlerFunc {
 }
 
 // AcceptRecommendation marks a recommendation as accepted
-func AcceptRecommendation(db *sqlx.DB) http.HandlerFunc {
+func AcceptRecommendation(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			pkg.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -145,8 +148,9 @@ func AcceptRecommendation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // DismissRecommendation marks a recommendation as dismissed
-func DismissRecommendation(db *sqlx.DB) http.HandlerFunc {
+func DismissRecommendation(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			pkg.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -177,8 +181,9 @@ func DismissRecommendation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // SnoozeRecommendation snoozes a recommendation until a specified time
-func SnoozeRecommendation(db *sqlx.DB) http.HandlerFunc {
+func SnoozeRecommendation(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			pkg.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -216,8 +221,9 @@ func SnoozeRecommendation(db *sqlx.DB) http.HandlerFunc {
 }
 
 // GetPendingCount returns count of pending recommendations (for sidebar badge)
-func GetPendingRecommendationCount(db *sqlx.DB) http.HandlerFunc {
+func GetPendingRecommendationCount(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		now := time.Now().Unix()
 		var count int
 		err := db.Get(&count, `SELECT COUNT(*) FROM ai_recommendations WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > $1) AND (snoozed_until IS NULL OR snoozed_until <= $1)`, now)

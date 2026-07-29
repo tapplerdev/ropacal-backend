@@ -7,35 +7,33 @@ import (
 	"log"
 	"strings"
 	"time"
-
-	"github.com/jmoiron/sqlx"
 )
 
 // notificationSettings holds all configurable notification preferences.
 type notificationSettings struct {
-	DriftAlertsEnabled        bool   `json:"drift_alerts_enabled"`
-	DriftCheckIntervalMinutes int    `json:"drift_check_interval_minutes"`
-	DriftThresholdMeters      int    `json:"drift_threshold_meters"`
-	MorningDigestEnabled      bool   `json:"morning_digest_enabled"`
-	MorningDigestHour         int    `json:"morning_digest_hour"`
-	MorningDigestMinute       int    `json:"morning_digest_minute"`
-	AfternoonDigestEnabled    bool   `json:"afternoon_digest_enabled"`
-	AfternoonDigestHour       int    `json:"afternoon_digest_hour"`
-	AfternoonDigestMinute     int    `json:"afternoon_digest_minute"`
-	ShiftNotificationsEnabled bool   `json:"shift_notifications_enabled"`
-	MoveRequestNotifEnabled   bool   `json:"move_request_notifications_enabled"`
-	Timezone                  string `json:"timezone"`
-	OverdueMoveAlertsEnabled    bool `json:"overdue_move_alerts_enabled"`
-	OverdueMoveCheckIntervalMin int  `json:"overdue_move_check_interval_minutes"`
-	DueSoonAlertsEnabled        bool `json:"due_soon_alerts_enabled"`
-	DueSoonHoursBefore          int  `json:"due_soon_hours_before"`
+	DriftAlertsEnabled          bool   `json:"drift_alerts_enabled"`
+	DriftCheckIntervalMinutes   int    `json:"drift_check_interval_minutes"`
+	DriftThresholdMeters        int    `json:"drift_threshold_meters"`
+	MorningDigestEnabled        bool   `json:"morning_digest_enabled"`
+	MorningDigestHour           int    `json:"morning_digest_hour"`
+	MorningDigestMinute         int    `json:"morning_digest_minute"`
+	AfternoonDigestEnabled      bool   `json:"afternoon_digest_enabled"`
+	AfternoonDigestHour         int    `json:"afternoon_digest_hour"`
+	AfternoonDigestMinute       int    `json:"afternoon_digest_minute"`
+	ShiftNotificationsEnabled   bool   `json:"shift_notifications_enabled"`
+	MoveRequestNotifEnabled     bool   `json:"move_request_notifications_enabled"`
+	Timezone                    string `json:"timezone"`
+	OverdueMoveAlertsEnabled    bool   `json:"overdue_move_alerts_enabled"`
+	OverdueMoveCheckIntervalMin int    `json:"overdue_move_check_interval_minutes"`
+	DueSoonAlertsEnabled        bool   `json:"due_soon_alerts_enabled"`
+	DueSoonHoursBefore          int    `json:"due_soon_hours_before"`
 	// Daily reports (replace morning/afternoon digest)
-	DailyMoveReportEnabled bool `json:"daily_move_report_enabled"`
-	DailyMoveReportHour    int  `json:"daily_move_report_hour"`
-	DailyMoveReportMinute  int  `json:"daily_move_report_minute"`
-	DailyBinCheckEnabled   bool `json:"daily_bin_check_enabled"`
-	DailyBinCheckHour      int  `json:"daily_bin_check_hour"`
-	DailyBinCheckMinute    int  `json:"daily_bin_check_minute"`
+	DailyMoveReportEnabled    bool `json:"daily_move_report_enabled"`
+	DailyMoveReportHour       int  `json:"daily_move_report_hour"`
+	DailyMoveReportMinute     int  `json:"daily_move_report_minute"`
+	DailyBinCheckEnabled      bool `json:"daily_bin_check_enabled"`
+	DailyBinCheckHour         int  `json:"daily_bin_check_hour"`
+	DailyBinCheckMinute       int  `json:"daily_bin_check_minute"`
 	DailyBatteryReportEnabled bool `json:"daily_battery_report_enabled"`
 	DailyBatteryReportHour    int  `json:"daily_battery_report_hour"`
 	DailyBatteryReportMinute  int  `json:"daily_battery_report_minute"`
@@ -62,18 +60,18 @@ func defaultNotificationSettings() notificationSettings {
 		DailyMoveReportEnabled:      true,
 		DailyMoveReportHour:         8,
 		DailyMoveReportMinute:       0,
-		DailyBinCheckEnabled:          true,
-		DailyBinCheckHour:             9,
-		DailyBinCheckMinute:           0,
-		DailyBatteryReportEnabled:     true,
-		DailyBatteryReportHour:        10,
-		DailyBatteryReportMinute:      0,
+		DailyBinCheckEnabled:        true,
+		DailyBinCheckHour:           9,
+		DailyBinCheckMinute:         0,
+		DailyBatteryReportEnabled:   true,
+		DailyBatteryReportHour:      10,
+		DailyBatteryReportMinute:    0,
 	}
 }
 
-func loadNotificationSettings(db *sqlx.DB) notificationSettings {
+func loadNotificationSettings(db Querier) notificationSettings {
 	var configValue []byte
-	err := db.QueryRow(`SELECT value FROM config WHERE key = 'notification_settings'`).Scan(&configValue)
+	err := db.Get(&configValue, `SELECT value FROM config WHERE key = 'notification_settings'`)
 	if err == sql.ErrNoRows {
 		log.Println("ℹ️  [Settings] No notification_settings in config table — using defaults (first run?)")
 		return defaultNotificationSettings()
@@ -126,7 +124,7 @@ func loadNotificationSettings(db *sqlx.DB) notificationSettings {
 	return settings
 }
 
-func logNotification(db *sqlx.DB, notifType, title, body string, data interface{}, recipientsCount int) {
+func logNotification(db Querier, notifType, title, body string, data interface{}, recipientsCount int) {
 	dataJSON, _ := json.Marshal(data)
 	id := fmt.Sprintf("notif_%d", time.Now().UnixNano())
 
@@ -169,7 +167,7 @@ func preferenceCategory(notifType string) string {
 }
 
 // GetAdminUserIDs returns all admin user IDs.
-func GetAdminUserIDs(db *sqlx.DB) ([]string, error) {
+func GetAdminUserIDs(db Querier) ([]string, error) {
 	var ids []string
 	err := db.Select(&ids, `SELECT id FROM users WHERE role = 'admin'`)
 	return ids, err
@@ -181,7 +179,7 @@ func GetAdminUserIDs(db *sqlx.DB) ([]string, error) {
 // Note: Real-time Centrifugo events are published by the callers (digest_scheduler,
 // move_request_monitor, etc.) with the semantic event type, NOT here.
 func CreateNotificationForUsers(
-	db *sqlx.DB,
+	db Querier,
 	recipientUserIDs []string,
 	notifType, title, body string,
 	data interface{},
@@ -207,10 +205,10 @@ func CreateNotificationForUsers(
 	for _, userID := range recipientUserIDs {
 		if prefCol != "" {
 			var enabled bool
-			err := db.QueryRow(
+			err := db.Get(&enabled,
 				fmt.Sprintf(`SELECT COALESCE((SELECT %s FROM user_notification_preferences WHERE user_id = $1), true)`, prefCol),
 				userID,
-			).Scan(&enabled)
+			)
 			if err == nil && !enabled {
 				continue
 			}
@@ -232,7 +230,7 @@ func CreateNotificationForUsers(
 }
 
 // UpdateDeliveryStatus updates the delivery status of a user notification.
-func UpdateDeliveryStatus(db *sqlx.DB, notifID, status string) {
+func UpdateDeliveryStatus(db Querier, notifID, status string) {
 	_, err := db.Exec(`UPDATE user_notifications SET delivery_status = $1 WHERE id = $2`, status, notifID)
 	if err != nil {
 		log.Printf("⚠️ Failed to update delivery status for %s: %v", notifID, err)

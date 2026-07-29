@@ -14,6 +14,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
@@ -23,8 +24,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func GetBins(db *sqlx.DB) http.HandlerFunc {
+func GetBins(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		// Auto-uncheck bins older than 3 days
 		threeDaysAgo := time.Now().Add(-3 * 24 * time.Hour).Unix()
 		_, err := db.Exec(`
@@ -63,8 +65,9 @@ func GetBins(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func CreateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CreateBin(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		var req models.CreateBinRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -242,8 +245,9 @@ func CreateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 	}
 }
 
-func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func UpdateBin(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		id := chi.URLParam(r, "id")
 		log.Printf("🔧 [UPDATE-BIN] Request received for bin ID: %s", id)
 
@@ -957,8 +961,9 @@ func UpdateBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 	}
 }
 
-func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func DeleteBin(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -1042,8 +1047,9 @@ func DeleteBin(db *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo.C
 }
 
 // LoadRealBins clears test data and loads real production bins (admin only)
-func LoadRealBins(db *sqlx.DB) http.HandlerFunc {
+func LoadRealBins(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		fmt.Println("🗑️  REQUEST: POST /api/admin/bins/load-real")
 
 		// Step 1: Delete all non-Dallas bins
@@ -1158,8 +1164,9 @@ INSERT INTO bins (id, bin_number, current_street, city, zip, last_moved, last_ch
 }
 
 // FixBinStatus lowercases all bin status values for Flutter compatibility
-func FixBinStatus(db *sqlx.DB) http.HandlerFunc {
+func FixBinStatus(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		fmt.Println("🔧 REQUEST: POST /api/admin/bins/fix-status")
 
 		// Update all bin statuses to lowercase
@@ -1184,8 +1191,9 @@ func FixBinStatus(db *sqlx.DB) http.HandlerFunc {
 
 // GetBinChangeLog returns the change log for a specific bin
 // GET /api/bins/:id/change-log
-func GetBinChangeLog(db *sqlx.DB) http.HandlerFunc {
+func GetBinChangeLog(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Missing bin ID", http.StatusBadRequest)

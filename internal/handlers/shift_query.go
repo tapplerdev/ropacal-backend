@@ -8,6 +8,7 @@ import (
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 	"strconv"
 	"time"
@@ -166,8 +167,9 @@ func GetCurrentShift(store ShiftStore) http.HandlerFunc {
 }
 
 // GetShiftByID retrieves a specific shift by its ID (manager/admin only)
-func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
+func GetShiftByID(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "shiftId")
 		log.Printf("📥 REQUEST: GET /api/manager/shifts/%s", shiftID)
 
@@ -232,8 +234,9 @@ func GetShiftByID(db *sqlx.DB) http.HandlerFunc {
 // GetAllShifts returns a list of all shifts with optional filtering
 // GET /api/manager/shifts
 // Query params: status, driver_id, start_date, end_date, limit, offset
-func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
+func GetAllShifts(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/manager/shifts")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -405,8 +408,9 @@ func GetAllShifts(db *sqlx.DB) http.HandlerFunc {
 // GetManagerShiftHistory returns paginated completed-shift history with per-shift task stats.
 // GET /api/manager/shifts/history
 // Query params: driver_id, start_date (unix), end_date (unix), limit, offset
-func GetManagerShiftHistory(db *sqlx.DB) http.HandlerFunc {
+func GetManagerShiftHistory(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/manager/shifts/history")
 
 		_, ok := middleware.GetUserFromContext(r)
@@ -563,8 +567,9 @@ func GetManagerShiftHistory(db *sqlx.DB) http.HandlerFunc {
 
 // GetShiftHistoryTasks returns the granular per-task breakdown for a single completed shift.
 // GET /api/manager/shifts/history/{shiftId}/tasks
-func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
+func GetShiftHistoryTasks(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "shiftId")
 		if shiftID == "" {
 			utils.RespondError(w, http.StatusBadRequest, "shiftId is required")
@@ -727,8 +732,9 @@ func GetShiftHistoryTasks(db *sqlx.DB) http.HandlerFunc {
 // PreflightCheck validates GPS readiness before starting a shift
 // Returns: ready status, location cached, Centrifugo connection health
 
-func GetDriverShiftHistory(db *sqlx.DB) http.HandlerFunc {
+func GetDriverShiftHistory(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/driver/shift-history")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -770,8 +776,9 @@ func GetDriverShiftHistory(db *sqlx.DB) http.HandlerFunc {
 
 // GetDriverShiftHistoryByID returns all completed shifts for a specific driver (manager access)
 // GET /api/manager/drivers/{driverId}/shifts
-func GetDriverShiftHistoryByID(db *sqlx.DB) http.HandlerFunc {
+func GetDriverShiftHistoryByID(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		driverID := chi.URLParam(r, "driverId")
 		log.Printf("📥 REQUEST: GET /api/manager/drivers/%s/shifts", driverID)
 
@@ -876,8 +883,9 @@ func GetShiftDetails(store ShiftStore) http.HandlerFunc {
 }
 
 // GetShiftMoveRequests returns all move requests assigned to a shift
-func GetShiftMoveRequests(db *sqlx.DB) http.HandlerFunc {
+func GetShiftMoveRequests(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: GET /api/driver/shift-move-requests")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -1022,7 +1030,7 @@ func calculateLogicalBinCounts(bins []models.ShiftBinWithDetails) (int, int) {
 
 // getShiftTasksWithDetails fetches shift tasks with full details
 // ONLY uses route_tasks table (new unified task system)
-func getShiftTasksWithDetails(db *sqlx.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
+func getShiftTasksWithDetails(db *orgdb.DB, shiftID string) ([]models.ShiftBinWithDetails, error) {
 	// Query route_tasks table with enhanced fields for all task types
 	query := `
 		SELECT

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/optimization"
 
 	"github.com/go-chi/chi/v5"
@@ -37,8 +38,9 @@ type TaskRow struct {
 }
 
 // CompareOptimizerForShift compares Mapbox v2 vs HERE Maps optimization
-func CompareOptimizerForShift(db *sqlx.DB) http.HandlerFunc {
+func CompareOptimizerForShift(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "id")
 		log.Printf("🔍 Comparing optimization for shift: %s", shiftID)
 

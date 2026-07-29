@@ -10,6 +10,7 @@ import (
 
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
 
@@ -27,7 +28,8 @@ const (
 // StaleShiftMonitor periodically checks for active shifts with no GPS updates
 // and auto-ends them with end_reason "driver_disconnected".
 type StaleShiftMonitor struct {
-	db               *sqlx.DB
+	root             *sqlx.DB  // unscoped pool — org enumeration only
+	db               *orgdb.DB // org-bound handle for the CURRENT per-org pass (see checkStaleShifts)
 	redisClient      *redis.Client
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
@@ -51,7 +53,8 @@ type activeShiftRow struct {
 // NewStaleShiftMonitor creates a new monitor.
 func NewStaleShiftMonitor(db *sqlx.DB, redisClient *redis.Client, fcmService *FCMService, centrifugoClient *centrifugo.Client) *StaleShiftMonitor {
 	return &StaleShiftMonitor{
-		db:               db,
+		root:             db,
+		db:               orgdb.Passthrough(db),
 		redisClient:      redisClient,
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
@@ -88,7 +91,21 @@ func (m *StaleShiftMonitor) Stop() {
 	m.stopChan <- true
 }
 
+// checkStaleShifts runs one sweep per active organization. This worker has
+// the highest blast radius of the six — it auto-ends shifts and archives them
+// to shift_history — so its reads AND its auto-end transaction must run under
+// the owning tenant's app.org_id (the snapshot-retention DELETE it issues is
+// likewise org-scoped by RLS instead of fleet-wide).
 func (m *StaleShiftMonitor) checkStaleShifts() {
+	orgdb.ForEachActiveOrg(m.root, "StaleShiftMonitor", func(d *orgdb.DB) error {
+		o := *m // shallow copy: shared clients/ticker, per-org db
+		o.db = d
+		o.checkStaleShiftsOrg()
+		return nil
+	})
+}
+
+func (m *StaleShiftMonitor) checkStaleShiftsOrg() {
 	// Only check active shifts (not paused — driver intentionally paused)
 	// First: auto-end any shifts where ready_to_end_at expired (driver was at warehouse, GPS stopped)
 	var readyToEndShifts []struct {

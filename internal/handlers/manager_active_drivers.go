@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/redis"
 
 	"github.com/jmoiron/sqlx"
@@ -57,8 +58,9 @@ type AllDriverResponse struct {
 
 // GetActiveDrivers returns all drivers publishing location data
 // Includes shift info if they're on an active shift
-func GetActiveDrivers(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
+func GetActiveDrivers(root *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Println("📋 GetActiveDrivers: Fetching drivers from Redis...")
 
 		ctx := context.Background()

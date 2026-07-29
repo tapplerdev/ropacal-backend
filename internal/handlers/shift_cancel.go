@@ -9,6 +9,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/websocket"
@@ -19,8 +20,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func ClearAllShifts(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("🗑️  REQUEST: DELETE /api/admin/shifts/clear")
 
 		// Get all affected driver IDs before deleting
@@ -106,8 +108,9 @@ func ClearAllShifts(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 // UpdateLocation handles driver location updates (POST /api/driver/location)
 // Called every 10 seconds when driver is on active shift
 
-func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CancelShift(root *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "id")
 		log.Printf("❌ REQUEST: PUT /api/manager/shifts/%s/cancel", shiftID)
 
@@ -335,8 +338,9 @@ func CancelShift(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMServ
 
 // CancelAllActiveShifts cancels all active or paused shifts
 // POST /api/manager/shifts/cancel-all-active
-func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CancelAllActiveShifts(root *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("❌ REQUEST: POST /api/manager/shifts/cancel-all-active")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -556,8 +560,9 @@ func CancelAllActiveShifts(db *sqlx.DB, wsHub *websocket.Hub, fcmService *servic
 // test/demo shifts — the only prior removal option was ClearAllShifts, which
 // wipes every shift.
 // DELETE /api/manager/shifts/{shiftId}/purge
-func PurgeShift(db *sqlx.DB) http.HandlerFunc {
+func PurgeShift(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "shiftId")
 		if shiftID == "" {
 			utils.RespondError(w, http.StatusBadRequest, "shiftId is required")

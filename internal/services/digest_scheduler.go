@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -20,7 +21,8 @@ import (
 // - Daily Move Report: consolidates overdue/urgent/soon moves + warehouse bins into ONE notification with snapshot
 // - Daily Bin Check Report: bins not checked in 7+ days, grouped by severity
 type DigestScheduler struct {
-	db               *sqlx.DB
+	root             *sqlx.DB  // unscoped pool — org enumeration only
+	db               *orgdb.DB // org-bound handle for the CURRENT pass (see checkAndSend / ForOrg)
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
 	bridgeURL        string
@@ -44,13 +46,24 @@ type DigestResult struct {
 // NewDigestScheduler creates a new digest scheduler that checks every minute.
 func NewDigestScheduler(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *DigestScheduler {
 	return &DigestScheduler{
-		db:               db,
+		root:             db,
+		db:               orgdb.Passthrough(db),
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
 		bridgeURL:        os.Getenv("FINDMY_BRIDGE_URL"),
 		ticker:           time.NewTicker(1 * time.Minute),
 		stopChan:         make(chan bool),
 	}
+}
+
+// ForOrg returns a shallow copy of the scheduler bound to the given org
+// handle. The manual-trigger endpoint uses it so an admin's digest runs
+// against THEIR tenant only; the per-minute ticker uses the same mechanism
+// for each active org. Shared clients are inherited; only db differs.
+func (s *DigestScheduler) ForOrg(d *orgdb.DB) *DigestScheduler {
+	o := *s
+	o.db = d
+	return &o
 }
 
 // Start begins the background scheduler goroutine.
@@ -80,8 +93,19 @@ func (s *DigestScheduler) Stop() {
 	s.stopChan <- true
 }
 
-// checkAndSend checks the current time against configured report times.
+// checkAndSend runs one time-window check per active organization. Each org
+// evaluates ITS OWN notification settings (timezone, report times) and its own
+// dedup keys — the config conflict target is per-org once tenancy is live, so
+// one org sending its 8 AM report can never mark another org's as sent.
 func (s *DigestScheduler) checkAndSend() {
+	orgdb.ForEachActiveOrg(s.root, "DailyReport", func(d *orgdb.DB) error {
+		s.ForOrg(d).checkAndSendOrg()
+		return nil
+	})
+}
+
+// checkAndSendOrg checks the current time against this org's configured report times.
+func (s *DigestScheduler) checkAndSendOrg() {
 	settings := loadNotificationSettings(s.db)
 
 	loc, err := time.LoadLocation(settings.Timezone)
@@ -780,15 +804,18 @@ func (s *DigestScheduler) fetchBridgeAirtagLocations() ([]AirtagEntry, error) {
 	return resp.Data, nil
 }
 
-// updateConfigTimestamp upserts the config key with today's date.
+// updateConfigTimestamp upserts the config key with today's date. The conflict
+// target flips to (organization_id, key) once tenancy is live, which is what
+// makes the daily-report dedup PER TENANT — one org sending its report must
+// never mark every other org's as already sent.
 func (s *DigestScheduler) updateConfigTimestamp(key, date string) {
 	value := fmt.Sprintf(`{"date": "%s", "timestamp": %d}`, date, time.Now().Unix())
-	_, err := s.db.Exec(`
+	_, err := s.db.Exec(fmt.Sprintf(`
 		INSERT INTO config (key, value, updated_by, updated_at)
 		VALUES ($1, $2::jsonb, 'system', CURRENT_TIMESTAMP)
-		ON CONFLICT (key)
+		ON CONFLICT %s
 		DO UPDATE SET value = $2::jsonb, updated_by = 'system', updated_at = CURRENT_TIMESTAMP
-	`, key, value)
+	`, orgdb.ConfigConflictTarget()), key, value)
 	if err != nil {
 		log.Printf("⚠️  [DailyReport] Failed to update config %s: %v", key, err)
 	}

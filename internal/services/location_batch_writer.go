@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/redis"
 
 	"github.com/jmoiron/sqlx"
@@ -15,7 +16,8 @@ import (
 // LocationBatchWriter periodically writes driver locations from Redis to PostgreSQL
 // This allows fast writes to Redis while maintaining a persistent historical record
 type LocationBatchWriter struct {
-	db          *sqlx.DB
+	root        *sqlx.DB  // unscoped pool — org enumeration only
+	db          *orgdb.DB // org-bound handle for the CURRENT per-org pass (see writeBatch)
 	redisClient *redis.Client
 	ticker      *time.Ticker
 	stopChan    chan bool
@@ -24,7 +26,8 @@ type LocationBatchWriter struct {
 // NewLocationBatchWriter creates a new batch writer that runs every 30 seconds
 func NewLocationBatchWriter(db *sqlx.DB, redisClient *redis.Client) *LocationBatchWriter {
 	return &LocationBatchWriter{
-		db:          db,
+		root:        db,
+		db:          orgdb.Passthrough(db),
 		redisClient: redisClient,
 		ticker:      time.NewTicker(30 * time.Second),
 		stopChan:    make(chan bool),
@@ -56,8 +59,23 @@ func (w *LocationBatchWriter) Stop() {
 	w.stopChan <- true
 }
 
-// writeBatch reads all driver locations from Redis and inserts them into PostgreSQL
+// writeBatch runs one flush per active organization. The Redis snapshot is
+// fleet-wide; each org's pass only persists ITS OWN drivers (see the EXISTS
+// guard in writeBatchOrg), so every driver row is written exactly once, under
+// the right tenant. Single-tenant mode is one passthrough pass — unchanged
+// behavior.
 func (w *LocationBatchWriter) writeBatch() {
+	orgdb.ForEachActiveOrg(w.root, "BatchWriter", func(d *orgdb.DB) error {
+		o := *w // shallow copy: shared redis/ticker, per-org db
+		o.db = d
+		o.writeBatchOrg()
+		return nil
+	})
+}
+
+// writeBatchOrg reads all driver locations from Redis and upserts the ones
+// belonging to this pass's organization into PostgreSQL.
+func (w *LocationBatchWriter) writeBatchOrg() {
 	ctx := context.Background()
 
 	// Get all driver locations from Redis
@@ -94,9 +112,35 @@ func (w *LocationBatchWriter) writeBatch() {
 			updated_at = EXCLUDED.updated_at,
 			is_connected = true
 	`
+	if orgdb.Migrated() {
+		// Tenancy live: the Redis snapshot spans every tenant's drivers, but
+		// this pass must only write drivers that belong to ITS org. Under RLS
+		// only this org's users rows are visible, so the EXISTS drops foreign
+		// drivers from this pass (their own org's pass persists them). Without
+		// it, iterating org B would mint org A's driver row with org B's
+		// organization_id — a cross-tenant GPS leak no constraint catches
+		// (driver_current_location has no FK to users).
+		query = `
+		INSERT INTO driver_current_location
+		(driver_id, latitude, longitude, heading, speed, accuracy, shift_id, timestamp, updated_at)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, EXTRACT(EPOCH FROM NOW())::BIGINT
+		WHERE EXISTS (SELECT 1 FROM users WHERE id = $1)
+		ON CONFLICT (driver_id) DO UPDATE SET
+			latitude = EXCLUDED.latitude,
+			longitude = EXCLUDED.longitude,
+			heading = EXCLUDED.heading,
+			speed = EXCLUDED.speed,
+			accuracy = EXCLUDED.accuracy,
+			shift_id = EXCLUDED.shift_id,
+			timestamp = EXCLUDED.timestamp,
+			updated_at = EXCLUDED.updated_at,
+			is_connected = true
+	`
+	}
 
 	successCount := 0
 	errorCount := 0
+	skippedCount := 0
 
 	for driverID, locationJSON := range locations {
 		var location struct {
@@ -117,7 +161,7 @@ func (w *LocationBatchWriter) writeBatch() {
 
 		// Upsert to PostgreSQL
 		timestampSec := location.Timestamp / 1000 // Convert milliseconds to seconds
-		_, err := w.db.Exec(query,
+		res, err := w.db.Exec(query,
 			driverID,
 			location.Latitude,
 			location.Longitude,
@@ -131,10 +175,16 @@ func (w *LocationBatchWriter) writeBatch() {
 		if err != nil {
 			log.Printf("⚠️  [BatchWriter] Failed to insert location for driver %s: %v", driverID, err)
 			errorCount++
+		} else if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+			skippedCount++ // another org's driver — persisted by that org's pass
 		} else {
 			successCount++
 		}
 	}
 
-	log.Printf("✅ [BatchWriter] Batch complete: %d success, %d errors", successCount, errorCount)
+	if skippedCount > 0 {
+		log.Printf("✅ [BatchWriter] Batch complete: %d success, %d errors, %d other-org (skipped)", successCount, errorCount, skippedCount)
+	} else {
+		log.Printf("✅ [BatchWriter] Batch complete: %d success, %d errors", successCount, errorCount)
+	}
 }

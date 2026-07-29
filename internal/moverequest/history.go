@@ -266,7 +266,7 @@ func LogUpdated(db sqlx.Ext, moveRequestID string, actorID string, actorName str
 }
 
 // GetHistory retrieves the full history for a move request
-func GetHistory(db *sqlx.DB, moveRequestID string) ([]models.MoveRequestHistoryResponse, error) {
+func GetHistory(db DB, moveRequestID string) ([]models.MoveRequestHistoryResponse, error) {
 	query := `
 		SELECT
 			id, move_request_id, action_type, actor_id, actor_name, actor_role,

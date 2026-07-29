@@ -15,6 +15,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -26,8 +27,9 @@ import (
 
 // shiftHistoryExec is satisfied by both *sqlx.DB and *sqlx.Tx, allowing
 // archiveShift to run against a plain connection or inside a transaction.
-func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
+func PreflightCheck(root *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/driver/shift/preflight")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -196,8 +198,9 @@ func PreflightCheck(db *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 }
 
 // driverStartLocation is a resolved GPS fix used as a route's start point.
-func StartShift(db *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func StartShift(root *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/driver/shift/start")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -758,8 +761,9 @@ func ResumeShift(store ShiftStore, hub *websocket.Hub, centrifugoClient *centrif
 }
 
 // EndShift ends the current shift
-func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func EndShift(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		userClaims, ok := middleware.GetUserFromContext(r)
 		if !ok {
 			utils.RespondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -1005,8 +1009,9 @@ func EndShift(db *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Clie
 }
 
 // CompleteShiftBin marks a task as completed within an active shift (collection, pickup, dropoff, warehouse, placement)
-func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func SkipTask(root *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/driver/shift/skip-task")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -1195,7 +1200,7 @@ func SkipTask(db *sqlx.DB, redisClient *redis.Client, hub *websocket.Hub, centri
 // POST /api/manager/shifts/create-with-tasks. It answers 410 (instead of the
 // route being deleted outright) so any unknown caller fails loudly and shows
 // up in the logs rather than silently minting broken shifts.
-func AssignRoute(db *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func AssignRoute(root *sqlx.DB, hub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("⛔ 410: legacy /api/manager/assign-route called — use /api/manager/shifts/create-with-tasks")
 		utils.RespondError(w, http.StatusGone, "This endpoint has been retired. Use POST /api/manager/shifts/create-with-tasks instead.")

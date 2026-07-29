@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ropacal-backend/internal/middleware"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/pkg/utils"
 
 	"github.com/jmoiron/sqlx"
@@ -52,8 +53,9 @@ type routeStats struct {
 }
 
 // POST /api/manager/routes/generate-smart
-func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
+func GenerateSmartRoutes(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/manager/routes/generate-smart")
 
 		_, ok := middleware.GetUserFromContext(r)
@@ -191,7 +193,11 @@ func GenerateSmartRoutes(db *sqlx.DB) http.HandlerFunc {
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 		// Step 4: Fetch warehouse location
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-		warehouseLat, warehouseLng := fetchWarehouseLocation(db)
+		warehouseLat, warehouseLng, whOK := fetchWarehouseLocation(db)
+		if !whOK {
+			http.Error(w, `{"error":"warehouse location is not configured"}`, http.StatusPreconditionFailed)
+			return
+		}
 		log.Printf("🏭 Warehouse: (%.6f, %.6f)", warehouseLat, warehouseLng)
 
 		// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

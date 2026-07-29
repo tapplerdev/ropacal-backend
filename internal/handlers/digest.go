@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 )
 
@@ -30,7 +31,11 @@ func TriggerDigest(scheduler *services.DigestScheduler) http.HandlerFunc {
 		forceStr := r.URL.Query().Get("force")
 		forceRun := forceStr == "true" || forceStr == "1"
 
-		result, err := scheduler.RunDigest(window, forceRun)
+		// Run against the CALLER's organization only: the scheduler is a
+		// boot-built singleton around the root pool, so bind a per-request
+		// copy to the admin's org handle (single-tenant mode: passthrough,
+		// identical to before).
+		result, err := scheduler.ForOrg(orgdb.From(r)).RunDigest(window, forceRun)
 		if err != nil {
 			log.Printf("❌ [Digest] Manual trigger failed: %v", err)
 			http.Error(w, "digest failed: "+err.Error(), http.StatusInternalServerError)

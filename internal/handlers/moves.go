@@ -8,13 +8,15 @@ import (
 	"time"
 
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 )
 
-func GetMoves(db *sqlx.DB) http.HandlerFunc {
+func GetMoves(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -48,8 +50,9 @@ func GetMoves(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func CreateMove(db *sqlx.DB) http.HandlerFunc {
+func CreateMove(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		binID := chi.URLParam(r, "id")
 		if binID == "" {
 			http.Error(w, "Bad Request", http.StatusBadRequest)

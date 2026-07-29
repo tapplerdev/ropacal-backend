@@ -5,6 +5,7 @@ import (
 
 	"ropacal-backend/internal/database"
 	"ropacal-backend/internal/models"
+	"ropacal-backend/internal/orgdb"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -91,6 +92,11 @@ type resumeResponse struct {
 }
 
 // sqlShiftStore is the Postgres-backed ShiftStore.
+//
+// TENANCY: the store is constructed once at boot around the root pool, but
+// every method resolves the caller's org-bound handle from ctx (stashed by
+// middleware.Org), so its queries carry app.org_id under RLS. The pool field
+// is only the single-tenant / unit-test fallback.
 type sqlShiftStore struct {
 	db *sqlx.DB
 }
@@ -98,6 +104,20 @@ type sqlShiftStore struct {
 // NewSQLShiftStore returns a ShiftStore backed by the given database handle.
 func NewSQLShiftStore(db *sqlx.DB) *sqlShiftStore {
 	return &sqlShiftStore{db: db}
+}
+
+// h resolves the handle for one call: the request's org-bound handle when
+// present, a passthrough over the pool while tenancy is dark. A missing org
+// context with tenancy live is a wiring bug and fails loudly (same contract
+// as orgdb.From).
+func (s *sqlShiftStore) h(ctx context.Context) *orgdb.DB {
+	if d := orgdb.FromContext(ctx); d != nil {
+		return d
+	}
+	if orgdb.Migrated() {
+		panic("shiftstore: no organization context on ctx — route is missing middleware.Auth/Org")
+	}
+	return orgdb.Passthrough(s.db)
 }
 
 // currentShiftQuery is the exact query previously inlined in GetCurrentShift —
@@ -117,7 +137,7 @@ const currentShiftQuery = `SELECT * FROM shifts
 
 func (s *sqlShiftStore) CurrentByDriver(ctx context.Context, driverID, today string) (*models.Shift, error) {
 	var shift models.Shift
-	if err := s.db.GetContext(ctx, &shift, currentShiftQuery, driverID, today); err != nil {
+	if err := s.h(ctx).GetContext(ctx, &shift, currentShiftQuery, driverID, today); err != nil {
 		return nil, err
 	}
 	return &shift, nil
@@ -125,7 +145,7 @@ func (s *sqlShiftStore) CurrentByDriver(ctx context.Context, driverID, today str
 
 func (s *sqlShiftStore) ByIDForDriver(ctx context.Context, shiftID, driverID string) (*models.Shift, error) {
 	var shift models.Shift
-	if err := s.db.GetContext(ctx, &shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, driverID); err != nil {
+	if err := s.h(ctx).GetContext(ctx, &shift, `SELECT * FROM shifts WHERE id = $1 AND driver_id = $2`, shiftID, driverID); err != nil {
 		return nil, err
 	}
 	return &shift, nil
@@ -136,7 +156,7 @@ func (s *sqlShiftStore) ByIDForDriver(ctx context.Context, shiftID, driverID str
 // timestamps, $3 driver_id. RETURNING * gives the updated row in one round-trip.
 func (s *sqlShiftStore) PauseByDriver(ctx context.Context, driverID string, now int64) (*models.Shift, error) {
 	var shift models.Shift
-	err := s.db.GetContext(ctx, &shift, `UPDATE shifts
+	err := s.h(ctx).GetContext(ctx, &shift, `UPDATE shifts
 		SET status = 'paused', pause_start_time = $1, updated_at = $2
 		WHERE driver_id = $3 AND status = 'active'
 		RETURNING *`, now, now, driverID)
@@ -148,7 +168,7 @@ func (s *sqlShiftStore) PauseByDriver(ctx context.Context, driverID string, now 
 
 func (s *sqlShiftStore) PausedByDriver(ctx context.Context, driverID string) (*models.Shift, error) {
 	var shift models.Shift
-	if err := s.db.GetContext(ctx, &shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, driverID); err != nil {
+	if err := s.h(ctx).GetContext(ctx, &shift, `SELECT * FROM shifts WHERE driver_id = $1 AND status = 'paused'`, driverID); err != nil {
 		return nil, err
 	}
 	return &shift, nil
@@ -156,7 +176,7 @@ func (s *sqlShiftStore) PausedByDriver(ctx context.Context, driverID string) (*m
 
 func (s *sqlShiftStore) ResumeByID(ctx context.Context, shiftID string, totalPauseSeconds, now int64) (*models.Shift, error) {
 	var shift models.Shift
-	err := s.db.GetContext(ctx, &shift, `UPDATE shifts
+	err := s.h(ctx).GetContext(ctx, &shift, `UPDATE shifts
 		SET status = 'active', total_pause_seconds = $1, pause_start_time = NULL, updated_at = $2
 		WHERE id = $3
 		RETURNING *`, totalPauseSeconds, now, shiftID)
@@ -167,9 +187,9 @@ func (s *sqlShiftStore) ResumeByID(ctx context.Context, shiftID string, totalPau
 }
 
 func (s *sqlShiftStore) TasksWithDetails(ctx context.Context, shiftID string) ([]models.ShiftBinWithDetails, error) {
-	return getShiftTasksWithDetails(s.db, shiftID)
+	return getShiftTasksWithDetails(s.h(ctx), shiftID)
 }
 
 func (s *sqlShiftStore) Tasks(ctx context.Context, shiftID string) ([]models.RouteTask, error) {
-	return database.GetShiftTasks(s.db, shiftID)
+	return database.GetShiftTasks(s.h(ctx), shiftID)
 }

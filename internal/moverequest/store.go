@@ -84,11 +84,22 @@ type EditView struct {
 	BinNumber       int     `db:"bin_number"`
 }
 
-// sqlStore is the production Store backed by a PostgreSQL pool.
-type sqlStore struct{ db *sqlx.DB }
+// DB is the database handle the move-request domain needs. It is satisfied by
+// both *sqlx.DB (single-tenant / tests) and *orgdb.DB (org-scoped requests and
+// per-org worker iterations) — handlers rebuild the store per request around
+// their org-bound handle (`moverequest.NewSQLStore(db)` after the orgdb
+// shadow), so every query the store issues carries app.org_id under RLS.
+type DB interface {
+	sqlx.Ext
+	Get(dest interface{}, query string, args ...interface{}) error
+	Select(dest interface{}, query string, args ...interface{}) error
+}
 
-// NewSQLStore returns a Store backed by the given database pool.
-func NewSQLStore(db *sqlx.DB) Store { return &sqlStore{db: db} }
+// sqlStore is the production Store backed by a PostgreSQL handle.
+type sqlStore struct{ db DB }
+
+// NewSQLStore returns a Store backed by the given database handle.
+func NewSQLStore(db DB) Store { return &sqlStore{db: db} }
 
 func (s *sqlStore) ByID(id string) (*models.BinMoveRequest, error) {
 	var mr models.BinMoveRequest
@@ -181,15 +192,21 @@ func (s *sqlStore) ActiveForBin(binID string) ([]ActiveMove, error) {
 }
 
 func (s *sqlStore) ResponsibleDriver(m *models.BinMoveRequest) (driverID, driverName string, err error) {
+	// Get (not QueryRow) so the DB seam stays satisfiable by both *sqlx.DB and
+	// *orgdb.DB — their QueryRow return types differ, their Get signatures do not.
 	switch {
 	case m.AssignedUserID != nil && *m.AssignedUserID != "":
 		driverID = *m.AssignedUserID
-		err = s.db.QueryRow(`SELECT name FROM users WHERE id = $1`, driverID).Scan(&driverName)
+		err = s.db.Get(&driverName, `SELECT name FROM users WHERE id = $1`, driverID)
 	case m.AssignedShiftID != nil && *m.AssignedShiftID != "":
-		err = s.db.QueryRow(
+		var row struct {
+			ID   string `db:"id"`
+			Name string `db:"name"`
+		}
+		err = s.db.Get(&row,
 			`SELECT u.id, u.name FROM shifts s JOIN users u ON s.driver_id = u.id WHERE s.id = $1`,
-			*m.AssignedShiftID,
-		).Scan(&driverID, &driverName)
+			*m.AssignedShiftID)
+		driverID, driverName = row.ID, row.Name
 	}
 	return driverID, driverName, err
 }

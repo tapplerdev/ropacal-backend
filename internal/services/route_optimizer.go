@@ -1,7 +1,6 @@
 package services
 
 import (
-	"database/sql"
 	"encoding/json"
 	"log"
 	"math"
@@ -17,25 +16,27 @@ import (
 // 	WAREHOUSE_ADDRESS = "1185 Campbell Ave, San Jose, CA 95126"
 // )
 
-// GetWarehouseLocation fetches warehouse location from database config
-// Falls back to default San Jose location if not configured
-func GetWarehouseLocation(db interface {
-	QueryRow(query string, args ...interface{}) *sql.Row
-}) OptimizerLocation {
+// GetWarehouseLocation fetches the warehouse location from the config table.
+// ok=false when the row is missing, unreadable, unparseable, or null-island —
+// callers MUST fail loudly and must not optimize.
+//
+// There is deliberately NO hardcoded fallback anymore. Under row-level
+// security a missing config row means THIS TENANT has no warehouse
+// configured; silently anchoring their routes to somebody else's depot
+// coordinates is the worst failure mode this system has (routes still
+// generate — they are just geometrically wrong, and nothing errors).
+// A 4xx/5xx on a misconfigured tenant is strictly better.
+func GetWarehouseLocation(db Querier) (OptimizerLocation, bool) {
 	var configValue []byte
-	err := db.QueryRow(`
+	err := db.Get(&configValue, `
 		SELECT value
 		FROM config
 		WHERE key = 'warehouse_location'
-	`).Scan(&configValue)
+	`)
 
 	if err != nil {
-		// Fallback to default warehouse location if not found
-		log.Printf("⚠️  Failed to fetch warehouse from config (using default): %v", err)
-		return OptimizerLocation{
-			Latitude:  37.3009357, // San Jose, CA
-			Longitude: -121.9493848,
-		}
+		log.Printf("❌ Warehouse location unavailable from config (NO fallback — configure the warehouse): %v", err)
+		return OptimizerLocation{}, false
 	}
 
 	var warehouse struct {
@@ -45,17 +46,18 @@ func GetWarehouseLocation(db interface {
 	}
 
 	if err := json.Unmarshal(configValue, &warehouse); err != nil {
-		log.Printf("⚠️  Failed to parse warehouse config (using default): %v", err)
-		return OptimizerLocation{
-			Latitude:  37.3009357,
-			Longitude: -121.9493848,
-		}
+		log.Printf("❌ Warehouse location config is unparseable (NO fallback): %v", err)
+		return OptimizerLocation{}, false
+	}
+	if warehouse.Latitude == 0 && warehouse.Longitude == 0 {
+		log.Printf("❌ Warehouse location config is null-island 0,0 — treating as unset (NO fallback)")
+		return OptimizerLocation{}, false
 	}
 
 	return OptimizerLocation{
 		Latitude:  warehouse.Latitude,
 		Longitude: warehouse.Longitude,
-	}
+	}, true
 }
 
 // OptimizerLocation represents a geographic point for route optimization

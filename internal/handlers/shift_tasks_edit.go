@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/models"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
@@ -24,8 +25,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
+func RemoveTasksFromShift(root *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: POST /api/manager/shifts/:shift_id/tasks/remove")
 
 		userClaims, ok := middleware.GetUserFromContext(r)
@@ -374,8 +376,9 @@ func RemoveTasksFromShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClie
 
 // UpdateShift comprehensively updates a shift (time, driver, add/remove tasks)
 // PATCH /api/manager/shifts/:id
-func UpdateShift(db *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
+func UpdateShift(root *sqlx.DB, redisClient *redis.Client, centrifugoClient *centrifugo.Client, fcmService *services.FCMService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
 		log.Printf("📥 REQUEST: PATCH /api/manager/shifts/:id")
 
 		userClaims, ok := middleware.GetUserFromContext(r)

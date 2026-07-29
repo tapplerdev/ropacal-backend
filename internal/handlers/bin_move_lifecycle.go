@@ -10,6 +10,7 @@ import (
 	"ropacal-backend/internal/itinerary"
 	"ropacal-backend/internal/middleware"
 	"ropacal-backend/internal/moverequest"
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/websocket"
@@ -20,8 +21,10 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
+func CancelBinMoveRequest(store moverequest.Store, root *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
+		store := moverequest.NewSQLStore(db)
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, "Missing move request ID", http.StatusBadRequest)
@@ -193,8 +196,10 @@ func CancelBinMoveRequest(store moverequest.Store, db *sqlx.DB, redisClient *red
 // AssignMoveToUser assigns a move request to a specific user for manual completion
 // PUT /api/manager/bins/move-requests/:id/assign-to-user
 
-func ManuallyCompleteMoveRequest(store moverequest.Store, db *sqlx.DB) http.HandlerFunc {
+func ManuallyCompleteMoveRequest(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		db := orgdb.From(r)
+		store := moverequest.NewSQLStore(db)
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, "Missing move request ID", http.StatusBadRequest)

@@ -1,7 +1,5 @@
 package moverequest
 
-import "github.com/jmoiron/sqlx"
-
 // AssignmentState is a move's assignment at a point in time, used to decide which
 // history event an edit produced. UserName/DriverName are the resolved display
 // names when already known (the after-state carries them from its JOIN); a
@@ -30,7 +28,7 @@ func (s AssignmentState) displayName() *string {
 // It is the one place that resolves a previous assignee's display name (the
 // handler used to copy-paste that lookup three times). History is post-commit and
 // best-effort: the caller logs the returned error but does not fail the request.
-func LogAssignmentChange(db *sqlx.DB, moveReqID, actorID, actorName, actorRole string, before, after AssignmentState) error {
+func LogAssignmentChange(db DB, moveReqID, actorID, actorName, actorRole string, before, after AssignmentState) error {
 	switch {
 	case !before.assigned() && after.assigned():
 		atype := ""
@@ -55,7 +53,7 @@ func LogAssignmentChange(db *sqlx.DB, moveReqID, actorID, actorName, actorRole s
 
 // resolvePreviousName looks up the display name for a now-previous assignment: the
 // manually-assigned user, else the shift's driver. Returns nil if neither resolves.
-func resolvePreviousName(db *sqlx.DB, s AssignmentState) *string {
+func resolvePreviousName(db DB, s AssignmentState) *string {
 	if s.UserID != nil {
 		var name string
 		if err := db.Get(&name, `SELECT name FROM users WHERE id = $1`, *s.UserID); err == nil {
