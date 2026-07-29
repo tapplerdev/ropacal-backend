@@ -30,6 +30,7 @@ See `.env.example`. Key vars:
 - `REDIS_URL` — Redis connection (defaults to `redis://localhost:6379`)
 - `FIREBASE_CREDENTIALS_BASE64` or `FIREBASE_CREDENTIALS_FILE` — FCM push notifications
 - `CENTRIFUGO_API_URL`, `CENTRIFUGO_API_KEY` — Centrifugo real-time messaging
+- `CENTRIFUGO_PROXY_SECRET` — shared secret Centrifugo must send (header `X-Centrifugo-Proxy-Secret`) on its `/api/centrifugo/*` proxy calls; unset = proxies UNPROTECTED (transitional, loud boot warning)
 - `MAPBOX_ACCESS_TOKEN` — only the comparison optimizer (the active OR-Tools optimizer runs in-process, no token needed)
 - `HERE_API_KEY` — geocoding
 - `INTERNAL_API_KEY` — secures internal endpoints (FindMy bridge)

@@ -293,12 +293,19 @@ func main() {
 	// WebSocket endpoint (authentication handled in handler via query param)
 	r.Get("/ws", websocket.HandleWebSocket(wsHub, db))
 
-	// Centrifugo proxy endpoints (called by Centrifugo server for authorization)
-	r.Post("/api/centrifugo/subscribe", handlers.CentrifugoSubscribeProxy(db))
-	r.Post("/api/centrifugo/publish", handlers.CentrifugoPublishProxy(db))
-
-	// Centrifugo location publish proxy (processes GPS data before broadcast)
-	r.Post("/api/centrifugo/publish-location", handlers.CentrifugoLocationPublishProxy(db, redisClient, osrmClient, centrifugoClient, fcmService))
+	// Centrifugo proxy endpoints — called by the CENTRIFUGO SERVER (never by
+	// clients), so they carry no user JWT. Guarded by a shared static secret
+	// header (CENTRIFUGO_PROXY_SECRET); once the caller is proven to be
+	// Centrifugo, the payload `user` field is trustworthy (Centrifugo filled
+	// it from the client's authenticated connection token). Fail-open with a
+	// loud boot warning until ops set the var + Centrifugo config.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.CentrifugoProxyAuth())
+		r.Post("/api/centrifugo/subscribe", handlers.CentrifugoSubscribeProxy(db))
+		r.Post("/api/centrifugo/publish", handlers.CentrifugoPublishProxy(db))
+		// Location publish proxy (processes GPS data before broadcast)
+		r.Post("/api/centrifugo/publish-location", handlers.CentrifugoLocationPublishProxy(db, redisClient, osrmClient, centrifugoClient, fcmService))
+	})
 
 	// Internal API routes (secured with INTERNAL_API_KEY, used by FindMy bridge)
 	r.Route("/api/internal", func(r chi.Router) {
@@ -319,9 +326,8 @@ func main() {
 		// Directions endpoint (OSRM-powered road-following polyline, no auth required)
 		r.Get("/directions", handlers.GetDirections())
 
-		// Config endpoints (warehouse location)
+		// Config endpoints (warehouse location) — the write is admin-only, below
 		r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
-		r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub, centrifugoClient))
 
 		// Bins endpoints (read-only - no auth required)
 		r.Get("/bins", handlers.GetBins(db))
@@ -336,29 +342,39 @@ func main() {
 			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub, centrifugoClient))
 			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db))                                  // Batch geocode all bins using HERE Maps
 			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db, redisClient)) // Check if bin is in active shifts
+			r.Post("/bins/{id}/moves", handlers.CreateMove(db))                                           // Manual move record — rewrites the bin's address, same class as PATCH /bins/{id}
 		})
 
 		// Checks endpoints
 		r.Get("/bins/{id}/checks", handlers.GetChecks(db))
 		r.Get("/checks", handlers.GetAllChecks(db))
 
-		// Moves endpoints
+		// Moves endpoints (reads; the write lives in the bins mutation group)
 		r.Get("/bins/{id}/moves", handlers.GetMoves(db))
-		r.Post("/bins/{id}/moves", handlers.CreateMove(db))
 		r.Get("/bins/{id}/move-requests", handlers.GetBinMoveRequestsByBinID(db))
 		r.Get("/bins/{id}/incidents", handlers.GetBinIncidents(db))
 		r.Get("/bins/{id}/change-log", handlers.GetBinChangeLog(db))
 
-		// Route management endpoints (route blueprints/templates)
+		// Route management endpoints (route blueprints/templates) — reads and
+		// read-only optimization previews; the writes are admin-only, below
 		r.Get("/routes", handlers.GetRoutes(db))
 		r.Get("/routes/{id}", handlers.GetRoute(db))
-		r.Post("/routes", handlers.CreateRoute(db))
 		r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
 		r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))     // Testing endpoint for HERE Maps API
 		r.Post("/routes/test-mapbox-optimization", handlers.TestMapboxOptimization(db)) // Testing endpoint for Mapbox API v1
-		r.Patch("/routes/{id}", handlers.UpdateRoute(db))
-		r.Delete("/routes/{id}", handlers.DeleteRoute(db))
-		r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
+
+		// Admin-only writes (JWT + admin role): the global warehouse anchor and
+		// route-template mutations are dashboard/manager operations — no driver
+		// or anonymous path ever calls them.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Auth)
+			r.Use(middleware.RequireRole("admin"))
+			r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub, centrifugoClient))
+			r.Post("/routes", handlers.CreateRoute(db))
+			r.Patch("/routes/{id}", handlers.UpdateRoute(db))
+			r.Delete("/routes/{id}", handlers.DeleteRoute(db))
+			r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
+		})
 
 		// No-Go Zones endpoints
 		r.Get("/no-go-zones", handlers.GetNoGoZones(db))
