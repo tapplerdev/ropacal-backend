@@ -270,6 +270,30 @@ func main() {
 		MaxAge:           300,
 	}))
 
+	// ────────────────────────────────────────────────────────────────────────
+	// PUBLIC ROUTES — the complete no-auth exception list:
+	//
+	//   GET  /health          liveness/deploy probe (no DB)
+	//   POST /api/auth/login  establishes identity (mints the JWT)
+	//   /api/internal/*       FindMy bridge — guarded by INTERNAL_API_KEY
+	//
+	// Registered alongside them but NOT user-authenticated routes:
+	//
+	//   GET  /ws              legacy WebSocket — validates the app JWT
+	//                         in-handler via ?token= (browsers cannot set
+	//                         headers on WS upgrades); removal is scheduled
+	//                         for a later deploy
+	//   POST /api/centrifugo/{subscribe,publish,publish-location}
+	//                         called by the Centrifugo SERVER, not clients —
+	//                         guarded by the CENTRIFUGO_PROXY_SECRET shared
+	//                         header, which makes the payload identity
+	//                         (resolved from the connection token) trustworthy
+	//
+	// EVERY other route requires a JWT: middleware.Auth at minimum, plus
+	// RequireRole("admin") for the admin group inside /api below. Tenant-data
+	// endpoints must never be public — RLS (keyed on the JWT org) is coming.
+	// ────────────────────────────────────────────────────────────────────────
+
 	// Health check. Reports a deploy marker (to confirm which build is live) and
 	// booleans for whether the third-party API keys are present in the env
 	// (booleans only — never the key values).
@@ -317,91 +341,87 @@ func main() {
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
-		// Geocoding endpoints (no auth required)
-		r.Post("/geocoding/reverse", handlers.ReverseGeocode())
-		r.Post("/geocoding/reverse/batch", handlers.BatchReverseGeocode())
-		r.Post("/geocoding/forward", handlers.Geocode())
-		r.Post("/geocoding/forward/batch", handlers.BatchGeocode())
-
-		// Directions endpoint (OSRM-powered road-following polyline, no auth required)
-		r.Get("/directions", handlers.GetDirections())
-
-		// Config endpoints (warehouse location) — the write is admin-only, below
-		r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
-
-		// Bins endpoints (read-only - no auth required)
-		r.Get("/bins", handlers.GetBins(db))
-		r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering
-		r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
-
-		// Bins mutation endpoints (require authentication)
+		// ── AUTHENTICATED ENDPOINTS — everything in this group requires a
+		// valid JWT (middleware.Auth). Reads included: they expose tenant data
+		// (whole-fleet bins, routes, zones, analytics, ...), and the upcoming
+		// RLS needs the JWT org on every DB-touching request. ──
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
+
+			// Geocoding (HERE) and directions (OSRM) proxies — no tenant data,
+			// but they burn paid third-party API quota, so no anonymous use.
+			r.Post("/geocoding/reverse", handlers.ReverseGeocode())
+			r.Post("/geocoding/reverse/batch", handlers.BatchReverseGeocode())
+			r.Post("/geocoding/forward", handlers.Geocode())
+			r.Post("/geocoding/forward/batch", handlers.BatchGeocode())
+			r.Get("/directions", handlers.GetDirections())
+
+			// Config endpoints (warehouse location) — the write is admin-only, below
+			r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
+
+			// Bins endpoints (reads)
+			r.Get("/bins", handlers.GetBins(db))
+			r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering
+			r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
+
+			// Bins mutation endpoints
 			r.Post("/bins", handlers.CreateBin(db, wsHub, centrifugoClient))
 			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
 			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub, centrifugoClient))
 			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db))                                  // Batch geocode all bins using HERE Maps
 			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db, redisClient)) // Check if bin is in active shifts
 			r.Post("/bins/{id}/moves", handlers.CreateMove(db))                                           // Manual move record — rewrites the bin's address, same class as PATCH /bins/{id}
-		})
 
-		// Checks endpoints
-		r.Get("/bins/{id}/checks", handlers.GetChecks(db))
-		r.Get("/checks", handlers.GetAllChecks(db))
+			// Checks endpoints
+			r.Get("/bins/{id}/checks", handlers.GetChecks(db))
+			r.Get("/checks", handlers.GetAllChecks(db))
 
-		// Moves endpoints (reads; the write lives in the bins mutation group)
-		r.Get("/bins/{id}/moves", handlers.GetMoves(db))
-		r.Get("/bins/{id}/move-requests", handlers.GetBinMoveRequestsByBinID(db))
-		r.Get("/bins/{id}/incidents", handlers.GetBinIncidents(db))
-		r.Get("/bins/{id}/change-log", handlers.GetBinChangeLog(db))
+			// Moves endpoints (reads; the write sits with the bins mutations)
+			r.Get("/bins/{id}/moves", handlers.GetMoves(db))
+			r.Get("/bins/{id}/move-requests", handlers.GetBinMoveRequestsByBinID(db))
+			r.Get("/bins/{id}/incidents", handlers.GetBinIncidents(db))
+			r.Get("/bins/{id}/change-log", handlers.GetBinChangeLog(db))
 
-		// Route management endpoints (route blueprints/templates) — reads and
-		// read-only optimization previews; the writes are admin-only, below
-		r.Get("/routes", handlers.GetRoutes(db))
-		r.Get("/routes/{id}", handlers.GetRoute(db))
-		r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
-		r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))     // Testing endpoint for HERE Maps API
-		r.Post("/routes/test-mapbox-optimization", handlers.TestMapboxOptimization(db)) // Testing endpoint for Mapbox API v1
+			// Route management endpoints (route blueprints/templates) — reads
+			// and read-only optimization previews (the previews burn optimizer
+			// API quota); the writes are admin-only, below
+			r.Get("/routes", handlers.GetRoutes(db))
+			r.Get("/routes/{id}", handlers.GetRoute(db))
+			r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
+			r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))     // Testing endpoint for HERE Maps API
+			r.Post("/routes/test-mapbox-optimization", handlers.TestMapboxOptimization(db)) // Testing endpoint for Mapbox API v1
 
-		// Admin-only writes (JWT + admin role): the global warehouse anchor and
-		// route-template mutations are dashboard/manager operations — no driver
-		// or anonymous path ever calls them.
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.Auth)
-			r.Use(middleware.RequireRole("admin"))
-			r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub, centrifugoClient))
-			r.Post("/routes", handlers.CreateRoute(db))
-			r.Patch("/routes/{id}", handlers.UpdateRoute(db))
-			r.Delete("/routes/{id}", handlers.DeleteRoute(db))
-			r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
-		})
+			// No-Go Zones endpoints
+			r.Get("/no-go-zones", handlers.GetNoGoZones(db))
+			r.Get("/no-go-zones/{id}", handlers.GetNoGoZone(db))
+			r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
+			r.Get("/incidents/nearby", handlers.GetNearbyIncidents(db))
 
-		// No-Go Zones endpoints
-		r.Get("/no-go-zones", handlers.GetNoGoZones(db))
-		r.Get("/no-go-zones/{id}", handlers.GetNoGoZone(db))
-		r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
-		r.Get("/incidents/nearby", handlers.GetNearbyIncidents(db))
+			// Shift-related incident queries
+			r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
 
-		// Shift-related incident queries
-		r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
+			// Analytics endpoints
+			r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
 
-		// Analytics endpoints
-		r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
+			// True city boundary (GeoJSON) for the target-area map overlay
+			// (embedded polygons, no DB — behind Auth to keep the public
+			// exception list exact)
+			r.Get("/areas/boundary", handlers.GetAreaBoundary())
+			r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db))      // weekly operational buckets (Network Health tab)
+			r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))          // per-bin quadrant scorecard (Bin Performance tab)
+			r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))    // per-bin 90d yield proxy (Growth hex map)
+			r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db))  // scored deployment candidates (Growth tab)
+			r.Get("/analytics/growth/weekly-plan", handlers.GetWeeklyGrowthPlan(db)) // the week's growth actions in one plan
 
-		// True city boundary (GeoJSON) for the target-area map overlay
-		r.Get("/areas/boundary", handlers.GetAreaBoundary())
-		r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db))      // weekly operational buckets (Network Health tab)
-		r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))          // per-bin quadrant scorecard (Bin Performance tab)
-		r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))    // per-bin 90d yield proxy (Growth hex map)
-		r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db))  // scored deployment candidates (Growth tab)
-		r.Get("/analytics/growth/weekly-plan", handlers.GetWeeklyGrowthPlan(db)) // the week's growth actions in one plan
+			// Potential Locations endpoints (all authenticated users can view)
+			r.Get("/potential-locations", handlers.GetPotentialLocations(db))
 
-		// Potential Locations endpoints (managers can view all - no auth required)
-		r.Get("/potential-locations", handlers.GetPotentialLocations(db))
-
-		// Driver shift endpoints (require authentication)
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.Auth)
+			// Mobile log ingestion. app-error INSERTs rows; diagnostic only
+			// writes to stdout but is spam/log-injection surface either way.
+			// Accepted consequence: pre-login / FCM background-isolate
+			// diagnostics are dropped (app_error_logs has zero rows ever).
+			r.Post("/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
+			r.Post("/logs/app-error", handlers.LogAppError(db))
 
 			// Auth status endpoint
 			r.Get("/auth/status", handlers.GetAuthStatus(db))
@@ -458,16 +478,20 @@ func main() {
 			r.Patch("/notifications/{id}/read", handlers.MarkNotificationRead(db))
 		})
 
-		// Diagnostic logging endpoint (no auth required for easier debugging)
-		r.Post("/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
-
-		// App error logging endpoint (no auth required for mobile app error reporting)
-		r.Post("/logs/app-error", handlers.LogAppError(db))
-
-		// Manager endpoints (require authentication + admin role)
+		// ── ADMIN ENDPOINTS — JWT + admin role (middleware.Auth +
+		// RequireRole("admin")): the /manager surface plus the non-/manager
+		// admin writes (warehouse config, route templates). ──
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
 			r.Use(middleware.RequireRole("admin"))
+
+			// Warehouse anchor & route-template writes: dashboard/manager
+			// operations — no driver or anonymous path ever calls them.
+			r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub, centrifugoClient))
+			r.Post("/routes", handlers.CreateRoute(db))
+			r.Patch("/routes/{id}", handlers.UpdateRoute(db))
+			r.Delete("/routes/{id}", handlers.DeleteRoute(db))
+			r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
 
 			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService, centrifugoClient))
 			// Cancel is an action (state transition), so POST is the correct verb.
