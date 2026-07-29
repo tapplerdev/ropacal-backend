@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 
 	"github.com/jmoiron/sqlx"
@@ -780,15 +781,18 @@ func (s *DigestScheduler) fetchBridgeAirtagLocations() ([]AirtagEntry, error) {
 	return resp.Data, nil
 }
 
-// updateConfigTimestamp upserts the config key with today's date.
+// updateConfigTimestamp upserts the config key with today's date. The conflict
+// target flips to (organization_id, key) once tenancy is live, which is what
+// makes the daily-report dedup PER TENANT — one org sending its report must
+// never mark every other org's as already sent.
 func (s *DigestScheduler) updateConfigTimestamp(key, date string) {
 	value := fmt.Sprintf(`{"date": "%s", "timestamp": %d}`, date, time.Now().Unix())
-	_, err := s.db.Exec(`
+	_, err := s.db.Exec(fmt.Sprintf(`
 		INSERT INTO config (key, value, updated_by, updated_at)
 		VALUES ($1, $2::jsonb, 'system', CURRENT_TIMESTAMP)
-		ON CONFLICT (key)
+		ON CONFLICT %s
 		DO UPDATE SET value = $2::jsonb, updated_by = 'system', updated_at = CURRENT_TIMESTAMP
-	`, key, value)
+	`, orgdb.ConfigConflictTarget()), key, value)
 	if err != nil {
 		log.Printf("⚠️  [DailyReport] Failed to update config %s: %v", key, err)
 	}

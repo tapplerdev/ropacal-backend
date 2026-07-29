@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -88,16 +89,19 @@ func UpdateWarehouseLocation(root *sqlx.DB, hub *websocket.Hub, centrifugoClient
 			return
 		}
 
-		// Update or insert warehouse location (no user tracking for now)
-		_, err = db.Exec(`
+		// Update or insert warehouse location (no user tracking for now).
+		// Conflict target flips to (organization_id, key) once tenancy is
+		// live; the INSERT arm's organization_id then comes from the column
+		// DEFAULT, fed by this request's app.org_id.
+		_, err = db.Exec(fmt.Sprintf(`
 			INSERT INTO config (key, value, updated_by, updated_at)
 			VALUES ('warehouse_location', $1, 'system', CURRENT_TIMESTAMP)
-			ON CONFLICT (key)
+			ON CONFLICT %s
 			DO UPDATE SET
 				value = EXCLUDED.value,
 				updated_by = 'system',
 				updated_at = CURRENT_TIMESTAMP
-		`, warehouseJSON)
+		`, orgdb.ConfigConflictTarget()), warehouseJSON)
 
 		if err != nil {
 			log.Printf("❌ Failed to update warehouse location: %v", err)

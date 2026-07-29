@@ -201,14 +201,18 @@ func UpdateNotificationSettings(root *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		_, err = db.Exec(`
+		// Conflict target flips to (organization_id, key) once tenancy is live
+		// (the migration replaces config's UNIQUE(key) with a composite). The
+		// INSERT arm's organization_id then comes from the column DEFAULT,
+		// fed by this request's app.org_id.
+		_, err = db.Exec(fmt.Sprintf(`
 			INSERT INTO config (key, value, updated_by, updated_at)
 			VALUES ('notification_settings', $1::jsonb, 'admin', CURRENT_TIMESTAMP)
-			ON CONFLICT (key) DO UPDATE SET
+			ON CONFLICT %s DO UPDATE SET
 				value = $1::jsonb,
 				updated_by = 'admin',
 				updated_at = CURRENT_TIMESTAMP
-		`, string(valueJSON))
+		`, orgdb.ConfigConflictTarget()), string(valueJSON))
 
 		if err != nil {
 			log.Printf("❌ Failed to save notification settings: %v", err)
