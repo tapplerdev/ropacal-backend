@@ -25,8 +25,12 @@ type UserClaims struct {
 	OrgID string `json:"org_id"`
 }
 
-// Auth middleware validates JWT token and adds user claims to context
+// Auth middleware validates JWT token and adds user claims to context.
+// It then hands off through Org, which binds the caller's organization-scoped
+// database handle (a no-op passthrough until the tenancy migration is live) —
+// so every Auth'd route group gets org context with no wiring changes.
 func Auth(next http.Handler) http.Handler {
+	next = Org(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		// log.Printf("🔐 AUTH MIDDLEWARE: %s %s", r.Method, r.URL.Path)
