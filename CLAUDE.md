@@ -30,6 +30,7 @@ See `.env.example`. Key vars:
 - `REDIS_URL` — Redis connection (defaults to `redis://localhost:6379`)
 - `FIREBASE_CREDENTIALS_BASE64` or `FIREBASE_CREDENTIALS_FILE` — FCM push notifications
 - `CENTRIFUGO_API_URL`, `CENTRIFUGO_API_KEY` — Centrifugo real-time messaging
+- `CENTRIFUGO_PROXY_SECRET` — shared secret Centrifugo must send (header `X-Centrifugo-Proxy-Secret`) on its `/api/centrifugo/*` proxy calls; unset = proxies UNPROTECTED (transitional, loud boot warning)
 - `MAPBOX_ACCESS_TOKEN` — only the comparison optimizer (the active OR-Tools optimizer runs in-process, no token needed)
 - `HERE_API_KEY` — geocoding
 - `INTERNAL_API_KEY` — secures internal endpoints (FindMy bridge)
@@ -132,10 +133,11 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 
 ## API Auth
 
-- **Public endpoints:** health, geocoding, directions, bins (read), routes, zones, analytics, potential locations, `GET /api/areas/boundary` (true city polygon for the target-area overlay; requires name+lat+lng so the geo-sanity guard arms; districts/unknowns → found=false)
-- **Driver endpoints:** JWT Bearer token required (`middleware.Auth`)
-- **Manager endpoints:** JWT + `admin` role required (`middleware.RequireRole("admin")`)
-- **Internal endpoints:** `INTERNAL_API_KEY` header (FindMy bridge)
+- **Public endpoints (the complete list):** `GET /health`, `POST /api/auth/login`, `/api/internal/*` (`INTERNAL_API_KEY` header — FindMy bridge). Everything else requires an identity.
+- **Everything else under /api:** JWT Bearer token required (`middleware.Auth`) — including all reads (bins, routes, zones, analytics, potential locations, `GET /api/areas/boundary`) and the geocoding/directions proxies (no tenant data, but paid API quota)
+- **Admin endpoints:** JWT + `admin` role (`middleware.RequireRole("admin")`) — the `/api/manager/*` surface plus `PATCH /api/config/warehouse` and the route-template writes (`POST/PATCH/DELETE /api/routes*`)
+- **Centrifugo proxies** (`POST /api/centrifugo/*`): called by the Centrifugo SERVER, not clients — guarded by the `CENTRIFUGO_PROXY_SECRET` shared header (`X-Centrifugo-Proxy-Secret`); fail-open with a loud boot warning until ops set it. Payload `user` identity is only trustworthy behind that guard.
+- **`GET /ws`:** legacy WebSocket, validates the app JWT in-handler via `?token=`; scheduled for removal in a later deploy
 - JWT uses HMAC signing with `APP_JWT_SECRET`, includes user_id/email/role claims
 
 ## Background Workers (started in main.go)

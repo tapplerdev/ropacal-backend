@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -78,7 +79,10 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 
 		driverID := parts[2]
 
-		// 2. Authorize: Only the driver can publish to their own location channel
+		// 2. Authorize: Only the driver can publish to their own location
+		// channel. req.User is the identity Centrifugo resolved from the
+		// client's authenticated connection token — trustworthy only because
+		// the CentrifugoProxyAuth middleware verified the caller IS Centrifugo.
 		if req.User != driverID {
 			// Silently deny - this is expected behavior when non-drivers try to publish
 			w.Header().Set("Content-Type", "application/json")
@@ -107,6 +111,51 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 
 		// log.Printf("📍 [LocationProxy] Driver %s: lat=%.6f, lng=%.6f, accuracy=%.1fm",
 		// driverID, locationData.Latitude, locationData.Longitude, locationData.Accuracy)
+
+		// 3.5 If a shift_id is supplied, verify the shift belongs to this driver
+		// BEFORE any side effect (Redis write, proximity goroutine, broadcast).
+		// checkWarehouseProximity can end a shift and archive it to
+		// shift_history, so a forged (user, shift_id) pair must never reach it.
+		if locationData.ShiftID != nil {
+			var shiftDriverID sql.NullString
+			err := db.Get(&shiftDriverID, `SELECT driver_id FROM shifts WHERE id = $1`, *locationData.ShiftID)
+			if err == sql.ErrNoRows {
+				log.Printf("🚫 [LocationProxy] Publish rejected — shift %s not found (driver=%s)",
+					*locationData.ShiftID, driverID)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+					Error: &CentrifugoError{
+						Code:    403,
+						Message: "permission denied",
+					},
+				})
+				return
+			}
+			if err != nil {
+				log.Printf("❌ [LocationProxy] Shift ownership check failed for shift %s (driver=%s): %v",
+					*locationData.ShiftID, driverID, err)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+					Error: &CentrifugoError{
+						Code:    403,
+						Message: "authorization failed",
+					},
+				})
+				return
+			}
+			if !shiftDriverID.Valid || shiftDriverID.String != driverID {
+				log.Printf("🚫 [LocationProxy] Publish rejected — shift %s does not belong to driver %s",
+					*locationData.ShiftID, driverID)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(CentrifugoPublishResponse{
+					Error: &CentrifugoError{
+						Code:    403,
+						Message: "permission denied",
+					},
+				})
+				return
+			}
+		}
 
 		// 4. Save ORIGINAL GPS to Redis (synchronous).
 		// Redis is the source of truth for live position (preflight, StartShift,

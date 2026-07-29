@@ -91,14 +91,21 @@ func CentrifugoSubscribeProxy(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// req.User is the identity Centrifugo resolved from the client's
+		// authenticated connection token. It is trustworthy ONLY because the
+		// CentrifugoProxyAuth middleware verified this request came from the
+		// Centrifugo server itself (shared proxy secret) — never trust it on
+		// an unguarded route.
+		userID := req.User
+
 		log.Printf("🔐 [Centrifugo] Subscribe request: user=%s channel=%s client=%s",
-			req.User, req.Channel, req.ClientID)
+			userID, req.Channel, req.ClientID)
 
 		// Authorize subscription based on channel type
-		authorized, err := authorizeSubscription(db, req.User, req.Channel)
+		authorized, err := authorizeSubscription(db, userID, req.Channel)
 		if err != nil {
 			log.Printf("❌ [Centrifugo] Authorization error for user=%s channel=%s: %v",
-				req.User, req.Channel, err)
+				userID, req.Channel, err)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
 				Error: &CentrifugoError{
@@ -111,7 +118,7 @@ func CentrifugoSubscribeProxy(db *sqlx.DB) http.HandlerFunc {
 
 		if !authorized {
 			log.Printf("🚫 [Centrifugo] Subscription denied: user=%s channel=%s",
-				req.User, req.Channel)
+				userID, req.Channel)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
 				Error: &CentrifugoError{
@@ -123,14 +130,14 @@ func CentrifugoSubscribeProxy(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		log.Printf("✅ [Centrifugo] Subscription authorized: user=%s channel=%s",
-			req.User, req.Channel)
+			userID, req.Channel)
 
 		// Return successful authorization
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
 			Result: &CentrifugoSubscribeResult{
 				Info: map[string]interface{}{
-					"user_id": req.User,
+					"user_id": userID,
 					"channel": req.Channel,
 				},
 			},
@@ -266,14 +273,19 @@ func CentrifugoPublishProxy(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// Same identity rule as the subscribe proxy: req.User comes from the
+		// client's authenticated connection token and is trustworthy only
+		// behind the CentrifugoProxyAuth shared-secret guard.
+		userID := req.User
+
 		log.Printf("🔐 [Centrifugo] Publish request: user=%s channel=%s client=%s",
-			req.User, req.Channel, req.ClientID)
+			userID, req.Channel, req.ClientID)
 
 		// Authorize publication based on channel type
-		authorized, err := authorizePublication(db, req.User, req.Channel)
+		authorized, err := authorizePublication(db, userID, req.Channel)
 		if err != nil {
 			log.Printf("❌ [Centrifugo] Authorization error for user=%s channel=%s: %v",
-				req.User, req.Channel, err)
+				userID, req.Channel, err)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(CentrifugoPublishResponse{
 				Error: &CentrifugoError{
@@ -286,7 +298,7 @@ func CentrifugoPublishProxy(db *sqlx.DB) http.HandlerFunc {
 
 		if !authorized {
 			log.Printf("🚫 [Centrifugo] Publication denied: user=%s channel=%s",
-				req.User, req.Channel)
+				userID, req.Channel)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(CentrifugoPublishResponse{
 				Error: &CentrifugoError{
@@ -298,7 +310,7 @@ func CentrifugoPublishProxy(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		log.Printf("✅ [Centrifugo] Publication authorized: user=%s channel=%s",
-			req.User, req.Channel)
+			userID, req.Channel)
 
 		// Return successful authorization
 		w.Header().Set("Content-Type", "application/json")
