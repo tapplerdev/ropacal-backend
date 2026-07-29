@@ -94,6 +94,19 @@ func main() {
 	}
 	log.Println("✅ Database migrations completed")
 
+	// Multi-tenancy plumbing (ships dark). Detects — once — whether
+	// migrations/add_multi_tenancy_rls.sql has run; until then orgdb stays in
+	// single-tenant passthrough mode and behavior is unchanged. Once live,
+	// this also refuses to boot if RLS is provably not filtering rows for the
+	// connection role (see database.AssertRLSEnforced).
+	if err := database.InitTenancy(db); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: Multi-tenancy initialization failed")
+		log.Printf("   Error: %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Fatal(err)
+	}
+
 	// Load compiled-in city boundaries (TIGER CA places) for the target-area
 	// map overlay + recommender containment. Non-fatal: on failure the picker
 	// falls back to its search bbox everywhere.
