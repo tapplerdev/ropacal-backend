@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"ropacal-backend/internal/middleware"
@@ -95,13 +96,18 @@ type CentrifugoError struct {
 //     to pre-tenancy behavior.
 //   - Tenancy live + meta org present: ALL DB access for the request runs on
 //     an org-bound handle (orgdb.System), so RLS sees the right tenant.
-//   - Tenancy live + meta org absent/invalid: the connection predates the
-//     flip (or the Centrifugo service is missing the
-//     proxy_include_connection_meta config). Deny with a Centrifugo-shaped
-//     error — fail closed and loud, never run the lookups unscoped (they
-//     would silently return zero rows under RLS). The client re-establishes
-//     with a fresh, org-bearing token via the normal token lifecycle
-//     (post-flip re-login / token refresh).
+//   - Tenancy live + meta org absent + exactly ONE organization: resolve that
+//     org (single-org grace, same rule as login). A connection predating the
+//     flip, or a Centrifugo without proxy_include_connection_meta, forwards no
+//     meta — and with one tenant the answer is unambiguous, so realtime keeps
+//     working instead of dying for an external config change.
+//   - Tenancy live + meta org absent + SEVERAL organizations: deny with a
+//     Centrifugo-shaped error. There is no safe guess, and running the lookups
+//     unscoped would silently return zero rows under RLS. The client
+//     re-establishes with a fresh, org-bearing token via the normal lifecycle
+//     (post-flip re-login / token refresh). This is the same threshold at
+//     which CENTRIFUGO_PROXY_SECRET becomes mandatory.
+//   - Tenancy live + meta org invalid: always deny.
 
 // metaOrgID extracts org_id from a Centrifugo proxy request's connection
 // meta. Returns "" when meta is absent, null, or not the expected shape.
@@ -118,6 +124,34 @@ func metaOrgID(meta json.RawMessage) string {
 	return m.OrgID
 }
 
+// soleActiveOrgID returns the id of the ONLY active organization, or "" when
+// there are zero or several. Cached briefly: proxy calls are frequent (driver
+// GPS) and provisioning is rare, but the TTL means org #2 tightens this within
+// seconds without a restart.
+var (
+	soleOrgMu sync.Mutex
+	soleOrgID string
+	soleOrgAt time.Time
+)
+
+func soleActiveOrgID(root *sqlx.DB) (string, error) {
+	soleOrgMu.Lock()
+	defer soleOrgMu.Unlock()
+	if time.Since(soleOrgAt) < 30*time.Second {
+		return soleOrgID, nil
+	}
+	var ids []string
+	if err := root.Select(&ids, `SELECT id FROM organizations WHERE status = 'active' LIMIT 2`); err != nil {
+		return "", err
+	}
+	soleOrgID = ""
+	if len(ids) == 1 {
+		soleOrgID = ids[0]
+	}
+	soleOrgAt = time.Now()
+	return soleOrgID, nil
+}
+
 // proxyOrgDB resolves the DB handle a Centrifugo proxy request must use,
 // per the TENANCY block above. ok=false means the request must be denied
 // (tenancy is live but the connection carries no usable org).
@@ -128,7 +162,18 @@ func proxyOrgDB(root *sqlx.DB, meta json.RawMessage) (*orgdb.DB, bool) {
 	}
 	orgID := metaOrgID(meta)
 	if orgID == "" {
-		return nil, false
+		// SINGLE-ORG GRACE, mirroring login: a connection predating the flip (or
+		// a Centrifugo not yet configured with proxy_include_connection_meta)
+		// forwards no meta. While exactly ONE organization exists the answer is
+		// unambiguous — it can only be that one — so resolve it rather than
+		// killing realtime for a config change on an external service.
+		// With two or more orgs there is no safe guess and we deny, which is
+		// also when the proxy-secret guard becomes mandatory.
+		only, err := soleActiveOrgID(root)
+		if err != nil || only == "" {
+			return nil, false
+		}
+		orgID = only
 	}
 	d, err := orgdb.System(root, orgID)
 	if err != nil {

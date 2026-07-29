@@ -5,8 +5,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 
 	"ropacal-backend/internal/orgdb"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // CentrifugoProxyHeader is the header Centrifugo must send on every proxy
@@ -24,49 +28,76 @@ const CentrifugoProxyHeader = "X-Centrifugo-Proxy-Secret"
 // The guard is MANDATORY once tenancy is live, and only transitionally
 // fail-open before that:
 //
-//   - secret set                  -> enforced (always).
-//   - unset + tenancy DARK        -> pass through with a loud boot warning.
-//     Single-tenant, so this is exactly the historical status quo: forged
-//     payloads can spoof a driver, which they already could. Deploying the
-//     guard shouldn't break realtime before ops has configured the header.
-//   - unset + tenancy LIVE        -> DENY every proxy request.
+//   - secret set                     -> enforced (always).
+//   - unset + ONE organization       -> pass through with a loud boot warning.
+//     A forged payload can only name the single existing org, so the exposure
+//     is exactly the historical one (spoof a driver) and shipping the guard
+//     must not break realtime before ops has configured Centrifugo's header.
+//   - unset + MORE THAN ONE org      -> DENY every proxy request.
 //
-// That last case is not caution, it is necessity. Once tenancy is live the
-// proxies derive their tenant from the connection `meta` in the REQUEST BODY
-// (see handlers.proxyOrgDB): org_id becomes an attacker-controlled parameter.
-// RLS cannot help — it is handed the forged org rather than asked to validate
-// it — so an unauthenticated caller could pick a victim tenant and publish
-// GPS into its scope, or trip the proximity auto-end path against its shifts.
-// Fail-open would therefore upgrade single-tenant spoofing into cross-tenant
-// steering. Denying loudly (realtime down, obvious, self-healing the moment
-// the header is configured) is the only acceptable failure here.
-func CentrifugoProxyAuth() func(http.Handler) http.Handler {
+// That last case is not caution, it is necessity. The proxies derive their
+// tenant from the connection `meta` in the REQUEST BODY (see
+// handlers.proxyOrgDB): org_id is an attacker-controlled parameter, and RLS
+// cannot help — it is handed the forged org rather than asked to validate it.
+// With two or more tenants an unauthenticated caller could therefore pick a
+// VICTIM org and publish GPS into its scope, or trip the proximity auto-end
+// path against its shifts. Denying loudly (realtime down, obvious,
+// self-healing the instant the header is configured) is the only acceptable
+// failure once that is reachable.
+//
+// Same escalation rule as database.AssertRLSEnforced: one tenant is a warning,
+// several is a refusal.
+func CentrifugoProxyAuth(root *sqlx.DB) func(http.Handler) http.Handler {
 	secret := os.Getenv("CENTRIFUGO_PROXY_SECRET")
 	if secret == "" {
 		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Println("⚠️  CENTRIFUGO_PROXY_SECRET is not set — Centrifugo proxy endpoints are UNPROTECTED")
 		log.Println("   Anyone can POST forged subscribe/publish/GPS payloads to /api/centrifugo/*.")
 		log.Printf("   Set the var and configure Centrifugo to send the %s header.", CentrifugoProxyHeader)
-		if orgdb.Migrated() {
-			log.Println("   🚨 TENANCY IS LIVE: proxy requests are being DENIED rather than trusted,")
-			log.Println("      because an unauthenticated caller could otherwise name ANY tenant in")
-			log.Println("      the connection meta. Realtime stays down until the secret is set.")
-		}
+		log.Println("   Realtime will be DENIED outright as soon as a SECOND organization exists,")
+		log.Println("   because org_id then becomes an attacker-selectable victim.")
 		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	}
+
+	// Cached multi-tenant check. Provisioning a new org is rare and deliberate,
+	// so a short TTL keeps steady-state at zero queries while still hardening
+	// on its own within seconds of org #2 appearing.
+	var (
+		mu          sync.Mutex
+		multiTenant bool
+		checkedAt   time.Time
+	)
+	isMultiTenant := func() bool {
+		if !orgdb.Migrated() {
+			return false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Since(checkedAt) < 30*time.Second {
+			return multiTenant
+		}
+		var n int
+		if err := root.Get(&n, `SELECT count(*) FROM organizations`); err != nil {
+			// Cannot prove single-tenant -> assume the dangerous case.
+			log.Printf("⚠️  [Centrifugo] org count failed (%v) — treating as multi-tenant", err)
+			multiTenant = true
+		} else {
+			multiTenant = n > 1
+		}
+		checkedAt = time.Now()
+		return multiTenant
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if secret == "" {
-				// Mode is frozen at boot, but read it per-request so ordering
-				// between InitTenancy and route registration can never matter.
-				if orgdb.Migrated() {
-					log.Printf("🚫 [Centrifugo] Proxy request DENIED: tenancy is live and %s is not configured",
-						CentrifugoProxyHeader)
+				if isMultiTenant() {
+					log.Printf("🚫 [Centrifugo] Proxy request DENIED: %s is not configured and this "+
+						"database now hosts multiple organizations", CentrifugoProxyHeader)
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
-				next.ServeHTTP(w, r) // dark mode: historical behavior
+				next.ServeHTTP(w, r) // single tenant: historical behavior
 				return
 			}
 			provided := r.Header.Get(CentrifugoProxyHeader)

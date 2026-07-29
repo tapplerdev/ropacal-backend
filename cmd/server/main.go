@@ -348,7 +348,7 @@ func main() {
 	// it from the client's authenticated connection token). Fail-open with a
 	// loud boot warning until ops set the var + Centrifugo config.
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.CentrifugoProxyAuth())
+		r.Use(middleware.CentrifugoProxyAuth(db))
 		r.Post("/api/centrifugo/subscribe", handlers.CentrifugoSubscribeProxy(db))
 		r.Post("/api/centrifugo/publish", handlers.CentrifugoPublishProxy(db))
 		// Location publish proxy (processes GPS data before broadcast)
