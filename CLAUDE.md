@@ -105,7 +105,7 @@ internal/
     notification_helpers.go — Notification building helpers
     geocoding*.go           — HERE Maps geocoding service
     route_optimizer.go      — Route optimization orchestration
-  websocket/                — Native WebSocket hub (legacy, alongside Centrifugo)
+  websocket/                — Native WebSocket hub (legacy; /ws route CLOSED 2026-07 — zero clients, broadcasts are no-ops; package pending deletion)
 pkg/utils/response.go      — HTTP response helpers
 migrations/                 — 20 SQL migration files (applied via database.go)
 ```
@@ -139,7 +139,7 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 - **Everything else under /api:** JWT Bearer token required (`middleware.Auth`) — including all reads (bins, routes, zones, analytics, potential locations, `GET /api/areas/boundary`) and the geocoding/directions proxies (no tenant data, but paid API quota)
 - **Admin endpoints:** JWT + `admin` role (`middleware.RequireRole("admin")`) — the `/api/manager/*` surface plus `PATCH /api/config/warehouse` and the route-template writes (`POST/PATCH/DELETE /api/routes*`)
 - **Centrifugo proxies** (`POST /api/centrifugo/*`): called by the Centrifugo SERVER, not clients — guarded by the `CENTRIFUGO_PROXY_SECRET` shared header (`X-Centrifugo-Proxy-Secret`); fail-open with a loud boot warning until ops set it. Payload `user` identity is only trustworthy behind that guard. Tenant scope comes from the connection `meta` (`{"org_id": ...}`, minted into the connection token) which Centrifugo forwards only when its service config sets `proxy_include_connection_meta` — see the CENTRIFUGO SERVICE CONFIG note under Environment Variables. Tenancy live + no org in meta = clean Centrifugo-shaped denial.
-- **`GET /ws`:** legacy WebSocket, validates the app JWT in-handler via `?token=`; scheduled for removal in a later deploy
+- **`GET /ws`:** REMOVED (route closed 2026-07; both clients are Centrifugo-only). The `websocket` package + hub wiring remain as dead code pending full deletion; revert = re-register the one route line in main.go
 - JWT uses HMAC signing with `APP_JWT_SECRET`, includes user_id/email/role claims
 
 ## Background Workers (started in main.go)
