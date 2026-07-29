@@ -133,6 +133,19 @@ All timestamps are Unix epoch (BIGINT). Migrations are inline in `database/datab
 - **notification_log** / **user_notifications** — notification audit trail + per-user inbox
 - **app_error_logs** — mobile app crash reporting
 
+## Multi-tenancy
+
+Live since 2026-07-29: shared DB, `organization_id` on 35 tables, RLS keyed on
+`current_setting('app.org_id')`, app connects as non-superuser `binly_app`
+(owns all tables, `FORCE ROW LEVEL SECURITY`). Request path binds the org from
+the JWT via `middleware.Org` -> `orgdb.From(r)`; workers loop per org via
+`orgdb.ForEachActiveOrg`; non-request paths use `orgdb.System`.
+
+**Several gates relax at exactly ONE organization and harden at two or more**
+(proxy secret, proxy connection-meta, login org slug, the RLS boot tripwire).
+Read `TENANCY_BACKLOG.md` before onboarding a second tenant — two Centrifugo
+config fields are a hard prerequisite, not polish.
+
 ## API Auth
 
 - **Public endpoints (the complete list):** `GET /health`, `POST /api/auth/login`, `/api/internal/*` (`INTERNAL_API_KEY` header — FindMy bridge). Everything else requires an identity.
