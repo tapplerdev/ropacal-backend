@@ -190,13 +190,11 @@ type CompanyEvent struct {
 // silently missed. That is the whole safety property, and it is also why the
 // free-form PublishToChannel was deleted — it offered a way around this check.
 //
-// DUAL PUBLISH (D1 Deploy 1 of 3). Events go to BOTH the scoped channel and the
-// legacy flat one, so this deploy is fully backward compatible: existing clients
-// keep receiving events on company:events while the scoped channel is pre-filled
-// and ready for Deploy 2's client switch. Deploy 3a removes the legacy PARSER
-// branch (closing the cross-tenant hole); Deploy 3b removes this legacy publish.
-// Publishing legacy FIRST is intentional — if the scoped publish fails, the
-// currently-live path has already succeeded.
+// Publishes ONLY to company:{orgID}:events (D1 Deploy 3b — the last step). The
+// dual publish to the shared company:events channel is gone, which is what
+// finally silences any client still attached to it. Deploy 3a had already
+// stopped NEW subscribes to that channel; this removes delivery to the
+// subscriptions established before it.
 func (c *Client) PublishCompanyEvent(ctx context.Context, orgID, eventType string, data interface{}) error {
 	payload := CompanyEvent{
 		Type: eventType,
@@ -206,13 +204,6 @@ func (c *Client) PublishCompanyEvent(ctx context.Context, orgID, eventType strin
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal company event data: %w", err)
-	}
-
-	// Legacy channel first: it is the one clients are on today.
-	const legacy = "company:events"
-	if _, err := c.client.Publish(ctx, legacy, jsonData); err != nil {
-		log.Printf("❌ [Centrifugo] Publish failed - Channel: %s, Type: %s, Error: %v", legacy, eventType, err)
-		return fmt.Errorf("failed to publish to channel %s: %w", legacy, err)
 	}
 
 	if orgID == "" {
@@ -228,9 +219,11 @@ func (c *Client) PublishCompanyEvent(ctx context.Context, orgID, eventType strin
 
 	scoped := fmt.Sprintf("company:%s:events", orgID)
 	if _, err := c.client.Publish(ctx, scoped, jsonData); err != nil {
-		// Do not fail the caller: the legacy publish already succeeded, so the
-		// event was delivered. Log it as the migration problem it is.
-		log.Printf("⚠️  [Centrifugo] scoped publish failed - Channel: %s, Type: %s, Error: %v", scoped, eventType, err)
+		// Now the ONLY delivery path, so a failure is the caller's problem
+		// again. During dual-publish this was logged and swallowed because the
+		// legacy publish had already delivered the event; that is no longer so.
+		log.Printf("❌ [Centrifugo] Publish failed - Channel: %s, Type: %s, Error: %v", scoped, eventType, err)
+		return fmt.Errorf("failed to publish to channel %s: %w", scoped, err)
 	}
 	return nil
 }
