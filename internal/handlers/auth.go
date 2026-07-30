@@ -34,10 +34,12 @@ type LoginRequest struct {
 
 // LoginOrganization is the organization block returned by a successful login
 // once multi-tenancy is live.
+// db tags are explicit rather than relying on sqlx's default lowercase name
+// mapper, since this struct is now scanned directly in GetAuthStatus.
 type LoginOrganization struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Slug string `json:"slug"`
+	ID   string `json:"id" db:"id"`
+	Name string `json:"name" db:"name"`
+	Slug string `json:"slug" db:"slug"`
 }
 
 type LoginResponse struct {
@@ -250,10 +252,37 @@ func GetAuthStatus(root *sqlx.DB) http.HandlerFunc {
 
 		log.Printf("✅ Auth status retrieved for: %s (%s)", user.Email, user.Role)
 
-		// Return user response (without password)
-		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
+		resp := map[string]interface{}{
 			"success": true,
 			"user":    user.ToUserResponse(),
-		})
+		}
+
+		// Include the organization, mirroring the login response.
+		//
+		// Clients remember the org SLUG to pre-fill their login form, because
+		// once a second tenant exists the slug is mandatory and a wrong one is
+		// indistinguishable from a bad password (both are an opaque 401). But
+		// the slug was previously only ever learned at LOGIN — so any user
+		// holding a valid 7-day token when the second org is provisioned would
+		// never have received it, and would land on an empty required field
+		// with no way to know what to type. Returning it here lets a
+		// session restore backfill it, which is the path every already-signed-in
+		// user takes on app launch.
+		//
+		// organizations is readable on the org-bound handle because it carries a
+		// permissive org_catalog_read policy (FOR SELECT USING (true)) alongside
+		// its isolation policy. Failure is non-fatal: auth status must keep
+		// working even if this lookup does not.
+		if orgID := db.OrgID(); orgID != "" {
+			var org LoginOrganization
+			if err := db.Get(&org,
+				`SELECT id, name, slug FROM organizations WHERE id = $1`, orgID); err != nil {
+				log.Printf("⚠️  Auth status: could not load organization %s: %v", orgID, err)
+			} else {
+				resp["organization"] = org
+			}
+		}
+
+		utils.RespondJSON(w, http.StatusOK, resp)
 	}
 }
