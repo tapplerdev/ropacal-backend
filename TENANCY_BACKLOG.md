@@ -249,6 +249,77 @@ WebSocket connections, so pick the window.
 
 ---
 
+## Findings from the 2026-07-30 config + migration review
+
+The review confirmed D1's load-bearing assumption and found six real issues.
+Four are fixed; two live in the FindMy bridge and are open.
+
+**Confirmed good — do not re-litigate:** Centrifugo resolves a channel's
+namespace at the FIRST colon, so `company:{uuid}:events` lands in the `company`
+namespace. Per the docs, and already demonstrated by the two-colon
+`driver:location:{id}` channel running in production today. D1 is sound.
+`include_connection_meta` is the correct v6 key at all three config paths, adds a
+top-level `meta` field, and matches the backend's struct tags. No Go code selects
+or updates `airtag_accounts` by email, so the per-org migration could not have
+turned a single-row lookup into a multi-row one.
+
+**Fixed 2026-07-30:**
+- Boot DDL declared `email TEXT NOT NULL UNIQUE` on `airtag_accounts` — the exact
+  constraint the migration removes. No migrations runner exists, so any FRESH
+  database silently reintroduced the cross-tenant existence oracle. Now an
+  idempotent DO block that installs the right constraint for either schema state.
+- `CentrifugoSubscribeResult.ExpireAt` was declared and never set, making every
+  subscription permanent: D4b's 60s revocation never reached an established
+  socket, and Deploy 3a's "zero legacy subscribes" gate could not see the very
+  sessions it would cut off. Now 1h, matching the D4a token TTL.
+- Centrifugo Dockerfile now warns against pinning below **v6.3.0** — the
+  `${CENTRIFUGO_VAR_*}` interpolation does not exist before it, so an older pin
+  sends the literal string as the proxy secret and 401s every proxy request,
+  presenting as a secret mismatch rather than a version problem.
+- `binly-findmy-bridge` `.gitignore` now covers `account_*.json`. Those hold the
+  iCloud password in plaintext plus ~10 live FindMy tokens; only
+  `account_state.json` was ignored, so a `git add -A` would have committed them.
+  Verified never committed historically, so no history rewrite is needed.
+
+**OPEN — in `binly-findmy-bridge`, and blocking for org #2:**
+1. **Positional account misalignment (a LIVE bug, not just a tenancy one).**
+   `sync_engine.py:172` does `zip(self.accounts, self.config.APPLE_ACCOUNTS)`, but
+   `get_accounts()` SKIPS accounts that fail login or need 2FA
+   (`location_fetcher.py:98`, `:103`), so the lists shift and one account's Apple
+   session is PUT to another account's row. Same assumption at
+   `sync_engine.py:201-202`, `:319`, `api.py:143`, `:182`. At two orgs this
+   carries one tenant's live Apple auth tokens into another tenant's row.
+   `state_file = f"account_{i}.json"` has the same problem, and
+   `_restore_account_state_from_db` only writes the backend's copy when the local
+   file is ABSENT, so a stale file beats the authoritative one.
+2. **`_pending_2fa` is keyed by email** (`location_fetcher.py:21`, `:102`;
+   `api.py:63-73`, `:86-88`) — precisely the collision the migration now permits.
+   Two orgs sharing an Apple ID means the second overwrites the first's pending
+   entry and that org can never complete 2FA. `account_id` already exists on
+   `AccountCredentials` and is the obvious key.
+3. The bridge is org-blind generally: it merges every account's keys into one
+   list, so org A's credentials query org B's tags, and it posts locations keyed
+   on `bin_number`, which is NOT unique across tenants. The backend fails closed
+   (multi-org matches are skipped), so this is silent tracking LOSS rather than
+   misrouting — but two orgs owning "Bin 46" breaks it for both.
+
+**Assessed and deliberately not changed:**
+- `client.allowed_origins: ["*"]` is largely mitigated, not a live hole. It only
+  constrains browsers (requests without an `Origin` header pass regardless, and
+  non-browsers can forge it), anonymous connect is disabled, the connection token
+  is minted behind `middleware.Auth` on another origin with no cookie auth in the
+  handshake, and every subscribe is proxy-authorized per user AND per org.
+  Tightening it to the dashboard origins is free and will not break Flutter
+  (native clients send no `Origin`), but it is defense-in-depth, not a fix.
+- `channel.proxy.publish` is dead config — no namespace enables it except
+  `driver`, which overrides it with `publish_proxy_name`. Fail-closed, but
+  config.json reads as though it guards shift/manager/company publishes when
+  default-deny is what actually does.
+- `driver`'s `allow_publish_for_client: true` is safe only because
+  `publish_proxy_enabled` routes to the location proxy, which enforces channel
+  shape and `req.User == driverID`. Dropping or mistyping that flag would let any
+  authenticated client publish into any `driver:*` channel.
+
 ## Security items still open
 
 - **Rotate the `postgres` password.** It was pasted into an assistant transcript
