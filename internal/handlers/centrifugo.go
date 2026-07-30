@@ -335,16 +335,59 @@ func authorizeSubscription(db *orgdb.DB, userID string, channel string) (bool, e
 	return false, fmt.Errorf("unknown channel format: %s", channel)
 }
 
-// canViewDriverLocation checks if user can view a driver's location
+// sameOrgAsSubscriber reports whether targetOrg belongs to the same tenant as the
+// subscriber's org-bound handle.
+//
+// D2 (tenant isolation). RLS already scopes these lookups to the subscriber's org,
+// so a foreign row normally comes back as ErrNoRows. This is a SECOND, explicit
+// barrier for two reasons: it does not depend on RLS being correctly configured on
+// every table forever, and it fails closed if a future query is ever run on an
+// unscoped handle. `orgID == ""` means a passthrough handle (tenancy not migrated),
+// where there is exactly one tenant and nothing to compare.
+func sameOrgAsSubscriber(db *orgdb.DB, targetOrg string) bool {
+	subscriberOrg := db.OrgID()
+	if subscriberOrg == "" {
+		return true // single-tenant / dark mode
+	}
+	return targetOrg == subscriberOrg
+}
+
+// canViewDriverLocation checks if user can view a driver's location.
+//
+// D2: this used to authorize ANY driverID once the subscriber was an admin — the
+// driver's own org was never consulted. `db` is bound to the SUBSCRIBER's org, so
+// the role lookup only proved "an admin of their own tenant", after which a
+// foreign driver's UUID was accepted. Given a UUID, one tenant could live-track
+// another tenant's fleet. The target is now resolved and its org compared.
 func canViewDriverLocation(db *orgdb.DB, userID string, driverID string) (bool, error) {
 	// Allow if user is the driver themselves
 	if userID == driverID {
 		return true, nil
 	}
 
-	// Check if user is a manager (has manager role)
+	// Resolve the TARGET driver first, on the subscriber's org-bound handle.
+	// ErrNoRows here means the driver is foreign (RLS hid it) or nonexistent —
+	// both are a denial, and deliberately indistinguishable to the caller.
+	var target struct {
+		Role  string `db:"role"`
+		OrgID string `db:"organization_id"`
+	}
+	err := db.Get(&target, `SELECT role, organization_id FROM users WHERE id = $1`, driverID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to resolve target driver: %w", err)
+	}
+	if !sameOrgAsSubscriber(db, target.OrgID) {
+		log.Printf("🚫 [Centrifugo] cross-org denial: subscriber org=%s tried driver %s (org=%s)",
+			db.OrgID(), driverID, target.OrgID)
+		return false, nil
+	}
+
+	// Then the subscriber's own role.
 	var role string
-	err := db.Get(&role, `SELECT role FROM users WHERE id = $1`, userID)
+	err = db.Get(&role, `SELECT role FROM users WHERE id = $1`, userID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -352,24 +395,37 @@ func canViewDriverLocation(db *orgdb.DB, userID string, driverID string) (bool, 
 		return false, fmt.Errorf("failed to get user role: %w", err)
 	}
 
-	// Managers can view all driver locations
+	// NOTE: "manager" is not a live role — the users CHECK constraint allows only
+	// driver|admin. Kept for compatibility; admin is what actually matches.
 	return role == "admin" || role == "manager", nil
 }
 
-// canViewShift checks if user can view shift updates
+// canViewShift checks if user can view shift updates.
+//
+// D2: identical hole to canViewDriverLocation, and worse in payload — the
+// shift:updates channel carries the full task list (addresses, sequence, bins).
+// A foreign admin holding a shift UUID received all of it.
 func canViewShift(db *orgdb.DB, userID string, shiftID string) (bool, error) {
-	// Check if user is assigned to this shift
-	var driverID sql.NullString
-	err := db.Get(&driverID, `SELECT driver_id FROM shifts WHERE id = $1`, shiftID)
+	// Resolve the shift and its owning org together.
+	var shift struct {
+		DriverID sql.NullString `db:"driver_id"`
+		OrgID    string         `db:"organization_id"`
+	}
+	err := db.Get(&shift, `SELECT driver_id, organization_id FROM shifts WHERE id = $1`, shiftID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("failed to get shift: %w", err)
 	}
+	if !sameOrgAsSubscriber(db, shift.OrgID) {
+		log.Printf("🚫 [Centrifugo] cross-org denial: subscriber org=%s tried shift %s (org=%s)",
+			db.OrgID(), shiftID, shift.OrgID)
+		return false, nil
+	}
 
 	// Allow if user is assigned to this shift
-	if driverID.Valid && driverID.String == userID {
+	if shift.DriverID.Valid && shift.DriverID.String == userID {
 		return true, nil
 	}
 
