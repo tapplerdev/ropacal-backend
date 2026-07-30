@@ -338,6 +338,59 @@ turned a single-row lookup into a multi-row one.
   shape and `req.User == driverID`. Dropping or mistyping that flag would let any
   authenticated client publish into any `driver:*` channel.
 
+## The backend cannot boot against a FRESH database (found 2026-07-30)
+
+Discovered while building a local test environment. Pointing the backend at an
+empty database fails at startup:
+
+    ❌ FATAL ERROR: Database migrations failed
+       migration failed: pq: relation "move_request_history" does not exist
+
+`internal/database/database.go:238` runs
+`ALTER TABLE move_request_history ADD COLUMN IF NOT EXISTS seq BIGSERIAL`, but
+nothing in the boot DDL ever CREATEs that table — it only exists in
+`migrations/add_move_request_history.sql`, which is applied by hand. So the boot
+DDL is not self-sufficient: a fresh database needs some migrations applied
+BEFORE the server will start, and nothing documents which.
+
+This compounds the airtag boot-DDL finding (fixed the same day): the
+fresh-database path is broken in more than one way, and it is untested because
+production has had these tables for months and
+`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` make every boot a
+no-op there.
+
+Worth fixing properly rather than patching: either add the missing CREATE TABLE
+statements to the boot DDL, or add a real migration runner and stop keeping two
+sources of schema truth. Until then, the reliable way to stand up a new
+environment is to restore a schema dump from production
+(`pg_dump --schema-only`), which is what the local test used.
+
+**Verified working via that route (2026-07-30), all against a local clone of the
+production schema with a non-superuser `binly_app` owning 41 tables under FORCE
+ROW LEVEL SECURITY — production was never touched:**
+
+| Test | Result |
+|---|---|
+| `POST /api/internal/organizations` with no / wrong internal key | 401 |
+| Validation: missing name, bad slug, missing email, half-supplied or out-of-range coords, coords without address | all rejected with specific messages |
+| Create org with warehouse | 201, password returned once |
+| Create org without warehouse | 201 + warning about the 412 |
+| Duplicate slug | 409 |
+| **2 orgs → login without slug** | **400 with the "organization is required" message** |
+| 2 orgs → login with slug | 200, returns the organization |
+| Slug case-insensitivity (`ACME`) | 200 |
+| Right password + WRONG org slug | opaque 401 |
+| Unknown slug | opaque 401 (indistinguishable — no tenant enumeration) |
+| Both orgs create bin **9001** | both succeed; numbers are per-tenant |
+| Each org lists bins | sees ONLY its own |
+| acme PATCHes its own bin (control) | 200, change applied |
+| **acme PATCHes beta's bin by exact UUID** | **404, beta's data unchanged** |
+| `teardown-org.sh beta` | removed cleanly, acme untouched, 0 orphaned rows |
+| Back to 1 org | single-org grace returns within ~12s |
+
+The control on the PATCH test matters: a 404 only proves isolation if the same
+call against your OWN row returns 200. It did.
+
 ## Security items still open
 
 - **Rotate the `postgres` password.** It was pasted into an assistant transcript
