@@ -278,6 +278,103 @@ Centrifugo does send the header (verified: 45 × `publish-location` → 200 unde
 enforcement), so every gate's `curl` against a proxy endpoint must include
 `-H "X-Centrifugo-Proxy-Secret: <value>"` or it will 401 for the wrong reason.
 
+## 0.10 Six changes required by the Tier-2 compatibility review
+
+Tier-2's verdict on this plan: sound, implement it, **nothing needs unpicking** —
+but six changes must land first so Tier-2 is not made harder. Full rationale in
+`TIER2_PLAN.md` §1.7.
+
+**1. Extract ONE `parseChannel` helper — do not inline a two-form parse.**
+As currently written, D1 parses both channel forms inline inside `case "company"`,
+which leaves `channelType := parts[1]` (`handlers/centrifugo.go:286`) a lie and
+forces Tier-2 to add three more ad-hoc parses: in `authorizeSubscription`, in
+`authorizePublication` (`:476`), and around the location proxy's hard
+`len(parts) != 3` assert (`:95`). Discriminate on **`uuid.Parse(parts[1])`**, not
+on `len(parts)` — the length test breaks the moment a second family gains an org
+segment.
+
+**2. DELETE `PublishToChannel` (`services/centrifugo/client.go:114`).**
+D1's headline safety claim — "changing `PublishCompanyEvent`'s signature breaks
+compilation at all 36 sites" — is true *today only by luck*. All four callers of
+`PublishToChannel` hand-build their channel with `fmt.Sprintf("shift:updates:%s")`,
+so they would **silently survive** the signature change. Verified good news: none
+of them builds a `company:` channel, so D1's 36-site count is complete.
+
+**3. KEYS → SCAN is MANDATORY inside D3, not "recommended".** See 0.11.
+
+**4. Add D5 — AirTag tenancy.** See 0.12. This is the most urgent item in either
+tier: it leaks automatically, minutes after org #2 exists.
+
+**5. Make `orgID == ""` LOUD under live tenancy** in both `PublishCompanyEvent`
+and the new `driverLocationKey`. The current silent legacy fallback is correct
+pre-D1, but after Deploy 3 it becomes silent event loss (publish to a channel
+nobody parses) and unreadable Redis keys. Log an error and, for the Redis key,
+return an error rather than a legacy-shaped key.
+
+**6. Pin the Centrifugo Docker tag BEFORE D1 Deploy 2.** The image uses a floating
+tag — it self-upgraded 6.6.0 → 6.9.1 during the 2026-07-30 secret rotation. An
+unannounced version move mid-migration could shift namespace-resolution behaviour
+underneath the one assumption D1 rests on.
+
+## 0.11 KEYS → SCAN belongs in D3, mandatorily
+
+`GetAllDriverLocations` uses `KEYS`, which blocks Redis for the duration. Two
+facts make this a Tier-1 concern rather than tidy-up:
+
+- **Centrifugo shares this Redis instance.** The blocking command is aimed at the
+  live message broker, and ~93% of the keyspace is Centrifugo's own
+  (`centrifugo.stream.meta.*`), growing with *their* traffic, not ours.
+- **D3 ships `ForEachActiveOrg` as the permanent shape.** So after D3 the number
+  of blocking full-keyspace commands per 30 seconds *is the tenant count*.
+  Tenancy's one new variable becomes the multiplier on the one blocking command
+  pointed at the broker.
+
+Same function, ~10 lines, and every caller is already being edited by D3. Keep it
+a **separate commit inside the same deploy** so the tenant fix and the
+shared-fate fix can be reverted independently.
+
+Honest limit: SCAN removes the *block*, not the *work* — `MATCH` still walks a
+keyspace that is mostly Centrifugo's. A per-org index set is the real answer;
+the `ropacal:org:{id}:` prefix leaves room for it. Do not build it now.
+
+## 0.12 D5 — AirTag tenancy (NEW, and the most urgent item in either tier)
+
+This leaks with **no attacker and no misconfiguration**, automatically, minutes
+after a second org is provisioned. Two defects, both verified:
+
+**(a) The monitor's unscoped fallback — 2 lines.**
+`services/airtag_monitor.go:346-350`:
+```go
+entries, err := GetAirtagLocationsFromDB(m.db)
+if err == nil && len(entries) > 0 { return entries, nil }   // <-- zero rows falls through
+if err != nil { log.Printf("⚠️ ... falling back to bridge: %v", err) }  // <-- warns ONLY on error
+// ... then fetches the ENTIRE FindMy fleet from the bridge
+```
+A *successful* read returning zero rows drops through to the global bridge fleet,
+and the warning is on the error branch only — so it is silent. A newly
+provisioned org has zero `airtag_locations` rows **by definition**. So ~3 minutes
+after org #2 exists, its drift sweep evaluates org #1's whole fleet (72 rows)
+against org #2's bins, matched on non-unique `bin_number`, and emits FCM pushes
+carrying org #1's addresses.
+Fix: treat `len(entries) == 0` as a legitimate empty result under live tenancy —
+return it, do not fall back — and log if the fallback is ever taken.
+
+**(b) The resolver cache bypasses its own ambiguity guard — ~6 lines.**
+`handlers/airtag_org.go:96-102` returns the cached org **before** any probe, so
+the ambiguity guard at `:126-136` — the only cross-tenant defence on this path —
+runs only on a cache miss. With a 1h TTL: org A caches bin 56, org B later
+creates bin 56, and B's AirTag GPS writes into A's scope with no log, and the
+rows persist after the cache expires. Prod already has duplicate bin numbers
+**56, 86, 116**.
+Fix: include the org in the cache key, or re-run the ambiguity check on hits.
+
+**(c) Bundle the existence oracle.** `airtag_accounts_email_key UNIQUE (email)` is
+global, so a tenant adding an Apple ID already held by another tenant gets a
+23505 on a row RLS says does not exist. Scope it to `(organization_id, email)`.
+
+Ship D5 **before** any second org is provisioned. It is independent of D1-D4 and
+can go first.
+
 ## D1. `company:events` → `company:{orgID}:events`
 
 ### Current state (verified)
