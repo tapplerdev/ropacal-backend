@@ -60,7 +60,37 @@ that — it is handed the org id rather than asked to validate it. Unauthenticat
 callers could otherwise pick a victim tenant, publish forged GPS into its scope,
 and trip the proximity auto-end path against its shifts.
 
-### 2. Tenant provisioning flow
+### 2. Tenant provisioning flow — SCRIPTS NOW EXIST
+
+`scripts/provision-org.sh` and `scripts/teardown-org.sh` (added 2026-07-30).
+Provisioning runs all three inserts in ONE transaction; teardown deletes the 35
+tenant tables in generated dependency order, then the org.
+
+**Regenerating the teardown order** if the schema changes — the order must be a
+topological sort over BLOCKING FK edges only (`confdeltype IN ('a','r')`).
+Including the 40 SET NULL and 27 CASCADE edges produces a FALSE cycle among
+bins / potential_locations / shifts / users:
+
+```sql
+SELECT c.conrelid::regclass::text AS child, c.confrelid::regclass::text AS parent
+FROM pg_constraint c
+WHERE c.contype='f' AND c.connamespace='public'::regnamespace
+  AND c.confdeltype IN ('a','r') AND c.conrelid <> c.confrelid;
+```
+Then topologically sort the 35 tables that have an `organization_id` column,
+emitting a table only once nothing still-pending references it as a parent.
+
+Constraints that shaped the scripts:
+- all 35 FKs to `organizations` are RESTRICT and `condeferrable = false`, so
+  `SET CONSTRAINTS ALL DEFERRED` is not available
+- `config.id` is a SERIAL INTEGER, not a uuid — omit it on insert
+- provisioning needs NO new credential: `binly_app` already holds INSERT on
+  `organizations`, and `set_config('app.org_id', …)` satisfies the RLS
+  `WITH CHECK` plus the `organization_id` column defaults
+- a new org's warehouse is seeded at 0,0 and route optimization returns 412
+  until it is set for real
+
+### 2b. Original notes
 Org creation is currently manual SQL run as `postgres` (boot seeds are correctly
 skipped once tenancy is live — see `cmd/server/main.go`, or they would NOT-NULL
 violate and boot-loop). Needs a real path: create `organizations` row + first
