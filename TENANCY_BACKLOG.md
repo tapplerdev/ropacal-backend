@@ -346,12 +346,61 @@ empty database fails at startup:
     ❌ FATAL ERROR: Database migrations failed
        migration failed: pq: relation "move_request_history" does not exist
 
-`internal/database/database.go:238` runs
-`ALTER TABLE move_request_history ADD COLUMN IF NOT EXISTS seq BIGSERIAL`, but
-nothing in the boot DDL ever CREATEs that table — it only exists in
-`migrations/add_move_request_history.sql`, which is applied by hand. So the boot
-DDL is not self-sufficient: a fresh database needs some migrations applied
-BEFORE the server will start, and nothing documents which.
+**Independently verified 2026-07-30, and it is WORSE than the first diagnosis.**
+`move_request_history` is 1 of **4** blockers and it is the easy one — fixing it
+just moves the error three more times. All 223 boot statements were extracted and
+run individually against an empty database; **24 fail across 4 tables**, in two
+distinct classes:
+
+| Table | Failing stmts | Class |
+|---|---|---|
+| **`route_tasks`** | **20** | **No `CREATE TABLE` exists ANYWHERE in the repo** — not in Go, not in `migrations/*.sql`. Only ALTERs and indexes. |
+| `move_request_history` | 2 | Not created in the boot path; DDL exists only in `migrations/add_move_request_history.sql` |
+| `bin_move_requests` | 1 | Ordering only — the table IS created later in the same slice (line 602) |
+| `potential_locations` | 1 | Ordering only — created later in the same slice (line 660) |
+
+Proof of the split: after pre-creating the two genuinely-missing tables, a second
+pass over the identical 223 statements returned **zero** failures.
+
+`route_tasks` is the serious one — the central table of the itinerary domain,
+~27 query sites, and no canonical schema anywhere. `internal/itinerary/DESIGN.md`
+line 76 lists exactly this as Phase 0 work that was never shipped: "add
+idempotent `CREATE TABLE route_tasks` DDL (canonical schema; currently only
+ALTERs exist)". Fixing it means AUTHORING the schema from `models.RouteTask` plus
+the existing ALTERs, not copying a file.
+
+Second trap: the naive fix for `move_request_history` also fails. Its
+`CREATE TABLE` in `migrations/add_move_request_history.sql` carries inline
+`REFERENCES bin_move_requests(id)` and `REFERENCES users(id)`, so pasting it at
+the top of the slice fails on a missing `bin_move_requests`. It has to go AFTER
+line 629.
+
+The failure is fatal, not skipped — `database.go:1175-1179` returns on the first
+error and `cmd/server/main.go:89-95` wraps it in `log.Fatal`.
+
+Beyond the boot blockers: **`routes` and `route_bins` are never created either**
+(only in `migrations/create_routes_table.sql`). They do not stop boot, but
+`internal/handlers/routes.go` (12+ query sites) and
+`ai_operations_agent.go:445` would 500 at runtime — so even a booting fresh
+environment is not functional.
+
+**Minimal correct fix, in order:**
+1. Author `CREATE TABLE IF NOT EXISTS route_tasks (...)` from `models.RouteTask`;
+   insert after `shifts` (line 187) so its `shift_id`/`bin_id` FKs resolve. The
+   existing ALTERs then become no-ops.
+2. Add `CREATE TABLE IF NOT EXISTS move_request_history (...)` after the
+   `bin_move_requests` block (after line 629), and relocate lines 238-239 (the
+   `seq` column and `idx_mrh_move_seq`) to directly follow it.
+3. Move the `zone_incidents_move_request_id_fkey` DO block (line 460) to after
+   line 629.
+4. Move the `fk_bins_source_potential_location` DO block (line 585) to after
+   line 683.
+5. Add `routes` / `route_bins` DDL so the environment is usable, not just
+   bootable.
+
+Tenancy detection and seeding are innocent — verified: with the schema fixed the
+real binary boots fully, detects single-tenant passthrough correctly, seeds 4
+users and 44 bins, starts every worker and serves 200 on `/health`.
 
 This compounds the airtag boot-DDL finding (fixed the same day): the
 fresh-database path is broken in more than one way, and it is untested because
