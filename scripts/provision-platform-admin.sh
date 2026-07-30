@@ -14,9 +14,14 @@
 # Usage:
 #   DATABASE_URL='postgres://...' ./scripts/provision-platform-admin.sh omar@binly.com "Omar Gabr"
 #
-# The password and the TOTP secret are written to SEPARATE mode-600 files rather
-# than printed. Putting both factors in one terminal scrollback, CI log or tmux
-# buffer defeats the point of having two.
+# By default this creates a PASSWORD-ONLY account. Pass --totp to also enrol a
+# second factor, which is strongly recommended for an identity that reaches every
+# tenant's data — with password-only, the login rate limiter (3 attempts per IP
+# per 15 minutes) is the only thing standing in the way of a guessed password.
+#
+# Credentials are written to mode-600 files rather than printed, and when TOTP is
+# enabled the two factors go to SEPARATE files: both in one terminal scrollback,
+# CI log or tmux buffer defeats the point of having two.
 #
 # The platform surface stays DISABLED until PLATFORM_JWT_SECRET is set on the
 # backend — a separate secret from APP_JWT_SECRET, and the server refuses to boot
@@ -24,7 +29,17 @@
 #   openssl rand -base64 48
 set -euo pipefail
 
-EMAIL="${1:?usage: provision-platform-admin.sh <email> <name>}"
+WITH_TOTP=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --totp) WITH_TOTP=1 ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+EMAIL="${1:?usage: provision-platform-admin.sh [--totp] <email> <name>}"
 NAME="${2:?missing name}"
 : "${DATABASE_URL:?DATABASE_URL must be set}"
 
@@ -72,7 +87,7 @@ VALUES ('$(sqlq "$ADMIN_ID")',
         lower('$(sqlq "$EMAIL")'),
         '$(sqlq "$HASH")',
         '$(sqlq "$NAME")',
-        '$(sqlq "$TOTP_SECRET")',
+        $( [ "$WITH_TOTP" = "1" ] && printf "'%s'" "$(sqlq "$TOTP_SECRET")" || printf 'NULL' ),
         'active',
         EXTRACT(EPOCH FROM NOW())::BIGINT,
         EXTRACT(EPOCH FROM NOW())::BIGINT);
@@ -82,10 +97,14 @@ ISSUER="Binly%20Platform"
 URI="otpauth://totp/${ISSUER}:${EMAIL}?secret=${TOTP_SECRET}&issuer=${ISSUER}&algorithm=SHA1&digits=6&period=30"
 
 PW_FILE="$(mktemp -t binly-platform-pw)"
-TOTP_FILE="$(mktemp -t binly-platform-totp)"
-chmod 600 "$PW_FILE" "$TOTP_FILE"
+chmod 600 "$PW_FILE"
 printf '%s\n' "$PASSWORD" > "$PW_FILE"
-printf 'secret: %s\nuri:    %s\n' "$TOTP_SECRET" "$URI" > "$TOTP_FILE"
+TOTP_FILE="(not enabled)"
+if [ "$WITH_TOTP" = "1" ]; then
+  TOTP_FILE="$(mktemp -t binly-platform-totp)"
+  chmod 600 "$TOTP_FILE"
+  printf 'secret: %s\nuri:    %s\n' "$TOTP_SECRET" "$URI" > "$TOTP_FILE"
+fi
 
 cat <<EOF
 
@@ -101,10 +120,9 @@ cat <<EOF
 
   Move them into a password manager, then delete both files.
 
-  Login requires ALL THREE — email, password, and a current 6-digit code:
-    POST /api/platform/auth/login  {"email","password","totp_code"}
-
-  Codes are single-use: a replayed code is refused even inside its 30s window.
+  Login: POST /api/platform/auth/login  {"email","password"$( [ "$WITH_TOTP" = "1" ] && printf ',"totp_code"' )}
+$( [ "$WITH_TOTP" = "1" ] && printf '  Codes are single-use: a replayed code is refused even inside its 30s window.' \
+   || printf '  PASSWORD ONLY — no second factor. Re-run with --totp to enrol one.' )
 
   The platform surface returns 404 until PLATFORM_JWT_SECRET is set on the
   backend, and the server refuses to boot if it equals APP_JWT_SECRET.

@@ -67,12 +67,12 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 		req.TOTPCode = strings.TrimSpace(req.TOTPCode)
 
 		var admin struct {
-			ID         string `db:"id"`
-			Email      string `db:"email"`
-			Password   string `db:"password"`
-			Name       string `db:"name"`
-			TOTPSecret string `db:"totp_secret"`
-			Status     string `db:"status"`
+			ID         string         `db:"id"`
+			Email      string         `db:"email"`
+			Password   string         `db:"password"`
+			Name       string         `db:"name"`
+			TOTPSecret sql.NullString `db:"totp_secret"`
+			Status     string         `db:"status"`
 			// Highest TOTP counter already accepted for this admin. Anything at
 			// or below it is a replay.
 			LastTOTPCounter int64 `db:"last_totp_counter"`
@@ -121,24 +121,45 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 			deny("bad password")
 			return
 		}
-		if req.TOTPCode == "" {
-			deny("missing totp code")
-			return
-		}
+		// TOTP is OPTIONAL per account: required whenever a secret is set,
+		// skipped entirely when it is not. The owner chose password-only for
+		// now; enabling it later is one UPDATE, and the replay-protection code
+		// below stays exercised the moment any account opts in.
+		//
+		// With no second factor, PlatformLoginRateLimit is the ONLY thing
+		// between a guessed password and every tenant's data — which is why it
+		// was tightened to 3 attempts per IP alongside this change.
+		totpEnabled := admin.TOTPSecret.Valid && admin.TOTPSecret.String != ""
+		var counter int64
 
-		// TOTP with REPLAY PROTECTION. totp.Validate alone accepts a code across
-		// three counter windows (Skew=1, Period=30), so a code observed once
-		// stays valid for up to 90 seconds — the review confirmed the same code
-		// authenticating three times in a row. Requiring a strictly increasing
-		// counter makes each code single-use.
-		counter, ok := validateTOTPCounter(req.TOTPCode, admin.TOTPSecret, time.Now())
-		if !ok {
-			deny("bad totp code")
-			return
-		}
-		if counter <= admin.LastTOTPCounter {
-			deny("replayed totp code")
-			return
+		if totpEnabled {
+			if req.TOTPCode == "" {
+				deny("missing totp code")
+				return
+			}
+			// REPLAY PROTECTION. totp.Validate alone accepts a code across three
+			// counter windows (Skew=1, Period=30), so a code observed once stays
+			// valid for up to 90 seconds — a review confirmed the same code
+			// authenticating three times in a row. Requiring a strictly
+			// increasing counter makes each code single-use.
+			c, ok := validateTOTPCounter(req.TOTPCode, admin.TOTPSecret.String, time.Now())
+			if !ok {
+				deny("bad totp code")
+				return
+			}
+			if c <= admin.LastTOTPCounter {
+				deny("replayed totp code")
+				return
+			}
+			counter = c
+		} else {
+			// Password-only account. Deliberate owner decision; the compensating
+			// control is PlatformLoginRateLimit, tightened to 3 attempts per IP
+			// because it is now the ONLY thing between a guessed password and
+			// every tenant's data. Logged loudly every time so the posture is
+			// visible in the logs rather than assumed.
+			log.Printf("⚠️  [PlatformLogin] %s authenticated with PASSWORD ONLY — no second factor "+
+				"on an identity that reaches every tenant", admin.Email)
 		}
 
 		now := time.Now()
@@ -164,19 +185,30 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 		// both pass the in-memory check above, but only one UPDATE can win.
 		// Unlike last_login_at, a failure here is FATAL to the login — serving a
 		// token after failing to burn the counter would reopen the replay window.
-		res, err := root.Exec(
-			`UPDATE platform_admins
-			 SET last_totp_counter = $1, last_login_at = $2, updated_at = $2
-			 WHERE id = $3 AND last_totp_counter < $1`,
-			counter, now.Unix(), admin.ID)
-		if err != nil {
-			log.Printf("❌ [PlatformLogin] could not burn totp counter: %v", err)
-			writePlatformJSON(w, http.StatusInternalServerError, PlatformLoginResponse{OK: false})
-			return
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			deny("totp counter already burned (concurrent replay)")
-			return
+		if totpEnabled {
+			// Burn the counter. The WHERE guard is the atomic step of the replay
+			// defence: two requests presenting the same code concurrently both
+			// pass the check above, but only one UPDATE can win. A failure here
+			// is FATAL to the login — issuing a token after failing to burn the
+			// counter would reopen the replay window.
+			res, err := root.Exec(
+				`UPDATE platform_admins
+				 SET last_totp_counter = $1, last_login_at = $2, updated_at = $2
+				 WHERE id = $3 AND last_totp_counter < $1`,
+				counter, now.Unix(), admin.ID)
+			if err != nil {
+				log.Printf("❌ [PlatformLogin] could not burn totp counter: %v", err)
+				writePlatformJSON(w, http.StatusInternalServerError, PlatformLoginResponse{OK: false})
+				return
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				deny("totp counter already burned (concurrent replay)")
+				return
+			}
+		} else if _, err := root.Exec(
+			`UPDATE platform_admins SET last_login_at = $1, updated_at = $1 WHERE id = $2`,
+			now.Unix(), admin.ID); err != nil {
+			log.Printf("⚠️  [PlatformLogin] could not record last_login_at: %v", err)
 		}
 
 		middleware.AuditPlatformLogin(root, admin.ID, admin.Email, "SUCCESS", r)

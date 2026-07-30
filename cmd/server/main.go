@@ -353,7 +353,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "platform-p2-readonly",
+			"version":         "platform-p2b-writes",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -440,10 +440,11 @@ func main() {
 		// that must be attributed to a person do not. See PLATFORM_ADMIN_PLAN.md.
 		r.Route("/act", func(r chi.Router) {
 			r.Use(middleware.PlatformAuth(db))
-			// READ-ONLY, structurally. Ordered BEFORE ActAsOrg so a write is
-			// refused without even binding a tenant handle or writing an audit
-			// row implying access was granted.
-			r.Use(middleware.PlatformReadOnly)
+			// Read-WRITE. The earlier read-only guard existed only because a
+			// platform request had no valid user to attribute writes to; the
+			// per-organization support user removes that reason. Writes are now
+			// recorded as "Binly Support" in the tenant's own history and as the
+			// individual operator in platform_audit_log.
 			r.Use(middleware.ActAsOrg(db))
 			registerTenantRoutes(r, deps)
 			registerTenantAdminRoutes(r, deps)

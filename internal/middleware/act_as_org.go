@@ -14,61 +14,6 @@ import (
 	"ropacal-backend/internal/orgdb"
 )
 
-// PlatformActorEmail is the identity stamped on a platform request's synthetic
-// tenant claims. Deliberately not a real address and not in any `users` table —
-// if it ever appears in tenant data, something has written when it should not
-// have been able to.
-const PlatformActorEmail = "platform-operator@binly.internal"
-
-// PlatformReadOnly restricts the act-as-org surface to safe methods.
-//
-// THIS IS THE SECURITY BOUNDARY, and it replaces one that turned out not to
-// exist. Phase 2 originally claimed "reads work, attribution-requiring writes
-// fail closed" — but that boundary was an accident of which handlers happened to
-// call GetUserFromContext, not a rule. A review found roughly 20 write routes
-// with no acting-user check at all that therefore succeeded silently, including:
-//
-//	POST /manager/users  — creates a user INSIDE the acted-upon tenant, with
-//	                       role:"admin" accepted. An operator could mint a
-//	                       permanent tenant admin, log in as it, and do anything
-//	                       — unattributed, and invisible to platform_audit_log
-//	                       because it is then ordinary tenant traffic. Strictly
-//	                       worse than the synthesized identity Phase 2 refused to
-//	                       build.
-//	DELETE /manager/shifts/clear, .../purge, POST /manager/bins/load-real —
-//	                       destructive, unattributed.
-//
-// Writes also silently dropped their audit rows: a PATCH to a bin committed the
-// UPDATE while skipping the bin_change_log INSERT entirely, because the log is
-// gated on having a user id.
-//
-// So the rule is now structural rather than incidental: an operator can SEE
-// everything a tenant admin sees and change nothing. Writes return 405 with an
-// explanation. Restoring them needs a real identity to attribute them to — a
-// designated support user per organization, Phase 2b — not a relaxation here.
-func PlatformReadOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
-			next.ServeHTTP(w, r)
-		default:
-			claims, _ := PlatformFromContext(r.Context())
-			email := "(unauthenticated)"
-			if claims != nil {
-				email = claims.Email
-			}
-			log.Printf("🚫 [Platform] write refused: %s %s by %s acting as %q",
-				r.Method, r.URL.Path, email, r.Header.Get(ActAsOrgHeader))
-			w.Header().Set("Allow", "GET, HEAD")
-			http.Error(w,
-				"The platform surface is read-only. Writes must be attributed to a real user, "+
-					"and a platform operator is not one — use the tenant's own credentials, or wait "+
-					"for per-organization support users.",
-				http.StatusMethodNotAllowed)
-		}
-	})
-}
-
 // ActAsOrg binds ONE tenant's database handle to a platform request, so the
 // ordinary tenant handlers serve that tenant unchanged.
 //
@@ -160,22 +105,28 @@ func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 
 			ctx := orgdb.NewContext(r.Context(), d)
 
-			// Synthetic tenant claims, so role-gated READS work.
+			// Attribute this request to the organization's SUPPORT USER — a real
+			// row in that tenant's `users` table, created on first use.
 			//
-			// Without this, 17 of 73 GET routes returned 401 — including the
-			// entire shift surface — because they call GetUserFromContext and
-			// bail when it is absent. "The same views that tenant's admin gets"
-			// was simply untrue.
-			//
-			// Safe ONLY because PlatformReadOnly blocks every mutating method:
-			// nothing can write, so an empty UserID can never reach a column or
-			// an audit row. UserID is deliberately left EMPTY rather than
-			// faked — reads that filter by the current user return nothing,
-			// which is honest, and if this value ever turns up in tenant data it
-			// is proof that a write escaped the read-only guard.
+			// This is what makes writes possible at all. 28 foreign keys point
+			// at `users` and 115 sites read userClaims.UserID, so a fabricated id
+			// would violate the constraints and an empty one silently skipped
+			// audit writes (a bin edit committed while logging nothing). A real
+			// row satisfies both, and the tenant's own history honestly reads
+			// "Binly Support" rather than naming one of their own staff. WHICH
+			// operator it was lives in platform_audit_log.
+			supportUserID, err := ensureSupportUser(root, d, org.ID, org.Slug)
+			if err != nil {
+				// Fail CLOSED. Serving the request without a valid actor is how
+				// unattributed writes happened before.
+				log.Printf("❌ [ActAsOrg] could not establish support user for %s: %v", org.Slug, err)
+				http.Error(w, "Could not establish an audit identity for this organization",
+					http.StatusServiceUnavailable)
+				return
+			}
 			ctx = context.WithValue(ctx, UserContextKey, UserClaims{
-				UserID: "",
-				Email:  PlatformActorEmail,
+				UserID: supportUserID,
+				Email:  SupportUserEmail(org.Slug),
 				Role:   "admin",
 				OrgID:  org.ID,
 			})

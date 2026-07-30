@@ -27,9 +27,10 @@ import (
 // worse than none. One process owns the pool here, so in-process is accurate.
 
 const (
-	// Per-IP: enough for a human fumbling a TOTP code, nowhere near enough to
-	// search a 6-digit space.
-	platformLoginPerIPLimit  = 5
+	// Per-IP. Tightened from 5 to 3 when TOTP became optional: with
+	// password-only accounts this limiter is the ONLY thing between a guessed
+	// password and every tenant's data.
+	platformLoginPerIPLimit  = 3
 	platformLoginPerIPWindow = 15 * time.Minute
 
 	// Global: a botnet spreads across many IPs, so the per-IP bucket alone is
