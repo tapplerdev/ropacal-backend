@@ -54,6 +54,11 @@ type CentrifugoSubscribeResponse struct {
 	Error  *CentrifugoError           `json:"error,omitempty"`
 }
 
+// subscriptionTTL is how long an authorized subscription stands before
+// Centrifugo must re-ask. Matched to the D4a connection-token TTL so it adds no
+// extra refresh traffic — the SDKs already wake on that cadence.
+const subscriptionTTL = time.Hour
+
 // CentrifugoSubscribeResult represents successful subscription authorization
 type CentrifugoSubscribeResult struct {
 	// B64Data can be used to pass custom data to client
@@ -290,10 +295,29 @@ func CentrifugoSubscribeProxy(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("✅ [Centrifugo] Subscription authorized: user=%s channel=%s",
 			userID, req.Channel)
 
-		// Return successful authorization
+		// Return successful authorization.
+		//
+		// ExpireAt was declared but never set, which made every subscription
+		// PERMANENT: the proxy re-authorizes only on (re)subscribe, so a
+		// dashboard tab or Flutter session that subscribed once was never
+		// checked again. Two consequences, both bad:
+		//
+		//  1. Revocation had no effect on an established subscription. D4b
+		//     closed the HTTP side to ~60s, but a socket subscribed before a
+		//     user was removed kept receiving that org's feed indefinitely.
+		//  2. It broke D1's Deploy 3a gate. That gate says "confirm zero
+		//     `channel=company:events` subscribes over a business day" — but a
+		//     session that subscribed days ago never re-subscribes, never
+		//     appears in the logs, and so passes a gate it should fail, right
+		//     before 3a cuts it off.
+		//
+		// One hour matches the connection-token TTL set in D4a, so a
+		// re-subscribe costs nothing extra: the SDKs are already refreshing on
+		// that cadence.
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(CentrifugoSubscribeResponse{
 			Result: &CentrifugoSubscribeResult{
+				ExpireAt: time.Now().Add(subscriptionTTL).Unix(),
 				Info: map[string]interface{}{
 					"user_id": userID,
 					"channel": req.Channel,

@@ -838,14 +838,50 @@ func Migrate(db *sqlx.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_potential_locations_bin_current_status ON potential_locations(bin_current_status)`,
 
 		// AirTag accounts table — stores Apple iCloud credentials for FindMy bridge
+		//
+		// email is deliberately NOT declared UNIQUE here. A global unique on
+		// email is a cross-tenant existence oracle: a unique index is enforced
+		// across rows that RLS hides, so registering an Apple ID another
+		// organization already uses returns 23505 on a row you are not allowed
+		// to see. It also blocks a legitimate case — two haulers can genuinely
+		// use the same Apple ID for their own FindMy accounts.
+		// migrations/scope_airtag_account_email_per_org.sql replaced it with
+		// UNIQUE (organization_id, email) in production. That migration is NOT
+		// auto-applied (there is no runner; migrations/*.sql are run by hand),
+		// and CREATE TABLE IF NOT EXISTS is a no-op against the existing table —
+		// so leaving UNIQUE here meant any FRESH database (local dev, a restore,
+		// a new environment) silently reintroduced the oracle. The DO block
+		// below installs the correct constraint for whichever schema state
+		// exists.
 		`CREATE TABLE IF NOT EXISTS airtag_accounts (
 			id            TEXT PRIMARY KEY,
-			email         TEXT NOT NULL UNIQUE,
+			email         TEXT NOT NULL,
 			password      TEXT NOT NULL,
 			account_state TEXT,
 			created_at    BIGINT NOT NULL,
 			updated_at    BIGINT NOT NULL
 		)`,
+
+		// Reconcile airtag_accounts email uniqueness with the tenancy state.
+		// Idempotent and safe on every boot in both modes.
+		`DO $$
+		BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.columns
+			           WHERE table_name = 'airtag_accounts' AND column_name = 'organization_id') THEN
+				-- Tenancy live: scope uniqueness to the org and drop the global one.
+				ALTER TABLE airtag_accounts DROP CONSTRAINT IF EXISTS airtag_accounts_email_key;
+				IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_airtag_accounts_org_email') THEN
+					ALTER TABLE airtag_accounts
+						ADD CONSTRAINT uq_airtag_accounts_org_email UNIQUE (organization_id, email);
+				END IF;
+			ELSE
+				-- Single-tenant (pre-migration): one org, so a global unique on
+				-- email is the correct constraint and leaks nothing.
+				IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'airtag_accounts_email_key') THEN
+					ALTER TABLE airtag_accounts ADD CONSTRAINT airtag_accounts_email_key UNIQUE (email);
+				END IF;
+			END IF;
+		END $$;`,
 
 		// AirTag keys table — stores FindMy accessory keys per account
 		`CREATE TABLE IF NOT EXISTS airtag_keys (
