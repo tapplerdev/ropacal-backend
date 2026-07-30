@@ -84,8 +84,27 @@ func main() {
 	defer db.Close()
 	log.Println("✅ Database connection established")
 
-	// Run migrations
-	log.Println("🔄 Running database migrations...")
+	// Versioned schema, first. On an existing database this stamps the baseline
+	// as already-applied and does nothing else; on a genuinely fresh one it
+	// BUILDS the whole schema, which the legacy DDL below cannot do (it assumes
+	// tables that only ever existed in hand-applied files — route_tasks had no
+	// CREATE TABLE anywhere in the repo).
+	log.Println("🔄 Running schema migrations...")
+	if err := database.RunMigrations(db); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: Schema migrations failed")
+		log.Printf("   Error: %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Fatal(err)
+	}
+
+	// Legacy idempotent DDL. Retained deliberately rather than deleted: it is
+	// the historical record of every schema change made before goose, it is a
+	// no-op against any database the baseline already built, and removing 223
+	// statements in the same change that introduces a migration runner would
+	// make a rollback much harder to reason about. New schema changes go in a
+	// numbered goose migration, NOT here.
+	log.Println("🔄 Running legacy idempotent DDL...")
 	if err := database.Migrate(db); err != nil {
 		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		log.Println("❌ FATAL ERROR: Database migrations failed")

@@ -26,7 +26,7 @@ fi
 
 # Execute the migration SQL file
 echo "📤 Executing migration..."
-psql "$DATABASE_URL" -f migrations/load_real_bins.sql
+psql "$DATABASE_URL" -f internal/database/migrations/archive/load_real_bins.sql
 
 if [ $? -eq 0 ]; then
     echo ""

@@ -338,6 +338,34 @@ turned a single-row lookup into a multi-row one.
   shape and `req.User == driverID`. Dropping or mistyping that flag would let any
   authenticated client publish into any `driver:*` channel.
 
+## Schema management — FIXED 2026-07-30 (goose + baseline)
+
+**The problem below is resolved.** `internal/database/migrations/00001_baseline_schema.sql`
+is a `pg_dump` of production's schema, run by goose (`internal/database/goose.go`,
+embedded via `go:embed`, executed at boot before the legacy DDL).
+
+- **Fresh database** → goose builds the entire schema. Verified: an empty
+  database boots to `/health` 200 with 42 tables and all 37 RLS policies,
+  identical to production, including the four tables that were missing.
+- **Existing database** (production) → detected and **STAMPED** at version 1
+  without executing, because running it would fail on the first CREATE. Verified
+  against a full clone of production's schema: 42 tables → 43 (only
+  `goose_db_version` added), boot clean.
+- New schema changes go in a numbered goose migration, NOT the legacy DDL list.
+- The 22 previously hand-applied files are kept as history in
+  `internal/database/migrations/archive/` and are deliberately NOT embedded —
+  their effects are already in the baseline.
+- Still not carried by the baseline: the **`binly_app` role** (roles are
+  cluster-level, not per-database), so a brand-new environment must create it and
+  grant table ownership.
+
+Two pg_dump quirks had to be handled for goose: the `\restrict`/`\unrestrict`
+psql meta-commands it emits (goose executes SQL directly and cannot parse them),
+and `set_config('search_path','',false)` — an empty search_path stops goose
+finding its own version table after the migration runs.
+
+### Original finding (kept for context)
+
 ## The backend cannot boot against a FRESH database (found 2026-07-30)
 
 Discovered while building a local test environment. Pointing the backend at an
