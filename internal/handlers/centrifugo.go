@@ -417,15 +417,20 @@ func authorizeSubscription(db *orgdb.DB, userID string, channel string) (bool, e
 			}
 			return isCompanyEventViewer(db, userID)
 		}
-		// company:events — LEGACY, un-scoped, and the remaining isolation hole:
-		// it is authorized on role alone, so any admin of any tenant receives
-		// every tenant's operational feed. Kept only so clients can migrate;
-		// D1 Deploy 3a deletes this branch, which is what actually closes the
-		// hole. The log line makes remaining adoption observable.
+		// company:events — REMOVED (D1 Deploy 3a). This is the deploy that
+		// actually closes the cross-tenant hole: the shared channel was
+		// authorized on role alone, so any admin of any tenant received every
+		// tenant's operational feed.
+		//
+		// Denied explicitly rather than by falling through to "unknown channel
+		// format", so the logs distinguish "a stale client is still asking for
+		// the shared channel" from "someone sent a malformed channel name". A
+		// stale client sees a 403 on its next resubscribe — that is the loud
+		// signal Deploy 3b waits on.
 		if ch.legacy {
-			log.Printf("⚠️  [Centrifugo] LEGACY company:events subscribe by user=%s (org=%s) — migrate to company:{orgID}:events",
+			log.Printf("🚫 [Centrifugo] REMOVED legacy company:events subscribe by user=%s (org=%s) — client needs updating to company:{orgID}:events",
 				userID, db.OrgID())
-			return isCompanyEventViewer(db, userID)
+			return false, nil
 		}
 	}
 
