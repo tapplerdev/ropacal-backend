@@ -37,8 +37,14 @@ func Auth(next http.Handler) http.Handler {
 
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			log.Println("❌ No authorization header")
-			log.Printf("   Request headers: %v", r.Header)
+			// Log the route, not the headers. This used to dump the ENTIRE
+			// header map on every unauthenticated request, which is a growing
+			// problem on two fronts: ~40 endpoints now 401 internet scanners, so
+			// it is a lot of noise, and the map carries cookies, proxy-injected
+			// identifiers and anything else a client sends — none of which we
+			// want in a log aggregator. The path is what is actually useful for
+			// diagnosing a misrouted client.
+			log.Printf("❌ No authorization header: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
