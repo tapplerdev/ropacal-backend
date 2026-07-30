@@ -156,6 +156,27 @@ func soleActiveOrgID(root *sqlx.DB) (string, error) {
 // proxyOrgDB resolves the DB handle a Centrifugo proxy request must use,
 // per the TENANCY block above. ok=false means the request must be denied
 // (tenancy is live but the connection carries no usable org).
+// proxyGraceLog rate-limits the single-org-grace notice to once a minute.
+var proxyGraceLog struct {
+	mu    sync.Mutex
+	last  time.Time
+	count int
+}
+
+func noteProxyGrace() {
+	proxyGraceLog.mu.Lock()
+	defer proxyGraceLog.mu.Unlock()
+	proxyGraceLog.count++
+	if time.Since(proxyGraceLog.last) < time.Minute {
+		return
+	}
+	log.Printf("⚠️  [Centrifugo] %d proxy request(s) resolved the org via the SINGLE-ORG GRACE, not connection meta — "+
+		"Centrifugo is not forwarding meta (include_connection_meta). This works with one org and DENIES EVERY "+
+		"proxy request once a second org exists.", proxyGraceLog.count)
+	proxyGraceLog.last = time.Now()
+	proxyGraceLog.count = 0
+}
+
 func proxyOrgDB(root *sqlx.DB, meta json.RawMessage) (*orgdb.DB, bool) {
 	if !orgdb.Migrated() {
 		// Single-tenant dark mode: tokens carry no meta yet; raw-pool behavior.
@@ -175,6 +196,15 @@ func proxyOrgDB(root *sqlx.DB, meta json.RawMessage) (*orgdb.DB, bool) {
 			return nil, false
 		}
 		orgID = only
+		// Make the grace path OBSERVABLE. Until now it was silent, which meant
+		// there was no way to tell whether Centrifugo is actually forwarding
+		// connection meta or whether every request is quietly leaning on the
+		// one-org fallback — and that distinction decides whether realtime
+		// survives the moment a second organization exists (no meta + 2 orgs =
+		// every proxy request denied). If this line stops appearing, meta is
+		// being forwarded and it is safe to onboard. Rate-limited because GPS
+		// publishes run about once a second per driver.
+		noteProxyGrace()
 	}
 	d, err := orgdb.System(root, orgID)
 	if err != nil {
