@@ -66,6 +66,18 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 			utils.RespondError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
+		// A request with no credentials is not a login ATTEMPT, and must not
+		// consume the rate-limit budget. Enabling this surface, I locked myself
+		// out with my own health check: a monitor polling this route with `{}`
+		// every 20s to detect when it came up burned the global bucket, and the
+		// real operator's first genuine login returned 429. Anything that cannot
+		// possibly succeed is refused before it costs anyone anything — which
+		// also removes the cheapest way for an outsider to lock out every
+		// operator at once.
+		if strings.TrimSpace(req.Email) == "" || req.Password == "" {
+			utils.RespondError(w, http.StatusBadRequest, "email and password are required")
+			return
+		}
 		platformLoginFlow(root, w, r, req)
 	}
 }
@@ -383,7 +395,9 @@ func tryPlatformLogin(root *sqlx.DB, w http.ResponseWriter, r *http.Request, req
 		return false // platform surface disabled
 	}
 	email := strings.TrimSpace(strings.ToLower(req.Email))
-	if email == "" {
+	// No credentials means no attempt: never spend rate-limit budget on a
+	// request that cannot succeed (see PlatformLogin for how that bit me).
+	if email == "" || req.Password == "" {
 		return false
 	}
 
