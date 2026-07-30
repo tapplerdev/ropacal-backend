@@ -124,8 +124,9 @@ cat <<EOF
        be done by hand:  PATCH /api/config/warehouse  as this org's admin" \
          || echo "Warehouse is set — nothing to do. (Re-run the PATCH if it moves;
        there is no dashboard UI for it.)")
-    2. Clients must send "organization":"$SLUG" on login. With more than one org
-       the single-org grace is gone and omitting it returns 400.
+    2. Login needs no organization ID: with 2+ orgs the server resolves it
+       from the email (verified in prod 2026-07-30). Only an email that exists
+       in MORE THAN ONE org is asked for the ID.
     3. Verify isolation BOTH ways before trusting it:
          log in as $EMAIL   -> must see 0 bins, 0 shifts
          log in as your own -> must see your fleet, unchanged

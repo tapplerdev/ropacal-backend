@@ -144,7 +144,16 @@ violate and boot-loop). Needs a real path: create `organizations` row + first
 admin user + that org's `warehouse_location` config row. Note `config.id` is a
 serial integer, not a UUID.
 
-### 3. Login `organization` field — DONE (2026-07-30)
+### 3. Login `organization` field — DONE, VERIFIED IN PROD WITH 2 ORGS (2026-07-30)
+
+Email→org resolution (blank field infers the org from the email; slug now
+user-facing as "Organization ID") was live-tested by provisioning a throwaway
+`sandbox` org next to ropacal and running the login battery against production:
+resolve-by-email for both orgs, ambiguous-email 400, explicit-ID override both
+ways, and unknown-email vs wrong-password byte-identical (no enumeration
+oracle) — 5/5. Mario's active shift streamed GPS through provision, the
+hardened gates, and teardown. Battery: scratchpad/battery.sh pattern; sandbox
+torn down same hour, zero residue.
 
 Shipped on both clients, plus a backend change they needed.
 
