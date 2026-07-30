@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/middleware"
@@ -65,7 +66,7 @@ func writeLoginJSON(w http.ResponseWriter, status int, resp LoginResponse) {
 // Unknown slugs return the same opaque 401 as a wrong password so login cannot
 // be used to enumerate tenant slugs; a real-but-inactive slug returns 403 with
 // a reason (its own users deserve to know why they are locked out).
-func resolveLoginOrg(root *sqlx.DB, slug string) (*LoginOrganization, int, string) {
+func resolveLoginOrg(root *sqlx.DB, slug, email string) (*LoginOrganization, int, string) {
 	if slug != "" {
 		var row struct {
 			ID     string `db:"id"`
@@ -89,12 +90,8 @@ func resolveLoginOrg(root *sqlx.DB, slug string) (*LoginOrganization, int, strin
 		return &LoginOrganization{ID: row.ID, Name: row.Name, Slug: row.Slug}, 0, ""
 	}
 
-	// No slug supplied: single-org grace.
-	var rows []struct {
-		ID   string `db:"id"`
-		Name string `db:"name"`
-		Slug string `db:"slug"`
-	}
+	// No organization ID supplied: single-org grace, then email resolution.
+	var rows []activeOrg
 	if err := root.Select(&rows, `SELECT id, name, slug FROM organizations WHERE status = 'active' ORDER BY created_at, id`); err != nil {
 		log.Printf("❌ Login: organization enumeration failed: %v", err)
 		return nil, http.StatusInternalServerError, ""
@@ -107,8 +104,91 @@ func resolveLoginOrg(root *sqlx.DB, slug string) (*LoginOrganization, int, strin
 		log.Println("❌ Login: no active organizations exist")
 		return nil, http.StatusUnauthorized, ""
 	default:
+		// Multiple tenants and no organization ID supplied. Demanding one from
+		// everybody would break every existing login the moment a second tenant
+		// goes active — the drivers on the Flutter app included, who have never
+		// typed one and cannot be updated without a store release. Infer it from
+		// the email where that is unambiguous, and ask only where it is not.
+		return resolveOrgByEmail(root, rows, email)
+	}
+}
+
+// activeOrg is one row of the active-organization list a login resolves against.
+type activeOrg struct {
+	ID   string `db:"id"`
+	Name string `db:"name"`
+	Slug string `db:"slug"`
+}
+
+// resolveOrgByEmail determines which active organization a login email belongs
+// to, so that a user never has to type an organization ID that can be inferred.
+//
+// WHY THIS LOOPS instead of running one cross-org query: users is under RLS
+// keyed on app.org_id, so a single `SELECT ... FROM users WHERE email = $1` on
+// the root pool returns NOTHING — the policy fail-closes. The alternative is
+// granting the login path an RLS bypass, and an unauthenticated endpoint is the
+// last place in this system that privilege belongs. So each active organization
+// is asked in turn through the ordinary org-bound handle: no new privilege, and
+// a bug here cannot read across a tenant boundary.
+//
+// Cost is one indexed lookup (idx_users_email) per active organization, and only
+// on requests that supplied no organization ID. If the tenant count ever reaches
+// the hundreds, make it a single query behind a SECURITY DEFINER function —
+// still not a broader grant.
+func resolveOrgByEmail(root *sqlx.DB, active []activeOrg, email string) (*LoginOrganization, int, string) {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" {
+		return nil, http.StatusUnauthorized, ""
+	}
+
+	var matches []activeOrg
+	for _, org := range active {
+		odb, err := orgdb.System(root, org.ID)
+		if err != nil {
+			log.Printf("❌ Login: org handle for %q: %v", org.Slug, err)
+			return nil, http.StatusInternalServerError, ""
+		}
+		var found int
+		// organization_id is in the WHERE as well as enforced by RLS: the query
+		// stays correct even on a passthrough handle, which is what runs in
+		// single-tenant mode.
+		err = odb.Get(&found,
+			`SELECT count(*) FROM users WHERE organization_id = $1 AND LOWER(email) = $2`,
+			org.ID, email)
+		odb.Release()
+		if err != nil {
+			log.Printf("❌ Login: email probe failed for organization %q: %v", org.Slug, err)
+			return nil, http.StatusInternalServerError, ""
+		}
+		if found > 0 {
+			matches = append(matches, org)
+			if len(matches) > 1 {
+				break // already ambiguous; probing the rest changes nothing
+			}
+		}
+	}
+	return decideOrgFromMatches(matches, email)
+}
+
+// decideOrgFromMatches turns the probe result into a response. Split from the
+// I/O above so the branch that must NOT be distinguishable is unit-testable
+// without a database.
+func decideOrgFromMatches(matches []activeOrg, email string) (*LoginOrganization, int, string) {
+	switch len(matches) {
+	case 1:
+		log.Printf("ℹ️  Login: no organization ID supplied; resolved %q from the email", matches[0].Slug)
+		return &LoginOrganization{ID: matches[0].ID, Name: matches[0].Name, Slug: matches[0].Slug}, 0, ""
+	case 0:
+		// Deliberately the SAME opaque 401 that a wrong password returns, with
+		// no message. Anything more specific would turn an unauthenticated
+		// endpoint into an oracle for "does this address exist anywhere in
+		// Binly" — across every tenant at once, which is strictly worse than
+		// the per-tenant enumeration login already permits.
+		log.Printf("❌ Login: %s matches no active organization", email)
+		return nil, http.StatusUnauthorized, ""
+	default:
 		return nil, http.StatusBadRequest,
-			"organization is required: this server hosts multiple organizations; pass your organization's slug in the 'organization' field"
+			"Your email is registered with more than one organization. Enter your Organization ID to continue."
 	}
 }
 
@@ -161,7 +241,7 @@ func Login(root *sqlx.DB) http.HandlerFunc {
 			org  *LoginOrganization
 		)
 		if orgdb.Migrated() {
-			resolved, failStatus, failMsg := resolveLoginOrg(root, req.Organization)
+			resolved, failStatus, failMsg := resolveLoginOrg(root, req.Organization, req.Email)
 			if failStatus != 0 {
 				writeLoginJSON(w, failStatus, LoginResponse{OK: false, Error: failMsg})
 				return
