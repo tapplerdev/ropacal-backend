@@ -154,6 +154,24 @@ func Auth(next http.Handler) http.Handler {
 
 		// log.Printf("   ✓ Claims extracted: %v", claims)
 
+		// A PLATFORM token must never authenticate a tenant route. Two existing
+		// guards already reject one — it carries no org_id, so Org 401s it, and
+		// D4b's membership check finds no matching users row — but both of those
+		// are consequences rather than intent. State the intent explicitly, so
+		// the rule survives someone later making org_id optional or relaxing the
+		// membership check.
+		//
+		// Under normal configuration a platform token cannot even reach here:
+		// it is signed with PLATFORM_JWT_SECRET, a different key. This is the
+		// backstop for the case where the two secrets are ever set to the same
+		// value, which would otherwise promote every tenant admin to a platform
+		// operator.
+		if isPlatform, _ := claims["platform"].(bool); isPlatform {
+			log.Println("🔒 Platform token presented on a tenant route — rejected")
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		// Convert to UserClaims struct. Comma-ok assertions: a token missing a
 		// required claim must 401, never panic into Recoverer as a 500 — and
 		// pre-tenancy tokens legitimately have no org_id claim at all.

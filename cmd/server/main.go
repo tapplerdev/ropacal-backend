@@ -339,7 +339,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "no-header-dump",
+			"version":         "platform-phase1",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -385,6 +385,21 @@ func main() {
 		// authenticated identity here belongs to exactly one org — gating it on
 		// an admin JWT would let an admin of org A mint org B.
 		r.Post("/organizations", handlers.CreateOrganization(db))
+	})
+
+	// PLATFORM routes — cross-tenant operator access. Mounted OUTSIDE /api on
+	// purpose: /api carries middleware.Auth -> Org, which binds the caller's
+	// single organization, and a platform admin has none.
+	//
+	// The whole surface 404s unless PLATFORM_JWT_SECRET is set, so it is off by
+	// default and a probe cannot tell it exists. See internal/middleware/platform.go.
+	r.Route("/api/platform", func(r chi.Router) {
+		r.Post("/auth/login", handlers.PlatformLogin(db))
+
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.PlatformAuth(db))
+			r.Get("/whoami", handlers.PlatformWhoAmI(db))
+		})
 	})
 
 	// API routes
