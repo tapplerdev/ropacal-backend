@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"log"
@@ -22,13 +23,16 @@ import (
 //
 // THREE INDEPENDENT THINGS MUST ALL HOLD for a request to pass:
 //
-//  1. PLATFORM_JWT_SECRET is configured. A separate secret from APP_JWT_SECRET
-//     on purpose: a leak of the tenant signing key must not be able to mint
-//     platform tokens. Unset means the entire platform surface is disabled,
-//     which is the correct default for a feature most deployments never use.
-//  2. The token is signed with that secret AND carries `platform: true`. A
-//     tenant token cannot satisfy this even if the secrets were ever
-//     misconfigured to match, because tenant tokens never set the claim.
+//  1. PLATFORM_JWT_SECRET is configured, and is genuinely DIFFERENT from
+//     APP_JWT_SECRET — asserted at boot by AssertPlatformSecretDistinct, which
+//     refuses to start otherwise. That assertion is what actually delivers "a
+//     leak of the tenant signing key cannot mint platform tokens"; an earlier
+//     version of this comment claimed the platform claim below did it, which was
+//     wrong: with matching secrets, anyone able to mint a tenant token can add
+//     platform:true and be accepted. Unset disables the whole surface.
+//  2. The token is signed with that secret AND carries `platform: true`. This
+//     separates the two token families; it does NOT survive misconfigured
+//     matching secrets on its own (see 1).
 //  3. The admin still exists and is active in platform_admins, checked on EVERY
 //     request. No caching here, unlike the tenant-side membership check: the
 //     traffic is a handful of requests from a handful of humans, and revoking
@@ -143,7 +147,14 @@ func parsePlatformToken(r *http.Request, secret string) (*PlatformClaims, error)
 			return nil, errors.New("unexpected signing method")
 		}
 		return []byte(secret), nil
-	})
+	},
+		// REQUIRE exp. Without this, jwt.Parse happily accepts a token that
+		// simply omits the claim — verified in review: a forged token with no
+		// exp authenticated indefinitely. PlatformTokenTTL was being honoured
+		// only by the minter, while a short lifetime is one of the three named
+		// mitigations for a leaked platform credential.
+		jwt.WithExpirationRequired(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -152,9 +163,14 @@ func parsePlatformToken(r *http.Request, secret string) (*PlatformClaims, error)
 		return nil, errors.New("invalid token")
 	}
 
-	// THE load-bearing check. Without it, any validly-signed token would be
-	// accepted here — and if PLATFORM_JWT_SECRET were ever set to the same value
-	// as APP_JWT_SECRET, every tenant admin would become a platform admin.
+	// THE load-bearing check: a token without this claim is not a platform
+	// token, whatever else it carries.
+	//
+	// It is NOT sufficient on its own, and an earlier comment here wrongly
+	// implied it was. If PLATFORM_JWT_SECRET equals APP_JWT_SECRET, anyone who
+	// can mint a tenant token can add platform:true and be accepted — the review
+	// demonstrated exactly that. What actually prevents it is
+	// AssertPlatformSecretDistinct, enforced at boot.
 	if p, _ := mc["platform"].(bool); !p {
 		return nil, errors.New("not a platform token")
 	}
@@ -164,6 +180,30 @@ func parsePlatformToken(r *http.Request, secret string) (*PlatformClaims, error)
 		return nil, errors.New("missing admin_id claim")
 	}
 	return &PlatformClaims{AdminID: adminID}, nil
+}
+
+// AuditPlatformLogin records an authentication attempt.
+//
+// Login sits OUTSIDE the PlatformAuth group (it is what mints the token), so it
+// was not covered by the per-request audit — meaning the single most important
+// event, an operator acquiring a credential that reaches every tenant, existed
+// only in stdout. Successes AND failures are recorded: a burst of failures is
+// exactly the signal worth having.
+//
+// adminID is empty when the email matched no admin; the path column carries the
+// outcome so a reader can tell attempts apart without a status_code.
+func AuditPlatformLogin(root *sqlx.DB, adminID, email, outcome string, r *http.Request) {
+	id := adminID
+	if id == "" {
+		id = "(unknown)"
+	}
+	if _, err := root.Exec(
+		`INSERT INTO platform_audit_log (admin_id, admin_email, target_org_id, method, path, at)
+		 VALUES ($1, $2, NULL, $3, $4, $5)`,
+		id, email, r.Method, "/api/platform/auth/login ["+outcome+" from "+clientIP(r)+"]",
+		time.Now().Unix()); err != nil {
+		log.Printf("🚨 [Platform] AUDIT WRITE FAILED for login attempt %q: %v", email, err)
+	}
 }
 
 // auditPlatformRequest records one row per platform request.
@@ -184,4 +224,35 @@ func auditPlatformRequest(root *sqlx.DB, c *PlatformClaims, targetOrg string, r 
 		log.Printf("🚨 [Platform] AUDIT WRITE FAILED for %s %s %s: %v",
 			c.Email, r.Method, r.URL.Path, err)
 	}
+}
+
+// AssertPlatformSecretDistinct refuses to boot the platform surface when its
+// signing secret is not genuinely separate from the tenant one.
+//
+// The entire "a leak of the tenant signing key cannot mint platform tokens"
+// property rests on the two secrets differing, and nothing was checking it. The
+// Phase 1 review set both to the same value and minted a token with the TENANT
+// key carrying platform:true — it was accepted, returning every organization.
+//
+// Fails the boot rather than warning: a warning in a startup log is not a
+// control, and the failure mode here is silent promotion of every tenant admin
+// to a cross-tenant operator.
+func AssertPlatformSecretDistinct() error {
+	platform := os.Getenv("PLATFORM_JWT_SECRET")
+	if platform == "" {
+		return nil // platform surface disabled; nothing to protect
+	}
+	app := os.Getenv("APP_JWT_SECRET")
+	if app != "" && subtle.ConstantTimeCompare([]byte(platform), []byte(app)) == 1 {
+		return errors.New(
+			"PLATFORM_JWT_SECRET must differ from APP_JWT_SECRET — they are identical, " +
+				"which would let any tenant token be forged into a platform token with " +
+				"cross-tenant access to every organization. Generate a separate one: openssl rand -base64 48")
+	}
+	if len(platform) < 32 {
+		return errors.New(
+			"PLATFORM_JWT_SECRET is too short (need at least 32 characters) — it guards " +
+				"cross-tenant access to every organization")
+	}
+	return nil
 }

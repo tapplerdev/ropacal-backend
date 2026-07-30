@@ -114,6 +114,18 @@ func main() {
 	}
 	log.Println("✅ Database migrations completed")
 
+	// Refuse to boot with a platform signing secret that is not genuinely
+	// separate from the tenant one — otherwise any tenant token can be forged
+	// into a cross-tenant platform token. Checked before serving, not warned
+	// about in a log nobody reads.
+	if err := middleware.AssertPlatformSecretDistinct(); err != nil {
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Println("❌ FATAL ERROR: platform secret misconfigured")
+		log.Printf("   %v", err)
+		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Fatal(err)
+	}
+
 	// Multi-tenancy plumbing (ships dark). Detects — once — whether
 	// migrations/add_multi_tenancy_rls.sql has run; until then orgdb stays in
 	// single-tenant passthrough mode and behavior is unchanged. Once live,
@@ -339,7 +351,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "platform-phase1",
+			"version":         "platform-p1-hardened",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -394,7 +406,12 @@ func main() {
 	// The whole surface 404s unless PLATFORM_JWT_SECRET is set, so it is off by
 	// default and a probe cannot tell it exists. See internal/middleware/platform.go.
 	r.Route("/api/platform", func(r chi.Router) {
-		r.Post("/auth/login", handlers.PlatformLogin(db))
+		// Rate limited: the review measured 50 unthrottled attempts/second here,
+		// which makes a 6-digit TOTP brute-forceable in under two hours once a
+		// password is known, and makes the endpoint a cheap way to burn bcrypt
+		// CPU in the process that serves the tenant API.
+		r.With(middleware.PlatformLoginRateLimit).
+			Post("/auth/login", handlers.PlatformLogin(db))
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.PlatformAuth(db))

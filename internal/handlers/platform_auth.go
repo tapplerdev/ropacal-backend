@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jmoiron/sqlx"
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 
@@ -71,24 +73,30 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 			Name       string `db:"name"`
 			TOTPSecret string `db:"totp_secret"`
 			Status     string `db:"status"`
+			// Highest TOTP counter already accepted for this admin. Anything at
+			// or below it is a replay.
+			LastTOTPCounter int64 `db:"last_totp_counter"`
 		}
 		err := root.Get(&admin,
-			`SELECT id, email, password, name, totp_secret, status
+			`SELECT id, email, password, name, totp_secret, status, last_totp_counter
 			 FROM platform_admins WHERE LOWER(email) = $1`, req.Email)
 
-		// Every failure below returns an IDENTICAL opaque response. An attacker
-		// must not be able to distinguish "no such operator" from "wrong
-		// password" from "wrong code" from "disabled" — that would turn this
-		// endpoint into an oracle for which Binly staff exist.
+		// Every failure below returns an IDENTICAL opaque response AND burns the
+		// same work. An attacker must not be able to distinguish "no such
+		// operator" from "wrong password" from "wrong code" from "disabled" —
+		// that would turn this endpoint into an oracle for which Binly staff
+		// exist and which of them are suspended.
+		//
+		// The first version of this only ran a dummy hash when the row was
+		// missing, and the dummy was cost 10 while provisioning writes cost 12.
+		// The review measured the result: unknown email 50ms, wrong password
+		// 195ms, and a DISABLED admin 0.8ms — a 250x tell, because that branch
+		// returned before any compare at all. So: always compare, always at the
+		// real cost, regardless of which check failed.
 		deny := func(reason string) {
 			log.Printf("🔒 [PlatformLogin] denied for %q: %s", req.Email, reason)
-			// Constant-ish cost on the miss path so a missing row is not
-			// obviously faster than a bad password.
-			if admin.Password == "" {
-				_ = bcrypt.CompareHashAndPassword(
-					[]byte("$2a$10$xxxxxxxxxxxxxxxxxxxxxuxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
-					[]byte(req.Password))
-			}
+			middleware.AuditPlatformLogin(root, admin.ID, req.Email, "DENIED: "+reason, r)
+			burnPasswordCompare(admin.Password, req.Password)
 			writePlatformJSON(w, http.StatusUnauthorized, PlatformLoginResponse{OK: false})
 		}
 
@@ -101,11 +109,15 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 			writePlatformJSON(w, http.StatusInternalServerError, PlatformLoginResponse{OK: false})
 			return
 		}
+		// Password is checked FIRST and unconditionally, even for a disabled
+		// admin, so every path below has already paid the bcrypt cost.
+		passwordOK := bcrypt.CompareHashAndPassword([]byte(admin.Password), []byte(req.Password)) == nil
+
 		if admin.Status != "active" {
 			deny("admin is " + admin.Status)
 			return
 		}
-		if bcrypt.CompareHashAndPassword([]byte(admin.Password), []byte(req.Password)) != nil {
+		if !passwordOK {
 			deny("bad password")
 			return
 		}
@@ -113,10 +125,19 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 			deny("missing totp code")
 			return
 		}
-		// Validate re-derives the expected code and compares; it also accepts
-		// the adjacent window to tolerate clock skew.
-		if !totp.Validate(req.TOTPCode, admin.TOTPSecret) {
+
+		// TOTP with REPLAY PROTECTION. totp.Validate alone accepts a code across
+		// three counter windows (Skew=1, Period=30), so a code observed once
+		// stays valid for up to 90 seconds — the review confirmed the same code
+		// authenticating three times in a row. Requiring a strictly increasing
+		// counter makes each code single-use.
+		counter, ok := validateTOTPCounter(req.TOTPCode, admin.TOTPSecret, time.Now())
+		if !ok {
 			deny("bad totp code")
+			return
+		}
+		if counter <= admin.LastTOTPCounter {
+			deny("replayed totp code")
 			return
 		}
 
@@ -138,12 +159,27 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		if _, err := root.Exec(
-			`UPDATE platform_admins SET last_login_at = $1, updated_at = $1 WHERE id = $2`,
-			now.Unix(), admin.ID); err != nil {
-			log.Printf("⚠️  [PlatformLogin] could not record last_login_at: %v", err)
+		// Burn the counter. The WHERE guard makes this the atomic step of the
+		// replay defence: two requests presenting the same code concurrently
+		// both pass the in-memory check above, but only one UPDATE can win.
+		// Unlike last_login_at, a failure here is FATAL to the login — serving a
+		// token after failing to burn the counter would reopen the replay window.
+		res, err := root.Exec(
+			`UPDATE platform_admins
+			 SET last_totp_counter = $1, last_login_at = $2, updated_at = $2
+			 WHERE id = $3 AND last_totp_counter < $1`,
+			counter, now.Unix(), admin.ID)
+		if err != nil {
+			log.Printf("❌ [PlatformLogin] could not burn totp counter: %v", err)
+			writePlatformJSON(w, http.StatusInternalServerError, PlatformLoginResponse{OK: false})
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			deny("totp counter already burned (concurrent replay)")
+			return
 		}
 
+		middleware.AuditPlatformLogin(root, admin.ID, admin.Email, "SUCCESS", r)
 		log.Printf("🛰️  [PlatformLogin] %s authenticated (cross-tenant access granted, expires %s)",
 			admin.Email, exp.Format(time.RFC3339))
 
@@ -156,8 +192,10 @@ func PlatformLogin(root *sqlx.DB) http.HandlerFunc {
 
 // PlatformWhoAmI confirms the token works and lists the tenants in reach.
 //
-// The org list is the honest answer to "what does this credential see": every
-// active organization.
+// The org list is the honest answer to "what does this credential see": EVERY
+// organization, whatever its status — deliberately unfiltered, because an
+// operator should see a suspended tenant exists rather than have it silently
+// vanish.
 func PlatformWhoAmI(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := middleware.PlatformFromContext(r.Context())
@@ -181,6 +219,17 @@ func PlatformWhoAmI(root *sqlx.DB) http.HandlerFunc {
 			utils.RespondError(w, http.StatusInternalServerError, "could not list organizations")
 			return
 		}
+		if len(orgs) == 0 {
+			// Be loud, the way ForEachActiveOrg already is on this exact
+			// condition. This read works only because `organizations` carries a
+			// permissive org_catalog_read policy; if that is ever tightened —
+			// a plausible hardening, since today it lets any tenant enumerate
+			// every other tenant — whoami would quietly report "you reach 0
+			// organizations" instead of failing.
+			log.Println("🚨 [Platform] whoami sees ZERO organizations — if tenants exist, the " +
+				"org_catalog_read policy on `organizations` has been tightened and this read is " +
+				"being filtered rather than genuinely empty")
+		}
 
 		utils.RespondJSON(w, http.StatusOK, map[string]interface{}{
 			"admin_id":      claims.AdminID,
@@ -197,4 +246,63 @@ func writePlatformJSON(w http.ResponseWriter, status int, body PlatformLoginResp
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// burnPasswordCompare spends the same work a real password check costs, so a
+// failed login takes indistinguishable time no matter WHICH check failed.
+//
+// storedHash is the hash we found, or "" when there was no such admin. In the
+// second case we compare against a placeholder generated at the SAME cost the
+// provisioning script uses (bcrypt.DefaultCost, 10 — matching
+// scripts/provision-platform-admin.sh after it was pinned), because a cheaper
+// placeholder is itself a tell: the review measured 50ms for a missing row
+// against 195ms for a real one.
+func burnPasswordCompare(storedHash, attempt string) {
+	if storedHash == "" {
+		storedHash = placeholderHash
+	}
+	_ = bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(attempt))
+}
+
+// placeholderHash is a real bcrypt hash of an unguessable value, generated once
+// at startup at the same cost as a stored credential. Generated rather than
+// hardcoded so it cannot drift out of step with the cost we actually use.
+var placeholderHash = func() string {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		// Fall back to a fixed string: this value is never compared for
+		// correctness, only for the time it takes.
+		buf = []byte("platform-login-timing-placeholder")
+	}
+	h, err := bcrypt.GenerateFromPassword(buf, bcrypt.DefaultCost)
+	if err != nil {
+		return "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+	}
+	return string(h)
+}()
+
+// validateTOTPCounter validates a code and returns the counter window it matched.
+//
+// totp.Validate answers only yes/no, which is not enough to prevent replay — the
+// caller needs to know WHICH 30-second window was used so it can refuse that one
+// and everything before it next time. This checks the same three windows
+// Skew=1 covers (previous, current, next), newest first so the common case is
+// one comparison.
+func validateTOTPCounter(code, secret string, now time.Time) (int64, bool) {
+	const period = 30
+	current := now.Unix() / period
+	for _, delta := range []int64{0, 1, -1} {
+		c := current + delta
+		at := time.Unix(c*period, 0)
+		valid, err := totp.ValidateCustom(code, secret, at, totp.ValidateOpts{
+			Period:    period,
+			Skew:      0, // exact window — the loop supplies the skew
+			Digits:    otp.DigitsSix,
+			Algorithm: otp.AlgorithmSHA1,
+		})
+		if err == nil && valid {
+			return c, true
+		}
+	}
+	return 0, false
 }

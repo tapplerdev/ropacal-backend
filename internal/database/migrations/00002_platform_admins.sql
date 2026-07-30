@@ -54,5 +54,10 @@ CREATE INDEX IF NOT EXISTS idx_platform_audit_admin ON platform_audit_log (admin
 CREATE INDEX IF NOT EXISTS idx_platform_audit_org ON platform_audit_log (target_org_id, at DESC);
 
 -- +goose Down
-DROP TABLE IF EXISTS platform_audit_log;
+-- platform_audit_log is deliberately NOT dropped. A routine deploy rollback must
+-- not erase the record of who reached which tenant's data — that is the one
+-- artifact you cannot reconstruct afterwards. target_org_id is already not a
+-- foreign key so the trail survives organization deletion; dropping the whole
+-- table on rollback would have been the inconsistent half of that decision.
+-- Drop it by hand if you genuinely mean to.
 DROP TABLE IF EXISTS platform_admins;
