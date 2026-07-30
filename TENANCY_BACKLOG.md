@@ -41,18 +41,30 @@ naming the `ropacal` org returned 401 while a second org existed, and reverted t
 45 × `publish-location` → 200 under enforcement, and every gate in this file had
 to send the header). That half is closed.
 
-**`include_connection_meta` is still UNCONFIRMED**, and it is the half that kills
-realtime. A probe was added 2026-07-30 to answer it: `proxyOrgDB`'s single-org
-grace now logs `SINGLE-ORG GRACE ... not connection meta` (rate-limited to once a
-minute). Reading it:
+**`include_connection_meta` IS configured** — resolved 2026-07-30 by locating the
+service source, which nothing had recorded:
 
-- line appears while REAL clients are connected → Centrifugo is not forwarding
-  meta → **do not onboard a second org**, realtime would be fully denied
-- line never appears once clients reconnect → meta is being forwarded → safe
+> The Centrifugo service deploys from the GitHub repo
+> **`tapplerdev/binly-centrifugo-service`** (found via the Railway GraphQL API;
+> `railway status` does not expose it). Its `config.json` defines the proxies and
+> is baked into the image by the Dockerfile. There are NO proxy env vars on the
+> Railway service — only `CENTRIFUGO_VAR_PROXY_SECRET`, which the config
+> interpolates as `${CENTRIFUGO_VAR_PROXY_SECRET}` into each proxy's
+> `http.static_headers`.
 
-As of 2026-07-30 04:44 the only occurrence was a deliberate meta-less test probe;
-no real client was connected to Centrifugo, so the question is still open. It
-answers itself as soon as someone logs into the dashboard or app.
+`include_connection_meta: true` is set on all three proxies:
+`proxies[location_publish]`, `channel.proxy.subscribe`, `channel.proxy.publish`.
+
+The runtime probe added the same day (`proxyOrgDB`'s single-org grace logs
+`SINGLE-ORG GRACE ... not connection meta`, rate-limited to once a minute) stays
+in place as the confirmation that config matches reality. Reading it:
+
+- line appears while REAL clients are connected → meta is NOT arriving despite
+  the config → investigate before onboarding
+- line absent while clients are connected → confirmed working
+
+The only occurrence so far was a deliberately meta-less test request of mine, not
+evidence about real traffic. Watch it once a real client connects.
 
 Original note on both fields:
 
@@ -114,7 +126,31 @@ violate and boot-loop). Needs a real path: create `organizations` row + first
 admin user + that org's `warehouse_location` config row. Note `config.id` is a
 serial integer, not a UUID.
 
-### 3. Login screens need the `organization` field
+### 3. Login `organization` field — DONE (2026-07-30)
+
+Shipped on both clients, plus a backend change they needed.
+
+- **Dashboard** (`binly-dashboard` f7984bd, fixes in 332fff0): optional field,
+  `?org=` support, slug remembered independently of Remember Me, 400/403 now
+  surface the backend's real reason instead of "Invalid email or password".
+- **Flutter** (`ropacalapp` 9a40057, fixes in 88ad90b): same, plus session-restore
+  backfill. **Needs a store release to reach drivers.**
+- **Backend** (24a8d67): `GET /api/auth/status` now returns the organization, so
+  a client that is already signed in learns its slug without re-authenticating.
+  Without this, any user holding a valid 7-day token when org #2 is provisioned
+  would hit a newly-mandatory field they had never been given a value for.
+
+Both were reviewed by an agent; every finding is fixed. Two are worth keeping in
+mind because they are the same bug in two codebases: **the remembered slug must
+be cleared on logout** (otherwise the next person on a shared device inherits it
+and gets an opaque 401 with correct credentials), and **only the SERVER-RESOLVED
+slug may be persisted**, never raw input.
+
+Still open on this item: the Flutter label reads "Organization (optional)", which
+becomes untrue at org #2 and needs a release to change. Change it in the same
+release that goes out around provisioning.
+
+Original contract notes:
 The single-org grace disappears at two orgs — every client must then send the org
 slug or get a 400.
 - **Dashboard**: `lib/auth/queries.ts` login body + the login form.
