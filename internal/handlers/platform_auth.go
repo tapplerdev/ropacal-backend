@@ -41,7 +41,15 @@ type PlatformLoginResponse struct {
 	// it: the response deliberately carries no `user` or `organization`, because
 	// an operator is neither — so a client that blindly expected the tenant
 	// shape would otherwise treat a successful login as malformed.
-	Platform  bool   `json:"platform,omitempty"`
+	//
+	// NO omitempty, deliberately. It had one, and the success path forgot to set
+	// the field — so `false` was omitted from the JSON entirely and the flag
+	// simply did not exist on the wire. Three correct client checks all read
+	// undefined, fell through to the tenant branch, found no `user`, and showed
+	// "Invalid response from server" on a login that had fully succeeded. Always
+	// emitting the field means a future omission shows up as `"platform": false`
+	// in the response instead of vanishing.
+	Platform  bool   `json:"platform"`
 	Token     string `json:"token,omitempty"`
 	Email     string `json:"email,omitempty"`
 	Name      string `json:"name,omitempty"`
@@ -256,10 +264,25 @@ func platformLoginFlow(root *sqlx.DB, w http.ResponseWriter, r *http.Request, re
 	log.Printf("🛰️  [PlatformLogin] %s authenticated (cross-tenant access granted, expires %s)",
 		admin.Email, exp.Format(time.RFC3339))
 
-	writePlatformJSON(w, http.StatusOK, PlatformLoginResponse{
-		OK: true, Token: signed, Email: admin.Email, Name: admin.Name,
-		ExpiresAt: exp.Unix(),
-	})
+	writePlatformJSON(w, http.StatusOK, newPlatformLoginSuccess(signed, admin.Email, admin.Name, exp.Unix()))
+}
+
+// newPlatformLoginSuccess builds the ONLY successful platform login response.
+//
+// It exists so the shape can be asserted without a database. The bug it guards
+// against already happened: the success path was built inline and omitted
+// Platform, which every client keys on, so a working login was rendered as
+// "Invalid response from server". A comment on the struct described the
+// contract; nothing checked it. Now TestPlatformLoginSuccessShape does.
+func newPlatformLoginSuccess(token, email, name string, expiresAt int64) PlatformLoginResponse {
+	return PlatformLoginResponse{
+		OK:        true,
+		Platform:  true, // never omit: clients branch on this to skip the tenant shape
+		Token:     token,
+		Email:     email,
+		Name:      name,
+		ExpiresAt: expiresAt,
+	}
 }
 
 // PlatformWhoAmI confirms the token works and lists the tenants in reach.
