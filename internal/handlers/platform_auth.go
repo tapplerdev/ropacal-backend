@@ -36,7 +36,12 @@ type PlatformLoginRequest struct {
 }
 
 type PlatformLoginResponse struct {
-	OK        bool   `json:"ok"`
+	OK bool `json:"ok"`
+	// Platform marks this as a cross-tenant operator session. Clients branch on
+	// it: the response deliberately carries no `user` or `organization`, because
+	// an operator is neither — so a client that blindly expected the tenant
+	// shape would otherwise treat a successful login as malformed.
+	Platform  bool   `json:"platform,omitempty"`
 	Token     string `json:"token,omitempty"`
 	Email     string `json:"email,omitempty"`
 	Name      string `json:"name,omitempty"`
