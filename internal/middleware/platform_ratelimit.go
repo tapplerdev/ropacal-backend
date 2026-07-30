@@ -138,3 +138,17 @@ func trimSpace(s string) string {
 	}
 	return s[start:end]
 }
+
+// AllowPlatformLoginAttempt records and rate-limits one platform authentication
+// attempt, for callers outside this package.
+//
+// Exists because platform admins now sign in through the ORDINARY
+// /api/auth/login route, which lives in the handlers package. That route must
+// share this bucket rather than have its own — otherwise the limit is trivially
+// bypassed by using whichever entry point is not throttled.
+//
+// Returns false and the scope that tripped ("per-ip" or "global") when the
+// attempt must be refused.
+func AllowPlatformLoginAttempt(r *http.Request) (bool, string) {
+	return platformLogins.allow(clientIP(r), time.Now())
+}

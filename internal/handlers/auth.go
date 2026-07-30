@@ -30,6 +30,9 @@ type LoginRequest struct {
 	// (single-org grace, so current login screens keep working until they
 	// ship the field).
 	Organization string `json:"organization,omitempty"`
+	// TOTPCode is only meaningful for a platform (cross-tenant) admin whose
+	// account has a second factor enrolled. Tenant logins ignore it.
+	TOTPCode string `json:"totp_code,omitempty"`
 }
 
 // LoginOrganization is the organization block returned by a successful login
@@ -125,6 +128,25 @@ func Login(root *sqlx.DB) http.HandlerFunc {
 		}
 
 		log.Printf("🔐 Login attempt for: %s", req.Email)
+
+		// PLATFORM ADMINS SIGN IN HERE TOO. Checked first, and only ever by
+		// email — a tenant user and a platform operator can never be the same
+		// row, because platform_admins is a separate table outside the tenancy
+		// model entirely.
+		//
+		// One form, no organization field for operators. If this email belongs
+		// to a platform admin the request is handed to the platform flow, which
+		// mints a token carrying `platform: true` and NO org_id. The two token
+		// families stay incompatible exactly as before — this only merges the
+		// entry point, not the credentials or the tokens.
+		//
+		// Costs a small enumeration signal: someone can learn an email belongs
+		// to Binly staff by observing that the response asks for a second
+		// factor. With a handful of such accounts on a guessable domain that is
+		// an accepted trade for not maintaining a separate login screen.
+		if handled := tryPlatformLogin(root, w, r, req); handled {
+			return
+		}
 
 		// Get JWT secret
 		jwtSecret := os.Getenv("APP_JWT_SECRET")
