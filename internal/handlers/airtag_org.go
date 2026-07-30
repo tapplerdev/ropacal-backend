@@ -56,6 +56,12 @@ func airtagOrgCacheGet(key string) (string, bool) {
 	return e.orgID, true
 }
 
+func airtagOrgCacheDelete(key string) {
+	airtagOrgCache.Lock()
+	defer airtagOrgCache.Unlock()
+	delete(airtagOrgCache.m, key)
+}
+
 func airtagOrgCachePut(key, orgID string) {
 	airtagOrgCache.Lock()
 	defer airtagOrgCache.Unlock()
@@ -93,12 +99,32 @@ func resolveAirtagOrg(root *sqlx.DB, cacheKey string, probe func(d *orgdb.DB) (b
 		return orgdb.Passthrough(root), true, nil
 	}
 
+	// CACHE HIT MUST STILL BE VERIFIED. Returning here unconditionally would skip
+	// the ambiguity check below — the only cross-tenant defence on this path — so
+	// the guard would run on a MISS and never on a HIT. With a 1h TTL that means:
+	// org A resolves bin 56 and caches it; org B later creates its own bin 56;
+	// for up to an hour B's AirTag GPS is written into A's scope with no log, and
+	// the rows persist after the cache expires. bin_number is NOT unique across
+	// tenants (prod holds duplicates 56, 86, 116), and bin numbers restart per
+	// tenant by design, so collisions are the expected case rather than the edge.
+	//
+	// Re-probing the cached org is one indexed lookup and keeps the hit path
+	// authoritative: if that org no longer claims the identifier, fall through to
+	// the full scan (which re-derives the owner and re-applies the guard).
 	if orgID, ok := airtagOrgCacheGet(cacheKey); ok {
 		d, err := orgdb.System(root, orgID)
 		if err != nil {
 			return nil, false, err
 		}
-		return d, true, nil
+		stillOwns, err := probe(d)
+		if err != nil {
+			return nil, false, fmt.Errorf("re-probing cached org %s: %w", orgID, err)
+		}
+		if stillOwns {
+			return d, true, nil
+		}
+		log.Printf("⚠️  [AirtagOrg] cached org %s no longer claims %s — re-resolving", orgID, cacheKey)
+		airtagOrgCacheDelete(cacheKey)
 	}
 
 	ids, err := orgdb.ActiveOrgIDs(root)

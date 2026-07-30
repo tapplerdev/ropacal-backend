@@ -345,16 +345,36 @@ func GetUnmatchedAirtagLocationsFromDB(db Querier) ([]AirtagEntry, error) {
 func (m *AirtagMonitor) fetchAirtagLocations() ([]AirtagEntry, error) {
 	// Read from DB (single source of truth)
 	entries, err := GetAirtagLocationsFromDB(m.db)
-	if err == nil && len(entries) > 0 {
+	if err == nil {
+		// ZERO ROWS IS A LEGITIMATE ANSWER — do NOT fall through to the bridge.
+		//
+		// This used to read `err == nil && len(entries) > 0`, so a *successful*
+		// read returning nothing dropped through to FetchAirtagLocations, which
+		// pulls the ENTIRE FindMy fleet with no org scoping. And the warning
+		// below is on the error branch only, so it was silent.
+		//
+		// A newly provisioned organization has zero airtag_locations rows BY
+		// DEFINITION. So minutes after a second org existed, its drift sweep
+		// would evaluate the other tenant's whole fleet against its own bins —
+		// matched on bin_number, which is NOT unique (prod has 56, 86, 116) —
+		// and emit FCM pushes carrying the other tenant's addresses. No attacker
+		// and no misconfiguration required; it fired on a timer.
+		//
+		// Under live tenancy the DB read is already org-scoped by RLS, so an
+		// empty result means "this tenant has no AirTags", not "the DB is
+		// unavailable". Return it.
 		return entries, nil
 	}
-	if err != nil {
-		log.Printf("⚠️  [AirtagMonitor] DB read failed, falling back to bridge: %v", err)
-	}
+	log.Printf("⚠️  [AirtagMonitor] DB read failed, falling back to bridge: %v", err)
 
-	// Fallback: fetch from bridge directly
+	// Fallback: bridge fetch, ONLY on a genuine DB error. This path is NOT
+	// org-scoped, so it must stay unreachable whenever the DB answered.
 	if m.bridgeURL == "" {
-		return nil, fmt.Errorf("no airtag data in DB and FINDMY_BRIDGE_URL not set")
+		return nil, fmt.Errorf("airtag DB read failed and FINDMY_BRIDGE_URL not set: %w", err)
+	}
+	if orgdb.Migrated() {
+		log.Printf("🚨 [AirtagMonitor] Falling back to the UNSCOPED bridge fleet while tenancy " +
+			"is live — entries may span organizations. Investigate the DB error above.")
 	}
 	resp, err := FetchAirtagLocations(m.bridgeURL)
 	if err != nil {
