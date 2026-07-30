@@ -389,7 +389,7 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 
 	// Publish to Centrifugo for real-time dashboard
 	if s.centrifugoClient != nil {
-		_ = s.centrifugoClient.PublishCompanyEvent(ctx, "daily_move_report", map[string]interface{}{
+		_ = s.centrifugoClient.PublishCompanyEvent(ctx, s.db.OrgID(), "daily_move_report", map[string]interface{}{
 			"overdue_count":   overdueCount,
 			"urgent_count":    urgentCount,
 			"soon_count":      soonCount,
@@ -563,7 +563,7 @@ func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, 
 
 	// Centrifugo
 	if s.centrifugoClient != nil {
-		_ = s.centrifugoClient.PublishCompanyEvent(ctx, "daily_bin_check_report", map[string]interface{}{
+		_ = s.centrifugoClient.PublishCompanyEvent(ctx, s.db.OrgID(), "daily_bin_check_report", map[string]interface{}{
 			"critical_count": criticalCount,
 			"overdue_count":  overdueCount,
 			"critical_items": criticalItems,
@@ -765,7 +765,7 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 
 	// Centrifugo
 	if s.centrifugoClient != nil {
-		_ = s.centrifugoClient.PublishCompanyEvent(ctx, "daily_battery_report", map[string]interface{}{
+		_ = s.centrifugoClient.PublishCompanyEvent(ctx, s.db.OrgID(), "daily_battery_report", map[string]interface{}{
 			"critical_count": criticalCount,
 			"low_count":      lowCount,
 			"critical_items": criticalItems,

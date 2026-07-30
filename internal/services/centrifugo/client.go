@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/centrifugal/gocent/v3"
+
 	"github.com/golang-jwt/jwt/v5"
+	"ropacal-backend/internal/orgdb"
 )
 
 // Client wraps Centrifugo gocent client for real-time messaging
@@ -86,7 +88,17 @@ func (c *Client) PublishDriverLocation(ctx context.Context, driverID string, loc
 	return nil
 }
 
-// PublishShiftUpdate publishes shift update to Centrifugo
+// PublishShiftUpdate publishes to one shift's channel.
+//
+// This is now the ONLY way to publish a shift update. A general
+// PublishToChannel(ctx, channel, data) used to sit alongside it and was a
+// redundant duplicate — all four of its callers built the same
+// "shift:updates:%s" string this function builds. It was deleted because a
+// free-form channel argument quietly undermined the property the company-event
+// publisher relies on: changing PublishCompanyEvent's signature is supposed to
+// break compilation at every one of its 36 call sites so none can be missed,
+// and a caller passing a hand-built "company:events" would have compiled
+// straight through that check.
 func (c *Client) PublishShiftUpdate(ctx context.Context, shiftID string, update interface{}) error {
 	channel := fmt.Sprintf("shift:updates:%s", shiftID)
 
@@ -103,25 +115,6 @@ func (c *Client) PublishShiftUpdate(ctx context.Context, shiftID string, update 
 
 	// DISABLED: Verbose publish logs
 	// log.Printf("📡 [Centrifugo] Published shift update to %s (offset: %d)", channel, result.Offset)
-
-	// Keep track of result to avoid unused variable warning
-	_ = result
-
-	return nil
-}
-
-// PublishToChannel publishes arbitrary data to a specific channel
-func (c *Client) PublishToChannel(ctx context.Context, channel string, data interface{}) error {
-	// Marshal data to JSON
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("failed to marshal data: %w", err)
-	}
-
-	result, err := c.client.Publish(ctx, channel, jsonData)
-	if err != nil {
-		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
-	}
 
 	// Keep track of result to avoid unused variable warning
 	_ = result
@@ -185,11 +178,26 @@ type CompanyEvent struct {
 	Data interface{} `json:"data"`
 }
 
-// PublishCompanyEvent publishes a company-wide event to the company:events channel,
-// which all authenticated managers subscribe to for real-time updates.
-func (c *Client) PublishCompanyEvent(ctx context.Context, eventType string, data interface{}) error {
-	channel := "company:events"
-
+// PublishCompanyEvent publishes one organization's operational feed event.
+//
+// orgID is an explicit parameter rather than something read out of ctx, and that
+// is deliberate. Reading it via orgdb.ForContext(ctx) would have compiled with
+// ZERO call-site edits — and then panicked in production, because ForContext
+// panics when tenancy is live and no handle is stashed, and three call sites pass
+// context.Background() while every background worker holds its handle in a
+// variable rather than in the context. Taking it as a parameter instead means
+// this signature change breaks compilation at all 36 sites, so none can be
+// silently missed. That is the whole safety property, and it is also why the
+// free-form PublishToChannel was deleted — it offered a way around this check.
+//
+// DUAL PUBLISH (D1 Deploy 1 of 3). Events go to BOTH the scoped channel and the
+// legacy flat one, so this deploy is fully backward compatible: existing clients
+// keep receiving events on company:events while the scoped channel is pre-filled
+// and ready for Deploy 2's client switch. Deploy 3a removes the legacy PARSER
+// branch (closing the cross-tenant hole); Deploy 3b removes this legacy publish.
+// Publishing legacy FIRST is intentional — if the scoped publish fails, the
+// currently-live path has already succeeded.
+func (c *Client) PublishCompanyEvent(ctx context.Context, orgID, eventType string, data interface{}) error {
 	payload := CompanyEvent{
 		Type: eventType,
 		Data: data,
@@ -200,13 +208,30 @@ func (c *Client) PublishCompanyEvent(ctx context.Context, eventType string, data
 		return fmt.Errorf("failed to marshal company event data: %w", err)
 	}
 
-	result, err := c.client.Publish(ctx, channel, jsonData)
-	if err != nil {
-		log.Printf("❌ [Centrifugo] Publish failed - Channel: %s, Type: %s, Error: %v", channel, eventType, err)
-		return fmt.Errorf("failed to publish to channel %s: %w", channel, err)
+	// Legacy channel first: it is the one clients are on today.
+	const legacy = "company:events"
+	if _, err := c.client.Publish(ctx, legacy, jsonData); err != nil {
+		log.Printf("❌ [Centrifugo] Publish failed - Channel: %s, Type: %s, Error: %v", legacy, eventType, err)
+		return fmt.Errorf("failed to publish to channel %s: %w", legacy, err)
 	}
 
-	_ = result
+	if orgID == "" {
+		// Pre-tenancy / passthrough handle. Legal in dark mode, but once the
+		// migration is live it means an unscoped handle reached a publish site,
+		// and the event would silently never reach the scoped channel. Be loud
+		// rather than quietly dropping a tenant's feed.
+		if orgdb.Migrated() {
+			log.Printf("❌ [Centrifugo] company event %q published WITHOUT an org — scoped channel skipped (unscoped handle at the call site)", eventType)
+		}
+		return nil
+	}
+
+	scoped := fmt.Sprintf("company:%s:events", orgID)
+	if _, err := c.client.Publish(ctx, scoped, jsonData); err != nil {
+		// Do not fail the caller: the legacy publish already succeeded, so the
+		// event was delivered. Log it as the migration problem it is.
+		log.Printf("⚠️  [Centrifugo] scoped publish failed - Channel: %s, Type: %s, Error: %v", scoped, eventType, err)
+	}
 	return nil
 }
 
@@ -222,9 +247,9 @@ func (c *Client) PublishCompanyEvent(ctx context.Context, eventType string, data
 // token byte-identical to the pre-tenancy shape.
 func (c *Client) GenerateConnectionToken(userID string, orgID string, expiresAt time.Time) (string, error) {
 	claims := jwt.MapClaims{
-		"sub": userID,                // User ID
-		"exp": expiresAt.Unix(),      // Expiration time
-		"iat": time.Now().Unix(),     // Issued at
+		"sub": userID,            // User ID
+		"exp": expiresAt.Unix(),  // Expiration time
+		"iat": time.Now().Unix(), // Issued at
 		"info": map[string]interface{}{ // Optional user info
 			"user_id": userID,
 		},
@@ -247,9 +272,9 @@ func (c *Client) GenerateConnectionToken(userID string, orgID string, expiresAt 
 // GenerateSubscriptionToken generates a JWT token for channel subscription
 func (c *Client) GenerateSubscriptionToken(userID string, channel string, expiresAt time.Time) (string, error) {
 	claims := jwt.MapClaims{
-		"sub":     userID,           // User ID
-		"channel": channel,          // Channel to subscribe to
-		"exp":     expiresAt.Unix(), // Expiration time
+		"sub":     userID,            // User ID
+		"channel": channel,           // Channel to subscribe to
+		"exp":     expiresAt.Unix(),  // Expiration time
 		"iat":     time.Now().Unix(), // Issued at
 	}
 

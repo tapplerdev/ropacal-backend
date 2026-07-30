@@ -457,7 +457,7 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 				"title": title,
 				"body":  body,
 			}
-			if pubErr := m.centrifugoClient.PublishCompanyEvent(ctx, "bin_drift_alert", payload); pubErr != nil {
+			if pubErr := m.centrifugoClient.PublishCompanyEvent(ctx, m.db.OrgID(), "bin_drift_alert", payload); pubErr != nil {
 				log.Printf("⚠️  [AirtagMonitor] Failed to publish drift alert to Centrifugo: %v", pubErr)
 			}
 		}

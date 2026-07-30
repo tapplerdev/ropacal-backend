@@ -126,7 +126,7 @@ func UpdateWarehouseLocation(root *sqlx.DB, hub *websocket.Hub, centrifugoClient
 
 		// Also publish via Centrifugo for mobile app notification pipeline
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "warehouse_location_updated", input); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "warehouse_location_updated", input); pubErr != nil {
 				log.Printf("⚠️  Failed to publish warehouse_location_updated to Centrifugo: %v", pubErr)
 			} else {
 				log.Printf("📡 Published warehouse_location_updated via Centrifugo")

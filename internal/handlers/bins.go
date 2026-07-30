@@ -232,7 +232,7 @@ func CreateBin(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo
 
 		// Publish to Centrifugo
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_created", created.ToBinResponse()); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "bin_created", created.ToBinResponse()); pubErr != nil {
 				log.Printf("⚠️  [CREATE-BIN] Failed to publish bin_created to Centrifugo: %v", pubErr)
 			} else {
 				log.Printf("📡 [CREATE-BIN] Centrifugo: Published bin_created to company:events")
@@ -947,7 +947,7 @@ func UpdateBin(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo
 
 		// Publish to Centrifugo
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_updated", updated.ToBinResponse()); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "bin_updated", updated.ToBinResponse()); pubErr != nil {
 				log.Printf("⚠️  [UPDATE-BIN] Failed to publish bin_updated to Centrifugo: %v", pubErr)
 			} else {
 				log.Printf("📡 [UPDATE-BIN] Centrifugo: Published bin_updated to company:events")
@@ -1033,7 +1033,7 @@ func DeleteBin(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo
 
 		// Publish to Centrifugo
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_deleted", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "bin_deleted", map[string]interface{}{
 				"bin_id": id,
 			}); pubErr != nil {
 				log.Printf("⚠️  [DELETE-BIN] Failed to publish bin_deleted to Centrifugo: %v", pubErr)

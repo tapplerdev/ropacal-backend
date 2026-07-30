@@ -441,7 +441,7 @@ func CreateShiftWithTasks(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *c
 			}
 
 			// 1. Publish to company:events (for manager dashboards)
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_created", shiftCreatedData); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "shift_created", shiftCreatedData); pubErr != nil {
 				log.Printf("⚠️  Failed to publish shift_created to company:events: %v", pubErr)
 			} else {
 				log.Printf("📡 Centrifugo: Published shift_created to company:events")

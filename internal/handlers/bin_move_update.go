@@ -635,7 +635,7 @@ func UpdateBinMoveRequest(store moverequest.Store, root *sqlx.DB, redisClient *r
 
 		// Always publish move_request_updated to Centrifugo so all manager views refresh
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_updated", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "move_request_updated", map[string]interface{}{
 				"move_request_id": id,
 				"status":          updatedMove.Status,
 				"bin_id":          updatedMove.BinID,

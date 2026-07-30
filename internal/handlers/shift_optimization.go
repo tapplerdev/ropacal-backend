@@ -1602,14 +1602,13 @@ func NotifyDriverOfRouteUpdate(
 	}
 
 	// Publish to shift-specific channel
-	channel := fmt.Sprintf("shift:updates:%s", shiftID)
 	ctx := context.Background()
-	err = centrifugoClient.PublishToChannel(ctx, channel, payload)
+	err = centrifugoClient.PublishShiftUpdate(ctx, shiftID, payload)
 	if err != nil {
-		log.Printf("❌ [NOTIFY-DRIVER] Failed to publish to Centrifugo channel %s: %v", channel, err)
+		log.Printf("❌ [NOTIFY-DRIVER] Failed to publish shift update for %s: %v", shiftID, err)
 		return fmt.Errorf("failed to publish notification: %w", err)
 	}
 
-	log.Printf("✅ [NOTIFY-DRIVER] Successfully published route update notification to channel %s", channel)
+	log.Printf("✅ [NOTIFY-DRIVER] Successfully published route update notification for shift %s", shiftID)
 	return nil
 }

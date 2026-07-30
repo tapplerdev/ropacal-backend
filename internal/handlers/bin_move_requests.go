@@ -470,7 +470,7 @@ func ScheduleBinMove(store moverequest.Store, root *sqlx.DB, wsHub *websocket.Hu
 			"status":          "pending",
 		}
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_created", moveCreatedData); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "move_request_created", moveCreatedData); pubErr != nil {
 				log.Printf("⚠️  Failed to publish move_request_created to Centrifugo: %v", pubErr)
 			}
 

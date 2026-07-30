@@ -866,7 +866,7 @@ func CreateManagerIncidentReport(root *sqlx.DB, centrifugoClient *centrifugo.Cli
 		); err == nil {
 			if centrifugoClient != nil {
 				zoneResp := zone.ToResponse()
-				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "zone_created", zoneResp); pubErr != nil {
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "zone_created", zoneResp); pubErr != nil {
 					log.Printf("⚠️ [CreateManagerIncidentReport] Centrifugo publish failed: %v", pubErr)
 				}
 			}
@@ -1041,7 +1041,7 @@ func UpdateNoGoZone(root *sqlx.DB, centrifugoClient *centrifugo.Client) http.Han
 		// Broadcast update via Centrifugo
 		if centrifugoClient != nil {
 			zoneResp := updatedZone.ToResponse()
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "zone_updated", zoneResp); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "zone_updated", zoneResp); pubErr != nil {
 				log.Printf("⚠️ [UpdateNoGoZone] Centrifugo publish failed: %v", pubErr)
 			}
 		}

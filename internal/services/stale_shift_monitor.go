@@ -479,7 +479,7 @@ func (m *StaleShiftMonitor) autoEndShift(shift activeShiftRow, endReasons ...str
 
 	// Notify managers via Centrifugo
 	if m.centrifugoClient != nil {
-		m.centrifugoClient.PublishCompanyEvent(context.Background(), "shift_auto_ended", map[string]interface{}{
+		m.centrifugoClient.PublishCompanyEvent(context.Background(), m.db.OrgID(), "shift_auto_ended", map[string]interface{}{
 			"shift_id":        shift.ID,
 			"driver_id":       shift.DriverID,
 			"driver_name":     shift.DriverName,

@@ -843,7 +843,7 @@ func (a *AIOperationsAgent) createRecommendation(recType, entityType, entityID, 
 	// Broadcast to managers via Centrifugo
 	if a.centrifugoClient != nil {
 		ctx := context.Background()
-		a.centrifugoClient.PublishCompanyEvent(ctx, "ai_recommendation_created", map[string]interface{}{
+		a.centrifugoClient.PublishCompanyEvent(ctx, a.db.OrgID(), "ai_recommendation_created", map[string]interface{}{
 			"id":       id,
 			"type":     recType,
 			"title":    title,

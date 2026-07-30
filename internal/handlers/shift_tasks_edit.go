@@ -327,11 +327,10 @@ func RemoveTasksFromShift(root *sqlx.DB, redisClient *redis.Client, centrifugoCl
 				"manager_name":  userClaims.Email,
 			}
 
-			channel := fmt.Sprintf("shift:updates:%s", shiftID)
-			if pubErr := centrifugoClient.PublishToChannel(r.Context(), channel, eventData); pubErr != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shiftID, eventData); pubErr != nil {
 				log.Printf("⚠️  Failed to publish task removal to Centrifugo: %v", pubErr)
 			} else {
-				log.Printf("📡 Published task_removed event to %s", channel)
+				log.Printf("📡 Published task_removed event for shift %s", shiftID)
 			}
 		}
 
@@ -1286,12 +1285,11 @@ func UpdateShift(root *sqlx.DB, redisClient *redis.Client, centrifugoClient *cen
 		if centrifugoClient != nil {
 			// If driver changed, notify old driver
 			if changes["driver_changed"].(bool) {
-				oldDriverChannel := fmt.Sprintf("shift:updates:%s", shiftID)
 				reassignedEvent := map[string]interface{}{
 					"type":   "shift_reassigned",
 					"reason": "Shift has been reassigned to another driver",
 				}
-				if pubErr := centrifugoClient.PublishToChannel(r.Context(), oldDriverChannel, reassignedEvent); pubErr != nil {
+				if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shiftID, reassignedEvent); pubErr != nil {
 					log.Printf("⚠️  Failed to notify old driver: %v", pubErr)
 				} else {
 					log.Printf("📡 Published shift_reassigned event to old driver")
@@ -1299,7 +1297,6 @@ func UpdateShift(root *sqlx.DB, redisClient *redis.Client, centrifugoClient *cen
 			}
 
 			// Publish shift_edited event to current/new driver
-			newDriverChannel := fmt.Sprintf("shift:updates:%s", shiftID)
 			editedEvent := map[string]interface{}{
 				"type":         "shift_edited",
 				"shift_id":     shiftID,
@@ -1307,7 +1304,7 @@ func UpdateShift(root *sqlx.DB, redisClient *redis.Client, centrifugoClient *cen
 				"reason":       req.Reason,
 				"manager_name": userClaims.Email,
 			}
-			if pubErr := centrifugoClient.PublishToChannel(r.Context(), newDriverChannel, editedEvent); pubErr != nil {
+			if pubErr := centrifugoClient.PublishShiftUpdate(r.Context(), shiftID, editedEvent); pubErr != nil {
 				log.Printf("⚠️  Failed to publish shift_edited event: %v", pubErr)
 			} else {
 				log.Printf("📡 Published shift_edited event")

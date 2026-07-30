@@ -489,7 +489,7 @@ func StartShift(root *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, ce
 
 				// Publish to Centrifugo
 				if centrifugoClient != nil {
-					if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_status_updated", moveReqData); pubErr != nil {
+					if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "move_request_status_updated", moveReqData); pubErr != nil {
 						log.Printf("⚠️  Failed to publish move_request_status_updated to Centrifugo: %v", pubErr)
 					}
 				}
@@ -578,7 +578,7 @@ func StartShift(root *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client, ce
 
 			// Also publish via Centrifugo for mobile app notification pipeline
 			if centrifugoClient != nil {
-				if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "driver_shift_change", map[string]interface{}{
+				if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), db.OrgID(), "driver_shift_change", map[string]interface{}{
 					"driver_id": shift.DriverID,
 					"status":    shift.Status,
 					"shift_id":  shift.ID,
@@ -653,7 +653,7 @@ func PauseShift(store ShiftStore, hub *websocket.Hub, centrifugoClient *centrifu
 
 		// Also publish driver_shift_change via Centrifugo
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), orgdb.From(r).OrgID(), "driver_shift_change", map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,
@@ -739,7 +739,7 @@ func ResumeShift(store ShiftStore, hub *websocket.Hub, centrifugoClient *centrif
 
 		// Also publish driver_shift_change via Centrifugo
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), orgdb.From(r).OrgID(), "driver_shift_change", map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,
@@ -980,7 +980,7 @@ func EndShift(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifugo.Cl
 
 		// Also publish driver_shift_change via Centrifugo
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "driver_shift_change", map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    shift.Status,
 				"shift_id":  shift.ID,

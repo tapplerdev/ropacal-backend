@@ -265,7 +265,7 @@ func CreatePotentialLocation(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClie
 
 			// Broadcast each location to all managers via Centrifugo
 			if centrifugoClient != nil {
-				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_created", resp); pubErr != nil {
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "potential_location_created", resp); pubErr != nil {
 					log.Printf("\u26a0\ufe0f [CREATE-POTENTIAL-LOCATION] Centrifugo publish failed: %v", pubErr)
 					wsHub.BroadcastToRole("admin", map[string]interface{}{"type": "potential_location_created", "data": resp})
 				}
@@ -376,7 +376,7 @@ func DeletePotentialLocation(root *sqlx.DB, redisClient *redis.Client, wsHub *we
 		// Broadcast to all managers via Centrifugo
 		deleteData := map[string]interface{}{"location_id": id}
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_deleted", deleteData); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "potential_location_deleted", deleteData); pubErr != nil {
 				log.Printf("\u26a0\ufe0f [DELETE-POTENTIAL-LOCATION] Centrifugo publish failed: %v", pubErr)
 				wsHub.BroadcastToRole("admin", map[string]interface{}{"type": "potential_location_deleted", "data": deleteData})
 			}
@@ -631,7 +631,7 @@ func ConvertPotentialLocationToBin(root *sqlx.DB, redisClient *redis.Client, wsH
 			},
 		}
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_converted", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "potential_location_converted", map[string]interface{}{
 				"location_id": id,
 				"bin":         createdBin.ToBinResponse(),
 			}); pubErr != nil {

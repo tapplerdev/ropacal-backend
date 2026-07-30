@@ -201,7 +201,7 @@ func (m *MoveRequestMonitor) sendAlert(ctx context.Context, notifType, title, bo
 			"body":  body,
 			"data":  data,
 		}
-		if pubErr := m.centrifugoClient.PublishCompanyEvent(ctx, notifType, payload); pubErr != nil {
+		if pubErr := m.centrifugoClient.PublishCompanyEvent(ctx, m.db.OrgID(), notifType, payload); pubErr != nil {
 			log.Printf("⚠️  [MoveRequestMonitor] Failed to publish to Centrifugo: %v", pubErr)
 		}
 	}

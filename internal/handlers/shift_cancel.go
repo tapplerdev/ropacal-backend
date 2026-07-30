@@ -74,7 +74,7 @@ func ClearAllShifts(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrif
 			// Also publish via Centrifugo
 			if centrifugoClient != nil {
 				// shift_deleted to company channel (drivers subscribe to company:events)
-				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_deleted", map[string]interface{}{
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "shift_deleted", map[string]interface{}{
 					"driver_id": driverID,
 					"shift_id":  "all",
 					"message":   "All shifts have been cleared by manager",
@@ -84,7 +84,7 @@ func ClearAllShifts(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrif
 				}
 
 				// driver_shift_change to company channel
-				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "driver_shift_change", map[string]interface{}{
 					"driver_id": driverID,
 					"status":    "ended",
 					"shift_id":  "all",
@@ -301,10 +301,10 @@ func CancelShift(root *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMSe
 
 		// Publish shift_cancelled + driver_shift_change to Centrifugo company:events
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "shift_cancelled", cancelDashboardData); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "shift_cancelled", cancelDashboardData); pubErr != nil {
 				log.Printf("⚠️  Failed to publish shift_cancelled to company:events: %v", pubErr)
 			}
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "driver_shift_change", map[string]interface{}{
 				"driver_id": shift.DriverID,
 				"status":    "cancelled",
 				"shift_id":  shiftID,
@@ -484,7 +484,7 @@ func CancelAllActiveShifts(root *sqlx.DB, wsHub *websocket.Hub, fcmService *serv
 				}); pubErr != nil {
 					log.Printf("⚠️  Failed to publish shift_cancelled to shift:updates:%s: %v", shift.ID, pubErr)
 				}
-				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "driver_shift_change", map[string]interface{}{
+				if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "driver_shift_change", map[string]interface{}{
 					"driver_id": shift.DriverID,
 					"status":    "cancelled",
 					"shift_id":  shift.ID,
@@ -536,7 +536,7 @@ func CancelAllActiveShifts(root *sqlx.DB, wsHub *websocket.Hub, fcmService *serv
 
 		// Publish bulk_shifts_cancelled to Centrifugo company:events
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bulk_shifts_cancelled", bulkCancelData); pubErr != nil {
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "bulk_shifts_cancelled", bulkCancelData); pubErr != nil {
 				log.Printf("⚠️  Failed to publish bulk_shifts_cancelled to Centrifugo: %v", pubErr)
 			}
 		}

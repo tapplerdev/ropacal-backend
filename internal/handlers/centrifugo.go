@@ -14,6 +14,7 @@ import (
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -275,64 +276,121 @@ func CentrifugoSubscribeProxy(db *sqlx.DB) http.HandlerFunc {
 // authorizeSubscription checks if a user is allowed to subscribe to a channel.
 // db is org-bound when tenancy is live (a passthrough while dark), so under
 // RLS the users/shifts lookups are automatically scoped to the caller's tenant.
-func authorizeSubscription(db *orgdb.DB, userID string, channel string) (bool, error) {
-	// Parse channel to determine type and resource ID
+// parsedChannel is the decomposed form of a Centrifugo channel name. There is
+// exactly ONE parser (parseChannel) and every authorization path uses it.
+//
+// Channels come in two shapes, and the difference is NOT the segment count:
+//
+//	driver:location:{driverID}        namespace=driver kind=location id=<driverID>  org=""
+//	company:{orgID}:events            namespace=company kind=events   id=""        org=<orgID>
+//
+// Both have three segments. Discriminating on len(parts) would therefore be
+// wrong the moment a second channel family gains an org segment, so the org
+// form is detected by trying to PARSE parts[1] as a UUID. That is also why the
+// org sits in the middle: under the pre-D1 parser, company:events:{orgID} would
+// have had parts[1] == "events" and been authorized for any admin of any org —
+// a stale backend accepting it SILENTLY. With the org in the middle, parts[1] is
+// a UUID, matches no legacy case, and falls through to a logged 403.
+type parsedChannel struct {
+	namespace string // driver, shift, manager, company
+	kind      string // location, events, updates, notifications
+	id        string // the trailing resource id, "" when the channel carries none
+	orgID     string // set only for the org-scoped form
+	legacy    bool   // true for the un-scoped company:events form (removed at D1 Deploy 3a)
+}
+
+func parseChannel(channel string) (parsedChannel, error) {
 	parts := strings.Split(channel, ":")
 	if len(parts) < 2 {
-		return false, fmt.Errorf("invalid channel format: %s", channel)
+		return parsedChannel{}, fmt.Errorf("invalid channel format: %s", channel)
 	}
 
-	namespace := parts[0]   // driver, shift, manager
-	channelType := parts[1] // location, updates, notifications
-
-	switch namespace {
-	case "driver":
-		// Channel format: driver:location:{driverId}
-		if channelType == "location" && len(parts) == 3 {
-			driverID := parts[2]
-			// Check if user is the driver themselves OR a manager
-			return canViewDriverLocation(db, userID, driverID)
+	// Org-scoped form: <namespace>:<uuid>:<kind>
+	if len(parts) == 3 {
+		if _, err := uuid.Parse(parts[1]); err == nil {
+			return parsedChannel{namespace: parts[0], kind: parts[2], orgID: parts[1]}, nil
 		}
-		// Channel format: driver:events:{driverId}
-		// Only the driver themselves can subscribe to their own events
-		if channelType == "events" && len(parts) == 3 {
-			driverID := parts[2]
-			return userID == driverID, nil
+	}
+
+	pc := parsedChannel{namespace: parts[0], kind: parts[1]}
+	if len(parts) == 3 {
+		pc.id = parts[2]
+	}
+	if pc.namespace == "company" && pc.kind == "events" && len(parts) == 2 {
+		pc.legacy = true
+	}
+	return pc, nil
+}
+
+func authorizeSubscription(db *orgdb.DB, userID string, channel string) (bool, error) {
+	ch, err := parseChannel(channel)
+	if err != nil {
+		return false, err
+	}
+
+	switch ch.namespace {
+	case "driver":
+		// driver:location:{driverId}
+		if ch.kind == "location" && ch.id != "" {
+			// Checks the target driver's org too — see canViewDriverLocation.
+			return canViewDriverLocation(db, userID, ch.id)
+		}
+		// driver:events:{driverId} — only the driver themselves
+		if ch.kind == "events" && ch.id != "" {
+			return userID == ch.id, nil
 		}
 
 	case "shift":
-		// Channel format: shift:updates:{shiftId}
-		if channelType == "updates" && len(parts) == 3 {
-			shiftID := parts[2]
-			// Check if user is assigned to this shift OR is a manager
-			return canViewShift(db, userID, shiftID)
+		// shift:updates:{shiftId}
+		if ch.kind == "updates" && ch.id != "" {
+			return canViewShift(db, userID, ch.id)
 		}
 
 	case "manager":
-		// Channel format: manager:notifications:{managerId}
-		if channelType == "notifications" && len(parts) == 3 {
-			managerID := parts[2]
-			// Only the manager themselves can subscribe
-			return userID == managerID, nil
+		// manager:notifications:{managerId} — only that manager
+		if ch.kind == "notifications" && ch.id != "" {
+			return userID == ch.id, nil
 		}
 
 	case "company":
-		// Channel format: company:events
-		// Only admins and managers can subscribe to company-wide broadcast events
-		if channelType == "events" {
-			var role string
-			err := db.Get(&role, `SELECT role FROM users WHERE id = $1`, userID)
-			if err == sql.ErrNoRows {
+		// company:{orgID}:events — the org-scoped form. BOTH the org and the
+		// role must match; an admin of another tenant is denied loudly.
+		if ch.kind == "events" && ch.orgID != "" {
+			if !sameOrgAsSubscriber(db, ch.orgID) {
+				log.Printf("🚫 [Centrifugo] cross-org denial: subscriber org=%s tried company channel for org=%s",
+					db.OrgID(), ch.orgID)
 				return false, nil
 			}
-			if err != nil {
-				return false, fmt.Errorf("failed to get user role: %w", err)
-			}
-			return role == "admin" || role == "manager", nil
+			return isCompanyEventViewer(db, userID)
+		}
+		// company:events — LEGACY, un-scoped, and the remaining isolation hole:
+		// it is authorized on role alone, so any admin of any tenant receives
+		// every tenant's operational feed. Kept only so clients can migrate;
+		// D1 Deploy 3a deletes this branch, which is what actually closes the
+		// hole. The log line makes remaining adoption observable.
+		if ch.legacy {
+			log.Printf("⚠️  [Centrifugo] LEGACY company:events subscribe by user=%s (org=%s) — migrate to company:{orgID}:events",
+				userID, db.OrgID())
+			return isCompanyEventViewer(db, userID)
 		}
 	}
 
 	return false, fmt.Errorf("unknown channel format: %s", channel)
+}
+
+// isCompanyEventViewer reports whether the user may receive the org-wide
+// operational feed. Extracted so the scoped and legacy branches cannot drift
+// apart while both exist.
+func isCompanyEventViewer(db *orgdb.DB, userID string) (bool, error) {
+	var role string
+	err := db.Get(&role, `SELECT role FROM users WHERE id = $1`, userID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get user role: %w", err)
+	}
+	return role == "admin" || role == "manager", nil
 }
 
 // sameOrgAsSubscriber reports whether targetOrg belongs to the same tenant as the

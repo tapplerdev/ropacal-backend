@@ -477,7 +477,7 @@ func CompleteTask(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 
 							// Publish bin_created via Centrifugo
 							if centrifugoClient != nil {
-								if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_created", map[string]interface{}{
+								if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "bin_created", map[string]interface{}{
 									"bin_id":     newBinID,
 									"bin_number": actualBinNumber,
 									"street":     potentialLocation.Street,
@@ -503,7 +503,7 @@ func CompleteTask(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 									"zip":         potentialLocation.Zip,
 									"shift_id":    shift.ID,
 								}
-								if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "potential_location_converted", plData); pubErr != nil {
+								if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "potential_location_converted", plData); pubErr != nil {
 									log.Printf("[DIAGNOSTIC] Failed to publish potential_location_converted via Centrifugo: %v", pubErr)
 								} else {
 									log.Printf("[DIAGNOSTIC] Published potential_location_converted via Centrifugo (location_id: %s)", *potentialLocationID)
@@ -698,7 +698,7 @@ func CompleteTask(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrifug
 					if centrifugoClient != nil {
 						var updatedBin models.Bin
 						if fetchErr := db.Get(&updatedBin, "SELECT * FROM bins WHERE id = $1", binIDForCheck); fetchErr == nil {
-							if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "bin_updated", updatedBin); pubErr != nil {
+							if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "bin_updated", updatedBin); pubErr != nil {
 								log.Printf("[DIAGNOSTIC] ⚠️  Centrifugo bin_updated publish failed: %v", pubErr)
 							}
 						}
@@ -1061,7 +1061,7 @@ func moveCompletionSideEffects(db *orgdb.DB, hub *websocket.Hub, centrifugoClien
 	hub.BroadcastToRole("admin", map[string]interface{}{"type": "move_request_status_updated", "data": moveCompletedData})
 	hub.BroadcastToRole("manager", map[string]interface{}{"type": "move_request_status_updated", "data": moveCompletedData})
 	if centrifugoClient != nil {
-		if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "move_request_status_updated", moveCompletedData); pubErr != nil {
+		if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), db.OrgID(), "move_request_status_updated", moveCompletedData); pubErr != nil {
 			log.Printf("⚠️  Failed to publish move_request_status_updated to Centrifugo: %v", pubErr)
 		}
 	}
@@ -1088,7 +1088,7 @@ func moveCompletionSideEffects(db *orgdb.DB, hub *websocket.Hub, centrifugoClien
 				}
 				hub.BroadcastToRole("manager", map[string]interface{}{"type": "potential_location_converted", "data": plConvertedData})
 				if centrifugoClient != nil {
-					if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), "potential_location_converted", plConvertedData); pubErr != nil {
+					if pubErr := centrifugoClient.PublishCompanyEvent(context.Background(), db.OrgID(), "potential_location_converted", plConvertedData); pubErr != nil {
 						log.Printf("⚠️  Failed to publish potential_location_converted to Centrifugo: %v", pubErr)
 					}
 				}

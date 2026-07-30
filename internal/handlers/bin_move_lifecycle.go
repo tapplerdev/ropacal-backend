@@ -177,7 +177,7 @@ func CancelBinMoveRequest(store moverequest.Store, root *sqlx.DB, redisClient *r
 
 		// Publish move_request_cancelled to Centrifugo so all manager dashboards update
 		if centrifugoClient != nil {
-			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), "move_request_cancelled", map[string]interface{}{
+			if pubErr := centrifugoClient.PublishCompanyEvent(r.Context(), db.OrgID(), "move_request_cancelled", map[string]interface{}{
 				"move_request_id": id,
 				"bin_id":          moveRequest.BinID,
 				"status":          "cancelled",
