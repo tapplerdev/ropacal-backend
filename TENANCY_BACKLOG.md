@@ -128,6 +128,32 @@ Four of the five items are **SHIPPED AND GATED**. D1 is one deploy of three in.
 Deploy 1 (backend: publisher dual-writes both channels, parser accepts both
 forms) is live and fully backward compatible. **It closes nothing on its own.**
 
+Deploy 1 gate results (2026-07-30):
+
+| Probe | Result |
+|---|---|
+| admin → `company:{own org}:events` | ALLOW |
+| admin → `company:events` (legacy) | ALLOW — backward compatible |
+| admin → `company:{other org}:events` | DENY |
+| driver → `company:{own org}:events` | DENY |
+| admin → `company:events:{org}` (wrong order) | DENY, `unknown channel format` — loud, as designed |
+| D2 regression (real vs made-up driver) | ALLOW / DENY, intact |
+| Centrifugo accepts `company:{uuid}:events` | yes (namespace resolves at the first colon) |
+| `history` on the company namespace | `not available` — confirms the namespace retains nothing |
+
+**Not yet observed with real traffic:** that the dual publish reaches the scoped
+channel in production. A failure there is non-breaking and self-announcing — the
+legacy publish is unchanged and still delivers, and the scoped failure logs
+`⚠️ [Centrifugo] scoped publish failed`. Any admin action or the periodic
+monitors will exercise it; check for that line before Deploy 2.
+
+**Gate-harness note:** the first run of this gate reported the own-org scoped
+channel as DENIED, which looked like a real bug. It was the test harness — in
+zsh, `$ORG:events` applies `:e` as a history modifier, so the string sent was
+`company:vents`. Brace org ids in gate scripts (`${ORG}`). The
+`unknown channel format` error now names the parsed shape, which is what
+identified this in one request.
+
 - **Deploy 2** — both clients subscribe to `company:{orgID}:events`. Needs the
   client org state in §1 of `TIER1_PLAN.md`; the four dashboard sites switch to
   the context's `companyChannel`, and Flutter passes `orgId` through. Flutter
