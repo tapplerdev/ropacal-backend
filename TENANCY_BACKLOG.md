@@ -111,19 +111,45 @@ an unknown slug returns a 401 **identical** to bad credentials (no enumeration).
 
 ---
 
-## Tier 1 realtime — before a second organization
+## Tier 1 realtime — status 2026-07-30
 
-Researched in full; not built. Channels are currently flat and org-blind.
+Four of the five items are **SHIPPED AND GATED**. D1 is one deploy of three in.
 
-- `company:events` is one channel carrying the whole operational feed (36 publish
-  sites) and is subscribable by any admin of any org → must become
-  `company:{orgID}:events`, with the publisher signature, 4 dashboard subscriber
-  sites and the Flutter manager mode updated.
-- `canViewDriverLocation` is role-only: any admin can live-track any driver given
-  the UUID → add an org-equality predicate now that proxies carry org context.
-- Redis GPS keys → `ropacal:org:{orgID}:driver:{id}:location` (the 10-minute TTL
-  makes that cutover trivial).
-- Shorten the Centrifugo connection-token TTL.
+| Item | State | Gate result |
+|---|---|---|
+| **D2** org-equality in subscribe auth | **DONE** | A made-up driver/shift UUID was ALLOWED before the deploy and DENIED after; self-subscribe still works |
+| **D3** Redis keys → `ropacal:org:{orgID}:driver:{id}:location`, `KEYS`→`SCAN` | **DONE** | Key landed under the org prefix; another org's prefix and the flat form both empty; Centrifugo's 153 keys untouched; batch writer advanced `driver_current_location` in 12s |
+| **D4b** cached per-request membership + role revalidation | **DONE** | A deleted user's still-valid token (exp 6 days out) 401'd at exactly 60s; 90s of continuous requests across the cache boundary all 200 |
+| **D4a** connection token TTL 24h → 1h | **DONE** | Freshly issued token has `exp - iat == 3600` |
+| **D1** `company:events` → `company:{orgID}:events` | **Deploy 1 of 3** | dual-publish + two-form parser live; see below |
+
+### D1 — what remains
+
+Deploy 1 (backend: publisher dual-writes both channels, parser accepts both
+forms) is live and fully backward compatible. **It closes nothing on its own.**
+
+- **Deploy 2** — both clients subscribe to `company:{orgID}:events`. Needs the
+  client org state in §1 of `TIER1_PLAN.md`; the four dashboard sites switch to
+  the context's `companyChannel`, and Flutter passes `orgId` through. Flutter
+  needs a store release, so start that clock early.
+- **Deploy 3a** — drop the legacy PARSER branch. **This is the deploy that
+  actually closes the cross-tenant hole.** Before it, confirm the Railway logs
+  show zero `channel=company:events` subscribes over a full business day. That
+  gate has a known blind spot: the subscribe proxy returns no `ExpireAt`, so a
+  subscription is re-authorized only on (re)subscribe and long-lived sessions are
+  invisible to the count. 3a converts them into loud 403s, which is why it
+  precedes 3b.
+- **Deploy 3b** — drop the legacy PUBLISH, only after 3a has been quiet for a
+  business day. Removing publish is the only step that can silence anyone.
+
+**Still open before Deploy 2: pin the Centrifugo Docker tag.** The image uses a
+floating tag and self-upgraded 6.6.0 → 6.9.1 unannounced during the 2026-07-30
+secret rotation. An unannounced version move mid-migration could shift
+namespace-resolution behaviour underneath the one assumption D1 rests on. The
+Railway CLI does not expose the image source, so this is a dashboard change:
+`binly-centrifugo-service` → the Centrifugo service → Settings → Source → Image,
+pin to the exact running version. Note it restarts the broker and drops live
+WebSocket connections, so pick the window.
 
 ## Tier 2 — later
 
@@ -134,7 +160,9 @@ Researched in full; not built. Channels are currently flat and org-blind.
 - `airtag_locations` matches on `bin_number`, which is **not unique** (prod has
   duplicates 56, 86, 116). Cross-tenant id collisions currently surface as the
   FindMy resolver's ambiguity skip — safe and loud, but it should be namespaced.
-- Redis `KEYS` → `SCAN`; per-org rate limits.
+- Per-org rate limits. (Redis `KEYS` → `SCAN` is DONE — folded into D3 on
+  2026-07-30, because the pattern ran against the same Redis instance
+  Centrifugo's engine uses, blocking it once per active org every 30 seconds.)
 - Drop the four `zz_backup_*` tables (RLS-denied to the app role, real data, no
   code path) and the four dead-but-populated tables:
   `driver_location_history` (94k rows), `driver_locations` (6k), `shift_bins`,

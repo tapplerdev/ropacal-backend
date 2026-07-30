@@ -375,7 +375,8 @@ func authorizeSubscription(db *orgdb.DB, userID string, channel string) (bool, e
 		}
 	}
 
-	return false, fmt.Errorf("unknown channel format: %s", channel)
+	return false, fmt.Errorf("unknown channel format: %s (parsed ns=%q kind=%q id=%q org=%q legacy=%v)",
+		channel, ch.namespace, ch.kind, ch.id, ch.orgID, ch.legacy)
 }
 
 // isCompanyEventViewer reports whether the user may receive the org-wide
