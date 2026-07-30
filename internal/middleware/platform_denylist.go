@@ -4,6 +4,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"ropacal-backend/pkg/utils"
 )
 
 // Routes an operator may NOT reach, even with full write access.
@@ -69,10 +71,14 @@ func PlatformDenyList(next http.Handler) http.Handler {
 				}
 				log.Printf("🚫 [Platform] DENIED %s %s for %s acting as %q — %s",
 					r.Method, path, who, r.Header.Get(ActAsOrgHeader), d.reason)
-				http.Error(w,
+				// JSON, not http.Error: this 403 is consumed by tenant-shaped client
+				// code that parses every error body as JSON. As plain text, the
+				// dashboard surfaced it as `Unexpected token 'N' ... is not valid
+				// JSON` — the block worked, the explanation never reached the
+				// operator (seen live, 2026-07-30).
+				utils.RespondError(w, http.StatusForbidden,
 					"Not available to platform operators: "+d.reason+
-						". Ask the organization's own admin to do this, or make the change directly with a human decision.",
-					http.StatusForbidden)
+						". Ask the organization's own admin to do this, or make the change directly with a human decision.")
 				return
 			}
 		}

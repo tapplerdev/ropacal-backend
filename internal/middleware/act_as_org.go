@@ -11,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jmoiron/sqlx"
 
+	"ropacal-backend/pkg/utils"
+
 	"ropacal-backend/internal/orgdb"
 )
 
@@ -120,8 +122,7 @@ func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 				// Fail CLOSED. Serving the request without a valid actor is how
 				// unattributed writes happened before.
 				log.Printf("❌ [ActAsOrg] could not establish support user for %s: %v", org.Slug, err)
-				http.Error(w, "Could not establish an audit identity for this organization",
-					http.StatusServiceUnavailable)
+				utils.RespondError(w, http.StatusServiceUnavailable, "Could not establish an audit identity for this organization")
 				return
 			}
 			ctx = context.WithValue(ctx, UserContextKey, UserClaims{
@@ -139,8 +140,7 @@ func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 			// already fails closed for the same reason; this now matches it.
 			if err := auditPlatform(root, claims, org.ID, org.Slug, r, 0); err != nil {
 				log.Printf("🚨 [ActAsOrg] refusing request — audit trail unwritable: %v", err)
-				http.Error(w, "Cannot record this action for audit; request refused",
-					http.StatusServiceUnavailable)
+				utils.RespondError(w, http.StatusServiceUnavailable, "Cannot record this action for audit; request refused")
 				return
 			}
 
