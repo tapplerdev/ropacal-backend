@@ -63,8 +63,26 @@ in place as the confirmation that config matches reality. Reading it:
   the config → investigate before onboarding
 - line absent while clients are connected → confirmed working
 
-The only occurrence so far was a deliberately meta-less test request of mine, not
-evidence about real traffic. Watch it once a real client connects.
+**RESOLVED 2026-07-30 — meta IS forwarded. Verified end to end.**
+
+Tested by connecting as a REAL Centrifugo client (the same `centrifuge` SDK the
+dashboard uses, driven from node against the production broker) with a genuine
+connection token, then subscribing to `company:{orgID}:events`:
+
+    connected: client=32859973-...
+    SUBSCRIBED to company:00000000-0000-0000-0000-000000000001:events
+    backend: Subscribe request ... channel=company:00000000-...:events
+    backend: Subscription authorized
+    SINGLE-ORG GRACE lines: 0
+
+Zero grace lines against a real subscribe means `proxyOrgDB` resolved the tenant
+from `meta`, not from the one-org fallback. **Realtime will survive a second
+organization.** This was the last blocking unknown on this item.
+
+That distinction is invisible from the backend alone while one org exists, which
+is why it needed a real client rather than a curl. The probe stays in place as a
+regression detector: if the line ever appears while real clients are connected,
+meta has stopped arriving.
 
 Original note on both fields:
 
