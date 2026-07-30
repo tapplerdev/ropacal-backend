@@ -59,12 +59,12 @@ type OSRMLeg struct {
 
 // OSRMTracepoint represents a GPS point matched to the road network
 type OSRMTracepoint struct {
-	Location         []float64 `json:"location"`          // [lng, lat]
-	Name             string    `json:"name"`              // Road name
-	Distance         float64   `json:"distance"`          // Distance from original GPS point (meters)
-	MatchingsIndex   int       `json:"matchings_index"`   // Which matching this belongs to
-	WaypointIndex    int       `json:"waypoint_index"`    // Position in the route
-	AlternativesCount int      `json:"alternatives_count"` // Number of alternative matches
+	Location          []float64 `json:"location"`           // [lng, lat]
+	Name              string    `json:"name"`               // Road name
+	Distance          float64   `json:"distance"`           // Distance from original GPS point (meters)
+	MatchingsIndex    int       `json:"matchings_index"`    // Which matching this belongs to
+	WaypointIndex     int       `json:"waypoint_index"`     // Position in the route
+	AlternativesCount int       `json:"alternatives_count"` // Number of alternative matches
 }
 
 // NewOSRMClient creates a new OSRM Map Matching client

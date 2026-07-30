@@ -279,8 +279,8 @@ func (g *GoogleOptimizer) buildGoogleRequest(req *RouteRequest) map[string]inter
 
 	// Build the request body
 	request := map[string]interface{}{
-		"model": model,
-		"searchMode": "RETURN_FAST", // Fast mode for production
+		"model":       model,
+		"searchMode":  "RETURN_FAST", // Fast mode for production
 		"solvingMode": "DEFAULT_SOLVE",
 	}
 

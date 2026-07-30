@@ -179,6 +179,7 @@ func (m *MoveRequestMonitor) sendAlert(ctx context.Context, notifType, title, bo
 		SELECT ft.token FROM fcm_tokens ft
 		JOIN users u ON ft.user_id = u.id
 		WHERE u.role = 'admin'
+		  AND u.email NOT LIKE '%@binly-platform.internal'
 	`)
 	if err != nil {
 		log.Printf("⚠️  [MoveRequestMonitor] Failed to query admin tokens: %v", err)

@@ -854,7 +854,7 @@ func (a *AIOperationsAgent) createRecommendation(recType, entityType, entityID, 
 	// Send push notification for critical/high severity
 	if (severity == "critical" || severity == "high") && a.fcmService != nil {
 		var tokens []string
-		a.db.Select(&tokens, `SELECT token FROM fcm_tokens WHERE user_id IN (SELECT id FROM users WHERE role = 'admin')`)
+		a.db.Select(&tokens, `SELECT token FROM fcm_tokens WHERE user_id IN (SELECT id FROM users WHERE role = 'admin' AND email NOT LIKE '%@binly-platform.internal')`)
 		if len(tokens) > 0 {
 			a.fcmService.SendMulticast(tokens, "AI Recommendation", title, map[string]string{
 				"type":              "ai_recommendation",

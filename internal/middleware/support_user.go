@@ -16,9 +16,18 @@ import (
 // The per-organization support identity that a platform operator's writes are
 // attributed to.
 //
-// SupportUserEmailDomain is reserved. It is not a routable domain and no tenant
-// would legitimately create an address under it, which is what keeps the
-// convention from colliding with a real person.
+// SupportUserEmailDomain is reserved, and enforced in two places: CreateUser
+// rejects it, and ensureSupportUser refuses to adopt a row under it that carries
+// a usable password. Without both, a tenant could pre-create the address and own
+// the identity Binly's writes are attributed to.
+//
+// It is also the marker every notification fan-out filters on. The support user
+// holds role='admin' so its WRITES attribute correctly, but it is Binly staff
+// rather than the customer's — six queries select admins for push, digests and
+// in-app notifications, and without the exclusion it would accumulate a
+// permanently-unread inbox row per notification, inflate the customer's
+// recipient counts, and (if ever registered for FCM) put a Binly device on their
+// admin push list. Grep for binly-platform.internal to find all of them.
 const (
 	SupportUserEmailDomain = "binly-platform.internal"
 	SupportUserName        = "Binly Support"

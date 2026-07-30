@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -151,4 +152,76 @@ func trimSpace(s string) string {
 // attempt must be refused.
 func AllowPlatformLoginAttempt(r *http.Request) (bool, string) {
 	return platformLogins.allow(clientIP(r), time.Now())
+}
+
+// ── per-account lockout ──────────────────────────────────────────────────────
+//
+// The per-IP bucket above is defeated by rotating X-Forwarded-For, which the
+// client controls — a reviewer proved it by making five attempts in a row. That
+// left a single global 20/15min bucket as the only real ceiling, which is
+// simultaneously too weak to stop a patient attacker (1,920 attempts/day,
+// unattended) and a trivial denial of service: any unauthenticated party could
+// burn it and lock every Binly operator out of the platform login, including
+// during the incident they were responding to.
+//
+// Keying on the EMAIL fixes both halves. It cannot be rotated, so the ceiling is
+// real; and it is per-account, so one attacker hammering one address cannot lock
+// out a different operator.
+
+const (
+	platformAccountLimit  = 5
+	platformAccountWindow = 15 * time.Minute
+)
+
+type accountAttempts struct {
+	mu sync.Mutex
+	m  map[string][]time.Time
+}
+
+var platformAccounts = &accountAttempts{m: make(map[string][]time.Time)}
+
+// AllowPlatformAccountAttempt records an attempt against a specific account and
+// reports whether it may proceed.
+//
+// Deliberately called only AFTER the email is known to belong to a platform
+// admin, so an attacker cannot use it to enumerate accounts by observing which
+// addresses can be locked out.
+func AllowPlatformAccountAttempt(email string) bool {
+	key := strings.ToLower(strings.TrimSpace(email))
+	now := time.Now()
+
+	platformAccounts.mu.Lock()
+	defer platformAccounts.mu.Unlock()
+
+	cutoff := now.Add(-platformAccountWindow)
+	kept := platformAccounts.m[key][:0]
+	for _, t := range platformAccounts.m[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= platformAccountLimit {
+		platformAccounts.m[key] = kept
+		return false
+	}
+	platformAccounts.m[key] = append(kept, now)
+
+	if len(platformAccounts.m) > 1000 {
+		for k, v := range platformAccounts.m {
+			if len(v) == 0 || v[len(v)-1].Before(cutoff) {
+				delete(platformAccounts.m, k)
+			}
+		}
+	}
+	return true
+}
+
+// ClearPlatformAccountAttempts resets an account's bucket after a SUCCESSFUL
+// login, so a legitimate operator who fumbled their password a few times is not
+// still throttled once they get it right.
+func ClearPlatformAccountAttempts(email string) {
+	key := strings.ToLower(strings.TrimSpace(email))
+	platformAccounts.mu.Lock()
+	delete(platformAccounts.m, key)
+	platformAccounts.mu.Unlock()
 }

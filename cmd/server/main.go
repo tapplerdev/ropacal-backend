@@ -353,7 +353,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "platform-hardened-2b",
+			"version":         "platform-ready",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -445,6 +445,10 @@ func main() {
 			// recorded as "Binly Support" in the tenant's own history and as the
 			// individual operator in platform_audit_log.
 			r.Use(middleware.ActAsOrg(db))
+			// Routes whose effects outlive the operator's session or escape the
+			// audit trail — chiefly user creation, which mints a 7-day tenant
+			// credential this API has no way to revoke.
+			r.Use(middleware.PlatformDenyList)
 			registerTenantRoutes(r, deps)
 			registerTenantAdminRoutes(r, deps)
 		})

@@ -77,11 +77,11 @@ func TestMalformedKeysRejected(t *testing.T) {
 	p := orgDriverPrefix(orgA)
 	for _, bad := range []string{
 		"",
-		"ropacal:driver:d1:location",                  // wrong family
-		"ropacal:org:" + orgA + ":driver::location",   // empty id
-		"ropacal:org:" + orgA + ":driver:d1",          // no suffix
-		"ropacal:org:" + orgA + ":driver:d1:locations",// suffix typo
-		"centrifugo:node:abc",                         // neighbour keyspace
+		"ropacal:driver:d1:location", // wrong family
+		"ropacal:org:" + orgA + ":driver::location",    // empty id
+		"ropacal:org:" + orgA + ":driver:d1",           // no suffix
+		"ropacal:org:" + orgA + ":driver:d1:locations", // suffix typo
+		"centrifugo:node:abc",                          // neighbour keyspace
 	} {
 		if id, ok := driverIDFromKey(p, bad); ok {
 			t.Fatalf("accepted malformed key %q as driver %q", bad, id)

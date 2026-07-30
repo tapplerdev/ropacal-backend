@@ -376,6 +376,7 @@ func (s *DigestScheduler) RunDailyMoveReport(force ...bool) (*DigestResult, erro
 		SELECT ft.token FROM fcm_tokens ft
 		JOIN users u ON ft.user_id = u.id
 		WHERE u.role = 'admin'
+		  AND u.email NOT LIKE '%@binly-platform.internal'
 	`)
 
 	// Send FCM
@@ -552,6 +553,7 @@ func (s *DigestScheduler) RunDailyBinCheckReport(force ...bool) (*DigestResult, 
 		SELECT ft.token FROM fcm_tokens ft
 		JOIN users u ON ft.user_id = u.id
 		WHERE u.role = 'admin'
+		  AND u.email NOT LIKE '%@binly-platform.internal'
 	`)
 
 	// Send FCM
@@ -754,6 +756,7 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 		SELECT ft.token FROM fcm_tokens ft
 		JOIN users u ON ft.user_id = u.id
 		WHERE u.role = 'admin'
+		  AND u.email NOT LIKE '%@binly-platform.internal'
 	`)
 
 	// Send FCM

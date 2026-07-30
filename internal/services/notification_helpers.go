@@ -169,7 +169,7 @@ func preferenceCategory(notifType string) string {
 // GetAdminUserIDs returns all admin user IDs.
 func GetAdminUserIDs(db Querier) ([]string, error) {
 	var ids []string
-	err := db.Select(&ids, `SELECT id FROM users WHERE role = 'admin'`)
+	err := db.Select(&ids, `SELECT id FROM users WHERE role = 'admin' AND email NOT LIKE '%@binly-platform.internal'`)
 	return ids, err
 }
 

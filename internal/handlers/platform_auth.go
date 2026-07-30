@@ -126,6 +126,19 @@ func platformLoginFlow(root *sqlx.DB, w http.ResponseWriter, r *http.Request, re
 	// admin, so every path below has already paid the bcrypt cost.
 	passwordOK := bcrypt.CompareHashAndPassword([]byte(admin.Password), []byte(req.Password)) == nil
 
+	// Per-ACCOUNT lockout, checked once the email is known to be a real platform
+	// admin so it cannot be used to enumerate accounts. Unlike the per-IP bucket
+	// this cannot be rotated around, and unlike the global one it cannot be used
+	// to lock out every operator at once.
+	if !middleware.AllowPlatformAccountAttempt(admin.Email) {
+		log.Printf("🚫 [PlatformLogin] account locked out after repeated failures: %s", admin.Email)
+		middleware.AuditPlatformLogin(root, admin.ID, admin.Email, "DENIED: account locked out", r)
+		burnPasswordCompare(admin.Password, req.Password)
+		w.Header().Set("Retry-After", "900")
+		http.Error(w, "Too many attempts", http.StatusTooManyRequests)
+		return
+	}
+
 	if admin.Status != "active" {
 		deny("admin is " + admin.Status)
 		return
@@ -224,6 +237,9 @@ func platformLoginFlow(root *sqlx.DB, w http.ResponseWriter, r *http.Request, re
 		log.Printf("⚠️  [PlatformLogin] could not record last_login_at: %v", err)
 	}
 
+	// A successful login clears the account bucket, so an operator who fumbled
+	// their password twice is not still throttled once they get it right.
+	middleware.ClearPlatformAccountAttempts(admin.Email)
 	middleware.AuditPlatformLogin(root, admin.ID, admin.Email, "SUCCESS", r)
 	log.Printf("🛰️  [PlatformLogin] %s authenticated (cross-tenant access granted, expires %s)",
 		admin.Email, exp.Format(time.RFC3339))

@@ -413,6 +413,7 @@ func (m *AirtagMonitor) sendAlerts(ctx context.Context, alerts []map[string]inte
 		SELECT ft.token FROM fcm_tokens ft
 		JOIN users u ON ft.user_id = u.id
 		WHERE u.role = 'admin'
+		  AND u.email NOT LIKE '%@binly-platform.internal'
 	`)
 	if err != nil {
 		log.Printf("⚠️  [AirtagMonitor] Failed to query admin tokens: %v", err)
