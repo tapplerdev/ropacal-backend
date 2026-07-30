@@ -32,6 +32,20 @@ See `.env.example`. Key vars:
 - `FIREBASE_CREDENTIALS_BASE64` or `FIREBASE_CREDENTIALS_FILE` — FCM push notifications
 - `CENTRIFUGO_API_URL`, `CENTRIFUGO_API_KEY` — Centrifugo real-time messaging
 - `CENTRIFUGO_PROXY_SECRET` — shared secret Centrifugo must send (header `X-Centrifugo-Proxy-Secret`) on its `/api/centrifugo/*` proxy calls. **REQUIRED once tenancy is live.** Unset + tenancy dark = proxies unprotected (historical status quo, loud boot warning). Unset + tenancy LIVE = every proxy request is DENIED, because the tenant comes from attacker-controllable request-body `meta`, so fail-open would mean anyone could name a victim org and forge GPS into it
+- **WHERE THE CENTRIFUGO CONFIG ACTUALLY LIVES:** the Centrifugo service deploys
+  from the GitHub repo **`tapplerdev/binly-centrifugo-service`** (Railway project
+  `binly-centrifugo-service`, service id `e059b63c-ebc7-47a3-a59a-e1e389cf414a`).
+  Its `config.json` holds the proxies, namespaces and `allowed_origins`, and the
+  Dockerfile bakes it into the image — so there are **no proxy env vars on the
+  Railway service**, only `CENTRIFUGO_VAR_PROXY_SECRET`, which the config
+  interpolates as `${CENTRIFUGO_VAR_PROXY_SECRET}` into each proxy's
+  `http.static_headers`. `railway status` does NOT expose the source repo; it was
+  found via the Railway GraphQL API (`service(id:){ serviceInstances{ edges{ node{
+  source{ image repo } } } } }`). Changing anything there redeploys the broker and
+  drops live WebSocket connections, so check `num_clients` via the Centrifugo
+  `/api/info` endpoint first. As of 2026-07-30 the image is PINNED to
+  `centrifugo/centrifugo:v6.9.1`; it was previously the floating `:v6`, which
+  self-upgraded 6.6.0 -> 6.9.1 with no commit.
 - **CENTRIFUGO SERVICE CONFIG (ops, set BOTH together on the external Centrifugo service):** (1) the static `X-Centrifugo-Proxy-Secret` header on the subscribe/publish/publish-location proxy config, matching `CENTRIFUGO_PROXY_SECRET`; (2) **`proxy_include_connection_meta: true`** so proxy requests carry the connection's `meta` (the `{"org_id": ...}` claim minted into connection tokens). Without (2), once the tenancy migration is live EVERY proxy request is denied with "organization context required" — realtime subscriptions, publishes, and driver GPS all stop. (Key names are Centrifugo v4-style; on v5+ granular proxies the per-proxy equivalents are `include_connection_meta` and `static_http_headers`.)
 - `MAPBOX_ACCESS_TOKEN` — only the comparison optimizer (the active OR-Tools optimizer runs in-process, no token needed)
 - `HERE_API_KEY` — geocoding
