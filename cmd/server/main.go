@@ -320,7 +320,7 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", middleware.ActAsOrgHeader},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: false,
 		MaxAge:           300,
@@ -353,7 +353,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "platform-phase2",
+			"version":         "platform-p2-readonly",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -403,7 +403,7 @@ func main() {
 
 	deps := routeDeps{db: db, wsHub: wsHub, centrifugoClient: centrifugoClient,
 		redisClient: redisClient, osrmClient: osrmClient, fcmService: fcmService,
-		digestScheduler: digestScheduler}
+		digestScheduler: digestScheduler, chatHandler: handlers.NewChatHandler(db)}
 
 	// PLATFORM routes — cross-tenant operator access. Mounted OUTSIDE /api on
 	// purpose: /api carries middleware.Auth -> Org, which binds the caller's
@@ -440,6 +440,10 @@ func main() {
 		// that must be attributed to a person do not. See PLATFORM_ADMIN_PLAN.md.
 		r.Route("/act", func(r chi.Router) {
 			r.Use(middleware.PlatformAuth(db))
+			// READ-ONLY, structurally. Ordered BEFORE ActAsOrg so a write is
+			// refused without even binding a tenant handle or writing an audit
+			// row implying access was granted.
+			r.Use(middleware.PlatformReadOnly)
 			r.Use(middleware.ActAsOrg(db))
 			registerTenantRoutes(r, deps)
 			registerTenantAdminRoutes(r, deps)
@@ -547,16 +551,14 @@ type routeDeps struct {
 	osrmClient       *roads.OSRMClient
 	fcmService       *services.FCMService
 	digestScheduler  *services.DigestScheduler
+	chatHandler      *handlers.ChatHandler
 }
 
 // registerTenantRoutes registers the endpoints an authenticated tenant user may
 // call. The caller supplies the authentication middleware — middleware.Auth for
 // the tenant mount, PlatformAuth+ActAsOrg for the operator mount.
 func registerTenantRoutes(r chi.Router, d routeDeps) {
-	db, wsHub, centrifugoClient := d.db, d.wsHub, d.centrifugoClient
-	redisClient, osrmClient, fcmService := d.redisClient, d.osrmClient, d.fcmService
-	digestScheduler := d.digestScheduler
-	_, _, _, _ = redisClient, osrmClient, fcmService, digestScheduler
+	db, wsHub, centrifugoClient, redisClient := d.db, d.wsHub, d.centrifugoClient, d.redisClient
 
 	// Geocoding (HERE) and directions (OSRM) proxies — no tenant data,
 	// but they burn paid third-party API quota, so no anonymous use.
@@ -694,10 +696,8 @@ func registerTenantRoutes(r chi.Router, d routeDeps) {
 // claim — being a platform admin IS the authorization, established before this
 // point.
 func registerTenantAdminRoutes(r chi.Router, d routeDeps) {
-	db, wsHub, centrifugoClient := d.db, d.wsHub, d.centrifugoClient
-	redisClient, osrmClient, fcmService := d.redisClient, d.osrmClient, d.fcmService
-	digestScheduler := d.digestScheduler
-	_, _, _, _ = redisClient, osrmClient, fcmService, digestScheduler
+	db, wsHub, centrifugoClient, redisClient := d.db, d.wsHub, d.centrifugoClient, d.redisClient
+	fcmService, digestScheduler := d.fcmService, d.digestScheduler
 
 	// Warehouse anchor & route-template writes: dashboard/manager
 	// operations — no driver or anonymous path ever calls them.
@@ -769,7 +769,12 @@ func registerTenantAdminRoutes(r chi.Router, d routeDeps) {
 	r.Get("/manager/placement/opportunities", handlers.GetPlacementOpportunities(db))
 
 	// AI Chat
-	chatHandler := handlers.NewChatHandler(db)
+	// Constructed ONCE at boot and carried on routeDeps. It owns a background
+	// cleanup goroutine and what its own comment calls "the process-wide
+	// conversation cache" — registering these routes twice (tenant mount plus
+	// platform act-as mount) would build two of each, so a conversation_id would
+	// silently start a fresh session when it crossed mounts.
+	chatHandler := d.chatHandler
 	r.Post("/manager/chat", chatHandler.Handle)
 
 	// AI Recommendations

@@ -82,7 +82,12 @@ func PlatformAuth(root *sqlx.DB) func(http.Handler) http.Handler {
 
 			claims, err := parsePlatformToken(r, secret)
 			if err != nil {
+				// Audited: a rejected token is a signal, not noise. Previously
+				// these returned before any audit write, so a revoked operator
+				// probing tenant data with a still-live token left ZERO rows —
+				// the highest-value event in the log was the one it missed.
 				log.Printf("🔒 [Platform] rejected: %v (%s %s)", err, r.Method, r.URL.Path)
+				auditPlatformDenied(root, "(unauthenticated)", "(unknown)", r, err.Error())
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -97,6 +102,7 @@ func PlatformAuth(root *sqlx.DB) func(http.Handler) http.Handler {
 				`SELECT email, status FROM platform_admins WHERE id = $1`, claims.AdminID)
 			if errors.Is(err, sql.ErrNoRows) {
 				log.Printf("🔒 [Platform] token for unknown admin %s — rejected", claims.AdminID)
+				auditPlatformDenied(root, claims.AdminID, "(deleted)", r, "admin no longer exists")
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -109,17 +115,17 @@ func PlatformAuth(root *sqlx.DB) func(http.Handler) http.Handler {
 			}
 			if row.Status != "active" {
 				log.Printf("🔒 [Platform] admin %s is %s — rejected", row.Email, row.Status)
+				auditPlatformDenied(root, claims.AdminID, row.Email, r, "admin is "+row.Status)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 			claims.Email = row.Email
 
-			// Audit BEFORE the handler runs. Logging afterwards would miss any
-			// request that panics or hangs — exactly the ones worth having a
-			// record of.
-			targetOrg := strings.TrimSpace(r.Header.Get(ActAsOrgHeader))
-			auditPlatformRequest(root, claims, targetOrg, r)
-
+			// No audit row here. ActAsOrg writes the authoritative one once the
+			// organization is RESOLVED — this layer only has the raw header,
+			// which is an unvalidated caller-supplied string and was previously
+			// being stored in a column named target_org_id. Routes that never
+			// reach ActAsOrg (whoami) are audited by their own handler.
 			ctx := context.WithValue(r.Context(), platformCtxKey{}, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -206,23 +212,17 @@ func AuditPlatformLogin(root *sqlx.DB, adminID, email, outcome string, r *http.R
 	}
 }
 
-// auditPlatformRequest records one row per platform request.
+// auditPlatformDenied records a REJECTED platform request.
 //
-// Best-effort by design: an audit write failure is logged loudly but does not
-// block the request. That is a deliberate trade — the alternative is that a
-// full disk or a locked table denies an operator access during an incident,
-// which is when they most need it. The loud log is the compensating control.
-func auditPlatformRequest(root *sqlx.DB, c *PlatformClaims, targetOrg string, r *http.Request) {
-	var org interface{}
-	if targetOrg != "" {
-		org = targetOrg
-	}
+// Failures matter more than successes here: a revoked or forged credential
+// probing tenant data is exactly what an audit trail is for, and these paths
+// previously wrote nothing at all.
+func auditPlatformDenied(root *sqlx.DB, adminID, email string, r *http.Request, reason string) {
 	if _, err := root.Exec(
-		`INSERT INTO platform_audit_log (admin_id, admin_email, target_org_id, method, path, at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		c.AdminID, c.Email, org, r.Method, r.URL.Path, time.Now().Unix()); err != nil {
-		log.Printf("🚨 [Platform] AUDIT WRITE FAILED for %s %s %s: %v",
-			c.Email, r.Method, r.URL.Path, err)
+		`INSERT INTO platform_audit_log (admin_id, admin_email, target_org_id, method, path, status_code, at)
+		 VALUES ($1, $2, NULL, $3, $4, 401, EXTRACT(EPOCH FROM NOW())::BIGINT)`,
+		adminID, email, r.Method, r.URL.Path+" [DENIED: "+reason+"]"); err != nil {
+		log.Printf("🚨 [Platform] AUDIT WRITE FAILED for denial (%s): %v", reason, err)
 	}
 }
 
@@ -230,13 +230,13 @@ func auditPlatformRequest(root *sqlx.DB, c *PlatformClaims, targetOrg string, r 
 // signing secret is not genuinely separate from the tenant one.
 //
 // The entire "a leak of the tenant signing key cannot mint platform tokens"
-// property rests on the two secrets differing, and nothing was checking it. The
-// Phase 1 review set both to the same value and minted a token with the TENANT
-// key carrying platform:true — it was accepted, returning every organization.
+// property rests on the two secrets differing, and nothing was checking it. A
+// review set both to the same value and minted a token with the TENANT key
+// carrying platform:true — it was accepted, returning every organization.
 //
 // Fails the boot rather than warning: a warning in a startup log is not a
-// control, and the failure mode here is silent promotion of every tenant admin
-// to a cross-tenant operator.
+// control, and the failure mode is silent promotion of every tenant admin to a
+// cross-tenant operator.
 func AssertPlatformSecretDistinct() error {
 	platform := os.Getenv("PLATFORM_JWT_SECRET")
 	if platform == "" {
