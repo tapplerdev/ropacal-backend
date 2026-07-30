@@ -25,6 +25,8 @@ import (
 	"ropacal-backend/internal/services/roads"
 	"ropacal-backend/internal/websocket"
 
+	"github.com/jmoiron/sqlx"
+
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -351,7 +353,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "platform-p1-hardened",
+			"version":         "platform-phase2",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -399,6 +401,10 @@ func main() {
 		r.Post("/organizations", handlers.CreateOrganization(db))
 	})
 
+	deps := routeDeps{db: db, wsHub: wsHub, centrifugoClient: centrifugoClient,
+		redisClient: redisClient, osrmClient: osrmClient, fcmService: fcmService,
+		digestScheduler: digestScheduler}
+
 	// PLATFORM routes — cross-tenant operator access. Mounted OUTSIDE /api on
 	// purpose: /api carries middleware.Auth -> Org, which binds the caller's
 	// single organization, and a platform admin has none.
@@ -417,6 +423,27 @@ func main() {
 			r.Use(middleware.PlatformAuth(db))
 			r.Get("/whoami", handlers.PlatformWhoAmI(db))
 		})
+
+		// ACT-AS-ORG (Phase 2). The IDENTICAL tenant route set, mounted behind a
+		// platform identity plus an X-Act-As-Org header, so an operator gets
+		// exactly what that tenant's own admin gets — not a parallel
+		// reimplementation that would drift.
+		//
+		// RequireRole("admin") is deliberately absent: a platform operator has
+		// no tenant role claim, and being a platform admin IS the authorization,
+		// established by PlatformAuth before this point.
+		//
+		// Handlers that need the acting USER (not just the org) will 401 here —
+		// a platform request has an organization but no tenant user, and there
+		// are 28 foreign keys to `users` so a synthesized identity would violate
+		// them. That is a deliberate fail-closed boundary: reads work, writes
+		// that must be attributed to a person do not. See PLATFORM_ADMIN_PLAN.md.
+		r.Route("/act", func(r chi.Router) {
+			r.Use(middleware.PlatformAuth(db))
+			r.Use(middleware.ActAsOrg(db))
+			registerTenantRoutes(r, deps)
+			registerTenantAdminRoutes(r, deps)
+		})
 	})
 
 	// API routes
@@ -427,135 +454,7 @@ func main() {
 		// RLS needs the JWT org on every DB-touching request. ──
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth)
-
-			// Geocoding (HERE) and directions (OSRM) proxies — no tenant data,
-			// but they burn paid third-party API quota, so no anonymous use.
-			r.Post("/geocoding/reverse", handlers.ReverseGeocode())
-			r.Post("/geocoding/reverse/batch", handlers.BatchReverseGeocode())
-			r.Post("/geocoding/forward", handlers.Geocode())
-			r.Post("/geocoding/forward/batch", handlers.BatchGeocode())
-			r.Get("/directions", handlers.GetDirections())
-
-			// Config endpoints (warehouse location) — the write is admin-only, below
-			r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
-
-			// Bins endpoints (reads)
-			r.Get("/bins", handlers.GetBins(db))
-			r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering
-			r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
-
-			// Bins mutation endpoints
-			r.Post("/bins", handlers.CreateBin(db, wsHub, centrifugoClient))
-			r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
-			r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub, centrifugoClient))
-			r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db))                                  // Batch geocode all bins using HERE Maps
-			r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db, redisClient)) // Check if bin is in active shifts
-			r.Post("/bins/{id}/moves", handlers.CreateMove(db))                                           // Manual move record — rewrites the bin's address, same class as PATCH /bins/{id}
-
-			// Checks endpoints
-			r.Get("/bins/{id}/checks", handlers.GetChecks(db))
-			r.Get("/checks", handlers.GetAllChecks(db))
-
-			// Moves endpoints (reads; the write sits with the bins mutations)
-			r.Get("/bins/{id}/moves", handlers.GetMoves(db))
-			r.Get("/bins/{id}/move-requests", handlers.GetBinMoveRequestsByBinID(db))
-			r.Get("/bins/{id}/incidents", handlers.GetBinIncidents(db))
-			r.Get("/bins/{id}/change-log", handlers.GetBinChangeLog(db))
-
-			// Route management endpoints (route blueprints/templates) — reads
-			// and read-only optimization previews (the previews burn optimizer
-			// API quota); the writes are admin-only, below
-			r.Get("/routes", handlers.GetRoutes(db))
-			r.Get("/routes/{id}", handlers.GetRoute(db))
-			r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
-			r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))     // Testing endpoint for HERE Maps API
-			r.Post("/routes/test-mapbox-optimization", handlers.TestMapboxOptimization(db)) // Testing endpoint for Mapbox API v1
-
-			// No-Go Zones endpoints
-			r.Get("/no-go-zones", handlers.GetNoGoZones(db))
-			r.Get("/no-go-zones/{id}", handlers.GetNoGoZone(db))
-			r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
-			r.Get("/incidents/nearby", handlers.GetNearbyIncidents(db))
-
-			// Shift-related incident queries
-			r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
-
-			// Analytics endpoints
-			r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
-
-			// True city boundary (GeoJSON) for the target-area map overlay
-			// (embedded polygons, no DB — behind Auth to keep the public
-			// exception list exact)
-			r.Get("/areas/boundary", handlers.GetAreaBoundary())
-			r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db))      // weekly operational buckets (Network Health tab)
-			r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))          // per-bin quadrant scorecard (Bin Performance tab)
-			r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))    // per-bin 90d yield proxy (Growth hex map)
-			r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db))  // scored deployment candidates (Growth tab)
-			r.Get("/analytics/growth/weekly-plan", handlers.GetWeeklyGrowthPlan(db)) // the week's growth actions in one plan
-
-			// Potential Locations endpoints (all authenticated users can view)
-			r.Get("/potential-locations", handlers.GetPotentialLocations(db))
-
-			// Mobile log ingestion. app-error INSERTs rows; diagnostic only
-			// writes to stdout but is spam/log-injection surface either way.
-			// Accepted consequence: pre-login / FCM background-isolate
-			// diagnostics are dropped (app_error_logs has zero rows ever).
-			r.Post("/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
-			r.Post("/logs/app-error", handlers.LogAppError(db))
-
-			// Auth status endpoint
-			r.Get("/auth/status", handlers.GetAuthStatus(db))
-
-			// Centrifugo connection token (for real-time WebSocket)
-			if centrifugoClient != nil {
-				r.Get("/centrifugo/token", handlers.GetCentrifugoToken(centrifugoClient))
-			}
-
-			// Shift management
-			r.Get("/driver/shift/current", handlers.GetCurrentShift(handlers.NewSQLShiftStore(db)))
-			r.Post("/driver/shift/preflight", handlers.PreflightCheck(db, redisClient))
-			r.Post("/driver/shift/start", handlers.StartShift(db, wsHub, redisClient, centrifugoClient))
-			r.Post("/driver/shift/pause", handlers.PauseShift(handlers.NewSQLShiftStore(db), wsHub, centrifugoClient))
-			r.Post("/driver/shift/resume", handlers.ResumeShift(handlers.NewSQLShiftStore(db), wsHub, centrifugoClient))
-			r.Post("/driver/shift/end", handlers.EndShift(db, wsHub, centrifugoClient))
-			r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub, centrifugoClient))
-			r.Post("/driver/shift/complete-warehouse-run", handlers.CompleteWarehouseRun(db, wsHub, centrifugoClient)) // Batch-complete a whole reload run (one tap for N loads)
-			r.Post("/driver/shift/skip-warehouse-run", handlers.SkipWarehouseRun(db, wsHub, centrifugoClient))         // Batch-skip a whole reload run (skip twin of the above)
-			r.Post("/driver/shift/skip-task", handlers.SkipTask(db, redisClient, wsHub, centrifugoClient))
-
-			// Shift history
-			r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
-			r.Get("/driver/shift-details", handlers.GetShiftDetails(handlers.NewSQLShiftStore(db)))
-			r.Get("/driver/shift-move-requests", handlers.GetShiftMoveRequests(db))
-
-			// Location tracking (sent every 10 seconds during active shift)
-			r.Post("/driver/location", handlers.UpdateLocation(db, wsHub, redisClient, centrifugoClient))
-
-			// OSRM test endpoint (for testing snap-to-roads integration)
-			r.Post("/test/osrm", handlers.TestOSRM(db, wsHub))
-
-			// FCM token registration
-			r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
-
-			// Route Task endpoints (task-based shift system)
-			r.Get("/shifts/{shiftId}/tasks", handlers.GetShiftTasks(db))
-			r.Get("/shifts/{shiftId}/tasks/detailed", handlers.GetShiftTasksDetailed(db))
-
-			// Potential Locations (drivers can create requests)
-			r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub, centrifugoClient))
-
-			// Incident reporting (drivers can report both check-based and field observations)
-			// TODO: Implement CreateZoneIncident handler (currently handled in CompleteShiftBin)
-			// r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
-
-			// Per-user notification inbox
-			r.Get("/notifications", handlers.GetUserNotifications(db))
-			r.Get("/notifications/unread-count", handlers.GetUnreadCount(db))
-			r.Get("/notifications/preferences", handlers.GetNotificationPreferences(db))
-			r.Put("/notifications/preferences", handlers.UpdateNotificationPreferences(db))
-			r.Patch("/notifications/read-all", handlers.MarkAllNotificationsRead(db))
-			r.Get("/notifications/{id}", handlers.GetNotificationByID(db))
-			r.Patch("/notifications/{id}/read", handlers.MarkNotificationRead(db))
+			registerTenantRoutes(r, deps)
 		})
 
 		// ── ADMIN ENDPOINTS — JWT + admin role (middleware.Auth +
@@ -565,133 +464,7 @@ func main() {
 			r.Use(middleware.Auth)
 			r.Use(middleware.RequireRole("admin"))
 
-			// Warehouse anchor & route-template writes: dashboard/manager
-			// operations — no driver or anonymous path ever calls them.
-			r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub, centrifugoClient))
-			r.Post("/routes", handlers.CreateRoute(db))
-			r.Patch("/routes/{id}", handlers.UpdateRoute(db))
-			r.Delete("/routes/{id}", handlers.DeleteRoute(db))
-			r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
-
-			r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService, centrifugoClient))
-			// Cancel is an action (state transition), so POST is the correct verb.
-			// PUT is kept temporarily for backward-compat until the dashboard ships
-			// its POST switch; remove the PUT line after that deploys.
-			r.Post("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
-			r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
-			r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService, centrifugoClient))
-			r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, redisClient, centrifugoClient, fcmService)) // Comprehensive shift editing
-			r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, redisClient, centrifugoClient, fcmService))
-			r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub, centrifugoClient))
-			r.Delete("/manager/shifts/{shiftId}/purge", handlers.PurgeShift(db)) // Hard-delete ONE non-live shift (test/demo cleanup)
-
-			// Task-based shift creation (agnostic shift builder)
-			r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub, centrifugoClient, fcmService))
-			r.Get("/manager/shifts", handlers.GetAllShifts(db))                                                 // List all shifts with filtering (register first - exact match)
-			r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db))                               // Completed shift history with task stats
-			r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))                 // Per-task granular breakdown for a shift
-			r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                                       // Get single shift (register after)
-			r.Get("/manager/shifts/{shiftId}/tasks/history", handlers.GetShiftTasksWithHistory(db))             // Get ALL tasks including deleted ones for audit trail
-			r.Post("/manager/shifts/{shiftId}/optimize-preview", handlers.PreviewShiftOptimization(db))         // Dry-run: preview a scheduled shift's optimized route (warehouse-anchored, no persist)
-			r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db))              // Compare Mapbox v2 optimization
-			r.Get("/manager/shifts/{id}/driver-proximity", handlers.CheckShiftDriverProximity(db, redisClient)) // Check if driver is nearby current task
-
-			// One-time data migration endpoints (can be removed after use)
-			r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
-			r.Post("/manager/bins/fix-status", handlers.FixBinStatus(db))
-
-			// Bin move request management
-			r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
-			r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))                                                                           // List all move requests (register first - exact match)
-			r.Get("/manager/bins/{binId}/active-move-requests", handlers.GetBinActiveMoveRequests(moverequest.NewSQLStore(db)))                             // bin's non-terminal moves (for the manual-edit-supersedes-move banner)
-			r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(moverequest.NewSQLStore(db), db))                                          // Get single move request (register after)
-			r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db))                                  // Check if move request is in active shifts
-			r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient)) // Update move request
-			r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
-			r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient))
-			r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(moverequest.NewSQLStore(db), db))
-			r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(moverequest.NewSQLStore(db), db))
-			r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(moverequest.NewSQLStore(db), db))
-			r.Get("/manager/bins/move-requests/{id}/history", handlers.GetMoveRequestHistory(db)) // Get audit trail
-
-			// Bin check recommendations (7-day stale bin flagging)
-			r.Post("/manager/bins/flag-stale", handlers.FlagStaleBins(db))
-			r.Get("/manager/bins/check-recommendations", handlers.GetBinCheckRecommendations(db))
-			r.Put("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db))
-
-			// Bin retirement & reactivation
-			r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
-			r.Post("/manager/bins/{id}/reactivate", handlers.ReactivateBin(db))
-
-			// Smart routes & daily priorities
-			r.Get("/manager/bins/daily-priorities", handlers.GetDailyPriorities(db))
-			r.Post("/manager/routes/generate-smart", handlers.GenerateSmartRoutes(db))
-			r.Get("/manager/routes/performance", handlers.GetRoutePerformance(db))
-			r.Post("/manager/routes/estimate-duration", handlers.EstimateRouteDuration(db))
-			r.Post("/manager/routes/smart-reoptimize", handlers.SmartReoptimize(db))
-			r.Get("/manager/bins/collection-stats", handlers.GetBinCollectionStats(db))
-
-			// Placement Planner
-			r.Get("/manager/placement/opportunities", handlers.GetPlacementOpportunities(db))
-
-			// AI Chat
-			chatHandler := handlers.NewChatHandler(db)
-			r.Post("/manager/chat", chatHandler.Handle)
-
-			// AI Recommendations
-			r.Get("/manager/ai-recommendations", handlers.GetAIRecommendations(db))
-			r.Get("/manager/ai-recommendations/pending-count", handlers.GetPendingRecommendationCount(db))
-			r.Put("/manager/ai-recommendations/{id}/accept", handlers.AcceptRecommendation(db))
-			r.Put("/manager/ai-recommendations/{id}/dismiss", handlers.DismissRecommendation(db))
-			r.Put("/manager/ai-recommendations/{id}/snooze", handlers.SnoozeRecommendation(db))
-
-			// Potential Locations management (managers can delete and convert)
-			r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
-			r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, redisClient, wsHub, centrifugoClient))
-			r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, redisClient, wsHub, centrifugoClient))
-			r.Get("/bins/{binId}/nearby-potential-locations", handlers.GetNearbyPotentialLocations(db))
-
-			// Fleet management
-			r.Get("/manager/drivers", handlers.GetAllDrivers(db, redisClient))
-			r.Get("/manager/drivers/{driverId}/shifts", handlers.GetDriverShiftHistoryByID(db))
-			r.Get("/manager/drivers/{id}/pending-moves", handlers.GetDriverPendingMoves(db))
-			r.Get("/manager/active-drivers", handlers.GetActiveDrivers(db, redisClient))
-			r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
-
-			// Incident reporting (manager phone-call complaints → zone creation)
-			r.Post("/manager/incident-report", handlers.CreateManagerIncidentReport(db, centrifugoClient))
-
-			// User management
-			r.Get("/manager/users", handlers.GetAllUsers(db))
-			r.Post("/manager/users", handlers.CreateUser(db))
-
-			// No-Go Zone management (admin only)
-			r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db, centrifugoClient))
-			// TODO: Implement remaining admin zone management handlers
-			// r.Post("/no-go-zones", handlers.CreateNoGoZone(db))
-			// r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
-
-			// Field observations management
-			r.Get("/field-observations", handlers.GetFieldObservations(db))
-			r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
-
-			// App error logs management (for viewing driver errors in dashboard)
-			r.Get("/manager/logs/app-errors", handlers.GetAppErrorLogs(db))
-			r.Get("/manager/logs/app-error-stats", handlers.GetAppErrorStats(db))
-			r.Patch("/manager/logs/app-errors/{id}/resolve", handlers.ResolveAppErrorLog(db))
-
-			// Daily digest (manual trigger)
-			r.Post("/manager/daily-digest", handlers.TriggerDigest(digestScheduler))
-
-			// Notification settings & history
-			r.Get("/manager/notification-settings", handlers.GetNotificationSettings(db))
-			r.Put("/manager/notification-settings", handlers.UpdateNotificationSettings(db))
-			r.Get("/manager/notification-log", handlers.GetNotificationLog(db))
-			r.Get("/manager/notification-log/{id}/recipients", handlers.GetNotificationRecipients(db))
-
-			// AirTag locations (read from DB, written by FindMy bridge)
-			r.Get("/manager/airtag-locations", handlers.GetAirtagLocations(db))
-			r.Post("/manager/airtag-sync", handlers.SyncAirtagLocations())
+			registerTenantAdminRoutes(r, deps)
 		})
 	})
 
@@ -757,4 +530,300 @@ func main() {
 		}
 	}
 	log.Println("✅ Clean exit")
+}
+
+// routeDeps carries everything the tenant handlers need, so the same route set
+// can be registered under more than one mount point.
+//
+// This exists for the platform (cross-tenant) surface: a Binly operator acting
+// as a tenant must get EXACTLY the routes that tenant's own admin gets, and the
+// only honest way to guarantee that is to register the identical set rather than
+// maintain a parallel copy that drifts.
+type routeDeps struct {
+	db               *sqlx.DB
+	wsHub            *websocket.Hub
+	centrifugoClient *centrifugo.Client
+	redisClient      *redis.Client
+	osrmClient       *roads.OSRMClient
+	fcmService       *services.FCMService
+	digestScheduler  *services.DigestScheduler
+}
+
+// registerTenantRoutes registers the endpoints an authenticated tenant user may
+// call. The caller supplies the authentication middleware — middleware.Auth for
+// the tenant mount, PlatformAuth+ActAsOrg for the operator mount.
+func registerTenantRoutes(r chi.Router, d routeDeps) {
+	db, wsHub, centrifugoClient := d.db, d.wsHub, d.centrifugoClient
+	redisClient, osrmClient, fcmService := d.redisClient, d.osrmClient, d.fcmService
+	digestScheduler := d.digestScheduler
+	_, _, _, _ = redisClient, osrmClient, fcmService, digestScheduler
+
+	// Geocoding (HERE) and directions (OSRM) proxies — no tenant data,
+	// but they burn paid third-party API quota, so no anonymous use.
+	r.Post("/geocoding/reverse", handlers.ReverseGeocode())
+	r.Post("/geocoding/reverse/batch", handlers.BatchReverseGeocode())
+	r.Post("/geocoding/forward", handlers.Geocode())
+	r.Post("/geocoding/forward/batch", handlers.BatchGeocode())
+	r.Get("/directions", handlers.GetDirections())
+
+	// Config endpoints (warehouse location) — the write is admin-only, below
+	r.Get("/config/warehouse", handlers.GetWarehouseLocation(db))
+
+	// Bins endpoints (reads)
+	r.Get("/bins", handlers.GetBins(db))
+	r.Get("/bins/priority", handlers.GetBinsWithPriority(db)) // Priority sorting & filtering
+	r.Get("/bins/top-performers", handlers.GetTopPerformingBins(db))
+
+	// Bins mutation endpoints
+	r.Post("/bins", handlers.CreateBin(db, wsHub, centrifugoClient))
+	r.Patch("/bins/{id}", handlers.UpdateBin(db, wsHub, centrifugoClient))
+	r.Delete("/bins/{id}", handlers.DeleteBin(db, wsHub, centrifugoClient))
+	r.Post("/bins/batch-geocode", handlers.BatchGeocodeBins(db))                                  // Batch geocode all bins using HERE Maps
+	r.Get("/bins/{id}/active-shift-dependencies", handlers.CheckBinDependencies(db, redisClient)) // Check if bin is in active shifts
+	r.Post("/bins/{id}/moves", handlers.CreateMove(db))                                           // Manual move record — rewrites the bin's address, same class as PATCH /bins/{id}
+
+	// Checks endpoints
+	r.Get("/bins/{id}/checks", handlers.GetChecks(db))
+	r.Get("/checks", handlers.GetAllChecks(db))
+
+	// Moves endpoints (reads; the write sits with the bins mutations)
+	r.Get("/bins/{id}/moves", handlers.GetMoves(db))
+	r.Get("/bins/{id}/move-requests", handlers.GetBinMoveRequestsByBinID(db))
+	r.Get("/bins/{id}/incidents", handlers.GetBinIncidents(db))
+	r.Get("/bins/{id}/change-log", handlers.GetBinChangeLog(db))
+
+	// Route management endpoints (route blueprints/templates) — reads
+	// and read-only optimization previews (the previews burn optimizer
+	// API quota); the writes are admin-only, below
+	r.Get("/routes", handlers.GetRoutes(db))
+	r.Get("/routes/{id}", handlers.GetRoute(db))
+	r.Post("/routes/optimize-preview", handlers.OptimizeRoutePreview(db))
+	r.Post("/routes/test-here-optimization", handlers.TestHereOptimization(db))     // Testing endpoint for HERE Maps API
+	r.Post("/routes/test-mapbox-optimization", handlers.TestMapboxOptimization(db)) // Testing endpoint for Mapbox API v1
+
+	// No-Go Zones endpoints
+	r.Get("/no-go-zones", handlers.GetNoGoZones(db))
+	r.Get("/no-go-zones/{id}", handlers.GetNoGoZone(db))
+	r.Get("/no-go-zones/{id}/incidents", handlers.GetZoneIncidents(db))
+	r.Get("/incidents/nearby", handlers.GetNearbyIncidents(db))
+
+	// Shift-related incident queries
+	r.Get("/shifts/{id}/incidents", handlers.GetShiftIncidents(db))
+
+	// Analytics endpoints
+	r.Get("/analytics/areas", handlers.GetAreaPerformance(db))
+
+	// True city boundary (GeoJSON) for the target-area map overlay
+	// (embedded polygons, no DB — behind Auth to keep the public
+	// exception list exact)
+	r.Get("/areas/boundary", handlers.GetAreaBoundary())
+	r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db))      // weekly operational buckets (Network Health tab)
+	r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))          // per-bin quadrant scorecard (Bin Performance tab)
+	r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))    // per-bin 90d yield proxy (Growth hex map)
+	r.Get("/analytics/growth/candidates", handlers.GetGrowthCandidates(db))  // scored deployment candidates (Growth tab)
+	r.Get("/analytics/growth/weekly-plan", handlers.GetWeeklyGrowthPlan(db)) // the week's growth actions in one plan
+
+	// Potential Locations endpoints (all authenticated users can view)
+	r.Get("/potential-locations", handlers.GetPotentialLocations(db))
+
+	// Mobile log ingestion. app-error INSERTs rows; diagnostic only
+	// writes to stdout but is spam/log-injection surface either way.
+	// Accepted consequence: pre-login / FCM background-isolate
+	// diagnostics are dropped (app_error_logs has zero rows ever).
+	r.Post("/logs/diagnostic", handlers.ReceiveDiagnosticLog(db))
+	r.Post("/logs/app-error", handlers.LogAppError(db))
+
+	// Auth status endpoint
+	r.Get("/auth/status", handlers.GetAuthStatus(db))
+
+	// Centrifugo connection token (for real-time WebSocket)
+	if centrifugoClient != nil {
+		r.Get("/centrifugo/token", handlers.GetCentrifugoToken(centrifugoClient))
+	}
+
+	// Shift management
+	r.Get("/driver/shift/current", handlers.GetCurrentShift(handlers.NewSQLShiftStore(db)))
+	r.Post("/driver/shift/preflight", handlers.PreflightCheck(db, redisClient))
+	r.Post("/driver/shift/start", handlers.StartShift(db, wsHub, redisClient, centrifugoClient))
+	r.Post("/driver/shift/pause", handlers.PauseShift(handlers.NewSQLShiftStore(db), wsHub, centrifugoClient))
+	r.Post("/driver/shift/resume", handlers.ResumeShift(handlers.NewSQLShiftStore(db), wsHub, centrifugoClient))
+	r.Post("/driver/shift/end", handlers.EndShift(db, wsHub, centrifugoClient))
+	r.Post("/driver/shift/complete-task", handlers.CompleteTask(db, wsHub, centrifugoClient))
+	r.Post("/driver/shift/complete-warehouse-run", handlers.CompleteWarehouseRun(db, wsHub, centrifugoClient)) // Batch-complete a whole reload run (one tap for N loads)
+	r.Post("/driver/shift/skip-warehouse-run", handlers.SkipWarehouseRun(db, wsHub, centrifugoClient))         // Batch-skip a whole reload run (skip twin of the above)
+	r.Post("/driver/shift/skip-task", handlers.SkipTask(db, redisClient, wsHub, centrifugoClient))
+
+	// Shift history
+	r.Get("/driver/shift-history", handlers.GetDriverShiftHistory(db))
+	r.Get("/driver/shift-details", handlers.GetShiftDetails(handlers.NewSQLShiftStore(db)))
+	r.Get("/driver/shift-move-requests", handlers.GetShiftMoveRequests(db))
+
+	// Location tracking (sent every 10 seconds during active shift)
+	r.Post("/driver/location", handlers.UpdateLocation(db, wsHub, redisClient, centrifugoClient))
+
+	// OSRM test endpoint (for testing snap-to-roads integration)
+	r.Post("/test/osrm", handlers.TestOSRM(db, wsHub))
+
+	// FCM token registration
+	r.Post("/driver/fcm-token", handlers.RegisterFCMToken(db))
+
+	// Route Task endpoints (task-based shift system)
+	r.Get("/shifts/{shiftId}/tasks", handlers.GetShiftTasks(db))
+	r.Get("/shifts/{shiftId}/tasks/detailed", handlers.GetShiftTasksDetailed(db))
+
+	// Potential Locations (drivers can create requests)
+	r.Post("/potential-locations", handlers.CreatePotentialLocation(db, wsHub, centrifugoClient))
+
+	// Incident reporting (drivers can report both check-based and field observations)
+	// TODO: Implement CreateZoneIncident handler (currently handled in CompleteShiftBin)
+	// r.Post("/zone-incidents", handlers.CreateZoneIncident(db))
+
+	// Per-user notification inbox
+	r.Get("/notifications", handlers.GetUserNotifications(db))
+	r.Get("/notifications/unread-count", handlers.GetUnreadCount(db))
+	r.Get("/notifications/preferences", handlers.GetNotificationPreferences(db))
+	r.Put("/notifications/preferences", handlers.UpdateNotificationPreferences(db))
+	r.Patch("/notifications/read-all", handlers.MarkAllNotificationsRead(db))
+	r.Get("/notifications/{id}", handlers.GetNotificationByID(db))
+	r.Patch("/notifications/{id}/read", handlers.MarkNotificationRead(db))
+}
+
+// registerTenantAdminRoutes registers the endpoints requiring the admin role
+// within a tenant. On the tenant mount the caller adds RequireRole("admin"); on
+// the platform mount it does not, because a platform operator has no tenant role
+// claim — being a platform admin IS the authorization, established before this
+// point.
+func registerTenantAdminRoutes(r chi.Router, d routeDeps) {
+	db, wsHub, centrifugoClient := d.db, d.wsHub, d.centrifugoClient
+	redisClient, osrmClient, fcmService := d.redisClient, d.osrmClient, d.fcmService
+	digestScheduler := d.digestScheduler
+	_, _, _, _ = redisClient, osrmClient, fcmService, digestScheduler
+
+	// Warehouse anchor & route-template writes: dashboard/manager
+	// operations — no driver or anonymous path ever calls them.
+	r.Patch("/config/warehouse", handlers.UpdateWarehouseLocation(db, wsHub, centrifugoClient))
+	r.Post("/routes", handlers.CreateRoute(db))
+	r.Patch("/routes/{id}", handlers.UpdateRoute(db))
+	r.Delete("/routes/{id}", handlers.DeleteRoute(db))
+	r.Post("/routes/{id}/duplicate", handlers.DuplicateRoute(db))
+
+	r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService, centrifugoClient))
+	// Cancel is an action (state transition), so POST is the correct verb.
+	// PUT is kept temporarily for backward-compat until the dashboard ships
+	// its POST switch; remove the PUT line after that deploys.
+	r.Post("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
+	r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
+	r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService, centrifugoClient))
+	r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, redisClient, centrifugoClient, fcmService)) // Comprehensive shift editing
+	r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, redisClient, centrifugoClient, fcmService))
+	r.Delete("/manager/shifts/clear", handlers.ClearAllShifts(db, wsHub, centrifugoClient))
+	r.Delete("/manager/shifts/{shiftId}/purge", handlers.PurgeShift(db)) // Hard-delete ONE non-live shift (test/demo cleanup)
+
+	// Task-based shift creation (agnostic shift builder)
+	r.Post("/manager/shifts/create-with-tasks", handlers.CreateShiftWithTasks(db, wsHub, centrifugoClient, fcmService))
+	r.Get("/manager/shifts", handlers.GetAllShifts(db))                                                 // List all shifts with filtering (register first - exact match)
+	r.Get("/manager/shifts/history", handlers.GetManagerShiftHistory(db))                               // Completed shift history with task stats
+	r.Get("/manager/shifts/history/{shiftId}/tasks", handlers.GetShiftHistoryTasks(db))                 // Per-task granular breakdown for a shift
+	r.Get("/manager/shifts/{shiftId}", handlers.GetShiftByID(db))                                       // Get single shift (register after)
+	r.Get("/manager/shifts/{shiftId}/tasks/history", handlers.GetShiftTasksWithHistory(db))             // Get ALL tasks including deleted ones for audit trail
+	r.Post("/manager/shifts/{shiftId}/optimize-preview", handlers.PreviewShiftOptimization(db))         // Dry-run: preview a scheduled shift's optimized route (warehouse-anchored, no persist)
+	r.Get("/manager/shifts/{id}/compare-optimizer", handlers.CompareOptimizerForShift(db))              // Compare Mapbox v2 optimization
+	r.Get("/manager/shifts/{id}/driver-proximity", handlers.CheckShiftDriverProximity(db, redisClient)) // Check if driver is nearby current task
+
+	// One-time data migration endpoints (can be removed after use)
+	r.Post("/manager/bins/load-real", handlers.LoadRealBins(db))
+	r.Post("/manager/bins/fix-status", handlers.FixBinStatus(db))
+
+	// Bin move request management
+	r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
+	r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))                                                                           // List all move requests (register first - exact match)
+	r.Get("/manager/bins/{binId}/active-move-requests", handlers.GetBinActiveMoveRequests(moverequest.NewSQLStore(db)))                             // bin's non-terminal moves (for the manual-edit-supersedes-move banner)
+	r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(moverequest.NewSQLStore(db), db))                                          // Get single move request (register after)
+	r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db))                                  // Check if move request is in active shifts
+	r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient)) // Update move request
+	r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
+	r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient))
+	r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(moverequest.NewSQLStore(db), db))
+	r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(moverequest.NewSQLStore(db), db))
+	r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(moverequest.NewSQLStore(db), db))
+	r.Get("/manager/bins/move-requests/{id}/history", handlers.GetMoveRequestHistory(db)) // Get audit trail
+
+	// Bin check recommendations (7-day stale bin flagging)
+	r.Post("/manager/bins/flag-stale", handlers.FlagStaleBins(db))
+	r.Get("/manager/bins/check-recommendations", handlers.GetBinCheckRecommendations(db))
+	r.Put("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db))
+
+	// Bin retirement & reactivation
+	r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
+	r.Post("/manager/bins/{id}/reactivate", handlers.ReactivateBin(db))
+
+	// Smart routes & daily priorities
+	r.Get("/manager/bins/daily-priorities", handlers.GetDailyPriorities(db))
+	r.Post("/manager/routes/generate-smart", handlers.GenerateSmartRoutes(db))
+	r.Get("/manager/routes/performance", handlers.GetRoutePerformance(db))
+	r.Post("/manager/routes/estimate-duration", handlers.EstimateRouteDuration(db))
+	r.Post("/manager/routes/smart-reoptimize", handlers.SmartReoptimize(db))
+	r.Get("/manager/bins/collection-stats", handlers.GetBinCollectionStats(db))
+
+	// Placement Planner
+	r.Get("/manager/placement/opportunities", handlers.GetPlacementOpportunities(db))
+
+	// AI Chat
+	chatHandler := handlers.NewChatHandler(db)
+	r.Post("/manager/chat", chatHandler.Handle)
+
+	// AI Recommendations
+	r.Get("/manager/ai-recommendations", handlers.GetAIRecommendations(db))
+	r.Get("/manager/ai-recommendations/pending-count", handlers.GetPendingRecommendationCount(db))
+	r.Put("/manager/ai-recommendations/{id}/accept", handlers.AcceptRecommendation(db))
+	r.Put("/manager/ai-recommendations/{id}/dismiss", handlers.DismissRecommendation(db))
+	r.Put("/manager/ai-recommendations/{id}/snooze", handlers.SnoozeRecommendation(db))
+
+	// Potential Locations management (managers can delete and convert)
+	r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
+	r.Delete("/potential-locations/{id}", handlers.DeletePotentialLocation(db, redisClient, wsHub, centrifugoClient))
+	r.Post("/potential-locations/{id}/convert", handlers.ConvertPotentialLocationToBin(db, redisClient, wsHub, centrifugoClient))
+	r.Get("/bins/{binId}/nearby-potential-locations", handlers.GetNearbyPotentialLocations(db))
+
+	// Fleet management
+	r.Get("/manager/drivers", handlers.GetAllDrivers(db, redisClient))
+	r.Get("/manager/drivers/{driverId}/shifts", handlers.GetDriverShiftHistoryByID(db))
+	r.Get("/manager/drivers/{id}/pending-moves", handlers.GetDriverPendingMoves(db))
+	r.Get("/manager/active-drivers", handlers.GetActiveDrivers(db, redisClient))
+	r.Get("/manager/driver-shift-details", handlers.GetDriverShiftDetails(db))
+
+	// Incident reporting (manager phone-call complaints → zone creation)
+	r.Post("/manager/incident-report", handlers.CreateManagerIncidentReport(db, centrifugoClient))
+
+	// User management
+	r.Get("/manager/users", handlers.GetAllUsers(db))
+	r.Post("/manager/users", handlers.CreateUser(db))
+
+	// No-Go Zone management (admin only)
+	r.Patch("/no-go-zones/{id}", handlers.UpdateNoGoZone(db, centrifugoClient))
+	// TODO: Implement remaining admin zone management handlers
+	// r.Post("/no-go-zones", handlers.CreateNoGoZone(db))
+	// r.Delete("/no-go-zones/{id}", handlers.DeleteNoGoZone(db))
+
+	// Field observations management
+	r.Get("/field-observations", handlers.GetFieldObservations(db))
+	r.Patch("/field-observations/{id}/verify", handlers.VerifyFieldObservation(db))
+
+	// App error logs management (for viewing driver errors in dashboard)
+	r.Get("/manager/logs/app-errors", handlers.GetAppErrorLogs(db))
+	r.Get("/manager/logs/app-error-stats", handlers.GetAppErrorStats(db))
+	r.Patch("/manager/logs/app-errors/{id}/resolve", handlers.ResolveAppErrorLog(db))
+
+	// Daily digest (manual trigger)
+	r.Post("/manager/daily-digest", handlers.TriggerDigest(digestScheduler))
+
+	// Notification settings & history
+	r.Get("/manager/notification-settings", handlers.GetNotificationSettings(db))
+	r.Put("/manager/notification-settings", handlers.UpdateNotificationSettings(db))
+	r.Get("/manager/notification-log", handlers.GetNotificationLog(db))
+	r.Get("/manager/notification-log/{id}/recipients", handlers.GetNotificationRecipients(db))
+
+	// AirTag locations (read from DB, written by FindMy bridge)
+	r.Get("/manager/airtag-locations", handlers.GetAirtagLocations(db))
+	r.Post("/manager/airtag-sync", handlers.SyncAirtagLocations())
 }
