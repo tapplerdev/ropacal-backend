@@ -63,6 +63,30 @@ func Org(next http.Handler) http.Handler {
 		}
 		defer d.Release() // reaps parked read-txs; runs on panic paths too
 
+		// D4b: the token proves who signed in, not that they still belong here.
+		// Re-check membership (cached ~60s) on the org-bound handle — see
+		// membership.go for why it cannot run on the root pool.
+		switch verdict, dbRole := verifyMembership(d, claims.UserID, claims.OrgID); {
+		case verdict == membershipDeny:
+			log.Printf("🔒 [Org] %s no longer belongs to org %s (or org inactive) — re-login required",
+				claims.Email, claims.OrgID)
+			http.Error(w, "Unauthorized: re-login required", http.StatusUnauthorized)
+			return
+		case verdict == membershipUnavailable:
+			// Deliberately NOT a 401: this is our problem, not a stale token,
+			// and a 401 would trigger the dashboard's hard logout for what may
+			// be a few seconds of pool saturation.
+			http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		case dbRole != claims.Role:
+			// RequireRole trusts the claim, so a demoted admin would otherwise
+			// keep admin authority for the token's remaining lifetime.
+			log.Printf("🔒 [Org] role drift for %s: token says %q, database says %q — re-login required",
+				claims.Email, claims.Role, dbRole)
+			http.Error(w, "Unauthorized: re-login required", http.StatusUnauthorized)
+			return
+		}
+
 		next.ServeHTTP(w, r.WithContext(orgdb.NewContext(r.Context(), d)))
 	})
 }
