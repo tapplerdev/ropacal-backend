@@ -213,7 +213,7 @@ func resolveDriverStartLocation(ctx context.Context, db *orgdb.DB, redisClient *
 
 	// Primary: Redis (live).
 	if redisClient != nil {
-		if raw, rErr := redisClient.GetDriverLocation(ctx, driverID); rErr == nil {
+		if raw, rErr := redisClient.GetDriverLocation(ctx, db.OrgID(), driverID); rErr == nil {
 			var rl models.DriverLocation
 			if jErr := json.Unmarshal([]byte(raw), &rl); jErr != nil {
 				return loc, fmt.Errorf("parse redis location: %w", jErr)
@@ -304,7 +304,7 @@ func CheckShiftDriverProximity(root *sqlx.DB, redisClient *redis.Client) http.Ha
 		}
 
 		ctx := context.Background()
-		locationJSON, err := redisClient.GetDriverLocation(ctx, shift.DriverID)
+		locationJSON, err := redisClient.GetDriverLocation(ctx, db.OrgID(), shift.DriverID)
 		if err != nil {
 			log.Printf("⚠️  [PROXIMITY CHECK] No location for driver %s: %v", shift.DriverID, err)
 			w.Header().Set("Content-Type", "application/json")
@@ -578,7 +578,7 @@ func UpdateLocation(root *sqlx.DB, hub *websocket.Hub, redisClient *redis.Client
 				Timestamp: req.Timestamp,
 			}
 			if locationJSON, mErr := json.Marshal(locData); mErr == nil {
-				if rErr := redisClient.SaveDriverLocation(r.Context(), userClaims.UserID, string(locationJSON)); rErr != nil {
+				if rErr := redisClient.SaveDriverLocation(r.Context(), db.OrgID(), userClaims.UserID, string(locationJSON)); rErr != nil {
 					log.Printf("⚠️  Failed to save location to Redis: %v", rErr)
 				}
 			}
@@ -679,7 +679,7 @@ func GetAllDrivers(root *sqlx.DB, redisClient *redis.Client) http.HandlerFunc {
 		var locations map[string]string
 		if redisClient != nil {
 			var err error
-			locations, err = redisClient.GetAllDriverLocations(ctx)
+			locations, err = redisClient.GetOrgDriverLocations(ctx, db.OrgID())
 			if err != nil {
 				log.Printf("⚠️ Redis error (non-fatal): %v", err)
 				locations = make(map[string]string)

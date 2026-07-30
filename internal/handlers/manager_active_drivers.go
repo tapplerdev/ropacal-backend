@@ -77,7 +77,7 @@ func GetActiveDrivers(root *sqlx.DB, redisClient *redis.Client) http.HandlerFunc
 		}
 
 		// 1. Get all driver locations from Redis (source of truth for current location)
-		locations, err := redisClient.GetAllDriverLocations(ctx)
+		locations, err := redisClient.GetOrgDriverLocations(ctx, db.OrgID())
 		if err != nil {
 			log.Printf("❌ Redis error: %v", err)
 			w.Header().Set("Content-Type", "application/json")

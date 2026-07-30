@@ -79,7 +79,7 @@ func (w *LocationBatchWriter) writeBatchOrg() {
 	ctx := context.Background()
 
 	// Get all driver locations from Redis
-	locations, err := w.redisClient.GetAllDriverLocations(ctx)
+	locations, err := w.redisClient.GetOrgDriverLocations(ctx, w.db.OrgID())
 	if err != nil {
 		log.Printf("❌ [BatchWriter] Failed to get locations from Redis: %v", err)
 		return

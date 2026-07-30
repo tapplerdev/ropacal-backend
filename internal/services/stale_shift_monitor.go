@@ -336,7 +336,7 @@ func (m *StaleShiftMonitor) checkInactiveShifts(shifts []activeShiftRow) {
 // Checks Redis first (real-time), falls back to PostgreSQL.
 func (m *StaleShiftMonitor) getLastGPSTime(ctx context.Context, driverID string) (time.Time, string) {
 	// Try Redis first (most recent GPS, updated every 1-3 seconds)
-	locationJSON, err := m.redisClient.GetDriverLocation(ctx, driverID)
+	locationJSON, err := m.redisClient.GetDriverLocation(ctx, m.db.OrgID(), driverID)
 	if err == nil && locationJSON != "" {
 		var loc struct {
 			Timestamp int64 `json:"timestamp"`

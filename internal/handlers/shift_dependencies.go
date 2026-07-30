@@ -160,7 +160,7 @@ func CheckBinDependencies(root *sqlx.DB, redisClient *redis.Client) http.Handler
 			ctx := context.Background()
 			for shiftID, dep := range shiftMap {
 				// Get driver's current location from Redis
-				locationJSON, err := redisClient.GetDriverLocation(ctx, dep.DriverID)
+				locationJSON, err := redisClient.GetDriverLocation(ctx, db.OrgID(), dep.DriverID)
 				if err != nil {
 					// Driver location not available - skip proximity calculation
 					log.Printf("⚠️  [CheckBinDependencies] No location for driver %s: %v", dep.DriverID, err)

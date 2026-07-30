@@ -193,7 +193,7 @@ func CentrifugoLocationPublishProxy(db *sqlx.DB, redisClient *redis.Client, osrm
 		if redisClient != nil {
 			ctx := context.Background()
 			locationJSON, _ := json.Marshal(locationData)
-			if err := redisClient.SaveDriverLocation(ctx, driverID, string(locationJSON)); err != nil {
+			if err := redisClient.SaveDriverLocation(ctx, odb.OrgID(), driverID, string(locationJSON)); err != nil {
 				log.Printf("⚠️  [LocationProxy] Failed to save to Redis: %v", err)
 			}
 		}
