@@ -35,9 +35,26 @@ naming the `ropacal` org returned 401 while a second org existed, and reverted t
 
 ## BLOCKING — required before a second organization onboards
 
-### 1. Centrifugo proxy secret (owner declined 2026-07-29; deferred here)
-Realtime **will be fully denied** the moment a second org exists until both sides
-are configured. Not optional, and not a code change — two config fields:
+### 1. Centrifugo proxy config — HALF DONE
+
+**`CENTRIFUGO_PROXY_SECRET` is SET and enforced** (done 2026-07-30; verified by
+45 × `publish-location` → 200 under enforcement, and every gate in this file had
+to send the header). That half is closed.
+
+**`include_connection_meta` is still UNCONFIRMED**, and it is the half that kills
+realtime. A probe was added 2026-07-30 to answer it: `proxyOrgDB`'s single-org
+grace now logs `SINGLE-ORG GRACE ... not connection meta` (rate-limited to once a
+minute). Reading it:
+
+- line appears while REAL clients are connected → Centrifugo is not forwarding
+  meta → **do not onboard a second org**, realtime would be fully denied
+- line never appears once clients reconnect → meta is being forwarded → safe
+
+As of 2026-07-30 04:44 the only occurrence was a deliberate meta-less test probe;
+no real client was connected to Centrifugo, so the question is still open. It
+answers itself as soon as someone logs into the dashboard or app.
+
+Original note on both fields:
 
 1. Backend (Railway `ropacal-backend` service):
    `CENTRIFUGO_PROXY_SECRET=$(openssl rand -hex 32)`
