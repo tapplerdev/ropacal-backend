@@ -578,8 +578,23 @@ func GetCentrifugoToken(centrifugoClient *centrifugo.Client) http.HandlerFunc {
 		// byte-identical to the pre-tenancy shape.
 		orgID := orgdb.From(r).OrgID()
 
-		// Generate token valid for 24 hours
-		expiresAt := time.Now().Add(24 * time.Hour)
+		// D4a: 1 hour, not 24. This token carries the org_id the proxy
+		// endpoints trust for tenant scope, so its lifetime is how long a
+		// revoked user keeps realtime access. Both SDKs auto-refresh off the
+		// token's own exp (the dashboard never reads expires_at, Flutter uses
+		// it only for logging), so shortening it needs no client change.
+		//
+		// 1 hour rather than minutes on purpose: the dashboard's refresh goes
+		// through apiFetch, which carries the global 401 -> logout redirect, so
+		// this TTL is also the interval at which the dashboard DISCOVERS app-JWT
+		// expiry and hard-logs-out. At an hour that is harmless; at five
+		// minutes it multiplies logout races and reconnect churn for no real
+		// gain, since the subscribe proxy re-authorizes every new subscribe
+		// regardless. Combined with D4b's 60s membership cache, realtime
+		// revocation lands within roughly an hour, and minting a NEW connection
+		// token is already blocked within 60s because this endpoint sits behind
+		// Auth -> Org.
+		expiresAt := time.Now().Add(1 * time.Hour)
 		token, err := centrifugoClient.GenerateConnectionToken(userID, orgID, expiresAt)
 		if err != nil {
 			log.Printf("❌ [Centrifugo] Failed to generate token for user %s: %v", userID, err)
