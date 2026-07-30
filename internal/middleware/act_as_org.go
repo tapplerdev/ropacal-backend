@@ -26,8 +26,8 @@ import (
 // running set_config('app.org_id', …), so a bug in a handler still cannot read
 // another tenant; the database does the filtering.
 //
-// MUST run after PlatformAuth, and PlatformReadOnly must be mounted alongside —
-// see that function for why.
+// MUST run after PlatformAuth, which is what establishes the operator identity
+// and enforces the per-account can_write permission.
 func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +72,7 @@ func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 				 ORDER BY created_at, id LIMIT 1`, slug)
 			if errors.Is(err, sql.ErrNoRows) {
 				log.Printf("🔒 [ActAsOrg] %s named unknown organization %q", claims.Email, slug)
-				auditPlatform(root, claims, "", slug, r, http.StatusNotFound)
+				_ = auditPlatform(root, claims, "", slug, r, http.StatusNotFound)
 				http.Error(w, "Unknown organization", http.StatusNotFound)
 				return
 			}
@@ -83,7 +83,7 @@ func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 			}
 			if org.Status != "active" {
 				log.Printf("🔒 [ActAsOrg] %s tried inactive organization %q (%s)", claims.Email, org.Slug, org.Status)
-				auditPlatform(root, claims, org.ID, org.Slug, r, http.StatusForbidden)
+				_ = auditPlatform(root, claims, org.ID, org.Slug, r, http.StatusForbidden)
 				http.Error(w, "Organization is "+org.Status, http.StatusForbidden)
 				return
 			}
@@ -131,7 +131,18 @@ func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 				OrgID:  org.ID,
 			})
 
-			auditPlatform(root, claims, org.ID, org.Slug, r, 0)
+			// FAIL CLOSED on an unwritable audit trail. This used to log and
+			// continue, so a reviewer made the INSERT fail and still created a
+			// bin — the record of who touched a customer's data is the entire
+			// justification for allowing writes, so proceeding without it
+			// contradicts the premise. ensureSupportUser twelve lines above
+			// already fails closed for the same reason; this now matches it.
+			if err := auditPlatform(root, claims, org.ID, org.Slug, r, 0); err != nil {
+				log.Printf("🚨 [ActAsOrg] refusing request — audit trail unwritable: %v", err)
+				http.Error(w, "Cannot record this action for audit; request refused",
+					http.StatusServiceUnavailable)
+				return
+			}
 
 			log.Printf("🛰️  [ActAsOrg] %s acting as %q (%s) — %s %s",
 				claims.Email, org.Slug, org.ID, r.Method, r.URL.Path)
@@ -153,7 +164,7 @@ func ActAsOrg(root *sqlx.DB) func(http.Handler) http.Handler {
 // outcome is the HTTP status when the request was rejected here, or 0 when it
 // was passed to a handler (whose status this layer cannot see — the row records
 // that access was granted, not what the handler returned).
-func auditPlatform(root *sqlx.DB, c *PlatformClaims, orgID, slug string, r *http.Request, outcome int) {
+func auditPlatform(root *sqlx.DB, c *PlatformClaims, orgID, slug string, r *http.Request, outcome int) error {
 	var org interface{}
 	if orgID != "" {
 		org = orgID
@@ -175,5 +186,7 @@ func auditPlatform(root *sqlx.DB, c *PlatformClaims, orgID, slug string, r *http
 		 VALUES ($1, $2, $3, $4, $5, $6, EXTRACT(EPOCH FROM NOW())::BIGINT)`,
 		c.AdminID, c.Email, org, r.Method, path, status); err != nil {
 		log.Printf("🚨 [Platform] AUDIT WRITE FAILED for %s acting as %s: %v", c.Email, slug, err)
+		return err
 	}
+	return nil
 }

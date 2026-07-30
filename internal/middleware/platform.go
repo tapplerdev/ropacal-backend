@@ -95,11 +95,12 @@ func PlatformAuth(root *sqlx.DB) func(http.Handler) http.Handler {
 			// Re-check the admin on every request. A disabled or deleted admin
 			// loses access immediately, not eventually.
 			var row struct {
-				Email  string `db:"email"`
-				Status string `db:"status"`
+				Email    string `db:"email"`
+				Status   string `db:"status"`
+				CanWrite bool   `db:"can_write"`
 			}
 			err = root.Get(&row,
-				`SELECT email, status FROM platform_admins WHERE id = $1`, claims.AdminID)
+				`SELECT email, status, can_write FROM platform_admins WHERE id = $1`, claims.AdminID)
 			if errors.Is(err, sql.ErrNoRows) {
 				log.Printf("🔒 [Platform] token for unknown admin %s — rejected", claims.AdminID)
 				auditPlatformDenied(root, claims.AdminID, "(deleted)", r, "admin no longer exists")
@@ -120,6 +121,21 @@ func PlatformAuth(root *sqlx.DB) func(http.Handler) http.Handler {
 				return
 			}
 			claims.Email = row.Email
+
+			// ENFORCE can_write. It was added as a column and read by nothing,
+			// which is worse than not having it: a column named can_write sitting
+			// at NOT NULL DEFAULT TRUE reads as a control, and a reviewer proved
+			// it was decorative by setting it false and writing anyway.
+			switch r.Method {
+			case http.MethodGet, http.MethodHead, http.MethodOptions:
+			default:
+				if !row.CanWrite {
+					log.Printf("🚫 [Platform] %s is read-only — refused %s %s", row.Email, r.Method, r.URL.Path)
+					w.Header().Set("Allow", "GET, HEAD")
+					http.Error(w, "This operator account is read-only", http.StatusForbidden)
+					return
+				}
+			}
 
 			// No audit row here. ActAsOrg writes the authoritative one once the
 			// organization is RESOLVED — this layer only has the raw header,

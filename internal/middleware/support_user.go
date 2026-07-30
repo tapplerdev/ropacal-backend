@@ -58,12 +58,31 @@ func ensureSupportUser(root *sqlx.DB, d *orgdb.DB, orgID, orgSlug string) (strin
 	// `users` is the authority, not the mapping table. Deriving the id from the
 	// tenant's own data means a lost or stale mapping row is self-healing rather
 	// than a second support user.
-	var userID string
-	err := d.Get(&userID,
-		`SELECT id FROM users WHERE organization_id = $1 AND email = $2`, orgID, email)
+	var found struct {
+		ID       string `db:"id"`
+		Password string `db:"password"`
+	}
+	err := d.Get(&found,
+		`SELECT id, password FROM users WHERE organization_id = $1 AND email = $2`, orgID, email)
 	if err == nil {
-		recordSupportUser(root, orgID, userID)
-		return userID, nil
+		// NEVER adopt a row we did not write. A tenant admin who created
+		// support+{slug}@binly-platform.internal themselves would otherwise have
+		// their row adopted as the support identity — giving them a login for the
+		// account every Binly write is attributed to. The password column is the
+		// proof of provenance: ours is the unusable sentinel, theirs is a real
+		// bcrypt hash they chose.
+		//
+		// CreateUser now rejects the reserved domain, but that does not cover
+		// rows created before this guard existed or inserted by direct SQL, so
+		// this check stands on its own.
+		if found.Password != unusablePasswordHash {
+			return "", fmt.Errorf(
+				"the support identity for organization %s is occupied by a row this system did not create "+
+					"(email %s exists with a usable password) — refusing to attribute platform writes to it",
+				orgSlug, email)
+		}
+		recordSupportUser(root, orgID, found.ID)
+		return found.ID, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("look up support user: %w", err)
@@ -82,6 +101,7 @@ func ensureSupportUser(root *sqlx.DB, d *orgdb.DB, orgID, orgSlug string) (strin
 	// Re-read rather than trusting newID: ON CONFLICT DO NOTHING means a
 	// concurrent request may have won, in which case the surviving row's id is
 	// the one to use.
+	var userID string
 	if err := d.Get(&userID,
 		`SELECT id FROM users WHERE organization_id = $1 AND email = $2`, orgID, email); err != nil {
 		return "", fmt.Errorf("read back support user: %w", err)

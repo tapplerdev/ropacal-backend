@@ -353,7 +353,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "platform-login-marker",
+			"version":         "platform-hardened-2b",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -433,11 +433,10 @@ func main() {
 		// no tenant role claim, and being a platform admin IS the authorization,
 		// established by PlatformAuth before this point.
 		//
-		// Handlers that need the acting USER (not just the org) will 401 here —
-		// a platform request has an organization but no tenant user, and there
-		// are 28 foreign keys to `users` so a synthesized identity would violate
-		// them. That is a deliberate fail-closed boundary: reads work, writes
-		// that must be attributed to a person do not. See PLATFORM_ADMIN_PLAN.md.
+		// Full read-WRITE. ActAsOrg attributes every request to the
+		// organization's "Binly Support" user — a real row, so the 28 foreign
+		// keys to `users` are satisfied and the tenant's own history records who
+		// acted. Which HUMAN operator it was lives in platform_audit_log.
 		r.Route("/act", func(r chi.Router) {
 			r.Use(middleware.PlatformAuth(db))
 			// Read-WRITE. The earlier read-only guard existed only because a

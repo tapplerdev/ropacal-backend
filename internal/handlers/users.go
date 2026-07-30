@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"ropacal-backend/internal/middleware"
+	"strings"
 	"time"
 
 	"ropacal-backend/internal/models"
@@ -48,6 +50,26 @@ func CreateUser(root *sqlx.DB) http.HandlerFunc {
 		if req.Email == "" || req.Password == "" || req.Name == "" || req.Role == "" {
 			log.Println("❌ Missing required fields")
 			utils.RespondError(w, http.StatusBadRequest, "Email, password, name, and role are required")
+			return
+		}
+
+		// The platform support-identity domain is RESERVED. Without this, a
+		// tenant admin could pre-create support+{their-slug}@binly-platform.internal
+		// with a password of their choosing; ensureSupportUser resolves that
+		// identity by email, would adopt the tenant's row, and every subsequent
+		// Binly write in that organization would be attributed to an account the
+		// TENANT controls and can log in as. Repudiation would then run both
+		// ways — they could act as "Binly Support" and blame us, and our real
+		// writes would be indistinguishable from theirs.
+		//
+		// This is one of two guards; ensureSupportUser independently verifies
+		// the row it finds carries the unusable password hash. Either alone is
+		// insufficient, because this one does not cover rows created before it
+		// existed or by direct SQL.
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(req.Email)), "@"+middleware.SupportUserEmailDomain) {
+			log.Printf("🚫 Refused reserved platform domain in user creation: %s", req.Email)
+			utils.RespondError(w, http.StatusBadRequest,
+				"That email domain is reserved and cannot be used")
 			return
 		}
 
