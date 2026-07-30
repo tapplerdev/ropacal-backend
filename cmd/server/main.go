@@ -353,7 +353,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "platform-ready",
+			"version":         "platform-admin-api",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -399,6 +399,12 @@ func main() {
 		// authenticated identity here belongs to exactly one org — gating it on
 		// an admin JWT would let an admin of org A mint org B.
 		r.Post("/organizations", handlers.CreateOrganization(db))
+		// Cross-tenant operators. Behind INTERNAL_API_KEY and deliberately NOT
+		// behind a platform token — an operator must not be able to mint more
+		// operators. Same reasoning that keeps org creation off the tenant
+		// surface: whatever grants cross-tenant access has to sit outside the
+		// system it grants access to.
+		r.Post("/platform-admins", handlers.CreatePlatformAdmin(db))
 	})
 
 	deps := routeDeps{db: db, wsHub: wsHub, centrifugoClient: centrifugoClient,
