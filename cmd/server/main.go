@@ -298,7 +298,7 @@ func main() {
 	//
 	//   GET  /health          liveness/deploy probe (no DB)
 	//   POST /api/auth/login  establishes identity (mints the JWT)
-	//   /api/internal/*       FindMy bridge — guarded by INTERNAL_API_KEY
+	//   /api/internal/*       FindMy bridge + tenant provisioning — guarded by INTERNAL_API_KEY
 	//
 	// Registered alongside them but NOT user-authenticated routes:
 	//
@@ -320,7 +320,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "review-fixes-1",
+			"version":         "org-provisioning-api",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -361,6 +361,11 @@ func main() {
 		r.Get("/airtag-accounts", handlers.GetAirtagAccounts(db))
 		r.Put("/airtag-accounts/{id}/state", handlers.UpdateAirtagAccountState(db))
 		r.Post("/airtag-locations", handlers.UpsertAirtagLocations(db))
+		// Tenant provisioning. Behind INTERNAL_API_KEY rather than an admin JWT
+		// because creating an organization is a CROSS-tenant act and every
+		// authenticated identity here belongs to exactly one org — gating it on
+		// an admin JWT would let an admin of org A mint org B.
+		r.Post("/organizations", handlers.CreateOrganization(db))
 	})
 
 	// API routes

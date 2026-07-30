@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log"
@@ -30,8 +31,11 @@ func InternalAPIKey(next http.Handler) http.Handler {
 			return
 		}
 
+		// Constant-time: a byte-wise != leaks key material through timing, and
+		// this header now guards tenant PROVISIONING as well as the FindMy
+		// bridge, so a forged request could mint an organization.
 		provided := r.Header.Get("X-Internal-API-Key")
-		if provided != apiKey {
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(apiKey)) != 1 {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
