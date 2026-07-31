@@ -125,3 +125,60 @@ func TestContainsWord_Boundaries(t *testing.T) {
 		}
 	}
 }
+
+// contains reports whether a chain list holds an exact entry.
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// Dollarama and Bulk Barn are TIER 1 for Canada (anchor score 1.0, not 0.7).
+// Promoted 2026-07-31: both are errand-frequency retail, and errand density
+// scored higher in the 2026-07 calibration (rho=+0.39) than anchor presence
+// itself (+0.35). US instincts would file them as tier 2.
+func TestCanadianTier1_IncludesErrandAnchors(t *testing.T) {
+	ca := chainsFor("CA")
+
+	for _, want := range []string{"dollarama", "bulk barn"} {
+		if !contains(ca.Tier1, want) {
+			t.Errorf("%q is not tier 1 for CA — it would score 0.7 instead of 1.0", want)
+		}
+		if contains(ca.Tier2, want) {
+			t.Errorf("%q is in BOTH tiers; tier 1 wins the loop, so the tier 2 entry is dead weight", want)
+		}
+	}
+	// The search terms decide what HERE is even asked for. A chain that is
+	// tier 1 for SCORING but missing from the search list can only ever be
+	// found by accident — that exact split is what hid Loblaws originally.
+	for _, want := range []string{"Dollarama", "Bulk Barn"} {
+		if !contains(ca.SearchTier1, want) {
+			t.Errorf("%q is not in SearchTier1 — the recommender never goes looking for it", want)
+		}
+	}
+}
+
+// Real HERE result names must actually match the new entries.
+func TestMatchesChain_NewCanadianAnchors(t *testing.T) {
+	cases := []struct {
+		name, chain string
+		want        bool
+	}{
+		{"dollarama", "dollarama", true},
+		{"dollarama #1234", "dollarama", true},
+		{"bulk barn", "bulk barn", true},
+		{"bulk barn foods ltd", "bulk barn", true},
+		// Must not swallow unrelated businesses that merely share a word.
+		{"the barn restaurant", "bulk barn", false},
+		{"barn owl bakery", "bulk barn", false},
+		{"dollar tree", "dollarama", false},
+	}
+	for _, c := range cases {
+		if got := matchesChain(c.name, c.chain, ""); got != c.want {
+			t.Errorf("matchesChain(%q, %q) = %v, want %v", c.name, c.chain, got, c.want)
+		}
+	}
+}

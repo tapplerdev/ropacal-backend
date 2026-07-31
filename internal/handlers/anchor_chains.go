@@ -75,9 +75,16 @@ var chainsByCountry = map[string]anchorChains{
 			"real canadian superstore", "loblaws", "no frills", "metro", "sobeys",
 			"food basics", "freshco", "fortinos", "zehrs", "longos",
 			"your independent grocer",
+			// Errand-frequency anchors. Neither is big-box, and on US instincts
+			// both would read as tier 2 — but the 2026-07 calibration found
+			// ERRAND retail the strongest yield signal (rho=+0.39), stronger than
+			// anchor presence itself (+0.35). Dollarama alone has ~1,600 Canadian
+			// stores, so it is closer to a footfall constant than a category.
+			// Promoted from tier 2 on Omar's call, 2026-07-31.
+			"dollarama", "bulk barn",
 		},
 		Tier2: []string{
-			"shoppers drug mart", "rexall", "dollarama", "giant tiger", "winners",
+			"shoppers drug mart", "rexall", "giant tiger", "winners",
 			"homesense", "marshalls", "sport chek", "pet valu", "farm boy",
 			"valu-mart", "staples", "best buy",
 		},
@@ -85,9 +92,10 @@ var chainsByCountry = map[string]anchorChains{
 			"Walmart", "Costco", "Home Depot", "Canadian Tire", "Rona",
 			"Real Canadian Superstore", "Loblaws", "No Frills", "Metro",
 			"Sobeys", "Food Basics", "FreshCo", "Fortinos", "Zehrs", "Longo's",
+			"Dollarama", "Bulk Barn",
 		},
 		SearchTier2: []string{
-			"Shoppers Drug Mart", "Rexall", "Dollarama", "Giant Tiger",
+			"Shoppers Drug Mart", "Rexall", "Giant Tiger",
 			"Winners", "Sport Chek", "Best Buy", "Staples",
 		},
 	},

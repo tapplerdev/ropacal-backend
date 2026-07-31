@@ -304,12 +304,13 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 							"bbox":  map[string]any{"type": "array", "items": map[string]any{"type": "number"}, "description": "[west, south, east, north]"},
 						},
 					},
-					"include_nearby":        map[string]any{"type": "boolean", "description": "When a target area is set: also surface profile-matching spots just outside it (core+halo, default true). Set false for strictly-inside-only. The dashboard's 'Strictly inside' toggle controls this; the recommender tags each result locality=in_area|near_area."},
-					"min_gap_miles":         map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
-					"algorithm":             map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (site-quality: HERE retail density + anchors + fill + population; ESRI crime gate only — income/clothing-spend are not used)"},
-					"mode":                  map[string]any{"type": "string", "description": "Placement mode: 'infill' (near existing high-performing bins, tighter spacing — only fires next to bins that actually perform), 'expand' (new areas), or 'auto' (default, expansion-led mix). To REHOME an existing bin use relocate_bin_number instead of this."},
-					"relocate_bin_number":   map[string]any{"type": "integer", "description": "RELOCATE an existing underperforming bin: pass its bin NUMBER and the tool searches for a better spot around that bin's own location, excluding the bin itself so it can't block its own replacement. The response includes a 'relocating' block with the bin's current fill rate — only recommend spots that beat it, and say so honestly if none clearly do. Use when the user says a bin is doing badly / should be moved."},
-					"relocate_radius_miles": map[string]any{"type": "number", "description": "How far from the bin to search when relocate_bin_number is set (default 3, max 15). Use ~1 for 'good area, wrong spot' (reposition within the same plaza/strip) and 5-10 when the whole area is dead."},
+					"include_nearby":         map[string]any{"type": "boolean", "description": "When a target area is set: also surface profile-matching spots just outside it (core+halo, default true). Set false for strictly-inside-only. The dashboard's 'Strictly inside' toggle controls this; the recommender tags each result locality=in_area|near_area."},
+					"min_gap_miles":          map[string]any{"type": "number", "description": "Minimum distance from existing bins in miles (default 0.3)"},
+					"algorithm":              map[string]any{"type": "string", "description": "Scoring algorithm: 'v1' (default, HERE traffic + census) or 'v2' (site-quality: HERE retail density + anchors + fill + population; ESRI crime gate only — income/clothing-spend are not used)"},
+					"mode":                   map[string]any{"type": "string", "description": "Placement mode: 'infill' (near existing high-performing bins, tighter spacing — only fires next to bins that actually perform), 'expand' (new areas), or 'auto' (default, expansion-led mix). To REHOME an existing bin use relocate_bin_number instead of this."},
+					"relocate_bin_number":    map[string]any{"type": "integer", "description": "RELOCATE an existing underperforming bin: pass its bin NUMBER and the tool searches for a better spot around that bin's own location, excluding the bin itself so it can't block its own replacement. The response includes a 'relocating' block with the bin's current fill rate — only recommend spots that beat it, and say so honestly if none clearly do. Use when the user says a bin is doing badly / should be moved."},
+					"relocate_radius_miles":  map[string]any{"type": "number", "description": "How far from the bin to search when relocate_bin_number is set (default 3, max 15). Use ~1 for 'good area, wrong spot' (reposition within the same plaza/strip) and 5-10 when the whole area is dead."},
+					"expansion_radius_miles": map[string]any{"type": "number", "description": "How far from the WAREHOUSE an expansion city may sit, in miles (default 75, clamped to 5-150). Only affects mode='expand' and the expansion half of mode='auto' — it does nothing for infill or relocate. Set it when the user says how far they are willing to drive: ~25 for 'somewhere we can service in a normal day', 75+ for 'we're opening new territory'. Do NOT guess a value from the conversation's tone; if they haven't said, leave it out and the default applies."},
 				},
 			},
 		},
@@ -343,6 +344,11 @@ type chatRequest struct {
 	// stays strictly inside the target area; when true (default), it also
 	// surfaces profile-matching spots just outside. nil = leave to the default.
 	IncludeNearby *bool `json:"include_nearby,omitempty"`
+	// ExpansionRadiusMiles is the dashboard's distance slider: how far from the
+	// warehouse an expansion city may sit. A statement about how far this
+	// business will drive, so it is injected rather than inferred — the model
+	// gets no say. nil = leave to the default. Clamped server-side.
+	ExpansionRadiusMiles *float64 `json:"expansion_radius_miles,omitempty"`
 }
 
 type chatTargetArea struct {
@@ -378,6 +384,22 @@ func injectTargetArea(input json.RawMessage, ta *chatTargetArea) json.RawMessage
 	}
 	m["target_area"] = area
 	delete(m, "target_city")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return input
+	}
+	return out
+}
+
+// injectNumber deterministically sets a numeric tool-input key from the request,
+// so a dashboard slider (e.g. expansion_radius_miles) can't be dropped or
+// rounded to something friendlier-looking by the model.
+func injectNumber(input json.RawMessage, key string, val float64) json.RawMessage {
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return input
+	}
+	m[key] = val
 	out, err := json.Marshal(m)
 	if err != nil {
 		return input
@@ -540,6 +562,11 @@ func (h *ChatHandler) handle(w http.ResponseWriter, r *http.Request) {
 						if req.IncludeNearby != nil {
 							toolInput = injectBool(toolInput, "include_nearby", *req.IncludeNearby)
 							log.Printf("📍 [Chat] Injected include_nearby=%v", *req.IncludeNearby)
+						}
+						if req.ExpansionRadiusMiles != nil {
+							r := clampExpansionRadius(*req.ExpansionRadiusMiles)
+							toolInput = injectNumber(toolInput, "expansion_radius_miles", r)
+							log.Printf("📍 [Chat] Injected expansion_radius_miles=%.0f", r)
 						}
 					}
 					result, toolErr := h.executeTool(variant.Name, toolInput)

@@ -59,13 +59,16 @@ type hereAddress struct {
 // to what the browser used to build itself, so the frontend swap is a change of
 // TRANSPORT only — no component has to reinterpret a different payload.
 type addressResult struct {
-	Street           string  `json:"street"`
-	City             string  `json:"city"`
-	Zip              string  `json:"zip"`
-	State            string  `json:"state,omitempty"`
-	Country          string  `json:"country,omitempty"`
-	Latitude         float64 `json:"latitude,omitempty"`
-	Longitude        float64 `json:"longitude,omitempty"`
+	Street  string `json:"street"`
+	City    string `json:"city"`
+	Zip     string `json:"zip"`
+	State   string `json:"state,omitempty"`
+	Country string `json:"country,omitempty"`
+	// No omitempty: the dashboard types these as REQUIRED numbers and assigns
+	// them straight into non-nullable state. A literal 0 coordinate must still
+	// arrive as 0, not vanish from the payload.
+	Latitude         float64 `json:"latitude"`
+	Longitude        float64 `json:"longitude"`
 	FormattedAddress string  `json:"formattedAddress"`
 }
 

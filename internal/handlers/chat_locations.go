@@ -160,13 +160,41 @@ var b2bTitleKeywords = []string{
 }
 
 // expansionRadiusMiles bounds how far from the WAREHOUSE a suggested expansion
-// city may sit. 75 miles is a ~150-mile round trip, which is the practical limit
-// for a truck that starts and ends its shift at the yard.
+// city may sit, when the caller does not say. 75 miles is a ~150-mile round
+// trip, which is the practical limit for a truck that starts and ends its shift
+// at the yard.
 //
 // Anchored on the warehouse rather than the centroid of existing bins on
 // purpose: the warehouse is where every route begins and ends, and it does not
 // drift every time a bin is added.
+//
+// Now a DEFAULT rather than a fixed rule: the dashboard exposes a slider, and
+// how far a business is willing to drive is a fact about that business, not
+// something to infer. 75 miles silently mixed "a comfortable day route" and
+// "expansion territory two hours away" into one undifferentiated list.
 const expansionRadiusMiles = 75.0
+
+// The slider's ends. Below the minimum a search returns the warehouse's own
+// city and nothing else; above the maximum the shortlist is dominated by places
+// no truck will reach and every extra mile costs paid API calls.
+const (
+	minExpansionRadiusMiles = 5.0
+	maxExpansionRadiusMiles = 150.0
+)
+
+// clampExpansionRadius keeps a caller-supplied radius inside the useful band.
+// Clamps rather than rejects: this arrives from a slider and from an LLM tool
+// call, and neither is worth failing a whole recommendation over.
+func clampExpansionRadius(miles float64) float64 {
+	switch {
+	case miles < minExpansionRadiusMiles:
+		return minExpansionRadiusMiles
+	case miles > maxExpansionRadiusMiles:
+		return maxExpansionRadiusMiles
+	default:
+		return miles
+	}
+}
 
 // expansionShortlistSize caps how many cities reach the EXPENSIVE stage. Each
 // surviving city costs HERE searches plus ESRI enrichment per candidate site, and
@@ -187,7 +215,7 @@ const expansionShortlistSize = 10
 // logs and skips expansion rather than emitting nonsense.
 // The return type mirrors the anonymous shape the expansion path already
 // threads through fanOutSearch — kept identical so no downstream code changes.
-func expansionOrigins(db *orgdb.DB, bins []existingBin) []struct {
+func expansionOrigins(db *orgdb.DB, bins []existingBin, radiusMiles float64) []struct {
 	City string
 	Lat  float64
 	Lng  float64
@@ -198,7 +226,7 @@ func expansionOrigins(db *orgdb.DB, bins []existingBin) []struct {
 		return nil
 	}
 
-	nearby, err := geo.CitiesWithin(whLat, whLng, expansionRadiusMiles)
+	nearby, err := geo.CitiesWithin(whLat, whLng, radiusMiles)
 	if err != nil {
 		log.Printf("⚠️  [Expand] city lookup failed: %v", err)
 		return nil
@@ -248,9 +276,9 @@ func expansionOrigins(db *orgdb.DB, bins []existingBin) []struct {
 	}
 	if len(origins) > 0 {
 		log.Printf("🗺️  [Expand] %d candidate cities within %.0f mi of the warehouse (largest first): %s",
-			len(origins), expansionRadiusMiles, originNames(origins))
+			len(origins), radiusMiles, originNames(origins))
 	} else {
-		log.Printf("ℹ️  [Expand] no uncovered cities within %.0f mi of the warehouse", expansionRadiusMiles)
+		log.Printf("ℹ️  [Expand] no uncovered cities within %.0f mi of the warehouse", radiusMiles)
 	}
 	return origins
 }
@@ -637,6 +665,14 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		haloKm = hk
 	}
 
+	// How far from the warehouse an EXPANSION city may sit. Only affects the
+	// expansion path — infill searches around existing bins and relocate
+	// searches around one bin, neither of which has anything to do with this.
+	expansionRadiusMi := expansionRadiusMiles
+	if er, ok := params["expansion_radius_miles"].(float64); ok && er > 0 {
+		expansionRadiusMi = clampExpansionRadius(er)
+	}
+
 	// RELOCATE mode — "Bin #47 is underperforming, find it a better home."
 	// Seeds the search at the bin's OWN coordinates instead of a city, and drops
 	// that bin from the gap check below. That exclusion is the whole trick: left
@@ -994,7 +1030,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// Build expansion jobs using same fanOutSearch pattern.
 		// Derived from THIS organization's warehouse, not a hardcoded region —
 		// see expansionOrigins.
-		cities := expansionOrigins(h.db, bins)
+		cities := expansionOrigins(h.db, bins, expansionRadiusMi)
 		if area != nil {
 			// Tile the area's bbox into search origins (~1.8 km grid) so a
 			// city- or district-sized target gets swept, not sampled once at
@@ -1341,12 +1377,17 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// Pre-fetch POI density for ALL topCandidates in parallel (biggest latency win)
 	type poiResult struct {
 		Index       int
-		Density     int
+		Density     int // baseline count — the only one scoring reads
 		HasAnchor   bool
 		AnchorName  string
 		AnchorLat   float64
 		AnchorLng   float64
 		RetailRatio float64
+		// Observed-only, for the density-ceiling comparison. Nothing branches
+		// on these; they exist so the run summary can say whether the old
+		// limit=20 ceiling was actually biting.
+		FullDensity int
+		Truncated   bool
 	}
 	tEnrichStart := time.Now()
 	poiResults := make([]poiResult, len(topCandidates))
@@ -1360,12 +1401,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				defer poiWg.Done()
 				for idx := range poiJobCh {
 					tc := topCandidates[idx]
-					density, hasAnc, ancName, ancLat, ancLng, retRatio := scorePOIDensity(tc.Lat, tc.Lng, orgCountry)
+					d := scorePOIDensity(tc.Lat, tc.Lng, orgCountry)
 					poiResults[idx] = poiResult{
-						Index: idx, Density: density,
-						HasAnchor: hasAnc, AnchorName: ancName,
-						AnchorLat: ancLat, AnchorLng: ancLng,
-						RetailRatio: retRatio,
+						Index: idx, Density: d.RetailCount,
+						HasAnchor: d.HasAnchor, AnchorName: d.AnchorName,
+						AnchorLat: d.AnchorLat, AnchorLng: d.AnchorLng,
+						RetailRatio: d.RetailRatio,
+						FullDensity: d.FullRetailCount, Truncated: d.Truncated,
 					}
 				}
 			}()
@@ -1377,6 +1419,16 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		poiWg.Wait()
 	}
 	log.Printf("⏱️ [Timing] POI density enrichment (%d candidates, 8 workers): %v", len(topCandidates), time.Since(tEnrichStart))
+	{
+		// poiResult is function-local, so hand the probe plain slices.
+		base := make([]int, len(poiResults))
+		full := make([]int, len(poiResults))
+		trunc := make([]bool, len(poiResults))
+		for i, r := range poiResults {
+			base[i], full[i], trunc[i] = r.Density, r.FullDensity, r.Truncated
+		}
+		logDensityCeilingReport(base, full, trunc)
+	}
 
 	// scored accumulates accepted picks WITH their calibrated feature vector, so
 	// the post-loop core+halo refinement can build the area profile and gate
@@ -2893,22 +2945,62 @@ var nonRetailCategories = []string{
 	"700-7010", // ATM
 }
 
+// POI density measurement limits.
+//
+// browseFetchLimit is what we ASK HERE for. It was 20, which was also the value
+// densityScore saturates at (maxPOI), so a 20-tenant strip and a 60-tenant power
+// centre scored identically — the lead signal (errand density, calibration
+// ρ=+0.39) flattened exactly where the best sites are. Billing is per REQUEST,
+// not per result, so a bigger page costs nothing extra.
+//
+// browseBaselineLimit is how many of those results the SCORED metrics use. It
+// stays at the old 20 deliberately: retailRatio gates candidates out at
+// chat_locations.go's "retail ratio" filter, so widening the page would silently
+// change which candidates survive. Measuring and changing behaviour in the same
+// step would make the comparison worthless. Everything beyond 20 is observed and
+// logged, and nothing yet acts on it.
+//
+// HERE returns browse items ordered by distance, so the first 20 of 100 are the
+// same 20 a limit=20 request would have returned. densityReading logs both
+// counts so that assumption is checkable rather than assumed.
+const (
+	browseFetchLimit    = 100
+	browseBaselineLimit = 20
+)
+
+// densityReading is one POI scan around a candidate. Split in two on purpose:
+// the Baseline* fields reproduce today's behaviour exactly and are what scoring
+// reads; the Full* fields are the wider truth and are logged only.
+type densityReading struct {
+	RetailCount int // baseline — feeds the score
+	TotalPOIs   int
+	RetailRatio float64
+	HasAnchor   bool
+	AnchorName  string
+	AnchorLat   float64
+	AnchorLng   float64
+
+	FullRetailCount int // everything HERE returned — measurement only
+	FullTotalPOIs   int
+	FullRetailRatio float64
+	Truncated       bool // HERE returned a full page; there may be more still
+}
+
 // scorePOIDensity counts retail POIs within 300m and detects anchor tenants.
-// Returns: (retailCount, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio)
-func scorePOIDensity(lat, lng float64, country string) (int, bool, string, float64, float64, float64) {
+func scorePOIDensity(lat, lng float64, country string) densityReading {
 	anchorTenants := anchorTenantsFor(country)
 	url := fmt.Sprintf(
-		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=20&in=circle:%.6f,%.6f;r=300&apiKey=%s",
-		lat, lng, lat, lng, HereAPIKey,
+		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=%d&in=circle:%.6f,%.6f;r=300&apiKey=%s",
+		lat, lng, browseFetchLimit, lat, lng, HereAPIKey,
 	)
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return 0, false, "", 0, 0, 0
+		return densityReading{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0, false, "", 0, 0, 0
+		return densityReading{}
 	}
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
@@ -2925,18 +3017,25 @@ func scorePOIDensity(lat, lng float64, country string) (int, bool, string, float
 		} `json:"items"`
 	}
 	if json.Unmarshal(body, &result) != nil {
-		return 0, false, "", 0, 0, 0
+		return densityReading{}
 	}
 
-	retailCount := 0
 	totalPOIs := len(result.Items)
 	hasAnchor := false
 	anchorName := ""
 	var anchorLat, anchorLng float64
 
+	// Baseline counters mirror a limit=20 request; full counters see everything.
+	baseRetail, baseTotal := 0, 0
+	fullRetail := 0
+
 	log.Printf("📊 [Density] Scanning %d POIs within 300m of (%.4f, %.4f)", totalPOIs, lat, lng)
 
-	for _, item := range result.Items {
+	for idx, item := range result.Items {
+		inBaseline := idx < browseBaselineLimit
+		if inBaseline {
+			baseTotal++
+		}
 		titleLower := strings.ToLower(item.Title)
 		primaryCat := ""
 		if len(item.Categories) > 0 {
@@ -2997,14 +3096,20 @@ func scorePOIDensity(lat, lng float64, country string) (int, bool, string, float
 			}
 		}
 		if isRetail {
-			retailCount++
+			fullRetail++
+			if inBaseline {
+				baseRetail++
+			}
 			log.Printf("   ✅ %s (%s, %dm) — %s", item.Title, primaryCat, item.Distance, matchLabel)
 		} else {
 			log.Printf("   ⬜ %s (%s, %dm) — no whitelist match", item.Title, primaryCat, item.Distance)
 		}
 
-		// Check for anchor tenant
-		if !hasAnchor {
+		// Anchor detection stays inside the baseline window. A wider page could
+		// otherwise surface an anchor 290m away that a limit=20 request never
+		// saw, silently raising anchorScore from 0.7 to 1.0 — a scoring change
+		// smuggled in under a measurement change.
+		if !hasAnchor && inBaseline {
 			for _, anchor := range anchorTenants {
 				// Whole-word + category-gated, same as the tier match. Plain
 				// strings.Contains here is what let "Lucky Convenience" and
@@ -3021,12 +3126,32 @@ func scorePOIDensity(lat, lng float64, country string) (int, bool, string, float
 		}
 	}
 
-	retailRatio := 0.0
-	if totalPOIs > 0 {
-		retailRatio = float64(retailCount) / float64(totalPOIs)
+	ratio := func(n, d int) float64 {
+		if d == 0 {
+			return 0
+		}
+		return float64(n) / float64(d)
 	}
-	log.Printf("📊 [Density] Result: %d/%d retail POIs (%.0f%%), anchor=%v (%s)", retailCount, totalPOIs, retailRatio*100, hasAnchor, anchorName)
-	return retailCount, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio
+	r := densityReading{
+		RetailCount: baseRetail, TotalPOIs: baseTotal, RetailRatio: ratio(baseRetail, baseTotal),
+		HasAnchor: hasAnchor, AnchorName: anchorName, AnchorLat: anchorLat, AnchorLng: anchorLng,
+
+		FullRetailCount: fullRetail, FullTotalPOIs: totalPOIs, FullRetailRatio: ratio(fullRetail, totalPOIs),
+		Truncated: totalPOIs >= browseFetchLimit,
+	}
+
+	log.Printf("📊 [Density] Result: %d/%d retail POIs (%.0f%%), anchor=%v (%s)",
+		r.RetailCount, r.TotalPOIs, r.RetailRatio*100, r.HasAnchor, r.AnchorName)
+	// The measurement line. BASE is what scoring uses today; FULL is what is
+	// actually there. If FULL never exceeds BASE the old ceiling was theoretical
+	// and nothing needs changing; if it routinely does, the lead signal has been
+	// saturating and this is the evidence.
+	log.Printf("🔬 [DensityProbe] (%.4f,%.4f) BASE retail=%d/%d (%.0f%%) | FULL retail=%d/%d (%.0f%%) | headroom=+%d%s",
+		lat, lng, r.RetailCount, r.TotalPOIs, r.RetailRatio*100,
+		r.FullRetailCount, r.FullTotalPOIs, r.FullRetailRatio*100,
+		r.FullRetailCount-r.RetailCount,
+		map[bool]string{true: " | TRUNCATED — a full page came back, there may be more", false: ""}[r.Truncated])
+	return r
 }
 
 // verifyLocationVisually fetches a satellite image and uses Claude Vision to judge if it's a good bin placement spot.
