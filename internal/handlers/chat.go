@@ -22,7 +22,7 @@ const baseSystemPrompt = `You are Binly AI, an assistant for a waste bin managem
 
 ## Domain Knowledge
 
-- Bins are clothing donation bins placed at locations across the company's service areas (Binly places bins in cities nationwide across the US)
+- Bins are clothing donation bins placed at locations across the company's service areas. Binly operates in MULTIPLE COUNTRIES — currently the United States and Canada — and each organization works its own region. Never assume a country from the tool names or from your own priors.
 - fill_percentage (0-100%) — how full a bin is, checked by drivers during collection shifts
 - avg_daily_fill_rate — how fast a bin fills per day. Higher = more demand = better performing location
 - Urgency levels (based on estimated current fill): critical (>=80%), high (>=60%), medium (>=40%), low (<40%)
@@ -67,7 +67,9 @@ Bad format:
 ## Tool orchestration
 
 When recommending new bin locations:
-- Binly places bins in cities across the US. NEVER refuse a location for being "out of region", far from existing bins, or "outside the service area" — there is no fixed service area. If the user targets an area anywhere in the country, call recommend_bin_locations for it and present what comes back.
+- NEVER refuse a location for being "out of region", far from existing bins, or "outside the service area" — there is no fixed service area. If the user names an area, call recommend_bin_locations for it and present what comes back.
+- REPORT WHAT THE TOOL RETURNED, NOT WHAT YOU EXPECT IT TO RETURN. If recommend_bin_locations comes back with results, present them — even for a city you did not expect, in a country you did not expect. Do NOT tell the user the tool "returned nothing", "has no coverage", "is calibrated for US locations", or "may not support" their region unless the tool response is genuinely empty. This has happened: runs that returned 20 valid Toronto recommendations were reported to the user as failures because the prompt had said "US" and the model trusted that over the data in front of it. The tool result is the evidence; your expectations are not.
+- If a tool genuinely returns nothing, say so plainly and quote the shortfall reasons it gives. Do not speculate about data-coverage gaps you cannot see.
 - To recommend spots in a NEW area with no bins yet, first get the specific city or metro from the user (ask "which city?") and target that. Do not run a network-wide "where should we expand" search with no area — it only covers current operating regions and would mislead across a national footprint.
 - The recommend_bin_locations tool already filters out no-go zones and malls/Safeway internally. Mention this once, don't repeat it every time.
 
@@ -313,7 +315,7 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 		},
 		{
 			Name:        "get_census_income",
-			Description: anthropic.String(`Look up median household income for US zip codes. Use this when the user asks about income levels, demographics, or affordability of an area. Can look up a specific zip code or return all zip codes for a city.`),
+			Description: anthropic.String(`Look up median household income for US ZIP codes. US ONLY — the underlying cache is US Census data keyed on 5-digit ZIPs, so it returns nothing for Canadian postal codes or any non-US address. Do not call it for a Canadian city, and do not present its absence as a fact about that city. Use it when the user asks about income levels, demographics, or affordability of a US area.`),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]any{
 					"zip":  map[string]any{"type": "string", "description": "Specific zip code to look up (e.g. '94306')"},
