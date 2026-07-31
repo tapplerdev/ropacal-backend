@@ -70,7 +70,7 @@ func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 		scope := scopeForOrg(db)
 
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-			hereAutosuggestURL(q, candidateLimit, scope), nil)
+			hereGeocodeURL(q, candidateLimit, scope), nil)
 		if err != nil {
 			utils.RespondError(w, http.StatusInternalServerError, "could not build geocode request")
 			return
