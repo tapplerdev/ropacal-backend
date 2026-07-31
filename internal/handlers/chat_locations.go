@@ -81,6 +81,7 @@ type candidate struct {
 	POIScore        float64
 	LocationType    string
 	NearbyPOI       string // name of the whitelisted POI that matched (e.g. "Chevron Gas")
+	Category        string // HERE category ID of that POI; gates ambiguous anchor names (see matchesChain)
 	Source          string // "gap_fill" or "expansion"
 
 	// Core+halo classification vs the target area (set during target filtering).
@@ -933,7 +934,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				for _, biz := range businesses {
 					gapCandidates = append(gapCandidates, candidate{
 						Lat: biz.Lat, Lng: biz.Lng, City: area.City, Zip: biz.Zip,
-						NearbyPOI: biz.Name, LocationType: "commercial",
+						NearbyPOI: biz.Name, Category: biz.Category, LocationType: "commercial",
 						POIScore: 1.0, Source: "business_search",
 					})
 				}
@@ -1556,13 +1557,43 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			anchorScore = 0.15 // non-anchor floor (prevents zero from killing score)
 			nameLower := strings.ToLower(c.NearbyPOI)
 			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
-			// Tier 1 national anchors — highest foot traffic
-			tier1National := []string{"target", "walmart", "costco", "home depot", "lowes", "safeway", "trader joe", "whole foods", "dicks sporting", "kohls", "best buy", "sprouts"}
+			// Anchor chains, US + CANADA in one list. Deliberately NOT branched on
+			// the org's country: chain names are geographically distinctive
+			// (Loblaws and Shoppers Drug Mart do not exist in the US; Target and
+			// CVS do not exist in Canada), so a merged list simply does not fire
+			// outside its own country. Branching would mean detecting "is this
+			// org Canadian", which is a new thing that can be wrong — and is
+			// wrong for any org near a border or operating in both.
+			//
+			// Matching is WHOLE-WORD (matchesChain), not substring. As substrings
+			// these produce nonsense: "rona" matched Corona Bakery and Verona
+			// Pizza, "ross" matched Rossi's Pizza and Cross Street Cafe, "lucky"
+			// matched Lucky Nails. Those last two are US entries — the bug
+			// predates the Canadian additions.
+			//
+			// Names here are apostrophe-stripped to match nameNorm above
+			// ("longos", not "longo's").
+			tier1National := []string{
+				// US
+				"target", "walmart", "costco", "home depot", "lowes", "safeway",
+				"trader joe", "whole foods", "dicks sporting", "kohls", "best buy", "sprouts",
+				// Canada — big-box + the five major grocers and their banners
+				"canadian tire", "real canadian superstore", "loblaws", "no frills",
+				"metro", "sobeys", "food basics", "freshco", "fortinos", "zehrs",
+				"longos", "rona", "your independent grocer",
+			}
 			// Tier 2 regional chains — good foot traffic
-			tier2Regional := []string{"cvs", "walgreens", "grocery outlet", "food maxx", "99 ranch", "lucky", "dollar tree", "petco", "petsmart", "ross", "marshalls"}
+			tier2Regional := []string{
+				// US
+				"cvs", "walgreens", "grocery outlet", "food maxx", "99 ranch", "lucky",
+				"dollar tree", "petco", "petsmart", "ross", "marshalls",
+				// Canada — pharmacy, discount, specialty
+				"shoppers drug mart", "rexall", "dollarama", "giant tiger", "winners",
+				"homesense", "sport chek", "pet valu", "farm boy", "valu-mart", "staples",
+			}
 			isT1 := false
 			for _, anchor := range tier1National {
-				if strings.Contains(nameNorm, anchor) {
+				if matchesChain(nameNorm, anchor, c.Category) {
 					anchorScore = 1.0
 					isT1 = true
 					break
@@ -1570,7 +1601,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			}
 			if !isT1 {
 				for _, anchor := range tier2Regional {
-					if strings.Contains(nameNorm, anchor) {
+					if matchesChain(nameNorm, anchor, c.Category) {
 						anchorScore = 0.7
 						break
 					}
@@ -2085,7 +2116,7 @@ func fanOutSearch(client *http.Client, jobs []searchJob, workers int) []candidat
 				for _, biz := range businesses {
 					candidates = append(candidates, candidate{
 						Lat: biz.Lat, Lng: biz.Lng, City: job.City, Zip: biz.Zip,
-						NearbyPOI: biz.Name, LocationType: "commercial",
+						NearbyPOI: biz.Name, Category: biz.Category, LocationType: "commercial",
 						POIScore: 1.0, Source: job.Source,
 					})
 				}
@@ -3138,11 +3169,12 @@ REASON: one sentence why`, lat, lng, businessName),
 }
 
 type discoveredBusiness struct {
-	Name string
-	Lat  float64
-	Lng  float64
-	City string
-	Zip  string
+	Name     string
+	Lat      float64
+	Lng      float64
+	City     string
+	Zip      string
+	Category string // primary HERE category ID; "" when HERE returned none
 }
 
 // discoverBusinesses searches for real businesses near a location using HERE Discover API
@@ -3171,6 +3203,11 @@ func discoverBusinesses(client *http.Client, lat, lng float64, query string) []d
 				City       string `json:"city"`
 				PostalCode string `json:"postalCode"`
 			} `json:"address"`
+			// Country-independent numeric taxonomy — the reason ambiguous anchor
+			// names can be verified in any market without a per-country list.
+			Categories []struct {
+				ID string `json:"id"`
+			} `json:"categories"`
 		} `json:"items"`
 	}
 	if json.Unmarshal(body, &result) != nil {
@@ -3179,12 +3216,17 @@ func discoverBusinesses(client *http.Client, lat, lng float64, query string) []d
 	var businesses []discoveredBusiness
 	for _, item := range result.Items {
 		if item.Position.Lat != 0 {
+			primaryCat := ""
+			if len(item.Categories) > 0 {
+				primaryCat = item.Categories[0].ID
+			}
 			businesses = append(businesses, discoveredBusiness{
-				Name: item.Title,
-				Lat:  item.Position.Lat,
-				Lng:  item.Position.Lng,
-				City: item.Address.City,
-				Zip:  item.Address.PostalCode,
+				Name:     item.Title,
+				Lat:      item.Position.Lat,
+				Lng:      item.Position.Lng,
+				City:     item.Address.City,
+				Zip:      item.Address.PostalCode,
+				Category: primaryCat,
 			})
 		}
 	}
