@@ -1576,8 +1576,17 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		var densityScore float64
 		if useV2 {
 			// v2: continuous log-scaled density — ln(1+count) / ln(1+max)
-			// max 20 POIs = 1.0. Spreads 5-14 POI range into 0.60-0.89 instead of all being 1.0.
-			maxPOI := 20.0
+			//
+			// 20 -> 60. The old 20 was set when the count came from a 20-item
+			// page, so it could never be exceeded. Now that scoring reads the
+			// full window, real Toronto counts run to a median of 23 and a
+			// measured max of 56 — against a ceiling of 20 every one of those
+			// would clamp to 1.0 and the feature would go from noisy to
+			// completely flat.
+			//
+			// 60 is set just above the observed maximum so the whole real range
+			// stays separable: 9 -> 0.56, 23 -> 0.77, 56 -> 0.98.
+			maxPOI := 60.0
 			densityScore = math.Log(1+float64(poiDensity)) / math.Log(1+maxPOI)
 			if densityScore > 1.0 {
 				densityScore = 1.0
@@ -2934,6 +2943,29 @@ func anchorTenantsFor(country string) []string {
 
 // Non-retail HERE category prefixes to exclude from POI density count.
 // These inflate counts without indicating retail foot traffic.
+// errandRetailOverrides are categories that a BROADER exclusion prefix would
+// otherwise swallow, but which are exactly the errand retail this score exists
+// to find. Checked before nonRetailCategories, so a specific rule beats a
+// general one.
+//
+// 700-7400-0137 is laundry / dry cleaning. It was being dropped by the
+// "700-7400" prefix below, whose comment says "post office" — a prefix match
+// that also covers HERE's professional-services bucket. Across three Toronto
+// runs it silently discarded ten laundromats and dry cleaners, including a
+// 24-hour laundromat sitting AT 0 METRES from a candidate.
+//
+// That is not a marginal call. The expansion sweep explicitly searches for
+// "laundromat" as one of four errand keywords (see expKeywords), so the system
+// was hunting for laundromats to find candidates and then refusing to count
+// laundromats when grading them, ~600 lines apart in this same file.
+//
+// The rest of 700-7400 stays excluded and should: the audit found design
+// studios, film production and communications agencies in there, which is the
+// B2B the exclusion was written for.
+var errandRetailOverrides = []string{
+	"700-7400-0137", // laundromat / dry cleaner
+}
+
 var nonRetailCategories = []string{
 	"400-4000", // bus stop / transit
 	"400-4100", // train station
@@ -2978,7 +3010,7 @@ const (
 // the Baseline* fields reproduce today's behaviour exactly and are what scoring
 // reads; the Full* fields are the wider truth and are logged only.
 type densityReading struct {
-	RetailCount int // baseline — feeds the score
+	RetailCount int // what SCORING reads — now the full window
 	TotalPOIs   int
 	RetailRatio float64
 	HasAnchor   bool
@@ -2986,7 +3018,13 @@ type densityReading struct {
 	AnchorLat   float64
 	AnchorLng   float64
 
-	FullRetailCount int // everything HERE returned — measurement only
+	// The old nearest-20 sample, kept so runs before and after the flip stay
+	// comparable. Nothing scores off these.
+	BaseRetailCount int
+	BaseTotalPOIs   int
+	BaseRetailRatio float64
+
+	FullRetailCount int
 	FullTotalPOIs   int
 	FullRetailRatio float64
 	Truncated       bool // HERE returned a full page; there may be more still
@@ -3048,9 +3086,26 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 			primaryCat = item.Categories[0].ID
 		}
 
+		// A specific errand-retail category beats a broader exclusion prefix.
+		isOverride := false
+		for _, cat := range item.Categories {
+			for _, id := range errandRetailOverrides {
+				if strings.HasPrefix(cat.ID, id) {
+					isOverride = true
+					break
+				}
+			}
+			if isOverride {
+				break
+			}
+		}
+
 		// Skip non-retail categories (bus stops, ATMs, parking — inflate count without foot traffic)
 		isNonRetail := false
 		for _, cat := range item.Categories {
+			if isOverride {
+				break
+			}
 			for _, prefix := range nonRetailCategories {
 				if strings.HasPrefix(cat.ID, prefix) {
 					isNonRetail = true
@@ -3086,7 +3141,17 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 		// Check if it's a retail POI
 		isRetail := false
 		matchLabel := ""
+		if isOverride {
+			// Surviving the exclusion is not enough — it still has to be COUNTED,
+			// and 700-7400-0137 is in no whitelist. Without this it would fall
+			// through to "no whitelist match" and the fix would do nothing.
+			isRetail = true
+			matchLabel = "laundry/dry cleaning"
+		}
 		for _, cat := range item.Categories {
+			if isRetail {
+				break
+			}
 			for _, wl := range retailWhitelist {
 				if strings.HasPrefix(cat.ID, wl.Prefix) {
 					isRetail = true
@@ -3119,11 +3184,13 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 			}
 		}
 
-		// Anchor detection stays inside the baseline window. A wider page could
-		// otherwise surface an anchor 290m away that a limit=20 request never
-		// saw, silently raising anchorScore from 0.7 to 1.0 — a scoring change
-		// smuggled in under a measurement change.
-		if !hasAnchor && inBaseline {
+		// Anchor detection now sees the full window too. It was pinned to the
+		// baseline while this was measurement-only, so a wider page could not
+		// smuggle a scoring change in under a measurement change. That caution
+		// has served its purpose: an anchor 290m from a candidate is a real
+		// anchor, and there was never a reason to miss it beyond the page size
+		// we happened to request.
+		if !hasAnchor {
 			for _, anchor := range anchorTenants {
 				// Whole-word + category-gated, same as the tier match. Plain
 				// strings.Contains here is what let "Lucky Convenience" and
@@ -3146,10 +3213,20 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 		}
 		return float64(n) / float64(d)
 	}
+	// SCORING NOW READS THE FULL WINDOW. Measurement said the nearest-20 sample
+	// was close to noise: across 11 Toronto candidates it counted a median of 9
+	// retail POIs where 23 existed, and 28% of candidate PAIRS ranked in the
+	// wrong order against the true counts. The window is sorted by distance, so
+	// it mostly measured what happened to be physically closest rather than how
+	// much errand retail is actually there.
+	//
+	// Base* is still computed and logged, so runs stay comparable with the ones
+	// taken before this flip.
 	r := densityReading{
-		RetailCount: baseRetail, TotalPOIs: baseTotal, RetailRatio: ratio(baseRetail, baseTotal),
+		RetailCount: fullRetail, TotalPOIs: totalPOIs, RetailRatio: ratio(fullRetail, totalPOIs),
 		HasAnchor: hasAnchor, AnchorName: anchorName, AnchorLat: anchorLat, AnchorLng: anchorLng,
 
+		BaseRetailCount: baseRetail, BaseTotalPOIs: baseTotal, BaseRetailRatio: ratio(baseRetail, baseTotal),
 		FullRetailCount: fullRetail, FullTotalPOIs: totalPOIs, FullRetailRatio: ratio(fullRetail, totalPOIs),
 		Truncated: totalPOIs >= browseFetchLimit,
 	}
@@ -3160,10 +3237,10 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 	// actually there. If FULL never exceeds BASE the old ceiling was theoretical
 	// and nothing needs changing; if it routinely does, the lead signal has been
 	// saturating and this is the evidence.
-	log.Printf("🔬 [DensityProbe] (%.4f,%.4f) BASE retail=%d/%d (%.0f%%) | FULL retail=%d/%d (%.0f%%) | headroom=+%d%s",
-		lat, lng, r.RetailCount, r.TotalPOIs, r.RetailRatio*100,
+	log.Printf("🔬 [DensityProbe] (%.4f,%.4f) OLD retail=%d/%d (%.0f%%) | SCORED retail=%d/%d (%.0f%%) | gained=+%d%s",
+		lat, lng, r.BaseRetailCount, r.BaseTotalPOIs, r.BaseRetailRatio*100,
 		r.FullRetailCount, r.FullTotalPOIs, r.FullRetailRatio*100,
-		r.FullRetailCount-r.RetailCount,
+		r.FullRetailCount-r.BaseRetailCount,
 		map[bool]string{true: " | TRUNCATED — a full page came back, there may be more", false: ""}[r.Truncated])
 	return r
 }

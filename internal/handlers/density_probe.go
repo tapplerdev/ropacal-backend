@@ -72,8 +72,8 @@ func medianInt(xs []int) int {
 }
 
 // liveDensityCeiling mirrors maxPOI in the v2 site score. Kept here so the
-// probe and the scorer cannot drift apart silently.
-const liveDensityCeiling = 20.0
+// probe and the scorer cannot drift apart silently — a test pins them together.
+const liveDensityCeiling = 60.0
 
 // logDensityCeilingReport prints the per-run verdict.
 func logDensityCeilingReport(base, full []int, truncated []bool) {
