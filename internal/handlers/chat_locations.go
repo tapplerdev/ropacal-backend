@@ -967,6 +967,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		gapCount = count - expansionCount
 	}
 
+	// The organization's country selects the anchor-chain list. Read once per
+	// run rather than per candidate — it is a single row and cannot change
+	// mid-request.
+	orgCountry := organizationCountry(h.db)
+
 	tExpStart := time.Now()
 	var expCandidates []candidate
 	// With a resolved area, always sweep it (except pure infill): the whole
@@ -1557,40 +1562,13 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			anchorScore = 0.15 // non-anchor floor (prevents zero from killing score)
 			nameLower := strings.ToLower(c.NearbyPOI)
 			nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
-			// Anchor chains, US + CANADA in one list. Deliberately NOT branched on
-			// the org's country: chain names are geographically distinctive
-			// (Loblaws and Shoppers Drug Mart do not exist in the US; Target and
-			// CVS do not exist in Canada), so a merged list simply does not fire
-			// outside its own country. Branching would mean detecting "is this
-			// org Canadian", which is a new thing that can be wrong — and is
-			// wrong for any org near a border or operating in both.
-			//
-			// Matching is WHOLE-WORD (matchesChain), not substring. As substrings
-			// these produce nonsense: "rona" matched Corona Bakery and Verona
-			// Pizza, "ross" matched Rossi's Pizza and Cross Street Cafe, "lucky"
-			// matched Lucky Nails. Those last two are US entries — the bug
-			// predates the Canadian additions.
-			//
-			// Names here are apostrophe-stripped to match nameNorm above
-			// ("longos", not "longo's").
-			tier1National := []string{
-				// US
-				"target", "walmart", "costco", "home depot", "lowes", "safeway",
-				"trader joe", "whole foods", "dicks sporting", "kohls", "best buy", "sprouts",
-				// Canada — big-box + the five major grocers and their banners
-				"canadian tire", "real canadian superstore", "loblaws", "no frills",
-				"metro", "sobeys", "food basics", "freshco", "fortinos", "zehrs",
-				"longos", "rona", "your independent grocer",
-			}
-			// Tier 2 regional chains — good foot traffic
-			tier2Regional := []string{
-				// US
-				"cvs", "walgreens", "grocery outlet", "food maxx", "99 ranch", "lucky",
-				"dollar tree", "petco", "petsmart", "ross", "marshalls",
-				// Canada — pharmacy, discount, specialty
-				"shoppers drug mart", "rexall", "dollarama", "giant tiger", "winners",
-				"homesense", "sport chek", "pet valu", "farm boy", "valu-mart", "staples",
-			}
+			// Anchor chains for THIS ORGANIZATION'S COUNTRY. Scoped rather than
+			// merged: a single global list put the US chain "lucky" in front of
+			// six unrelated Toronto corner shops on the first live Canadian run.
+			// See anchor_chains.go for why the whole class needed scoping.
+			chains := chainsFor(orgCountry)
+			tier1National := chains.Tier1
+			tier2Regional := chains.Tier2
 			isT1 := false
 			for _, anchor := range tier1National {
 				if matchesChain(nameNorm, anchor, c.Category) {

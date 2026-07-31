@@ -41,6 +41,11 @@ type CreateOrganizationRequest struct {
 	Name       string `json:"name"`
 	Slug       string `json:"slug"`
 	AdminEmail string `json:"admin_email"`
+	// Country is ISO 3166-1 alpha-2 and selects the anchor-chain list the
+	// placement recommender matches POI names against. Defaults to US. Getting
+	// it wrong is not fatal — it means a Canadian tenant is scored against US
+	// chain names, so good sites next to a Loblaws read as having no anchor.
+	Country string `json:"country,omitempty"`
 	// Optional warehouse. Supply it whenever you know it — there is no
 	// dashboard UI for setting a warehouse, so a tenant created without one has
 	// no self-service way to fix it and every route optimization returns 412.
@@ -92,6 +97,14 @@ func CreateOrganization(root *sqlx.DB) http.HandlerFunc {
 
 		if req.Name == "" {
 			utils.RespondError(w, http.StatusBadRequest, "name is required")
+			return
+		}
+		req.Country = strings.ToUpper(strings.TrimSpace(req.Country))
+		if req.Country == "" {
+			req.Country = "US"
+		}
+		if len(req.Country) != 2 {
+			utils.RespondError(w, http.StatusBadRequest, "country must be a 2-letter ISO code, e.g. US or CA")
 			return
 		}
 		if !slugPattern.MatchString(req.Slug) {
@@ -178,8 +191,8 @@ func CreateOrganization(root *sqlx.DB) http.HandlerFunc {
 		}
 
 		if _, err := tx.Exec(
-			`INSERT INTO organizations (id, name, slug, status) VALUES ($1, $2, $3, 'active')`,
-			orgID, req.Name, req.Slug); err != nil {
+			`INSERT INTO organizations (id, name, slug, status, country) VALUES ($1, $2, $3, 'active', $4)`,
+			orgID, req.Name, req.Slug, req.Country); err != nil {
 			log.Printf("❌ [CreateOrg] organization insert failed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "could not create organization")
 			return

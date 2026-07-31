@@ -46,12 +46,19 @@ var ambiguousAnchors = map[string]bool{
 // which is exactly the case the gate exists to stop. Only add a prefix here after
 // seeing HERE actually return it.
 var anchorCategoryPrefixes = []string{
-	"600-6000", // convenience store
 	"600-6300", // grocery store
 	"600-6400", // pharmacy / drugstore
 	"600-6500", // hardware / home improvement
 	"600-6900", // retail / department store
 }
+
+// NOT in the list, deliberately: 600-6000 (convenience store). It was included
+// at first and immediately certified six Toronto corner shops as anchors on the
+// first live Canadian run — Lucky Convenience, Lucky Lotto Centre, Lucky Dollar
+// Food Centre and friends all matched the US chain "lucky" as a whole word AND
+// carried a legitimate convenience-store category, so the gate waved them
+// through. An anchor is a DESTINATION people drive to on purpose; a corner shop
+// is not one in any country, whatever it is called.
 
 // matchesChain reports whether name contains chain as a WHOLE WORD or phrase.
 //
