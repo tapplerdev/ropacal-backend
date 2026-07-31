@@ -353,7 +353,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "geocode-rank-retry",
+			"version":         "geocode-address",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -635,6 +635,14 @@ func registerTenantRoutes(r chi.Router, d routeDeps) {
 	// and ranked by distance from its warehouse — neither of which the browser
 	// can determine authoritatively.
 	r.Get("/geocode/search", handlers.GeocodeSearch(db))
+
+	// ADDRESS geocoding — the everyday surface (typing a bin's street address,
+	// dropping a map pin). Same three reasons as above, but it previously had no
+	// country filter at all and anchored on KANSAS CITY whenever the caller
+	// passed no location, which nearly every caller did. See geocode_address.go.
+	r.Get("/geocode/autosuggest", handlers.GeocodeAutosuggest(db))
+	r.Get("/geocode/lookup", handlers.GeocodeLookup(db))
+	r.Get("/geocode/reverse", handlers.GeocodeReverse(db))
 	r.Get("/analytics/timeseries", handlers.GetAnalyticsTimeseries(db))      // weekly operational buckets (Network Health tab)
 	r.Get("/analytics/bin-scorecard", handlers.GetBinScorecard(db))          // per-bin quadrant scorecard (Bin Performance tab)
 	r.Get("/analytics/growth/bin-yield", handlers.GetGrowthBinYields(db))    // per-bin 90d yield proxy (Growth hex map)
