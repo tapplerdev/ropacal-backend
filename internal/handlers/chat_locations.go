@@ -818,20 +818,27 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	// Keywords for business search
 	// Tier 1: high-value anchors (used for ALL bins)
-	tier1Keywords := []string{
-		"Target", "Walmart", "Safeway", "Trader Joe's", "Costco",
-		"Home Depot", "Lowe's", "Grocery Outlet", "Food Maxx",
-		"99 Ranch", "Lucky Supermarket", "Whole Foods", "Dollar Tree",
-		"Dick's Sporting Goods", "Kohl's", "Sprouts",
-	}
-	// Full keyword list: Tier 1 + Tier 2 + Tier 3 (high-fill bins only)
-	allKeywords := append(append([]string{}, tier1Keywords...),
-		"CVS", "Walgreens", "Best Buy", "PetSmart", "Petco",
+	// The organization's country scopes EVERY chain list in this function —
+	// the HERE search terms, the preliminary sort's anchor boost, the halo
+	// detection inside scorePOIDensity, and the tier score. Read once per run:
+	// it is a single row and cannot change mid-request.
+	orgCountry := organizationCountry(h.db)
+
+	// Chain names to SEARCH HERE for, scoped to this organization's country.
+	// Previously hardcoded US chains, which meant a Toronto run asked HERE for
+	// Target, Safeway, Trader Joe's, Food Maxx, 99 Ranch and Dollar Tree and
+	// never once looked for a Loblaws or a Shoppers Drug Mart — so the only
+	// candidates it could possibly find were the few US chains that also
+	// operate in Canada. Candidate GENERATION was the US-only assumption that
+	// mattered most; scoring can only rank what the search returned.
+	tier1Keywords, chainKeywords := searchTermsFor(orgCountry)
+	// Generic terms are country-independent — HERE resolves them by category.
+	allKeywords := append(append([]string{}, chainKeywords...),
 		"grocery store", "coffee shop",
 		"shopping center", "shopping plaza",
 	)
-	// v1 fallback
-	v1Keywords := []string{"gas station", "laundromat", "dollar tree", "grocery store", "coffee shop"}
+	// v1 fallback: generic only, so it degrades identically in any market.
+	v1Keywords := []string{"gas station", "laundromat", "grocery store", "coffee shop", "pharmacy"}
 
 	client := &http.Client{Timeout: 8 * time.Second}
 
@@ -966,11 +973,6 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		expansionCount = int(math.Ceil(float64(count) * 0.7))
 		gapCount = count - expansionCount
 	}
-
-	// The organization's country selects the anchor-chain list. Read once per
-	// run rather than per candidate — it is a single row and cannot change
-	// mid-request.
-	orgCountry := organizationCountry(h.db)
 
 	tExpStart := time.Now()
 	var expCandidates []candidate
@@ -1244,7 +1246,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// (ρ=−0.13) — the income floor was vetoing good candidates. Site quality
 	// (errand-retail density + anchor) is what predicts yield; crime stays as a
 	// safety screen, which the calibration doesn't speak to.
-	tier1Anchors := []string{"target", "walmart", "safeway", "trader joe", "costco", "home depot", "lowes", "grocery outlet", "food maxx", "99 ranch", "lucky", "whole foods", "dollar tree", "cvs", "walgreens"}
+	// Preliminary sort's anchor boost — the THIRD copy of this list before it
+	// was unified. Derived from the same country-scoped source as everything
+	// else so it cannot drift out of scope on its own.
+	tier1Anchors := anchorTenantsFor(orgCountry)
 	if useV2 && esriResults != nil {
 		var gatedCandidates []candidate
 		for i := range allCandidates {
@@ -1281,7 +1286,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		nameLower := strings.ToLower(allCandidates[i].NearbyPOI)
 		nameNorm := strings.ReplaceAll(strings.ReplaceAll(nameLower, "\u2019", ""), "'", "")
 		for _, anchor := range tier1Anchors {
-			if strings.Contains(nameNorm, anchor) {
+			if matchesChain(nameNorm, anchor, allCandidates[i].Category) {
 				anchorBoost = 1.0
 				break
 			}

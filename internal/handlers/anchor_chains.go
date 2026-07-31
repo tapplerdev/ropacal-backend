@@ -27,8 +27,23 @@ import (
 // Tier 2 = strong co-tenants (score 0.7): pharmacy, discount, specialty.
 
 type anchorChains struct {
+	// Tier1/Tier2 are MATCH forms: lowercase, apostrophe-stripped, compared
+	// against POI titles by matchesChain.
 	Tier1 []string
 	Tier2 []string
+	// SearchTier1/SearchTier2 are QUERY forms sent to HERE Discover to generate
+	// candidates in the first place. Separate from the match forms because they
+	// are human-facing search strings ("Trader Joe's", not "trader joe") and
+	// because what you SEARCH for is not always what you MATCH on.
+	//
+	// This distinction was missed at first, and it was the most consequential
+	// US-only assumption of the four: a Toronto run searched HERE for Target,
+	// Safeway, Trader Joe's, Food Maxx, 99 Ranch, Lucky Supermarket and Dollar
+	// Tree, so it never once looked for a Loblaws or a Shoppers Drug Mart. The
+	// only candidates it could find were the handful of US chains that also
+	// operate in Canada — which is exactly what the results showed.
+	SearchTier1 []string
+	SearchTier2 []string
 }
 
 // chainsByCountry is keyed on ISO 3166-1 alpha-2, matching organizations.country.
@@ -44,6 +59,13 @@ var chainsByCountry = map[string]anchorChains{
 			"cvs", "walgreens", "grocery outlet", "food maxx", "99 ranch", "lucky",
 			"dollar tree", "petco", "petsmart", "ross", "marshalls",
 		},
+		SearchTier1: []string{
+			"Target", "Walmart", "Safeway", "Trader Joe's", "Costco",
+			"Home Depot", "Lowe's", "Grocery Outlet", "Food Maxx",
+			"99 Ranch", "Lucky Supermarket", "Whole Foods", "Dollar Tree",
+			"Dick's Sporting Goods", "Kohl's", "Sprouts",
+		},
+		SearchTier2: []string{"CVS", "Walgreens", "Best Buy", "PetSmart", "Petco"},
 	},
 	"CA": {
 		Tier1: []string{
@@ -58,6 +80,15 @@ var chainsByCountry = map[string]anchorChains{
 			"shoppers drug mart", "rexall", "dollarama", "giant tiger", "winners",
 			"homesense", "marshalls", "sport chek", "pet valu", "farm boy",
 			"valu-mart", "staples", "best buy",
+		},
+		SearchTier1: []string{
+			"Walmart", "Costco", "Home Depot", "Canadian Tire", "Rona",
+			"Real Canadian Superstore", "Loblaws", "No Frills", "Metro",
+			"Sobeys", "Food Basics", "FreshCo", "Fortinos", "Zehrs", "Longo's",
+		},
+		SearchTier2: []string{
+			"Shoppers Drug Mart", "Rexall", "Dollarama", "Giant Tiger",
+			"Winners", "Sport Chek", "Best Buy", "Staples",
 		},
 	},
 }
@@ -120,4 +151,15 @@ func organizationCountry(db *orgdb.DB) string {
 	}
 	log.Printf("🏷️  [Anchor] organization %s country=%s — using %s chain list", orgID, country, strings.ToUpper(country))
 	return country
+}
+
+// searchTermsFor returns the HERE Discover query strings for a country:
+// tier-1 alone, and tier-1 + tier-2 combined.
+func searchTermsFor(country string) (tier1 []string, all []string) {
+	ch := chainsFor(country)
+	tier1 = append([]string{}, ch.SearchTier1...)
+	all = append(append([]string{}, tier1...), ch.SearchTier2...)
+	// Generic terms work in any market and are appended in both lists by the
+	// caller's existing logic; kept out of here so this stays chains-only.
+	return tier1, all
 }
