@@ -1041,10 +1041,14 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// Legacy path (geocode failed): single-point search at first hit.
 			cityCoords, geoErr := geocodeCityHERE(targetCity, geoScope)
 			if geoErr != nil {
-				log.Printf("⚠️ [Expand] Failed to geocode %s: %v", targetCity, geoErr)
-			} else {
-				log.Printf("📍 [Expand] Geocoded %s → (%.4f, %.4f)", targetCity, cityCoords.Lat, cityCoords.Lng)
+				// Previously this only logged and fell through, so a failed
+				// geocode handed the search the zero value and every candidate
+				// was scored against 0,0 in the Gulf of Guinea. An expansion
+				// with no usable centre must fail, not relocate to the Atlantic.
+				log.Printf("⚠️ [Expand] Failed to geocode %s: %v — skipping expansion", targetCity, geoErr)
+				return "", fmt.Errorf("could not locate %q", targetCity)
 			}
+			log.Printf("📍 [Expand] Geocoded %s → (%.4f, %.4f)", targetCity, cityCoords.Lat, cityCoords.Lng)
 			cities = []struct {
 				City string
 				Lat  float64
@@ -2663,8 +2667,19 @@ func geocodeAreaHERE(q string, scope geocodeScope) ([]areaTarget, error) {
 	return out, nil
 }
 
+// geocodeCityHERE resolves a city NAME to a centroid for the expansion search.
+//
+// It asks for several candidates and ranks them rather than taking HERE's first
+// hit, because HERE's first hit is measurably not the city. For the Toronto
+// organization, `London` returns the Thames Centre district — a hamlet in a
+// neighbouring township — ahead of the City of London. Taking Items[0] there
+// would silently centre an entire expansion analysis on the wrong place, and
+// nothing downstream could tell: the coordinates are real and ~15 km from the
+// right answer, so every result would look plausible.
+//
+// Same rule as the area picker; see geocode_rank.go.
 func geocodeCityHERE(city string, scope geocodeScope) (struct{ Lat, Lng float64 }, error) {
-	url := hereGeocodeURL(city, 1, scope)
+	url := hereGeocodeURL(city, 6, scope)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -2674,16 +2689,38 @@ func geocodeCityHERE(city string, scope geocodeScope) (struct{ Lat, Lng float64 
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
 		Items []struct {
-			Position struct {
+			ResultType             string `json:"resultType"`
+			LocalityType           string `json:"localityType"`
+			AdministrativeAreaType string `json:"administrativeAreaType"`
+			Position               struct {
 				Lat float64 `json:"lat"`
 				Lng float64 `json:"lng"`
 			} `json:"position"`
 		} `json:"items"`
 	}
-	if json.Unmarshal(body, &result) == nil && len(result.Items) > 0 {
-		return struct{ Lat, Lng float64 }{result.Items[0].Position.Lat, result.Items[0].Position.Lng}, nil
+	if json.Unmarshal(body, &result) != nil || len(result.Items) == 0 {
+		return struct{ Lat, Lng float64 }{}, fmt.Errorf("geocode failed for %s", city)
 	}
-	return struct{ Lat, Lng float64 }{}, fmt.Errorf("geocode failed for %s", city)
+
+	cands := make([]geocodeSearchResult, 0, len(result.Items))
+	for _, it := range result.Items {
+		if it.Position.Lat == 0 && it.Position.Lng == 0 {
+			continue
+		}
+		typ := it.LocalityType
+		if typ == "" {
+			typ = it.AdministrativeAreaType
+		}
+		if typ == "" {
+			typ = it.ResultType
+		}
+		cands = append(cands, geocodeSearchResult{Type: typ, Lat: it.Position.Lat, Lng: it.Position.Lng})
+	}
+	if len(cands) == 0 {
+		return struct{ Lat, Lng float64 }{}, fmt.Errorf("geocode failed for %s", city)
+	}
+	rankGeocodeResults(cands, scope)
+	return struct{ Lat, Lng float64 }{cands[0].Lat, cands[0].Lng}, nil
 }
 
 // classifyAndSnap searches within 800m for whitelisted retail POIs.

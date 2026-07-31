@@ -30,9 +30,16 @@ import (
 //     dashboard could read it and spend the HERE quota. Proxying through here
 //     keeps the key server-side, where HERE_API_KEY already lives.
 //
-// Results are scoped by the caller's org country AND ranked by distance from
-// its warehouse, so "Brentwood" still resolves to Brentwood CA for a Bay Area
-// tenant while "Windsor" resolves to Windsor ON for a Toronto one.
+// The division of labour with HERE: HERE supplies CANDIDATES, this file decides
+// ORDER. See geocode_rank.go for why the ordering cannot be delegated.
+
+// candidateLimit is how many results we ask HERE for. Deliberately larger than
+// what we return: re-ranking can only reorder what it was given, and the whole
+// point is that HERE's first result is often not the one we want.
+const candidateLimit = 20
+
+// resultLimit is how many survive to the dropdown.
+const resultLimit = 8
 
 type geocodeSearchResult struct {
 	Label string      `json:"label"`
@@ -42,7 +49,7 @@ type geocodeSearchResult struct {
 	Type  string      `json:"type"`
 }
 
-// GeocodeSearch proxies HERE's geocode endpoint with organization scoping.
+// GeocodeSearch proxies HERE's autosuggest endpoint with organization scoping.
 func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -60,7 +67,8 @@ func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 		db := orgdb.From(r)
 		scope := scopeForOrg(db)
 
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, hereGeocodeURL(q, 6, scope), nil)
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+			hereAutosuggestURL(q, candidateLimit, scope), nil)
 		if err != nil {
 			utils.RespondError(w, http.StatusInternalServerError, "could not build geocode request")
 			return
@@ -88,7 +96,10 @@ func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 				// administrativeArea with administrativeAreaType.
 				LocalityType           string `json:"localityType"`
 				AdministrativeAreaType string `json:"administrativeAreaType"`
-				Position               struct {
+				Address                struct {
+					Label string `json:"label"`
+				} `json:"address"`
+				Position struct {
 					Lat float64 `json:"lat"`
 					Lng float64 `json:"lng"`
 				} `json:"position"`
@@ -109,7 +120,14 @@ func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 		out := make([]geocodeSearchResult, 0, len(parsed.Items))
 		seen := make(map[string]bool, len(parsed.Items))
 		for _, it := range parsed.Items {
-			if it.Title == "" || seen[it.Title] {
+			// autosuggest's `title` is the bare name ("London"); the full
+			// disambiguating text lives in address.label ("London, ON, Canada").
+			// Without this the dropdown shows several identical rows.
+			label := it.Address.Label
+			if label == "" {
+				label = it.Title
+			}
+			if label == "" || seen[label] {
 				continue
 			}
 			// Filtering lives here rather than in the browser so the rule exists
@@ -121,6 +139,9 @@ func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 			switch it.ResultType {
 			case "locality", "administrativeArea", "street", "houseNumber", "address", "intersection":
 			default:
+				// Drops POIs (resultType=place) and, importantly, autosuggest's
+				// chainQuery/categoryQuery rows, which carry an href to run a
+				// further search instead of any coordinates at all.
 				continue
 			}
 			// States and countries are not placement targets; postal codes are
@@ -134,7 +155,7 @@ func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 			if it.Position.Lat == 0 && it.Position.Lng == 0 {
 				continue
 			}
-			seen[it.Title] = true
+			seen[label] = true
 			// Prefer the most specific type available, matching what the picker
 			// displays: localityType ("district") beats resultType ("locality").
 			typ := it.LocalityType
@@ -145,13 +166,18 @@ func GeocodeSearch(root *sqlx.DB) http.HandlerFunc {
 				typ = it.ResultType
 			}
 			res := geocodeSearchResult{
-				Label: it.Title, Lat: it.Position.Lat, Lng: it.Position.Lng,
+				Label: label, Lat: it.Position.Lat, Lng: it.Position.Lng,
 				Type: typ,
 			}
 			if mv := it.MapView; mv != nil {
 				res.BBox = &[4]float64{mv.West, mv.South, mv.East, mv.North}
 			}
 			out = append(out, res)
+		}
+
+		rankGeocodeResults(out, scope)
+		if len(out) > resultLimit {
+			out = out[:resultLimit]
 		}
 
 		log.Printf("🔎 [Geocode] %q → %d results (country=%s, biased to %.4f,%.4f)",

@@ -79,7 +79,9 @@ func (s geocodeScope) apply(qs *url.Values) {
 	}
 }
 
-// hereGeocodeURL builds a scoped geocode request.
+// hereGeocodeURL builds a scoped /geocode request — used where a single
+// authoritative resolution is wanted (a known city name from a tool call), not
+// for interactive search. See hereAutosuggestURL for the picker.
 //
 // The raw query is passed through WITHOUT a country suffix. Appending ",USA"
 // was the other half of the old bug: it polluted the search text itself, so
@@ -91,4 +93,50 @@ func hereGeocodeURL(q string, limit int, s geocodeScope) string {
 	qs.Set("apiKey", HereAPIKey)
 	s.apply(&qs)
 	return "https://geocode.search.hereapi.com/v1/geocode?" + qs.Encode()
+}
+
+// hereAutosuggestURL builds a scoped /autosuggest request for INTERACTIVE
+// search.
+//
+// /geocode is the wrong endpoint for a picker. Measured: with the Toronto
+// warehouse as the proximity anchor, "Windsor" on /geocode returned exactly ONE
+// result — a POI near Toronto typed `place` — and Windsor, Ontario (pop.
+// 230,000, 350 km away) never appeared at all. The `at=` bias makes /geocode
+// prefer a strong nearby match and suppress distant ones, which is precisely
+// backwards for "where should we expand". Dropping the bias fixes Windsor and
+// breaks US determinism, so neither setting of that one knob is correct.
+//
+// /autosuggest surfaces both the near and the distant candidates. Its own
+// ranking is weaker — it put Springfield, MO above Springfield, CA for a Bay
+// Area anchor — so the ORDER is redone server-side by rankGeocodeResults, where
+// it can be reasoned about instead of inferred from a vendor's heuristics.
+func hereAutosuggestURL(q string, limit int, s geocodeScope) string {
+	qs := url.Values{}
+	qs.Set("q", q)
+	qs.Set("limit", fmt.Sprintf("%d", limit))
+	qs.Set("apiKey", HereAPIKey)
+	s.apply(&qs)
+	// /autosuggest REQUIRES `at` or `in=circle`. Fall back to the country
+	// centroid when the warehouse is unset so the request is still valid.
+	if qs.Get("at") == "" {
+		qs.Set("at", countryCentroid(s.Country))
+	}
+	return "https://autosuggest.search.hereapi.com/v1/autosuggest?" + qs.Encode()
+}
+
+// countryCentroid is a rough anchor for /autosuggest when an organization has
+// no warehouse yet. Only ever affects tie-breaking, never filtering.
+func countryCentroid(here3 string) string {
+	switch here3 {
+	case "CAN":
+		return "56.130400,-106.346800"
+	case "GBR":
+		return "54.702400,-3.276600"
+	case "AUS":
+		return "-25.274400,133.775100"
+	case "MEX":
+		return "23.634500,-102.552800"
+	default:
+		return "39.828200,-98.579500" // geographic centre of the contiguous US
+	}
 }
