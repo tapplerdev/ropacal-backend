@@ -158,20 +158,118 @@ var b2bTitleKeywords = []string{
 	"tattoo", "piercing", "barber",
 }
 
-// Bay Area cities for expansion mode — places we could expand to
-var expansionCities = []struct {
+// expansionRadiusMiles bounds how far from the WAREHOUSE a suggested expansion
+// city may sit. 75 miles is a ~150-mile round trip, which is the practical limit
+// for a truck that starts and ends its shift at the yard.
+//
+// Anchored on the warehouse rather than the centroid of existing bins on
+// purpose: the warehouse is where every route begins and ends, and it does not
+// drift every time a bin is added.
+const expansionRadiusMiles = 75.0
+
+// expansionShortlistSize caps how many cities reach the EXPENSIVE stage. Each
+// surviving city costs HERE searches plus ESRI enrichment per candidate site, and
+// a 75-mile radius around a metro warehouse contains well over a hundred places —
+// scoring them all would be hundreds of paid API calls per request. Population
+// is only used to pick which ones are worth that spend; the real ranking comes
+// from the placement scorer downstream.
+const expansionShortlistSize = 10
+
+// expansionOrigins returns the cities this organization could plausibly expand
+// into: within expansionRadiusMiles of its warehouse, minus everywhere it
+// already operates, largest first.
+//
+// This REPLACED a hardcoded list of eight Bay Area cities. That list was correct
+// for exactly one tenant — every other organization was told to expand into
+// Fremont and Hayward regardless of which continent it was on.
+//
+// Returns nil when the warehouse is unset (provisioning seeds new organizations
+// at 0,0, and a radius around that point is in the Gulf of Guinea). The caller
+// logs and skips expansion rather than emitting nonsense.
+// The return type mirrors the anonymous shape the expansion path already
+// threads through fanOutSearch — kept identical so no downstream code changes.
+func expansionOrigins(db *orgdb.DB, bins []existingBin) []struct {
 	City string
 	Lat  float64
 	Lng  float64
-}{
-	{"Fremont", 37.5485, -121.9886},
-	{"Hayward", 37.6688, -122.0808},
-	{"Oakland", 37.8044, -122.2712},
-	{"Berkeley", 37.8716, -122.2727},
-	{"Union City", 37.5934, -122.0439},
-	{"Newark", 37.5297, -122.0402},
-	{"Milpitas", 37.4323, -121.8996},
-	{"San Leandro", 37.7249, -122.1561},
+} {
+	whLat, whLng, ok := warehouseCoords(db)
+	if !ok {
+		log.Printf("⚠️  [Expand] no usable warehouse location — skipping city expansion")
+		return nil
+	}
+
+	nearby, err := geo.CitiesWithin(whLat, whLng, expansionRadiusMiles)
+	if err != nil {
+		log.Printf("⚠️  [Expand] city lookup failed: %v", err)
+		return nil
+	}
+
+	// Everywhere this organization already has bins is not an "expansion".
+	covered := make([]string, 0, len(bins))
+	for _, b := range bins {
+		if b.City != "" {
+			covered = append(covered, b.City)
+		}
+	}
+	nearby = geo.ExcludeCities(nearby, covered)
+
+	if len(nearby) > expansionShortlistSize {
+		nearby = nearby[:expansionShortlistSize]
+	}
+
+	origins := make([]struct {
+		City string
+		Lat  float64
+		Lng  float64
+	}, 0, len(nearby))
+	for _, c := range nearby {
+		origins = append(origins, struct {
+			City string
+			Lat  float64
+			Lng  float64
+		}{City: c.Name, Lat: c.Lat, Lng: c.Lng})
+	}
+	if len(origins) > 0 {
+		log.Printf("🗺️  [Expand] %d candidate cities within %.0f mi of the warehouse (largest first): %s",
+			len(origins), expansionRadiusMiles, originNames(origins))
+	} else {
+		log.Printf("ℹ️  [Expand] no uncovered cities within %.0f mi of the warehouse", expansionRadiusMiles)
+	}
+	return origins
+}
+
+func originNames(o []struct {
+	City string
+	Lat  float64
+	Lng  float64
+}) string {
+	names := make([]string, len(o))
+	for i, x := range o {
+		names[i] = x.City
+	}
+	return strings.Join(names, ", ")
+}
+
+// warehouseCoords reads the organization's warehouse position. The second
+// return is false when it is missing, unparseable, or still the 0,0 placeholder
+// that provisioning writes.
+func warehouseCoords(db *orgdb.DB) (lat, lng float64, ok bool) {
+	var raw []byte
+	if err := db.Get(&raw, `SELECT value FROM config WHERE key = 'warehouse_location'`); err != nil {
+		return 0, 0, false
+	}
+	var v struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return 0, 0, false
+	}
+	if v.Latitude == 0 && v.Longitude == 0 {
+		return 0, 0, false
+	}
+	return v.Latitude, v.Longitude, true
 }
 
 func stripZipPlus4(zip string) string {
@@ -807,8 +905,10 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 
 	if shouldExpand {
-		// Build expansion jobs using same fanOutSearch pattern
-		cities := expansionCities
+		// Build expansion jobs using same fanOutSearch pattern.
+		// Derived from THIS organization's warehouse, not a hardcoded region —
+		// see expansionOrigins.
+		cities := expansionOrigins(h.db, bins)
 		if area != nil {
 			// Tile the area's bbox into search origins (~1.8 km grid) so a
 			// city- or district-sized target gets swept, not sampled once at

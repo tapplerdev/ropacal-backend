@@ -29,3 +29,9 @@ func HaversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 func HaversineMiles(lat1, lon1, lat2, lon2 float64) float64 {
 	return HaversineMeters(lat1, lon1, lat2, lon2) / metersPerMile
 }
+
+// cosDeg is math.Cos for an angle in degrees — used when sizing a
+// longitude-degree box, where degrees narrow toward the poles.
+func cosDeg(deg float64) float64 {
+	return math.Cos(deg * math.Pi / 180)
+}
