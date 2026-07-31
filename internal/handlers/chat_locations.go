@@ -1289,6 +1289,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	// the post-loop core+halo refinement can build the area profile and gate
 	// "near_area" picks by similarity. Extracted into `recommendations` after.
 	var scored []scoredRec
+	placementLog := make([]placementDecision, 0, 128)
 	gapResults, expResults := 0, 0
 	// Near-misses: candidates that survived every gate but scored below the
 	// 4.0 quality bar. Returned SEPARATELY (never mixed into recommendations)
@@ -1656,6 +1657,24 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			DistanceFromAreaMi: math.Round(c.DistMiles*100) / 100,
 		}
 		scored = append(scored, scoredRec{rec: rec, feat: featureVec{densityScore, anchorScore, fillVal, popVal}})
+
+		// PHASE 0: freeze this candidate's decision-time features. Recorded for
+		// every scored candidate, not just the ones returned — the losing
+		// shortlist is what makes the gates auditable and propensity correction
+		// possible later. Outcome is decided after the final cut below.
+		// poiDensity (raw errand-POI count) is the calibrated lead signal; the
+		// normalized densityScore is a derived transform, so the RAW count is
+		// what gets frozen.
+		placementLog = append(placementLog, placementDecision{
+			Lat: rec.Latitude, Lng: rec.Longitude, Score: finalScore,
+			Features: placementFeatures{
+				RetailDensity:   float64(poiDensity),
+				AnchorStrength:  anchorScore,
+				DaytimePop:      float64(zipPopulation[stripZipPlus4(c.Zip)]), // RAW population — see placementFeatures
+				DistNearestBinM: c.NearestBinDist,
+				MedianIncome:    float64(zipIncome[zip5]),
+			},
+		})
 		cityCount[cityKey]++
 		if c.Source != "expansion" {
 			gapResults++
@@ -1673,6 +1692,37 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
 	log.Printf("📍 [Recommend] Final: %d (gap_fill: %d, expansion: %d, in_area: %d, nearby: %d)", len(recommendations), gapResults, expResults, inAreaCount, nearbyCount)
+
+	// PHASE 0: settle each logged candidate's outcome now that the final cut is
+	// known, then write the batch. Coordinates are the join key because that is
+	// what both the recommendation and the frozen row carry — rec.Latitude is
+	// already rounded to 4dp (~11 m) on both sides, so the comparison is exact
+	// rather than a float tolerance.
+	//
+	// Anything scored but not returned is "rejected". The reason is deliberately
+	// coarse — refineByAreaProfile and the count cut both land here — because a
+	// truthful coarse label beats a precise-looking guess in training data.
+	{
+		kept := make(map[[2]float64]bool, len(recommendations))
+		for _, r := range recommendations {
+			kept[[2]float64{r.Latitude, r.Longitude}] = true
+		}
+		for i := range placementLog {
+			if kept[[2]float64{placementLog[i].Lat, placementLog[i].Lng}] {
+				placementLog[i].Outcome = "placed"
+			} else {
+				placementLog[i].Outcome = "rejected"
+				placementLog[i].RejectReason = "not_selected"
+			}
+		}
+		areaLabel := targetCity
+		if area != nil {
+			areaLabel = areaShortLabel(area.Label)
+		}
+		// seed 0 = deterministic argmax, no randomness to reproduce. A real seed
+		// belongs here once explore slots exist.
+		logPlacementDecisions(h.db, areaLabel, 0, placementLog)
+	}
 	log.Printf("⏱️ [Timing] TOTAL: %v, returning %d results", time.Since(tTotal), len(recommendations))
 
 	// Top 3 near-misses only — enough for a human override, not a second list.
