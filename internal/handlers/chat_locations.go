@@ -513,6 +513,17 @@ func filterCandidates(
 }
 
 func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, error) {
+	// The organization's country scopes EVERYTHING country-specific in this
+	// function: the HERE geocode filter, the search keywords, the preliminary
+	// sort's anchor boost, the halo detection in scorePOIDensity, and the tier
+	// score. Read once per run — a single row that cannot change mid-request.
+	orgCountry := organizationCountry(h.db)
+	// Country filter + warehouse proximity for every HERE geocode below.
+	// Replaces a hardcoded ",USA" + in=countryCode:USA that made Canadian area
+	// searches structurally impossible: typing "Brampton" returned Brampton
+	// Township, Michigan, because Brampton, Ontario was excluded by construction.
+	geoScope := scopeForOrg(h.db)
+
 	count := 10
 	if c, ok := params["count"].(float64); ok && c > 0 {
 		count = int(c)
@@ -568,7 +579,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		}
 	}
 	if area == nil && targetCity != "" {
-		options, geoErr := geocodeAreaHERE(targetCity)
+		options, geoErr := geocodeAreaHERE(targetCity, geoScope)
 		if geoErr != nil {
 			log.Printf("⚠️ [Recommend] Area geocode failed for %q: %v — falling back to legacy city handling", targetCity, geoErr)
 		} else if len(options) == 1 {
@@ -818,11 +829,6 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 
 	// Keywords for business search
 	// Tier 1: high-value anchors (used for ALL bins)
-	// The organization's country scopes EVERY chain list in this function —
-	// the HERE search terms, the preliminary sort's anchor boost, the halo
-	// detection inside scorePOIDensity, and the tier score. Read once per run:
-	// it is a single row and cannot change mid-request.
-	orgCountry := organizationCountry(h.db)
 
 	// Chain names to SEARCH HERE for, scoped to this organization's country.
 	// Previously hardcoded US chains, which meant a Toronto run asked HERE for
@@ -1033,7 +1039,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			targetCity = areaShortLabel(area.Label) // short name for labels/caps — never the full HERE title
 		} else if targetCity != "" {
 			// Legacy path (geocode failed): single-point search at first hit.
-			cityCoords, geoErr := geocodeCityHERE(targetCity)
+			cityCoords, geoErr := geocodeCityHERE(targetCity, geoScope)
 			if geoErr != nil {
 				log.Printf("⚠️ [Expand] Failed to geocode %s: %v", targetCity, geoErr)
 			} else {
@@ -2564,9 +2570,8 @@ func (a *areaTarget) searchOrigins(maxOrigins int, haloKm float64) []struct{ Lat
 // options and the caller surfaces the choice (see disambiguation_needed) instead
 // of guessing; the state gets picked explicitly. The dashboard picker's
 // per-option title already carries the state, so most calls arrive pre-resolved.
-func geocodeAreaHERE(q string) ([]areaTarget, error) {
-	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,USA&in=countryCode:USA&limit=5&apiKey=%s",
-		strings.ReplaceAll(q, " ", "+"), HereAPIKey)
+func geocodeAreaHERE(q string, scope geocodeScope) ([]areaTarget, error) {
+	url := hereGeocodeURL(q, 5, scope)
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -2658,9 +2663,8 @@ func geocodeAreaHERE(q string) ([]areaTarget, error) {
 	return out, nil
 }
 
-func geocodeCityHERE(city string) (struct{ Lat, Lng float64 }, error) {
-	url := fmt.Sprintf("https://geocode.search.hereapi.com/v1/geocode?q=%s,USA&limit=1&apiKey=%s",
-		strings.ReplaceAll(city, " ", "+"), HereAPIKey)
+func geocodeCityHERE(city string, scope geocodeScope) (struct{ Lat, Lng float64 }, error) {
+	url := hereGeocodeURL(city, 1, scope)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
