@@ -26,6 +26,22 @@ var caPlacesJSON []byte
 //go:embed data/la_districts.json
 var laDistrictsJSON []byte
 
+// onPlacesJSON is the compiled-in boundary asset for ONTARIO: all 414 local
+// municipalities (241 lower-tier + 173 single-tier) from the Ontario GeoHub
+// "Municipal Boundary - Lower and Single Tier" layer, published by the Ministry
+// of Municipal Affairs and Housing, simplified to ~30 m. Water extents are
+// dropped, so these are land outlines — keeping them would stretch lakeshore
+// cities far out into Lake Ontario and make point-in-polygon match boats.
+//
+// Open Government Licence - Ontario. Attribution required wherever surfaced:
+//
+//	Contains information licensed under the Open Government Licence - Ontario.
+//
+// Regenerate with scripts/build_on_places.py.
+//
+//go:embed data/on_places.json
+var onPlacesJSON []byte
+
 // ring is a closed sequence of [lng, lat] vertices.
 type ring [][2]float64
 
@@ -158,8 +174,13 @@ func pointInRing(x, y float64, r ring) bool {
 // startup and read concurrently thereafter (never mutated after Load, so no
 // locking needed).
 type BoundaryStore struct {
-	cityByNorm     map[string]*Boundary
-	districtByNorm map[string]*Boundary
+	// Keyed by normalized name, but a name can map to SEVERAL boundaries: with
+	// more than one region loaded, real collisions exist — Windsor and Richmond
+	// are both California cities and Ontario municipalities. Lookup disambiguates
+	// on the picked coordinates. A single-value map would have silently made one
+	// of each pair unreachable forever.
+	cityByNorm     map[string][]*Boundary
+	districtByNorm map[string][]*Boundary
 }
 
 // districtTypes are HERE area types that resolve to a NEIGHBORHOOD polygon
@@ -173,10 +194,10 @@ var rejectTypes = map[string]bool{
 	"state": true, "country": true,
 }
 
-// loadRecords parses one embedded asset (cities or districts) into a
-// name-keyed map. First writer wins on a name collision (names are ~unique
-// within each layer; the lat/lng sanity check in Lookup catches the rest).
-func loadRecords(data []byte, typ, label string) (map[string]*Boundary, error) {
+// loadRecords parses one embedded asset and APPENDS into dst, which may already
+// hold boundaries from another region. Same-name entries accumulate rather than
+// overwrite; Lookup picks between them using the picked coordinates.
+func loadRecords(dst map[string][]*Boundary, data []byte, typ, label string) error {
 	var records []struct {
 		Name     string          `json:"name"`
 		NameNorm string          `json:"name_norm"`
@@ -186,13 +207,12 @@ func loadRecords(data []byte, typ, label string) (map[string]*Boundary, error) {
 		Geometry json.RawMessage `json:"geometry"`
 	}
 	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", label, err)
+		return fmt.Errorf("parse %s: %w", label, err)
 	}
-	out := make(map[string]*Boundary, len(records))
 	for _, rec := range records {
 		polys, err := parseGeometry(rec.Geometry)
 		if err != nil {
-			return nil, fmt.Errorf("parse geometry for %q: %w", rec.Name, err)
+			return fmt.Errorf("parse geometry for %q: %w", rec.Name, err)
 		}
 		lsad := rec.NameLSAD
 		if lsad == "" && rec.Parent != "" {
@@ -202,28 +222,40 @@ func loadRecords(data []byte, typ, label string) (map[string]*Boundary, error) {
 			Name: rec.Name, NameNorm: rec.NameNorm, NameLSAD: lsad,
 			Type: typ, BBox: rec.BBox, polys: polys, rawGeometry: rec.Geometry,
 		}
-		if _, exists := out[b.NameNorm]; !exists {
-			out[b.NameNorm] = b
-		}
+		dst[b.NameNorm] = append(dst[b.NameNorm], b)
 	}
-	return out, nil
+	return nil
 }
 
 // LoadBoundaries parses the embedded city + district assets into a lookup store.
 func LoadBoundaries() (*BoundaryStore, error) {
-	cities, err := loadRecords(caPlacesJSON, "city", "ca_places.json")
-	if err != nil {
+	cities := make(map[string][]*Boundary, 1024)
+	// Order is irrelevant now that same-name entries accumulate and Lookup
+	// disambiguates geographically — adding a region cannot displace another.
+	if err := loadRecords(cities, caPlacesJSON, "city", "ca_places.json"); err != nil {
 		return nil, err
 	}
-	districts, err := loadRecords(laDistrictsJSON, "district", "la_districts.json")
-	if err != nil {
+	if err := loadRecords(cities, onPlacesJSON, "city", "on_places.json"); err != nil {
+		return nil, err
+	}
+	districts := make(map[string][]*Boundary, 128)
+	if err := loadRecords(districts, laDistrictsJSON, "district", "la_districts.json"); err != nil {
 		return nil, err
 	}
 	return &BoundaryStore{cityByNorm: cities, districtByNorm: districts}, nil
 }
 
 // Count returns the total number of loaded boundaries (cities + districts).
-func (s *BoundaryStore) Count() int { return len(s.cityByNorm) + len(s.districtByNorm) }
+func (s *BoundaryStore) Count() int {
+	n := 0
+	for _, v := range s.cityByNorm {
+		n += len(v)
+	}
+	for _, v := range s.districtByNorm {
+		n += len(v)
+	}
+	return n
+}
 
 // Lookup resolves a picked area to its boundary polygon, or nil when there is
 // none: a district-type name resolves against the neighborhood layer, a
@@ -234,26 +266,35 @@ func (s *BoundaryStore) Lookup(name, typ string, lat, lng float64) *Boundary {
 	if rejectTypes[typ] {
 		return nil
 	}
-	var b *Boundary
+	var candidates []*Boundary
 	if districtTypes[typ] {
-		b = s.districtByNorm[normName(name)]
+		candidates = s.districtByNorm[normName(name)]
 	} else {
-		b = s.cityByNorm[normName(name)]
+		candidates = s.cityByNorm[normName(name)]
 	}
-	if b == nil {
+	if len(candidates) == 0 {
 		return nil
 	}
-	// Reject a same-name area elsewhere: the picked center must sit inside the
-	// matched boundary's bbox (with a ~5.5 km margin for centers HERE places
-	// just outside the line).
-	if lat != 0 || lng != 0 {
-		const margin = 0.05
-		if lng < b.BBox[0]-margin || lng > b.BBox[2]+margin ||
-			lat < b.BBox[1]-margin || lat > b.BBox[3]+margin {
-			return nil
+	// Without coordinates there is nothing to disambiguate on, so only an
+	// unambiguous name can resolve. Returning an arbitrary one of several
+	// same-named cities on different continents would be worse than no answer.
+	if lat == 0 && lng == 0 {
+		if len(candidates) == 1 {
+			return candidates[0]
+		}
+		return nil
+	}
+	// The picked center must sit inside the matched boundary's bbox (with a
+	// ~5.5 km margin for centers HERE places just outside the line). This is
+	// what separates Windsor, Ontario from Windsor, California.
+	const margin = 0.05
+	for _, b := range candidates {
+		if lng >= b.BBox[0]-margin && lng <= b.BBox[2]+margin &&
+			lat >= b.BBox[1]-margin && lat <= b.BBox[3]+margin {
+			return b
 		}
 	}
-	return b
+	return nil
 }
 
 // normName lowercases and collapses whitespace to match the asset's name_norm.
