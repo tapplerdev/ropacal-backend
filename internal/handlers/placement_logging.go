@@ -35,10 +35,23 @@ import (
 // FAILURE POLICY: best-effort, never blocking. A logging failure must not cost a
 // user their recommendations — the whole feature is an offline learning aid.
 
-// placementModelVersion marks rows produced by the hand-tuned formula. NULL is
-// reserved by the Python contract for "legacy, pre-logging"; 0 means "the
-// hand-tuned v2 site score", so re-fits can separate eras.
-const placementModelVersion = 0
+// placementModelVersion separates FEATURE ERAS, not just formula revisions. NULL
+// is reserved by the Python contract for "legacy, pre-logging".
+//
+//	0 — hand-tuned v2 site score. retail_density counted retail among the
+//	    NEAREST 20 POIs within 300m.
+//	1 — same formula, corrected density. retail_density now counts retail across
+//	    the full window (up to browseFetchLimit), and laundry/dry-cleaning is no
+//	    longer discarded by an over-broad post-office category prefix.
+//
+// The bump matters more than a formula change would. Measured on live Toronto
+// candidates, the old sample counted a median of 9 retail POIs where 23 existed
+// — the same location yields a retail_density roughly 2.6x larger under 1 than
+// under 0. Regressing yield on a column that means two different things
+// attenuates the fitted coefficient and the result describes neither era.
+//
+// The Python side must not pool eras silently; cli._training_frame enforces it.
+const placementModelVersion = 1
 
 // placementDecision is one candidate's frozen decision-time record.
 type placementDecision struct {
