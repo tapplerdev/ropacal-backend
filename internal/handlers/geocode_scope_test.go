@@ -44,54 +44,54 @@ func TestHereGeocodeURL_NoCountrySuffixInQuery(t *testing.T) {
 	}
 }
 
-// /geocode must NOT carry a proximity bias. This test previously asserted the
-// exact opposite, and the reversal is the point.
+// Proximity is what preserves determinism for US tenants after the hardcoded
+// country pin was removed. A Bay Area organization searching "Brentwood" must
+// still be biased toward its own warehouse.
 //
-// `at=` was there to make a bare "Brentwood" resolve deterministically for a
-// Bay Area org. Measured against production it did not do that job: it
-// SUPPRESSED distant candidates ("Windsor" for a Toronto org returned no
-// Windsor, Ontario at all) while still letting HERE's own relevance put a
-// hamlet above a city ("London" -> Thames Centre district). Both halves failed.
-//
-// Determinism did not go away — it moved somewhere it can be tested offline.
-// See rankGeocodeResults and TestRank_SameTypeFallsBackToDistance.
-func TestHereGeocodeURL_CarriesNoProximityBias(t *testing.T) {
+// Dropping this anchor was tried and measured WORSE: unanchored, HERE stopped
+// returning the nearby city at all — "Hayward" for the Hayward org came back as
+// streets and a district, and "Richmond" lost Richmond CA to Richmond VA.
+func TestHereGeocodeURL_ProximityBiasIsSet(t *testing.T) {
 	u := hereGeocodeURL("Brentwood", 5, geocodeScope{Country: "USA", Lat: 37.6368, Lng: -122.1269})
 	qs, _ := url.ParseQuery(strings.SplitN(u, "?", 2)[1])
-	if got := qs.Get("at"); got != "" {
-		t.Errorf("proximity bias %q is set — it suppresses distant candidates before "+
-			"rankGeocodeResults ever sees them", got)
+	if qs.Get("at") == "" {
+		t.Error("no proximity bias — a bare 'Brentwood' becomes ambiguous across states again")
 	}
 	if qs.Get("in") != "countryCode:USA" {
-		t.Errorf("country filter = %q — the hard filter must stay", qs.Get("in"))
+		t.Errorf("country filter = %q", qs.Get("in"))
 	}
 }
 
-// The country filter is independent of the warehouse: an organization with no
-// warehouse yet must still be confined to its own country.
-func TestHereGeocodeURL_UnsetWarehouseStillFiltersCountry(t *testing.T) {
+// Provisioning seeds new organizations with a 0,0 warehouse. Biasing a search
+// toward the Gulf of Guinea is worse than not biasing at all.
+func TestHereGeocodeURL_UnsetWarehouseOmitsProximity(t *testing.T) {
 	u := hereGeocodeURL("Toronto", 5, geocodeScope{Country: "CAN"})
 	qs, _ := url.ParseQuery(strings.SplitN(u, "?", 2)[1])
-	if qs.Get("in") != "countryCode:CAN" {
-		t.Error("country filter should apply without a warehouse")
-	}
 	if qs.Get("at") != "" {
-		t.Errorf("unexpected bias %q", qs.Get("at"))
+		t.Errorf("proximity bias %q was set from an unset (0,0) warehouse", qs.Get("at"))
+	}
+	if qs.Get("in") != "countryCode:CAN" {
+		t.Error("country filter should still apply without a warehouse")
 	}
 }
 
-// Autosuggest is the one endpoint that REQUIRES an anchor, so an organization
-// seeded at 0,0 must still produce a valid request. The centroid is coarse but
-// on the right continent, which the Gulf of Guinea is not.
-func TestAnchor_FallsBackToCountryCentroid(t *testing.T) {
-	if got := (geocodeScope{Country: "CAN"}).anchor(); got != "56.130400,-106.346800" {
-		t.Errorf("unset warehouse anchored at %q, want the Canadian centroid", got)
+// The Windsor retry: unbiased() must drop the anchor and KEEP the country
+// filter. Dropping the country too would let a Toronto search return Windsor,
+// Colorado — the retry is meant to widen the radius, not leave the country.
+func TestUnbiased_DropsAnchorKeepsCountry(t *testing.T) {
+	s := geocodeScope{Country: "CAN", Lat: 43.6426, Lng: -79.3771}.unbiased()
+	if s.Lat != 0 || s.Lng != 0 {
+		t.Errorf("anchor survived: %.4f,%.4f", s.Lat, s.Lng)
 	}
-	if got := (geocodeScope{Country: "CAN", Lat: 43.6426, Lng: -79.3771}).anchor(); got != "43.642600,-79.377100" {
-		t.Errorf("anchor = %q, want the warehouse when it is set", got)
+	if s.Country != "CAN" {
+		t.Errorf("country = %q, want CAN — the retry must not cross the border", s.Country)
 	}
-	if got := (geocodeScope{}).anchor(); got != "39.828200,-98.579500" {
-		t.Errorf("unknown country anchored at %q, want the US centroid default", got)
+	qs, _ := url.ParseQuery(strings.SplitN(hereGeocodeURL("Windsor", 20, s), "?", 2)[1])
+	if qs.Get("at") != "" {
+		t.Errorf("retry URL still anchored at %q", qs.Get("at"))
+	}
+	if qs.Get("in") != "countryCode:CAN" {
+		t.Errorf("retry URL country filter = %q", qs.Get("in"))
 	}
 }
 

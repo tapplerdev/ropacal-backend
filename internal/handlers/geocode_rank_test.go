@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"net/url"
 	"strings"
 	"testing"
 )
@@ -140,34 +139,5 @@ func TestHaversine_KnownDistance(t *testing.T) {
 	}
 	if haversineKm(43.6426, -79.3771, 43.6426, -79.3771) != 0 {
 		t.Error("distance to self must be zero")
-	}
-}
-
-// /autosuggest REQUIRES an anchor. A request built without one is rejected by
-// HERE outright, so an organization with no warehouse must still get a valid
-// URL rather than a 400.
-func TestHereAutosuggestURL_AlwaysAnchored(t *testing.T) {
-	u := hereAutosuggestURL("Toronto", 20, geocodeScope{Country: "CAN"})
-	qs, _ := url.ParseQuery(strings.SplitN(u, "?", 2)[1])
-	if qs.Get("at") == "" {
-		t.Error("no anchor — HERE rejects an autosuggest request without at= or in=circle")
-	}
-	if qs.Get("in") != "countryCode:CAN" {
-		t.Errorf("country filter = %q", qs.Get("in"))
-	}
-	if qs.Get("q") != "Toronto" {
-		t.Errorf("query text mangled: %q", qs.Get("q"))
-	}
-}
-
-// The warehouse, when set, must be the anchor — not the country centroid.
-func TestHereAutosuggestURL_PrefersWarehouseOverCentroid(t *testing.T) {
-	u := hereAutosuggestURL("Windsor", 20, toronto)
-	qs, _ := url.ParseQuery(strings.SplitN(u, "?", 2)[1])
-	if got := qs.Get("at"); got != "43.642600,-79.377100" {
-		t.Errorf("anchor = %q, want the Toronto warehouse", got)
-	}
-	if strings.Contains(u, "USA") {
-		t.Errorf("URL mentions USA: %s", u)
 	}
 }

@@ -21,25 +21,29 @@ import (
 // wrong one. Replacing the pin with the organization's country alone would
 // reintroduce exactly that for US tenants.
 //
-// WHERE THE PROXIMITY BIAS WENT. This file originally solved that by sending
-// `at={warehouse}` on every request, letting HERE rank by nearness. Measurement
-// killed that idea twice over:
+// So scoping is two parts:
 //
-//   - It SUPPRESSES distant matches. "Windsor" for a Toronto org returned one
-//     POI near Toronto and no Windsor, Ontario at all.
-//   - It does not even deliver the ranking it was there for. "London" still
-//     returned the Thames Centre district above the City of London, because
-//     both are ~190 km out and HERE's own relevance decided the rest.
+//   - in=countryCode:{org country}  — a hard filter, no cross-border results
+//   - at={warehouse lat,lng}        — proximity RANKING, so the nearest match wins
 //
-// So the request now carries the country filter ONLY, and proximity is applied
-// afterwards by rankGeocodeResults, over the full unsuppressed candidate list.
-// The determinism US tenants relied on is preserved — a Hayward org searching
-// "Brentwood" still gets Brentwood CA — but it is now something this codebase
-// implements and unit-tests, rather than something it hopes a vendor heuristic
-// keeps doing.
+// That keeps determinism without hardcoding a country: a Hayward organization
+// searching "Brentwood" still gets Brentwood CA because it is nearest, and a
+// Toronto organization searching "Waterloo" gets Waterloo ON. The behaviour US
+// tenants relied on is preserved and now generalises.
 //
-//   - in=countryCode:{org country}  — hard filter, no cross-border results
-//   - anchor()                      — only for endpoints that REQUIRE one
+// TWO GAPS THE ANCHOR LEAVES, both measured against production and both patched
+// where they occur rather than by abandoning the anchor:
+//
+//   - It does not order same-name results sensibly. "London" returned the
+//     Thames Centre district above the City of London (also Cambridge, Guelph,
+//     Peterborough — 4 of 10 Ontario cities). Fixed by rankGeocodeResults.
+//   - It can suppress a distant city entirely. "Windsor" returned one POI near
+//     Toronto and nothing else. Fixed by the unbiased() retry.
+//
+// Replacing the anchor was tried and measured worse: without it, HERE stops
+// returning the nearby city at all — a Hayward org searching "Hayward" gets
+// streets and a district, and "Richmond" loses Richmond CA in favour of
+// Richmond VA. The anchor earns its place; it just needed help at the edges.
 
 // hereCountryCode maps ISO 3166-1 alpha-2 (organizations.country) to the
 // alpha-3 codes HERE expects. Unknown codes return "" so the caller omits the
@@ -76,39 +80,33 @@ func scopeForOrg(db *orgdb.DB) geocodeScope {
 	return s
 }
 
-// apply appends the hard country filter. Deliberately NOT the proximity bias —
-// see the note above; that is rankGeocodeResults' job now.
+// apply appends the scoping parameters to a HERE geocode query string.
 func (s geocodeScope) apply(qs *url.Values) {
 	if s.Country != "" {
 		qs.Set("in", "countryCode:"+s.Country)
 	}
-}
-
-// anchor is the `at=` value for endpoints that REQUIRE one (autosuggest rejects
-// a request without it). Falls back to the country centroid, because
-// provisioning seeds new organizations at 0,0 and anchoring a Canadian search
-// in the Gulf of Guinea is worse than a coarse but correct-continent anchor.
-func (s geocodeScope) anchor() string {
+	// Proximity ranking. Omitted when the warehouse is unset — provisioning
+	// seeds new organizations at 0,0, and biasing toward the Gulf of Guinea is
+	// worse than no bias at all.
 	if s.Lat != 0 || s.Lng != 0 {
-		return fmt.Sprintf("%.6f,%.6f", s.Lat, s.Lng)
-	}
-	switch s.Country {
-	case "CAN":
-		return "56.130400,-106.346800"
-	case "GBR":
-		return "54.702400,-3.276600"
-	case "AUS":
-		return "-25.274400,133.775100"
-	case "MEX":
-		return "23.634500,-102.552800"
-	default:
-		return "39.828200,-98.579500" // geographic centre of the contiguous US
+		qs.Set("at", fmt.Sprintf("%.6f,%.6f", s.Lat, s.Lng))
 	}
 }
 
-// hereGeocodeURL builds a scoped /geocode request — used where a single
-// authoritative resolution is wanted (a known city name from a tool call), not
-// for interactive search. See hereAutosuggestURL for the picker.
+// unbiased is this scope with the proximity anchor removed, keeping the country
+// filter. Used for ONE case: the bias occasionally suppresses a distant city so
+// completely that nothing survives filtering. "Windsor" for a Toronto org
+// returned a single POI near Toronto and no Windsor, Ontario at all; unanchored,
+// the same query returns Windsor ON and Windsor QC.
+//
+// This is a fallback, not the default, because the anchor is doing real work
+// the rest of the time — it is what makes "Hayward" resolve to Hayward.
+func (s geocodeScope) unbiased() geocodeScope {
+	s.Lat, s.Lng = 0, 0
+	return s
+}
+
+// hereGeocodeURL builds a scoped geocode request.
 //
 // The raw query is passed through WITHOUT a country suffix. Appending ",USA"
 // was the other half of the old bug: it polluted the search text itself, so
@@ -120,28 +118,4 @@ func hereGeocodeURL(q string, limit int, s geocodeScope) string {
 	qs.Set("apiKey", HereAPIKey)
 	s.apply(&qs)
 	return "https://geocode.search.hereapi.com/v1/geocode?" + qs.Encode()
-}
-
-// hereAutosuggestURL builds a scoped /autosuggest request for INTERACTIVE
-// search — the picker, where the user is still typing.
-//
-// This is the endpoint HERE ships for typeahead, and it earns its place on
-// PREFIXES: measured across ten partial strings in both countries ("Bramp",
-// "Mississ", "San Jo", "Sacrame"…), it put the intended city first 10/10.
-// /geocode resolves complete place names and has no such guarantee.
-//
-// What it is NOT good at is surfacing the right cities, because it is
-// POI-weighted by design. Anchored at Hayward, "Richmond" came back as one
-// distant city (VA), one district, and six local streets — Richmond, CA, 34 km
-// away and 116,000 people, was absent from the response entirely. That is why
-// the anchor is a bare requirement here rather than a ranking strategy, and why
-// candidateLimit asks for far more rows than the picker shows.
-func hereAutosuggestURL(q string, limit int, s geocodeScope) string {
-	qs := url.Values{}
-	qs.Set("q", q)
-	qs.Set("limit", fmt.Sprintf("%d", limit))
-	qs.Set("apiKey", HereAPIKey)
-	s.apply(&qs)
-	qs.Set("at", s.anchor()) // required: autosuggest rejects an unanchored request
-	return "https://autosuggest.search.hereapi.com/v1/autosuggest?" + qs.Encode()
 }
