@@ -88,14 +88,36 @@ func organizationCountry(db *orgdb.DB) string {
 	if db == nil {
 		return defaultAnchorCountry
 	}
+	// MUST filter by id explicitly. `organizations` carries an org_catalog_read
+	// policy alongside org_isolation — the registry is deliberately readable
+	// across tenants — so a bare "LIMIT 1" is NOT scoped by RLS the way a tenant
+	// table would be. It returned whichever row Postgres handed back first,
+	// which was ropacal (US), so a Canadian org silently scored against US chain
+	// names. An earlier version of this comment asserted the opposite, which is
+	// exactly why the bug was invisible: the query succeeded, logged nothing,
+	// and returned a plausible answer.
+	orgID := db.OrgID()
+	if orgID == "" {
+		// Passthrough handle (single-tenant/dark mode): there is only one
+		// organization, so an unfiltered read is unambiguous.
+		var only string
+		if err := db.Get(&only, `SELECT COALESCE(country, '') FROM organizations LIMIT 1`); err != nil {
+			log.Printf("⚠️  [Anchor] could not read organization country (%v) — using %s chains", err, defaultAnchorCountry)
+			return defaultAnchorCountry
+		}
+		if strings.TrimSpace(only) == "" {
+			return defaultAnchorCountry
+		}
+		return only
+	}
 	var country string
-	// organization_id is implicit: RLS scopes this to the caller's own row.
-	if err := db.Get(&country, `SELECT COALESCE(country, '') FROM organizations LIMIT 1`); err != nil {
-		log.Printf("⚠️  [Anchor] could not read organization country (%v) — using %s chains", err, defaultAnchorCountry)
+	if err := db.Get(&country, `SELECT COALESCE(country, '') FROM organizations WHERE id = $1`, orgID); err != nil {
+		log.Printf("⚠️  [Anchor] could not read country for organization %s (%v) — using %s chains", orgID, err, defaultAnchorCountry)
 		return defaultAnchorCountry
 	}
 	if strings.TrimSpace(country) == "" {
 		return defaultAnchorCountry
 	}
+	log.Printf("🏷️  [Anchor] organization %s country=%s — using %s chain list", orgID, country, strings.ToUpper(country))
 	return country
 }
