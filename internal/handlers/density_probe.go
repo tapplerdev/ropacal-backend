@@ -71,9 +71,11 @@ func medianInt(xs []int) int {
 	return c[len(c)/2]
 }
 
-// liveDensityCeiling mirrors maxPOI in the v2 site score. Kept here so the
-// probe and the scorer cannot drift apart silently — a test pins them together.
-const liveDensityCeiling = 60.0
+// liveDensityCeiling mirrors maxPOI in the v2 site score, which is tied to the
+// fetch limit — the largest count that can be observed. A test pins them
+// together, because a hand-picked ceiling was wrong twice: 20 (unreachable by
+// construction) and then 60 (exceeded by a live count of 75 within one run).
+const liveDensityCeiling = float64(browseFetchLimit)
 
 // logDensityCeilingReport prints the per-run verdict.
 func logDensityCeilingReport(base, full []int, truncated []bool) {

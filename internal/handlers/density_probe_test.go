@@ -17,8 +17,8 @@ import (
 // Scoring now reads the full window, so the ceiling has to clear the real range
 // or the feature goes from noisy to flat.
 func TestDensityCurve_SeparatesRealCounts(t *testing.T) {
-	// Measured on live Toronto candidates: median 23, max 56.
-	const observedMedian, observedMax = 23, 56
+	// Measured on live Toronto candidates.
+	const observedMedian, observedMax = 23, 75 // live Toronto, 2026-07-31
 
 	// Under the OLD ceiling every one of those clamps to 1.0 — indistinguishable.
 	if densityScoreAt(observedMedian, 20) != 1.0 || densityScoreAt(observedMax, 20) != 1.0 {
@@ -30,7 +30,7 @@ func TestDensityCurve_SeparatesRealCounts(t *testing.T) {
 	mid := densityScoreAt(observedMedian, liveDensityCeiling)
 	hi := densityScoreAt(observedMax, liveDensityCeiling)
 	if !(lo < mid && mid < hi) {
-		t.Errorf("real counts not separated: 9=%.3f 23=%.3f 56=%.3f", lo, mid, hi)
+		t.Errorf("real counts not separated: 9=%.3f %d=%.3f %d=%.3f", lo, observedMedian, mid, observedMax, hi)
 	}
 	// And the top of the real range must not already be pinned, or the next
 	// denser location found is indistinguishable from this one.
@@ -123,11 +123,13 @@ func TestLimits_ProbeAndScorerAgree(t *testing.T) {
 		t.Errorf("fetch limit %d does not exceed the old window %d — nothing to compare against",
 			browseFetchLimit, browseBaselineLimit)
 	}
-	// The ceiling must clear what a real dense location produces, or scoring the
-	// full window just trades a noisy feature for a flat one.
-	if liveDensityCeiling < 56 {
-		t.Errorf("ceiling %.0f is below the measured Toronto maximum of 56 retail POIs",
-			liveDensityCeiling)
+	// The ceiling must be the largest OBSERVABLE count, not a hand-picked number.
+	// Picking one by eye was wrong twice: 20 could never be reached, and 60 was
+	// exceeded by a live count of 75 within a single run. Anything below the
+	// fetch limit clamps real candidates together and destroys their order.
+	if liveDensityCeiling != float64(browseFetchLimit) {
+		t.Errorf("ceiling %.0f != fetch limit %d — counts between them would clamp to an identical 1.0",
+			liveDensityCeiling, browseFetchLimit)
 	}
 	// It must also not be so high that ordinary locations bunch near zero.
 	if densityScoreAt(9, liveDensityCeiling) < 0.4 {

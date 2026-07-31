@@ -1577,16 +1577,20 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		if useV2 {
 			// v2: continuous log-scaled density — ln(1+count) / ln(1+max)
 			//
-			// 20 -> 60. The old 20 was set when the count came from a 20-item
-			// page, so it could never be exceeded. Now that scoring reads the
-			// full window, real Toronto counts run to a median of 23 and a
-			// measured max of 56 — against a ceiling of 20 every one of those
-			// would clamp to 1.0 and the feature would go from noisy to
-			// completely flat.
+			// The ceiling is the FETCH LIMIT, deliberately, because that is the
+			// largest count that can be observed. Any lower ceiling clamps real
+			// candidates to an identical 1.0 and destroys their ordering, which
+			// is the whole defect this area was fixing.
 			//
-			// 60 is set just above the observed maximum so the whole real range
-			// stays separable: 9 -> 0.56, 23 -> 0.77, 56 -> 0.98.
-			maxPOI := 60.0
+			// This was learned twice. It was 20 while the page was also 20, so it
+			// could never be exceeded. Raising it to 60 against a measured max of
+			// 56 looked safe and was wrong within one run — live Toronto produced
+			// 75 retail POIs and clamped again. Tying it to browseFetchLimit means
+			// saturation can now only happen where HERE itself truncated and we
+			// genuinely cannot tell two locations apart.
+			//
+			// Spread over the real range: 9 -> 0.50, 23 -> 0.69, 75 -> 0.94.
+			maxPOI := float64(browseFetchLimit)
 			densityScore = math.Log(1+float64(poiDensity)) / math.Log(1+maxPOI)
 			if densityScore > 1.0 {
 				densityScore = 1.0
@@ -3086,17 +3090,22 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 			primaryCat = item.Categories[0].ID
 		}
 
-		// A specific errand-retail category beats a broader exclusion prefix.
+		// A specific errand-retail category beats a broader exclusion prefix —
+		// but only as the PRIMARY category.
+		//
+		// Matching any category was too loose: the first live run counted
+		// "V I Realty Inc" as laundry, because HERE hangs a secondary
+		// 700-7400-0137 off a mixed-use address. A business whose primary
+		// category is realty is not errand retail no matter what else shares its
+		// doorway, and this override exists to rescue laundromats, not to widen
+		// the net.
 		isOverride := false
-		for _, cat := range item.Categories {
+		if len(item.Categories) > 0 {
 			for _, id := range errandRetailOverrides {
-				if strings.HasPrefix(cat.ID, id) {
+				if strings.HasPrefix(item.Categories[0].ID, id) {
 					isOverride = true
 					break
 				}
-			}
-			if isOverride {
-				break
 			}
 		}
 
