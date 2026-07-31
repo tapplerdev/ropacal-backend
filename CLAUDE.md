@@ -36,6 +36,33 @@ under `me.workspaces[].projects`, NOT `me.projects`; token at
 | **binly-osrm-service** | `tapplerdev/binly-osrm-service` | own project `osrm-routing-service` | `OSRM_SERVER_URL` | VRP matrix, GPS snap, map polylines |
 | **binly-centrifugo-service** | `tapplerdev/binly-centrifugo-service` | own project | `CENTRIFUGO_API_URL` | all realtime |
 | **binly-findmy-bridge** | `tapplerdev/binly-findmy-bridge` | same project | `FINDMY_BRIDGE_URL` | AirTag positions go stale |
+| **ropacal-placement** | `tapplerdev/ropacal-placement` | **not deployed** | 3 Postgres tables, no HTTP | nothing — it is offline-only |
+
+### ropacal-placement — the modeling sidecar (built, not deployed, deliberately)
+
+A Python service that re-fits the placement site score from realized outcomes,
+instead of the exponents being hand-tuned. Cloned locally; **no Dockerfile and no
+Railway service, on purpose.** The 2026-07-24 research decision was explicit:
+
+> **"NO request-path Python sidecar — batch job writes coefficients to Go."**
+
+Go must never call it synchronously. It meets Go only in Postgres:
+`placement_decisions` (Go writes), `placement_model` + `placement_scores` (Python
+writes, Go reads a column). `ortools-service` is the counter-example — a
+request-path Python dependency whose outage kills every shift start.
+
+**Status 2026-07-31:** Go now writes `placement_decisions` (see
+`handlers/placement_logging.go`). `signalcheck` was run against the real fleet
+and returned **out-of-sample rho = +0.167 on n=79, BELOW the 0.222 significance
+bar** — site features only weakly predict fill rate. An attempted label fix
+(dropping censored 100%-full observations) made it WORSE (+0.090), because a
+bin found full is the strongest evidence the site is good. **So the frozen
+formula stays and the model layer waits for more bins.** Re-run `signalcheck`
+around 250-300 bins before building anything on top of it.
+
+The five JSONB keys Go freezes are a contract with
+`ropacal_placement/features.py` FEATURE_SPEC — a rename on either side silently
+desyncs training, so `placement_logging_test.go` pins them.
 
 `ortools-service` and `binly-findmy-bridge` are cloned locally under
 `~/Documents/GitHub`; the OSRM and Centrifugo services are **not** — they exist
