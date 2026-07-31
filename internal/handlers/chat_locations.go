@@ -2968,6 +2968,12 @@ const (
 	browseBaselineLimit = 20
 )
 
+// Per-POI debug lines are also gated to the baseline window. They exist to show
+// WHAT the score counted, and beyond that window nothing is counted — so the
+// extra 80 were pure volume. Left ungated they five-folded the log burst, and
+// Railway's stream drops lines under bursts: the first measurement run emitted
+// 481 per-POI lines and lost the run-summary line entirely.
+
 // densityReading is one POI scan around a candidate. Split in two on purpose:
 // the Baseline* fields reproduce today's behaviour exactly and are what scoring
 // reads; the Full* fields are the wider truth and are logged only.
@@ -3056,7 +3062,9 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 			}
 		}
 		if isNonRetail {
-			log.Printf("   ⬜ %s (%s, %dm) — non-retail category skipped", item.Title, primaryCat, item.Distance)
+			if inBaseline {
+				log.Printf("   ⬜ %s (%s, %dm) — non-retail category skipped", item.Title, primaryCat, item.Distance)
+			}
 			continue
 		}
 
@@ -3069,7 +3077,9 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 			}
 		}
 		if isB2B {
-			log.Printf("   ⬜ %s (%s, %dm) — B2B skipped", item.Title, primaryCat, item.Distance)
+			if inBaseline {
+				log.Printf("   ⬜ %s (%s, %dm) — B2B skipped", item.Title, primaryCat, item.Distance)
+			}
 			continue
 		}
 
@@ -3100,9 +3110,13 @@ func scorePOIDensity(lat, lng float64, country string) densityReading {
 			if inBaseline {
 				baseRetail++
 			}
-			log.Printf("   ✅ %s (%s, %dm) — %s", item.Title, primaryCat, item.Distance, matchLabel)
+			if inBaseline {
+				log.Printf("   ✅ %s (%s, %dm) — %s", item.Title, primaryCat, item.Distance, matchLabel)
+			}
 		} else {
-			log.Printf("   ⬜ %s (%s, %dm) — no whitelist match", item.Title, primaryCat, item.Distance)
+			if inBaseline {
+				log.Printf("   ⬜ %s (%s, %dm) — no whitelist match", item.Title, primaryCat, item.Distance)
+			}
 		}
 
 		// Anchor detection stays inside the baseline window. A wider page could
