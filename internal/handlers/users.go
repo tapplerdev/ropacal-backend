@@ -73,11 +73,20 @@ func CreateUser(root *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Validate role
-		validRoles := map[string]bool{"driver": true, "admin": true, "manager": true}
+		// Validate role.
+		//
+		// "manager" was accepted here but REJECTED by the users_role_check
+		// constraint, which permits only driver|admin. So a request asking for a
+		// manager passed validation, reached the INSERT, tripped the CHECK, and
+		// came back 500 — a server-fault code for what is plainly a bad request.
+		// Retired 2026-07-31: the role is unused (zero such rows in production)
+		// and nothing in the dashboard offers it. This list must stay in step
+		// with users_role_check; adding a role here without a migration
+		// reintroduces the same 500.
+		validRoles := map[string]bool{"driver": true, "admin": true}
 		if !validRoles[req.Role] {
 			log.Printf("❌ Invalid role: %s", req.Role)
-			utils.RespondError(w, http.StatusBadRequest, "Role must be 'driver', 'admin', or 'manager'")
+			utils.RespondError(w, http.StatusBadRequest, "Role must be 'driver' or 'admin'")
 			return
 		}
 
