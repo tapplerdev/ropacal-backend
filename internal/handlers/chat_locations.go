@@ -1345,7 +1345,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				defer poiWg.Done()
 				for idx := range poiJobCh {
 					tc := topCandidates[idx]
-					density, hasAnc, ancName, ancLat, ancLng, retRatio := scorePOIDensity(tc.Lat, tc.Lng)
+					density, hasAnc, ancName, ancLat, ancLng, retRatio := scorePOIDensity(tc.Lat, tc.Lng, orgCountry)
 					poiResults[idx] = poiResult{
 						Index: idx, Density: density,
 						HasAnchor: hasAnc, AnchorName: ancName,
@@ -2887,15 +2887,26 @@ func classifyAndSnap(lat, lng float64) (poiScore float64, locationType string, n
 	return 0, "no_retail", nearMallOrSafeway, 0, 0, ""
 }
 
-// Anchor tenant names — major retailers that generate halo foot traffic
-var anchorTenants = []string{
-	"target", "walmart", "costco", "home depot", "lowe's", "lowes",
-	"trader joe", "whole foods", "safeway", "lucky", "food maxx", "foodmaxx",
-	"cvs", "walgreens", "rite aid", "ross", "marshalls", "tj maxx",
-	"dollar tree", "99 cents", "big lots", "grocery outlet",
-	"planet fitness", "24 hour fitness", "starbucks",
-	"dick's sporting", "dicks sporting", "kohl's", "kohls", "sprouts",
-	"99 ranch", "best buy", "petco", "petsmart",
+// anchorTenantsFor returns the halo-foot-traffic anchor names for a country.
+//
+// This USED to be a second hardcoded US-only list, duplicating the tier lists in
+// the scorer — and the duplication hid the Canadian bug through a whole round of
+// fixes. Country scoping was applied to the tier lists, the log confirmed
+// "country=CA — using CA chain list", and Toronto results still came back full
+// of Dollar Tree and Lucky, because THIS list set hasAnchor independently and
+// nobody had touched it.
+//
+// Derived from chainsByCountry now, so each chain lives in exactly one place.
+// The old list's "starbucks / planet fitness / 24 hour fitness" entries are
+// deliberately NOT carried over: the 2026-07 calibration measured ERRAND retail
+// as the yield signal, and a gym or a coffee shop is a different trip type — you
+// do not drop a bag of clothes off on the way to a workout.
+func anchorTenantsFor(country string) []string {
+	ch := chainsFor(country)
+	out := make([]string, 0, len(ch.Tier1)+len(ch.Tier2))
+	out = append(out, ch.Tier1...)
+	out = append(out, ch.Tier2...)
+	return out
 }
 
 // Non-retail HERE category prefixes to exclude from POI density count.
@@ -2913,7 +2924,8 @@ var nonRetailCategories = []string{
 
 // scorePOIDensity counts retail POIs within 300m and detects anchor tenants.
 // Returns: (retailCount, hasAnchor, anchorName, anchorLat, anchorLng, retailRatio)
-func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64, float64) {
+func scorePOIDensity(lat, lng float64, country string) (int, bool, string, float64, float64, float64) {
+	anchorTenants := anchorTenantsFor(country)
 	url := fmt.Sprintf(
 		"https://browse.search.hereapi.com/v1/browse?at=%.6f,%.6f&limit=20&in=circle:%.6f,%.6f;r=300&apiKey=%s",
 		lat, lng, lat, lng, HereAPIKey,
@@ -3023,7 +3035,10 @@ func scorePOIDensity(lat, lng float64) (int, bool, string, float64, float64, flo
 		// Check for anchor tenant
 		if !hasAnchor {
 			for _, anchor := range anchorTenants {
-				if strings.Contains(titleLower, anchor) {
+				// Whole-word + category-gated, same as the tier match. Plain
+				// strings.Contains here is what let "Lucky Convenience" and
+				// "Lucky Dollar Food Centre" register as anchor tenants.
+				if matchesChain(titleLower, anchor, primaryCat) {
 					hasAnchor = true
 					anchorName = item.Title
 					anchorLat = item.Position.Lat
