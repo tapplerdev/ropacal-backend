@@ -73,6 +73,11 @@ When recommending new bin locations:
 - To recommend spots in a NEW area with no bins yet, first get the specific city or metro from the user (ask "which city?") and target that. Do not run a network-wide "where should we expand" search with no area — it only covers current operating regions and would mislead across a national footprint.
 - The recommend_bin_locations tool already filters out no-go zones and malls/Safeway internally. Mention this once, don't repeat it every time.
 
+When asked what HAPPENED — today, this week, recently:
+- Incidents -> get_incidents. It takes a real date window. Do NOT answer from get_no_go_zones' incident_count: that is a LIFETIME total per zone with no dates, so quoting it for "today" or "this week" is simply wrong.
+- Move requests -> get_move_requests. Defaults to everything still open, which is usually the question.
+- ALWAYS state the window you actually searched when the answer is "nothing". "No incidents" and "no incidents in the last 7 days" are different claims, and only one of them is true.
+
 When analyzing bin performance:
 1. Use get_area_performance for the big picture
 2. Then search_bins for specifics
@@ -311,6 +316,29 @@ Always tell the user: "All locations have been verified clear of no-go zones and
 					"relocate_bin_number":    map[string]any{"type": "integer", "description": "RELOCATE an existing underperforming bin: pass its bin NUMBER and the tool searches for a better spot around that bin's own location, excluding the bin itself so it can't block its own replacement. The response includes a 'relocating' block with the bin's current fill rate — only recommend spots that beat it, and say so honestly if none clearly do. Use when the user says a bin is doing badly / should be moved."},
 					"relocate_radius_miles":  map[string]any{"type": "number", "description": "How far from the bin to search when relocate_bin_number is set (default 3, max 15). Use ~1 for 'good area, wrong spot' (reposition within the same plaza/strip) and 5-10 when the whole area is dead."},
 					"expansion_radius_miles": map[string]any{"type": "number", "description": "How far from the WAREHOUSE an expansion city may sit, in miles (default 75, clamped to 5-150). Only affects mode='expand' and the expansion half of mode='auto' — it does nothing for infill or relocate. Set it when the user says how far they are willing to drive: ~25 for 'somewhere we can service in a normal day', 75+ for 'we're opening new territory'. Do NOT guess a value from the conversation's tone; if they haven't said, leave it out and the default applies."},
+				},
+			},
+		},
+		{
+			Name:        "get_move_requests",
+			Description: anthropic.String(`Scheduled bin moves — what is outstanding, and what was requested or completed recently. Use for "any move requests this week?", "what moves are overdue?", "is anything urgent pending?", "what did we move in Brampton?". status defaults to OPEN (everything not completed or cancelled), which is almost always what is being asked; pass "all" or a specific status to widen. move_type distinguishes a relocation from a store/pickup_only/redeployment. The days window filters by when the request was RAISED, not when it is scheduled — a move raised today for next month is this week's news.`),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"status":    map[string]any{"type": "string", "description": "open (default — not completed/cancelled), all, or one of: pending, assigned, in_progress, completed, cancelled"},
+					"urgency":   map[string]any{"type": "string", "description": "Filter by urgency level"},
+					"move_type": map[string]any{"type": "string", "enum": []string{"relocation", "store", "pickup_only", "redeployment"}, "description": "Kind of move"},
+					"days":      map[string]any{"type": "integer", "description": "Only requests RAISED in the last N days (omit for all time; max 365)"},
+				},
+			},
+		},
+		{
+			Name:        "get_incidents",
+			Description: anthropic.String(`Reported incidents — vandalism, theft, landlord complaints, damage, missing or inaccessible bins, and driver field observations. Use for "were there any incidents today?", "what happened this week?", "any vandalism in Scarborough?". Defaults to the last 7 DAYS; pass days to widen. ALWAYS state the window you searched when reporting a nil result — "no incidents" must not be read as "none ever" when it means "none in the last week". Do NOT use get_no_go_zones for this: its incident_count is a LIFETIME total per zone with no dates, and quoting it in answer to a time-scoped question is wrong.`),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]any{
+					"days":          map[string]any{"type": "integer", "description": "Lookback window in days (default 7, max 365). Use 1 for 'today'."},
+					"incident_type": map[string]any{"type": "string", "enum": []string{"vandalism", "landlord_complaint", "theft", "relocation_request", "missing", "damaged", "vandalized", "inaccessible", "pulled_from_service"}},
+					"status":        map[string]any{"type": "string", "description": "open, resolved, or all"},
 				},
 			},
 		},
@@ -648,6 +676,10 @@ func (h *ChatHandler) executeTool(name string, input json.RawMessage) (string, e
 		return h.toolGetPotentialLocations(params)
 	case "recommend_bin_locations":
 		return h.toolRecommendLocations(params)
+	case "get_move_requests":
+		return h.toolGetMoveRequests(params)
+	case "get_incidents":
+		return h.toolGetIncidents(params)
 	case "get_census_income":
 		return h.toolGetCensusIncome(params)
 	default:
