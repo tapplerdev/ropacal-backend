@@ -33,10 +33,12 @@ import (
 // The division of labour with HERE: HERE supplies CANDIDATES, this file decides
 // ORDER. See geocode_rank.go for why the ordering cannot be delegated.
 
-// candidateLimit is how many results we ask HERE for. Deliberately larger than
-// what we return: re-ranking can only reorder what it was given, and the whole
-// point is that HERE's first result is often not the one we want.
-const candidateLimit = 20
+// candidateLimit is how many rows we ask HERE for. Deliberately far larger than
+// what we return, for two reasons: re-ranking can only reorder what it was
+// given, and autosuggest is POI-weighted, so the rows we actually want are the
+// minority. Anchored at Hayward, "Richmond" spent its whole default budget of
+// 20 on POIs and local streets and never included Richmond, CA at all.
+const candidateLimit = 100
 
 // resultLimit is how many survive to the dropdown.
 const resultLimit = 8

@@ -21,15 +21,25 @@ import (
 // wrong one. Replacing the pin with the organization's country alone would
 // reintroduce exactly that for US tenants.
 //
-// So scoping is two parts:
+// WHERE THE PROXIMITY BIAS WENT. This file originally solved that by sending
+// `at={warehouse}` on every request, letting HERE rank by nearness. Measurement
+// killed that idea twice over:
 //
-//   - in=countryCode:{org country}  — a hard filter, no cross-border results
-//   - at={warehouse lat,lng}        — proximity RANKING, so the nearest match wins
+//   - It SUPPRESSES distant matches. "Windsor" for a Toronto org returned one
+//     POI near Toronto and no Windsor, Ontario at all.
+//   - It does not even deliver the ranking it was there for. "London" still
+//     returned the Thames Centre district above the City of London, because
+//     both are ~190 km out and HERE's own relevance decided the rest.
 //
-// That keeps determinism without hardcoding a country: a Hayward organization
-// searching "Brentwood" still gets Brentwood CA because it is nearest, and a
-// Toronto organization searching "Windsor" gets Windsor ON rather than Windsor
-// CA. The behaviour US tenants relied on is preserved and now generalises.
+// So the request now carries the country filter ONLY, and proximity is applied
+// afterwards by rankGeocodeResults, over the full unsuppressed candidate list.
+// The determinism US tenants relied on is preserved — a Hayward org searching
+// "Brentwood" still gets Brentwood CA — but it is now something this codebase
+// implements and unit-tests, rather than something it hopes a vendor heuristic
+// keeps doing.
+//
+//   - in=countryCode:{org country}  — hard filter, no cross-border results
+//   - anchor()                      — only for endpoints that REQUIRE one
 
 // hereCountryCode maps ISO 3166-1 alpha-2 (organizations.country) to the
 // alpha-3 codes HERE expects. Unknown codes return "" so the caller omits the
@@ -66,16 +76,33 @@ func scopeForOrg(db *orgdb.DB) geocodeScope {
 	return s
 }
 
-// apply appends the scoping parameters to a HERE geocode query string.
+// apply appends the hard country filter. Deliberately NOT the proximity bias —
+// see the note above; that is rankGeocodeResults' job now.
 func (s geocodeScope) apply(qs *url.Values) {
 	if s.Country != "" {
 		qs.Set("in", "countryCode:"+s.Country)
 	}
-	// Proximity ranking. Omitted when the warehouse is unset — provisioning
-	// seeds new organizations at 0,0, and biasing toward the Gulf of Guinea is
-	// worse than no bias at all.
+}
+
+// anchor is the `at=` value for endpoints that REQUIRE one (autosuggest rejects
+// a request without it). Falls back to the country centroid, because
+// provisioning seeds new organizations at 0,0 and anchoring a Canadian search
+// in the Gulf of Guinea is worse than a coarse but correct-continent anchor.
+func (s geocodeScope) anchor() string {
 	if s.Lat != 0 || s.Lng != 0 {
-		qs.Set("at", fmt.Sprintf("%.6f,%.6f", s.Lat, s.Lng))
+		return fmt.Sprintf("%.6f,%.6f", s.Lat, s.Lng)
+	}
+	switch s.Country {
+	case "CAN":
+		return "56.130400,-106.346800"
+	case "GBR":
+		return "54.702400,-3.276600"
+	case "AUS":
+		return "-25.274400,133.775100"
+	case "MEX":
+		return "23.634500,-102.552800"
+	default:
+		return "39.828200,-98.579500" // geographic centre of the contiguous US
 	}
 }
 
@@ -96,47 +123,25 @@ func hereGeocodeURL(q string, limit int, s geocodeScope) string {
 }
 
 // hereAutosuggestURL builds a scoped /autosuggest request for INTERACTIVE
-// search.
+// search — the picker, where the user is still typing.
 //
-// /geocode is the wrong endpoint for a picker. Measured: with the Toronto
-// warehouse as the proximity anchor, "Windsor" on /geocode returned exactly ONE
-// result — a POI near Toronto typed `place` — and Windsor, Ontario (pop.
-// 230,000, 350 km away) never appeared at all. The `at=` bias makes /geocode
-// prefer a strong nearby match and suppress distant ones, which is precisely
-// backwards for "where should we expand". Dropping the bias fixes Windsor and
-// breaks US determinism, so neither setting of that one knob is correct.
+// This is the endpoint HERE ships for typeahead, and it earns its place on
+// PREFIXES: measured across ten partial strings in both countries ("Bramp",
+// "Mississ", "San Jo", "Sacrame"…), it put the intended city first 10/10.
+// /geocode resolves complete place names and has no such guarantee.
 //
-// /autosuggest surfaces both the near and the distant candidates. Its own
-// ranking is weaker — it put Springfield, MO above Springfield, CA for a Bay
-// Area anchor — so the ORDER is redone server-side by rankGeocodeResults, where
-// it can be reasoned about instead of inferred from a vendor's heuristics.
+// What it is NOT good at is surfacing the right cities, because it is
+// POI-weighted by design. Anchored at Hayward, "Richmond" came back as one
+// distant city (VA), one district, and six local streets — Richmond, CA, 34 km
+// away and 116,000 people, was absent from the response entirely. That is why
+// the anchor is a bare requirement here rather than a ranking strategy, and why
+// candidateLimit asks for far more rows than the picker shows.
 func hereAutosuggestURL(q string, limit int, s geocodeScope) string {
 	qs := url.Values{}
 	qs.Set("q", q)
 	qs.Set("limit", fmt.Sprintf("%d", limit))
 	qs.Set("apiKey", HereAPIKey)
 	s.apply(&qs)
-	// /autosuggest REQUIRES `at` or `in=circle`. Fall back to the country
-	// centroid when the warehouse is unset so the request is still valid.
-	if qs.Get("at") == "" {
-		qs.Set("at", countryCentroid(s.Country))
-	}
+	qs.Set("at", s.anchor()) // required: autosuggest rejects an unanchored request
 	return "https://autosuggest.search.hereapi.com/v1/autosuggest?" + qs.Encode()
-}
-
-// countryCentroid is a rough anchor for /autosuggest when an organization has
-// no warehouse yet. Only ever affects tie-breaking, never filtering.
-func countryCentroid(here3 string) string {
-	switch here3 {
-	case "CAN":
-		return "56.130400,-106.346800"
-	case "GBR":
-		return "54.702400,-3.276600"
-	case "AUS":
-		return "-25.274400,133.775100"
-	case "MEX":
-		return "23.634500,-102.552800"
-	default:
-		return "39.828200,-98.579500" // geographic centre of the contiguous US
-	}
 }
