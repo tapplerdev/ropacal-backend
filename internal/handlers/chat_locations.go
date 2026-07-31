@@ -169,10 +169,8 @@ const expansionRadiusMiles = 75.0
 
 // expansionShortlistSize caps how many cities reach the EXPENSIVE stage. Each
 // surviving city costs HERE searches plus ESRI enrichment per candidate site, and
-// a 75-mile radius around a metro warehouse contains well over a hundred places —
-// scoring them all would be hundreds of paid API calls per request. Population
-// is only used to pick which ones are worth that spend; the real ranking comes
-// from the placement scorer downstream.
+// a 75-mile radius around a metro warehouse holds well over a hundred places —
+// sweeping them all would be hundreds of paid API calls per request.
 const expansionShortlistSize = 10
 
 // expansionOrigins returns the cities this organization could plausibly expand
@@ -214,6 +212,23 @@ func expansionOrigins(db *orgdb.DB, bins []existingBin) []struct {
 	}
 	nearby = geo.ExcludeCities(nearby, covered)
 
+	// RANK BY DRIVE TIME, not population or straight-line distance.
+	//
+	// Population was the ranker until 2026-07-31, when it was measured against
+	// this fleet and found to predict nothing: Spearman rho = -0.122 (p=0.285)
+	// between city population and realized bin fill rate. The best bin in the
+	// network sits in Newark (45k people, 15.4 fill/day) while San Jose — 22x
+	// the population — runs at roughly half that rate. A population floor of
+	// 100k would have excluded the single best-performing location we have.
+	//
+	// Drive time is the one input here that is a hard fact rather than a
+	// prediction: it is what a truck actually pays, every day. Straight-line
+	// miles are not it — a 20-mile hop across a bay is not a 20-mile drive.
+	// One /table call ranks every candidate at once against the self-hosted
+	// OSRM, so the cost is a single request regardless of how many cities are
+	// in range.
+	rankCitiesByDriveTime(whLat, whLng, nearby)
+
 	if len(nearby) > expansionShortlistSize {
 		nearby = nearby[:expansionShortlistSize]
 	}
@@ -237,6 +252,63 @@ func expansionOrigins(db *orgdb.DB, bins []existingBin) []struct {
 		log.Printf("ℹ️  [Expand] no uncovered cities within %.0f mi of the warehouse", expansionRadiusMiles)
 	}
 	return origins
+}
+
+// rankCitiesByDriveTime reorders cities nearest-first by ACTUAL driving time
+// from the warehouse, using one OSRM /table call.
+//
+// Best-effort: on any failure the slice is left as-is (population order from
+// geo.CitiesWithin), which is a worse ranking but never a broken one. An
+// expansion suggestion is a human-reviewed hint, not a dispatch instruction, so
+// degrading beats erroring.
+func rankCitiesByDriveTime(whLat, whLng float64, cities []geo.NearbyCity) {
+	if len(cities) < 2 {
+		return
+	}
+	// OSRM wants lng,lat. Index 0 is the warehouse; row 0 of the matrix is then
+	// warehouse -> every city.
+	coords := make([]string, 0, len(cities)+1)
+	coords = append(coords, fmt.Sprintf("%.6f,%.6f", whLng, whLat))
+	for _, c := range cities {
+		coords = append(coords, fmt.Sprintf("%.6f,%.6f", c.Lng, c.Lat))
+	}
+
+	// Reuses the optimizer's helper (30s client timeout) rather than a bespoke
+	// one, so every OSRM /table caller shares the same client behaviour.
+	_, durMatrix, err := fetchOSRMMatrices(coords)
+	if err != nil || len(durMatrix) == 0 || len(durMatrix[0]) != len(cities)+1 {
+		log.Printf("⚠️  [Expand] drive-time ranking unavailable (%v) — keeping straight-line order", err)
+		return
+	}
+
+	// A duration of 0 to a DIFFERENT point means OSRM could not route there —
+	// most often the city is outside the served map extent. Those sort last
+	// rather than first, which is what an unranked 0 would otherwise do.
+	// (This is the same failure shape that made a California-only OSRM answer
+	// 0.0 km for Toronto.)
+	const unreachable = math.MaxInt32
+	mins := make(map[string]int, len(cities))
+	for i, c := range cities {
+		d := durMatrix[0][i+1]
+		if d <= 0 {
+			d = unreachable
+		}
+		mins[c.Name] = d
+	}
+	sort.SliceStable(cities, func(i, j int) bool {
+		return mins[cities[i].Name] < mins[cities[j].Name]
+	})
+
+	shown := len(cities)
+	if shown > 5 {
+		shown = 5
+	}
+	for _, c := range cities[:shown] {
+		if m := mins[c.Name]; m != unreachable {
+			log.Printf("   🚗 [Expand] %-22s %4.0f min drive, %6.1f mi straight-line, pop %d",
+				c.Name, float64(m)/60.0, c.DistanceMiles, c.Population)
+		}
+	}
 }
 
 func originNames(o []struct {
