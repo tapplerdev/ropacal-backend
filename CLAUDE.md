@@ -133,8 +133,9 @@ See `.env.example`. Key vars:
 cmd/server/main.go          — Entry point: boots DB, services, background workers, routes
 internal/
   database/
-    database.go             — PostgreSQL connection + a LEGACY idempotent inline DDL list (137 CREATE/ALTER statements) still executed every boot by database.Migrate(), called from main.go AFTER goose
-    goose.go                — goose versioned migrations (runs FIRST); baselines an existing DB by stamping v1 without executing
+    database.go             — PostgreSQL connection + pool config ONLY (138 lines). The legacy inline DDL list and database.Migrate() were DELETED 2026-08-02 (Track A3) after a goose-only database was diffed against production and found identical across columns/indexes/constraints/triggers/policies. Do not reintroduce boot-time DDL.
+    goose.go                — goose versioned migrations, now the ONLY thing that creates schema; baselines an existing DB by stamping v1 without executing
+    tenancy.go              — the two boot tripwires, both fatal: AssertRLSEnforced (BEHAVIOUR — an unscoped read of bins must be empty) + AssertRLSComplete (STRUCTURE — every organization_id table has ENABLE + FORCE + a policy). Neither subsumes the other
     seed.go                 — Seeds initial users and bins
     route_tasks.go          — Route task DB queries (CreateShiftWithTasks, GetShiftTasks[WithDeleted])
   moverequest/              — move-request DOMAIN: typed Status + guarded transitions, Store, Create/EditFields, PlanAssignment, LogAssignmentChange/history, Parse{MoveType,DisposalAction}
@@ -203,7 +204,9 @@ internal/database/migrations/ — goose migrations (4 files; 00001 is a pg_dump 
 
 ## Database Schema (key tables)
 
-All timestamps are Unix epoch (BIGINT). **Schema changes go through goose** (`internal/database/migrations/`, adopted 2026-07-30). A legacy inline DDL list in `database/database.go` ALSO still runs on every boot — it is idempotent, but it means the schema has two sources and a goose migration can be silently undone by the inline DDL if they disagree.
+All timestamps are Unix epoch (BIGINT). **Schema changes go through goose** (`internal/database/migrations/`, adopted 2026-07-30) — and as of 2026-08-02 goose is the ONLY writer. The legacy inline DDL that also ran every boot is gone (Track A3); the schema no longer has two sources, so a goose migration can no longer be silently undone. Boot now asserts the result: `AssertRLSComplete` refuses to serve if any `organization_id` table lacks ENABLE + FORCE + a policy.
+
+**Careful — a THIRD writer is arriving.** binly-backend (Python/Alembic) will share this database during the strangler migration. Its baseline is `alembic stamp`ed against production rather than run, so a fix that lives only in its `ADDITIONS` never reaches prod; that is why `0002` exists there and was applied here by hand on 2026-08-02 (narrowed `org_catalog_read`, added `route_tasks_placement_source_check`). Keep the two in step.
 
 - **users** — id, email, password, name, role (`driver`|`admin`), organization_id. **Known bug:** `handlers/users.go` also accepts `manager`, but the DB CHECK constraint permits only `driver`/`admin` — so `POST /api/manager/users` with `role:"manager"` passes validation then 500s on insert. Fix the handler, not this line.
 - **bins** — bin_number, address, city, status (`active`|`missing`|`retired`|`in_storage`|`pending_move`), fill_percentage, lat/lon, retirement tracking
