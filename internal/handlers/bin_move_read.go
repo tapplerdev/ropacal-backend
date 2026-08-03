@@ -468,7 +468,11 @@ func GetDriverPendingMoves(root *sqlx.DB) http.HandlerFunc {
 		var moves []PendingMove
 		err := db.Select(&moves, `
 			SELECT mr.id, mr.bin_id, b.bin_number, mr.status, mr.move_type,
-				COALESCE(EXTRACT(EPOCH FROM mr.scheduled_date)::bigint, 0) as scheduled_date,
+				-- scheduled_date is already BIGINT epoch seconds (NOT NULL), not a
+				-- timestamp. EXTRACT(EPOCH FROM bigint) has no such function, so this
+				-- 500'd on every call: "function pg_catalog.extract(unknown, bigint)
+				-- does not exist". Select it directly.
+				mr.scheduled_date,
 				mr.reason, b.current_street, b.city
 			FROM bin_move_requests mr
 			JOIN bins b ON b.id = mr.bin_id

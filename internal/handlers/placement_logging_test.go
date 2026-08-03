@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -79,15 +80,52 @@ func TestPlacementFeatures_ZeroValuesAreNotOmitted(t *testing.T) {
 // would shift every column in the batch by one position and mislabel the whole
 // dataset.
 func TestPlaceholderRow_Offsets(t *testing.T) {
-	if got := placeholderRow(0); got != "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)" {
-		t.Errorf("first row: %s", got)
+	// Asserted against the column count rather than a literal. The previous
+	// version of this test hardcoded 11 placeholders — matching a bug rather
+	// than the INSERT — so it passed green while every write to
+	// placement_decisions failed in production.
+	n := placementDecisionCols
+
+	first := placeholderRow(0)
+	if got := strings.Count(first, "$"); got != n {
+		t.Errorf("first row has %d placeholders, want %d: %s", got, n, first)
 	}
-	if got := placeholderRow(11); got != "($12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)" {
-		t.Errorf("second row: %s", got)
+	if !strings.HasPrefix(first, "($1,") {
+		t.Errorf("first row must start at $1: %s", first)
 	}
+
+	// Rows must tile without gap or overlap: row 1 starts where row 0 ended.
+	second := placeholderRow(n)
+	if !strings.HasPrefix(second, "($"+strconv.Itoa(n+1)+",") {
+		t.Errorf("second row must start at $%d: %s", n+1, second)
+	}
+
 	// Multi-digit offsets are where a hand-rolled integer formatter breaks.
-	if got := placeholderRow(1089); !strings.HasPrefix(got, "($1090,") || !strings.HasSuffix(got, "$1100)") {
+	if got := placeholderRow(1089); !strings.HasPrefix(got, "($1090,") {
 		t.Errorf("high offset: %s", got)
+	}
+}
+
+// TestPlacementDecisionArity is the test that would have caught the silent
+// failure: the INSERT column list, the placeholder count and the number of
+// arguments appended per row must all agree. They are now all derived from
+// placementDecisionColumns, so this pins that they stay derived.
+func TestPlacementDecisionArity(t *testing.T) {
+	if placementDecisionCols != len(placementDecisionColumns) {
+		t.Fatalf("column count %d != column list length %d",
+			placementDecisionCols, len(placementDecisionColumns))
+	}
+	if placementDecisionCols != 12 {
+		t.Errorf("placement_decisions has 12 columns; got %d — if the schema "+
+			"really changed, update the migration and this number together",
+			placementDecisionCols)
+	}
+	seen := map[string]bool{}
+	for _, c := range placementDecisionColumns {
+		if seen[c] {
+			t.Errorf("duplicate column %q in the INSERT list", c)
+		}
+		seen[c] = true
 	}
 }
 

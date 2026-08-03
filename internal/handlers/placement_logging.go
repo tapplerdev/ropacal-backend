@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -98,11 +99,9 @@ func logPlacementDecisions(db *orgdb.DB, areaLabel string, seed int64, decisions
 	now := time.Now().Unix()
 	// Placeholders are built rather than using a helper so a single malformed
 	// row cannot abort the batch through sqlx's rebinding.
-	const cols = 11
-	args := make([]interface{}, 0, len(decisions)*cols)
+	args := make([]interface{}, 0, len(decisions)*placementDecisionCols)
 	sql := `INSERT INTO placement_decisions
-		(id, decided_at, area_label, request_seed, candidate_lat, candidate_lng,
-		 features, model_version, score_at_decision, propensity, outcome, reject_reason)
+		(` + strings.Join(placementDecisionColumns, ", ") + `)
 		VALUES `
 
 	valid := 0
@@ -119,7 +118,7 @@ func logPlacementDecisions(db *orgdb.DB, areaLabel string, seed int64, decisions
 		if valid > 0 {
 			sql += ","
 		}
-		n := valid * cols
+		n := valid * placementDecisionCols
 		sql += placeholderRow(n)
 		// propensity is 1.0: selection is a deterministic argmax today. When an
 		// explore slot lands, randomized picks must log their true probability —
@@ -151,10 +150,29 @@ func logPlacementDecisions(db *orgdb.DB, areaLabel string, seed int64, decisions
 		valid, placed, valid-placed, areaLabel)
 }
 
-// placeholderRow renders ($1,$2,...,$11) offset by n.
+// placementDecisionColumns is the INSERT column list, and the ONLY place the
+// shape of a placement_decisions row is written down.
+//
+// This used to be a literal column list in the SQL plus a hand-maintained
+// `cols = 11` plus a hardcoded `i <= 11` in placeholderRow — three copies of one
+// fact, and they disagreed: the SQL named 12 columns and 12 args were appended,
+// so every batch failed with a placeholder/argument mismatch. It failed
+// SILENTLY, because the write is best-effort and only logs a warning, so the
+// table held zero rows from the day it shipped. Deriving the count from the list
+// makes that class of bug unrepresentable.
+var placementDecisionColumns = []string{
+	"id", "decided_at", "area_label", "request_seed",
+	"candidate_lat", "candidate_lng", "features", "model_version",
+	"score_at_decision", "propensity", "outcome", "reject_reason",
+}
+
+// placementDecisionCols is derived, never written by hand.
+var placementDecisionCols = len(placementDecisionColumns)
+
+// placeholderRow renders ($1,$2,...,$N) offset by n, where N is the column count.
 func placeholderRow(n int) string {
 	out := "("
-	for i := 1; i <= 11; i++ {
+	for i := 1; i <= placementDecisionCols; i++ {
 		if i > 1 {
 			out += ","
 		}
