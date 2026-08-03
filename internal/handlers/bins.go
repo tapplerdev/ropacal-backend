@@ -381,8 +381,21 @@ func UpdateBin(root *sqlx.DB, wsHub *websocket.Hub, centrifugoClient *centrifugo
 			moveRequestedInt = 1
 		}
 
-		// Dereference fill_percentage pointer to get actual value
+		// Partial-update semantics (#14/#35) — the field the original sweep missed.
+		// fill_percentage is written UNCONDITIONALLY below, so defaulting to 0 on an
+		// omitted field silently zeroes a real fill level. It also leaves no trace:
+		// the change log only records a fill_override when req.FillPercentage != nil
+		// (see the branch further down), so a PATCH that blanks the fill writes
+		// nothing to bin_change_log either.
+		//
+		// Unlike the string/number fields above, nil is an UNAMBIGUOUS "omitted"
+		// here: 0 is a legitimate fill level (an empty bin), so the pointer is the
+		// only signal that separates "set it to 0" from "don't touch it". That is
+		// why this one cannot use the `== 0 means omitted` shortcut.
 		fillPct := 0
+		if existing.FillPercentage != nil {
+			fillPct = *existing.FillPercentage
+		}
 		if req.FillPercentage != nil {
 			fillPct = *req.FillPercentage
 		}
