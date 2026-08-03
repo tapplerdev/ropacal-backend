@@ -84,7 +84,18 @@ func Auth(next http.Handler) http.Handler {
 			}
 			// log.Printf("   ✓ Signing method valid: %v", token.Method)
 			return []byte(jwtSecret), nil
-		})
+		},
+			// REQUIRE exp. jwt.Parse validates the claim when it is present but
+			// accepts a token that simply OMITS it, which makes such a token
+			// valid forever. AccessTokenTTL (7 days) was therefore honoured only
+			// by the minter — and there is no refresh endpoint and no revocation
+			// list, so an expiry that never arrives is the whole lifetime.
+			//
+			// middleware/platform.go:178 already required this; the finding was
+			// never carried across to the tenant path, which is the one every
+			// driver and manager authenticates through.
+			jwt.WithExpirationRequired(),
+		)
 
 		if err != nil || !token.Valid {
 			log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
