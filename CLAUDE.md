@@ -223,7 +223,9 @@ All timestamps are Unix epoch (BIGINT). **Schema changes go through goose** (`in
 - **airtag_locations** — latest AirTag positions per tag
 - **config** — key-value config (warehouse location, notification settings)
 - **fcm_tokens** — push notification device tokens per user
-- **driver_current_location** — latest GPS per driver (1 row per driver, upserted)
+- **driver_current_location** — latest GPS per driver (1 row per driver, upserted). Keeps NO history.
+- **driver_location_snapshots** — short GPS trail, **pruned to 3 hours** by `stale_shift_monitor.go`. Also keeps no history.
+- **driver_location_history** / **driver_locations** — the GPS ARCHIVE. Nothing reads them; they are retained deliberately because the two live tables above keep nothing, so these are the only long-term record of where anyone drove. **Sequential, not duplicates** — `driver_locations` covers 2025-02-04 → 2025-12-09 (2 drivers, 6,244 rows) and `driver_location_history` covers 2026-02-05 → 2026-06-01 (8 drivers, 94,647 rows), with a ~2-month gap. **Different time units:** `driver_location_history.recorded_at` is TIMESTAMPTZ; `driver_locations.timestamp` is BIGINT **milliseconds**, except 8 rows from the 2025-02-04 changeover which are seconds — guard with `CASE WHEN timestamp >= 1e11 THEN timestamp/1000 ELSE timestamp END` or 99.87% of rows date to the year 57910. See migration 00006.
 - **notification_log** / **user_notifications** — notification audit trail + per-user inbox
 - **app_error_logs** — mobile app crash reporting
 

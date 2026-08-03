@@ -29,10 +29,23 @@
 -- All six were dumped to CSV before dropping. Verified zero Go references at
 -- the time of removal.
 --
--- DELIBERATELY NOT DROPPED: driver_location_history (94,647 rows, Feb-Jun 2026)
--- and driver_locations (6,244 rows). Both are historical GPS and the ONLY
--- long-term record of it — driver_current_location is pruned to 3 hours, so
--- that window cannot be reconstructed once gone. They cost ~45 MB. Keeping
+-- DELIBERATELY NOT DROPPED: the two driver GPS archives. They are SEQUENTIAL,
+-- not duplicates — together they are the movement record from Feb 2025 to
+-- Jun 2026, with a ~2-month gap:
+--
+--   driver_locations         6,244 rows,  2 drivers,  2025-02-04 -> 2025-12-09
+--   driver_location_history 94,647 rows,  8 drivers,  2026-02-05 -> 2026-06-01
+--
+-- MIND THE UNITS. driver_location_history.recorded_at is TIMESTAMPTZ. But
+-- driver_locations.timestamp is BIGINT MILLISECONDS, with 8 of its 6,244 rows
+-- in SECONDS (all 2025-02-04, the changeover). Passing it straight to
+-- to_timestamp() dates 99.87% of the rows to the year 57910. Use:
+--     CASE WHEN timestamp >= 1e11 THEN timestamp/1000 ELSE timestamp END
+--
+-- WHY THEY STAY: this is the ONLY long-term record of driver movement. The live
+-- tables keep none — driver_current_location is one upserted row per driver,
+-- driver_location_snapshots is pruned to 3 hours (stale_shift_monitor.go) — so
+-- once these are gone that window is unreconstructable. ~45 MB total. Keeping
 -- them was a considered decision, not an oversight; do not "finish the job".
 
 DROP TABLE IF EXISTS public.shift_bins;
