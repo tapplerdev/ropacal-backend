@@ -376,17 +376,44 @@ func GetAllShifts(root *sqlx.DB) http.HandlerFunc {
 			shifts = append(shifts, shiftResp)
 		}
 
-		// Get total count for pagination
+		// Get total count for pagination.
+		//
+		// PARAMETERIZED, and it must stay that way. This was string concatenation
+		// of two raw query params (?status=, ?driver_id=) — while the main query
+		// a hundred lines above built the identical predicates with placeholders.
+		//
+		// It was not an ordinary injection. With ZERO bind args, lib/pq uses the
+		// SIMPLE query protocol, which permits STACKED statements. Those run
+		// inside the transaction orgdb has already opened, where app.org_id is
+		// settable — so the payload could rewrite the GUC that the entire tenancy
+		// model keys on: point it at another org for full cross-tenant read and
+		// write, or set it to '' to reach platform_admins, which the inverted
+		// policy in 00003 makes readable AND writable at that value.
+		//
+		// Passing args also keeps us on the extended protocol, which rejects
+		// stacked statements outright — so the parameters are two defences, not
+		// one. Never build this query by concatenation again, even for a value
+		// that "looks safe".
 		countQuery := `SELECT COUNT(*) FROM shifts s WHERE 1=1`
+		countArgs := []interface{}{}
+		countIdx := 1
 		if status != "" {
-			countQuery += " AND s.status = '" + status + "'"
+			countQuery += fmt.Sprintf(" AND s.status = $%d", countIdx)
+			countArgs = append(countArgs, status)
+			countIdx++
 		}
 		if driverID != "" {
-			countQuery += " AND s.driver_id = '" + driverID + "'"
+			countQuery += fmt.Sprintf(" AND s.driver_id = $%d", countIdx)
+			countArgs = append(countArgs, driverID)
+			countIdx++
 		}
 
 		var totalCount int
-		db.Get(&totalCount, countQuery)
+		if err := db.Get(&totalCount, countQuery, countArgs...); err != nil {
+			// Previously discarded, so a broken count silently reported 0 rows
+			// and the dashboard's pagination went wrong with nothing logged.
+			log.Printf("⚠️  [GetAllShifts] count query failed: %v", err)
+		}
 
 		log.Printf("📤 RESPONSE: 200 OK")
 		log.Printf("   Found %d shifts (total: %d)", len(shifts), totalCount)

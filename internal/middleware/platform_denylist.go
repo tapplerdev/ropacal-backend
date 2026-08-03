@@ -22,7 +22,13 @@ import (
 var platformDeniedRoutes = []struct {
 	method string
 	// path is matched as a prefix against the path AFTER /api/platform/act.
-	path   string
+	path string
+	// suffix, when set, must ALSO match the end of the path. This exists for
+	// routes with a path parameter in the middle — /manager/shifts/{id}/purge
+	// cannot be expressed as a prefix without also denying every other
+	// /manager/shifts/ route. Empty means prefix-only, which is every entry
+	// that predates this field.
+	suffix string
 	reason string
 }{
 	// The big one. A minted user is a SEVEN-DAY tenant credential that outlives
@@ -33,18 +39,37 @@ var platformDeniedRoutes = []struct {
 	// product. A reviewer demonstrated the full chain: create admin, log in as
 	// them, mint a second admin, wipe the org's shifts, with the audit count
 	// unchanged throughout.
-	{http.MethodPost, "/manager/users", "creates a persistent tenant credential that cannot be revoked through the product"},
+	{http.MethodPost, "/manager/users", "", "creates a persistent tenant credential that cannot be revoked through the product"},
 
 	// Mass-destructive and unattributed. Individual cancels and deletes stay
 	// available; these wipe whole collections in one call.
-	{http.MethodDelete, "/manager/shifts/clear", "deletes every shift in the organization"},
-	{http.MethodPost, "/manager/bins/load-real", "deletes and replaces the organization's bins with fixture data"},
+	{http.MethodDelete, "/manager/shifts/clear", "", "deletes every shift in the organization"},
+	{http.MethodPost, "/manager/bins/load-real", "", "deletes and replaces the organization's bins with fixture data"},
+
+	// Same class as /manager/shifts/clear, and missed when that one was added:
+	// one call cancels every active, paused and ready shift in the org —
+	// including shifts drivers are physically mid-route on.
+	{http.MethodPost, "/manager/shifts/cancel-all-active", "", "cancels every live shift in the organization in one call"},
+
+	// The audit-trail case, not the volume case: this HARD-deletes route_tasks,
+	// shift_history and shifts rows. platform_audit_log records only that the
+	// path was called, so the operation destroys the evidence of what it
+	// destroyed. Nothing else in this API hard-deletes shift history.
+	{http.MethodDelete, "/manager/shifts/", "/purge", "hard-deletes shift history, destroying the record of what was deleted"},
+
+	// Mints a ONE-HOUR realtime credential carrying org_id in its meta, which the
+	// Centrifugo proxy endpoints trust for tenant scope. PlatformAuth re-checks
+	// the operator on every HTTP request, but it cannot reach a token already
+	// issued — so this one keeps working after the platform admin is disabled.
+	// Bounded by its TTL rather than by revocation, which is the property this
+	// list exists to refuse.
+	{http.MethodGet, "/centrifugo/token", "", "mints a realtime credential that survives operator revocation"},
 
 	// Registers a push token against the ACTING user — which under act-as is the
 	// support user, an admin. Six admin-notification queries fan out on
 	// role='admin', so one stray call puts a Binly device on a customer's admin
 	// push list, silently and permanently.
-	{http.MethodPost, "/driver/fcm-token", "would subscribe a Binly device to the customer's admin notifications"},
+	{http.MethodPost, "/driver/fcm-token", "", "would subscribe a Binly device to the customer's admin notifications"},
 }
 
 // PlatformDenyList refuses operator access to routes whose effects outlive the
@@ -63,7 +88,8 @@ func PlatformDenyList(next http.Handler) http.Handler {
 		}
 
 		for _, d := range platformDeniedRoutes {
-			if r.Method == d.method && strings.HasPrefix(path, d.path) {
+			if r.Method == d.method && strings.HasPrefix(path, d.path) &&
+				(d.suffix == "" || strings.HasSuffix(path, d.suffix)) {
 				claims, _ := PlatformFromContext(r.Context())
 				who := "(unknown)"
 				if claims != nil {
