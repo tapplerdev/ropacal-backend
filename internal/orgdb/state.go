@@ -17,7 +17,7 @@ type tenancyState struct {
 
 var state atomic.Pointer[tenancyState]
 
-// Init detects — ONCE, at boot, after database.Migrate — whether the tenancy
+// Init detects — ONCE, at boot, after the goose migrations — whether the tenancy
 // migration (migrations/add_multi_tenancy_rls.sql) has been applied, keyed on
 // the existence of the organizations table. Until it has, every handle this
 // package hands out is a passthrough and behavior is byte-identical to the

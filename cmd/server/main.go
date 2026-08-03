@@ -100,20 +100,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Legacy idempotent DDL. Retained deliberately rather than deleted: it is
-	// the historical record of every schema change made before goose, it is a
-	// no-op against any database the baseline already built, and removing 223
-	// statements in the same change that introduces a migration runner would
-	// make a rollback much harder to reason about. New schema changes go in a
-	// numbered goose migration, NOT here.
-	log.Println("🔄 Running legacy idempotent DDL...")
-	if err := database.Migrate(db); err != nil {
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Println("❌ FATAL ERROR: Database migrations failed")
-		log.Printf("   Error: %v", err)
-		log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		log.Fatal(err)
-	}
+	// The legacy idempotent DDL that used to run here is GONE — see the note on
+	// database.Migrate's removal. Goose above is now the only thing that
+	// creates schema. Do not reintroduce boot-time DDL: it is what let
+	// shift_bins come back untenanted in Feb 2026.
 	log.Println("✅ Database migrations completed")
 
 	// Refuse to boot with a platform signing secret that is not genuinely

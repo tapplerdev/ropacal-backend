@@ -23,7 +23,10 @@ func InitTenancy(db *sqlx.DB) error {
 	if err := orgdb.Init(db); err != nil {
 		return err
 	}
-	return AssertRLSEnforced(db)
+	if err := AssertRLSEnforced(db); err != nil {
+		return err
+	}
+	return AssertRLSComplete(db)
 }
 
 // AssertRLSEnforced is the boot-time isolation tripwire.
@@ -122,4 +125,81 @@ func AssertRLSEnforced(db *sqlx.DB) error {
 	}
 	log.Println("🛡️  [RLS] Enforcement verified: unscoped probe sees 0 rows (fail-closed)")
 	return nil
+}
+
+// AssertRLSComplete is the STRUCTURAL half of the tenancy tripwire, and the Go
+// counterpart of app/core/tenancy.py:assert_rls_complete in binly-backend.
+//
+// AssertRLSEnforced above proves BEHAVIOUR — that an unscoped read of `bins`
+// really does come back empty. That check is necessary but not sufficient: it
+// looks at one table, and it passes vacuously if that table happens to be
+// empty. This one proves STRUCTURE — that EVERY table carrying an
+// organization_id has RLS enabled, FORCEd, and at least one policy. Neither
+// subsumes the other, which is why both run.
+//
+// It exists because of a specific incident: shift_bins was dropped in Feb 2026
+// and recreated by this package's boot-time DDL without organization_id or RLS,
+// and nothing said so. That DDL is gone as of 2026-08-02 (see database.go), so
+// this assertion is now the thing that would catch any future regression —
+// whether from a hand-applied fix, a migration that forgets a policy, or the
+// Python backend once it starts creating tables.
+//
+// Fails CLOSED: any violation is fatal to boot. A backend that cannot prove
+// tenant isolation must not serve tenant data.
+func AssertRLSComplete(db *sqlx.DB) error {
+	if !orgdb.Migrated() {
+		return nil // pre-tenancy database; nothing to assert yet
+	}
+
+	var violations []struct {
+		Table   string `db:"table_name"`
+		Enabled bool   `db:"enabled"`
+		Forced  bool   `db:"forced"`
+		Polices int    `db:"policy_count"`
+	}
+	// relkind IN ('r','p') so a partitioned parent holding tenant data cannot
+	// slip through — there are none today, and this keeps it true if that changes.
+	const q = `
+		SELECT c.relname AS table_name,
+		       c.relrowsecurity AS enabled,
+		       c.relforcerowsecurity AS forced,
+		       (SELECT count(*) FROM pg_policies p
+		         WHERE p.schemaname = 'public' AND p.tablename = c.relname) AS policy_count
+		  FROM pg_class c
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'public'
+		   AND c.relkind IN ('r','p')
+		   AND EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_schema = 'public'
+		                  AND table_name = c.relname
+		                  AND column_name = 'organization_id')
+		   AND (NOT c.relrowsecurity
+		        OR NOT c.relforcerowsecurity
+		        OR NOT EXISTS (SELECT 1 FROM pg_policies p
+		                        WHERE p.schemaname = 'public' AND p.tablename = c.relname))
+		 ORDER BY c.relname`
+	if err := db.Select(&violations, q); err != nil {
+		return fmt.Errorf("RLS completeness check failed to run: %w", err)
+	}
+	if len(violations) == 0 {
+		log.Println("🛡️  [RLS] Completeness verified: every org-scoped table has ENABLE + FORCE + a policy")
+		return nil
+	}
+
+	for _, v := range violations {
+		missing := ""
+		if !v.Enabled {
+			missing += " ENABLE"
+		}
+		if !v.Forced {
+			missing += " FORCE"
+		}
+		if v.Polices == 0 {
+			missing += " POLICY"
+		}
+		log.Printf("❌ [RLS] %s is missing:%s", v.Table, missing)
+	}
+	return fmt.Errorf(
+		"RLS INCOMPLETE: %d table(s) carry organization_id without full row-level security "+
+			"— tenant data in them is visible across organizations. REFUSING TO SERVE", len(violations))
 }
