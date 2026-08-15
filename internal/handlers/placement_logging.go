@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -93,6 +94,17 @@ type placementFeatures struct {
 // count.
 func logPlacementDecisions(db *orgdb.DB, areaLabel string, seed int64, decisions []placementDecision) {
 	if db == nil || len(decisions) == 0 {
+		return
+	}
+	// Experiment escape hatch. A local run pointed at the production database
+	// would otherwise inject its scored shortlist into the training set — rows
+	// that look identical to real operator-driven decisions but describe a
+	// scoring variant that was never shipped. Regressing yield on a table that
+	// silently mixes eras is the exact failure placementModelVersion exists to
+	// prevent, and there is no column that would let anyone unpick it later.
+	// Unset in every deployed environment; set only when benchmarking.
+	if os.Getenv("PLACEMENT_LOG_DISABLED") == "1" {
+		log.Printf("🧪 [PlacementLog] PLACEMENT_LOG_DISABLED=1 — skipping %d decisions (experiment run)", len(decisions))
 		return
 	}
 
