@@ -277,6 +277,12 @@ func main() {
 	aiAgent.Start(shutdownCtx, &workerWG)
 	log.Println("✅ AI Operations Agent started (30-minute cycles)")
 
+	// Placement model refit. Batch only — it writes coefficients to a table the
+	// scorer reads, and is never on the request path. Weekly, because at this
+	// fleet size the coefficients are noisy and refitting faster tracks a
+	// handful of new checks rather than any real change in the market.
+	handlers.StartPlacementRefitWorker(db)
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
 	go wsHub.Run()
@@ -343,7 +349,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "a3-boot-ddl-removed",
+			"version":         "placement-self-updating-model",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",

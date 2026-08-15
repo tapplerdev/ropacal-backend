@@ -50,6 +50,12 @@ type LocationRecommendation struct {
 	Locality           string  `json:"locality,omitempty"`
 	DistanceFromAreaMi float64 `json:"distance_from_area_mi,omitempty"`
 	AreaMatch          float64 `json:"area_match,omitempty"`
+
+	// PredictedFillRate is expected fill in percentage points per day. Present
+	// only under PLACEMENT_PREDICT_FILL, where Score carries the same value —
+	// this field names the UNITS, so a stored recommendation can be compared
+	// against the bin's realized rate later instead of being uncheckable.
+	PredictedFillRate float64 `json:"predicted_fill_rate_pct_per_day,omitempty"`
 }
 
 type existingBin struct {
@@ -1590,11 +1596,11 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			// genuinely cannot tell two locations apart.
 			//
 			// Spread over the real range: 9 -> 0.50, 23 -> 0.69, 75 -> 0.94.
-			maxPOI := float64(browseFetchLimit)
-			densityScore = math.Log(1+float64(poiDensity)) / math.Log(1+maxPOI)
-			if densityScore > 1.0 {
-				densityScore = 1.0
-			}
+			// Shared with the refit's feature gathering (see
+			// densityScoreFromCount): the model must be fitted on exactly the
+			// transform candidates are scored with, or its coefficients describe
+			// a feature that never reaches the scoring loop.
+			densityScore = densityScoreFromCount(poiDensity)
 		} else {
 			// v1: original tiered scoring
 			densityScore = 0.3
@@ -1631,6 +1637,9 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// Hoisted to loop scope so the core+halo profile can read this pick's
 		// calibrated feature vector after scoring (density is already loop-scoped).
 		var anchorScore, fillVal, popVal float64
+		// Non-zero only under PLACEMENT_PREDICT_FILL; surfaced on the response so
+		// a recommendation can be graded against what the bin actually does.
+		var predictedFill float64
 
 		if useV2 {
 			// v2: multiplicative site quality scoring
@@ -1706,6 +1715,17 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			finalScore = math.Round(finalScore*10) / 10 // round to 1 decimal
 			finalScore = math.Min(10, finalScore)
 
+			// Opt-in: score by PREDICTED FILL RATE instead of the 0-10 index.
+			// Same features, fitted exponents, no circular fill term — see
+			// placement_predict.go for why and for the accuracy this actually
+			// has. finalScore is overwritten so every downstream consumer
+			// (sorting, the quality gate, near-misses, the response) operates on
+			// one number rather than two that could disagree.
+			if predictedFillRateEnabled() {
+				predictedFill = predictFillRate(h.db, densityScore, anchorScore, popVal)
+				finalScore = predictedFill
+			}
+
 			log.Printf("📊 [v2 Site] %s: %.1f (density=%.3f, anchor=%.2f, fill=%.2f, pop=%.2f, POIs=%d, d^.4=%.3f, a^.3=%.3f, f^.2=%.3f, p^.1=%.3f)",
 				c.NearbyPOI, finalScore, densityScore, anchorScore, fillVal, popVal, poiDensity,
 				math.Pow(densityScore, 0.4), math.Pow(anchorScore, 0.3), math.Pow(fillVal, 0.2), math.Pow(popVal, 0.1))
@@ -1744,8 +1764,16 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 		// Minimum score cutoff — below this is not worth recommending as a
 		// pick, but it IS worth reporting: keep it as a labeled near-miss so
 		// "asked 10, got 8" comes with the 2 that just missed and why.
-		if finalScore < 4.0 {
-			log.Printf("🚫 [Recommend] Filtered: %s — score %.1f below 4.0 threshold", c.NearbyPOI, finalScore)
+		// Quality bar. Under predicted-yield scoring the units change from an
+		// arbitrary index to %/day, so the threshold has to change with them —
+		// comparing a 6.4 %/day prediction against the 4.0 index bar would be
+		// comparing two different quantities that happen to be numbers.
+		qualityBar := 4.0
+		if predictedFillRateEnabled() {
+			qualityBar = predictedFillCutoff()
+		}
+		if finalScore < qualityBar {
+			log.Printf("🚫 [Recommend] Filtered: %s — score %.1f below %.1f threshold", c.NearbyPOI, finalScore, qualityBar)
 			dropped["below_quality_bar"]++
 			nearMisses = append(nearMisses, LocationRecommendation{
 				Latitude:        math.Round(c.Lat*10000) / 10000,
@@ -1754,7 +1782,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 				City:            c.City,
 				Zip:             c.Zip,
 				Score:           finalScore,
-				Reasoning:       fmt.Sprintf("BELOW QUALITY BAR (%.1f < 4.0) — shown for transparency, not recommended", finalScore),
+				Reasoning:       fmt.Sprintf("BELOW QUALITY BAR (%.1f < %.1f) — shown for transparency, not recommended", finalScore, qualityBar),
 				NearestBinNum:   c.NearestBinNum,
 				NearestBinDist:  c.NearestBinDist,
 				AreaAvgFillRate: math.Round(c.NearestFillRate*10) / 10,
@@ -1816,6 +1844,7 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 			Source:             c.Source,
 			Locality:           c.Locality,
 			DistanceFromAreaMi: math.Round(c.DistMiles*100) / 100,
+			PredictedFillRate:  predictedFill,
 		}
 		scored = append(scored, scoredRec{rec: rec, feat: featureVec{densityScore, anchorScore, fillVal, popVal}})
 
@@ -2085,6 +2114,83 @@ func (h *ChatHandler) currentPitchFillRates() map[string]float64 {
 		i = j
 	}
 	log.Printf("📍 [FillRate] %d bins have a current-pitch fill rate (warehouse spells excluded)", len(out))
+	return out
+}
+
+// fillInterval is ONE measurement window between two checks at the bin's current
+// pitch: the observed rate, and whether that rate is a lower bound.
+//
+// Exists because censoring is a property of an INTERVAL, not of a bin. On the
+// live fleet 95 of 106 bins have at least one interval ending at 100%, so a
+// per-bin censored flag would mark almost everything and discard the very
+// distinction it was meant to capture.
+type fillInterval struct {
+	BinID    string
+	Rate     float64 // %/day
+	Censored bool    // window ended at 100% — the bin may have filled days earlier
+}
+
+// currentPitchIntervals returns the same measurements currentPitchFillRates
+// averages, but unaggregated and tagged with censoring.
+//
+// The validity rules are deliberately identical to currentPitchFillRates (same
+// pitch only, warehouse spells excluded, >1h apart, fill increased, <50%/day) so
+// the censored fit and the ordinary one are looking at exactly the same data and
+// any difference between them is the censoring treatment alone.
+func (h *ChatHandler) currentPitchIntervals() []fillInterval {
+	type chk struct {
+		BinID string  `db:"bin_id"`
+		Fill  float64 `db:"fill_percentage"`
+		At    int64   `db:"checked_on"`
+		Snap  string  `db:"snap"`
+	}
+	var rows []chk
+	if err := h.db.Select(&rows, `
+		SELECT bin_id, fill_percentage, checked_on, COALESCE(bin_address_snapshot,'') AS snap
+		FROM checks WHERE fill_percentage IS NOT NULL
+		ORDER BY bin_id, checked_on`); err != nil {
+		log.Printf("⚠️ [FillRate] interval query failed: %v", err)
+		return nil
+	}
+
+	warehouse := strings.ToLower(warehouseAddressHint(h.db))
+	var out []fillInterval
+	censored := 0
+	for i := 0; i < len(rows); {
+		j := i
+		for j < len(rows) && rows[j].BinID == rows[i].BinID {
+			j++
+		}
+		bin := rows[i:j]
+		start := len(bin) - 1
+		last := normalizePlace(bin[start].Snap)
+		for start > 0 && normalizePlace(bin[start-1].Snap) == last {
+			start--
+		}
+		cur := bin[start:]
+		if warehouse != "" && strings.Contains(last, normalizePlace(warehouse)) {
+			i = j
+			continue // parked in the yard — no field rate
+		}
+		for k := 1; k < len(cur); k++ {
+			dt := float64(cur[k].At-cur[k-1].At) / 86400.0
+			if cur[k].Fill <= cur[k-1].Fill || cur[k].At-cur[k-1].At <= 3600 {
+				continue
+			}
+			r := (cur[k].Fill - cur[k-1].Fill) / math.Max(1, dt)
+			if r >= 50 {
+				continue
+			}
+			isCensored := cur[k].Fill >= 100
+			if isCensored {
+				censored++
+			}
+			out = append(out, fillInterval{BinID: bin[0].BinID, Rate: r, Censored: isCensored})
+		}
+		i = j
+	}
+	log.Printf("📍 [FillRate] %d usable intervals, %d censored at 100%% (%.1f%%)",
+		len(out), censored, 100*float64(censored)/math.Max(1, float64(len(out))))
 	return out
 }
 
