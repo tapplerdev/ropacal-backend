@@ -101,7 +101,7 @@ func GetGrowthBinYields(root *sqlx.DB) http.HandlerFunc {
 //	                  1.5 km (kernel exp(-d/600m)), normalized to network P90
 //	Gap             — distance to the nearest bin, capped at 1200 m (whitespace)
 //	IncidentRisk    — kernel over ACTIVE no-go zone centers (exp(-d/400m));
-//	                  inside a zone's radius disqualifies outright
+//	                  inside a zone (its radius, at least 500 m) disqualifies outright
 //	Cannibalization — how much of the prior comes from close (<800 m)
 //	                  neighbors that a new bin would split rather than grow
 //
@@ -158,11 +158,20 @@ func GetGrowthCandidates(root *sqlx.DB) http.HandlerFunc {
 			Lng    float64 `db:"center_longitude"`
 			Radius float64 `db:"radius_meters"`
 		}
+		// No-go zones are a hard rule here (inside one zeroes the score, and the
+		// relocate modal hides those spots), so scoring without them would rank
+		// spots inside them as good ones. Fail instead of carrying on.
+		//
+		// Zones made from incident reports carry no radius (0), so the raw value
+		// only caught a candidate sitting exactly on a zone's center. Same 500 m
+		// floor as the AI recommender (toolRecommendLocations).
 		var zones []zone
 		if err := db.Select(&zones, `
-			SELECT center_latitude, center_longitude, radius_meters
+			SELECT center_latitude, center_longitude, GREATEST(radius_meters, 500) AS radius_meters
 			FROM no_go_zones WHERE status = 'active'`); err != nil {
-			log.Printf("⚠️  Failed to load no-go zones for scoring: %v", err)
+			log.Printf("❌ Error loading no-go zones for scoring: %v", err)
+			utils.RespondError(w, http.StatusInternalServerError, "Failed to load no-go zones")
+			return
 		}
 
 		// Network P90 of yield/bin-week anchors the YieldPrior normalization.

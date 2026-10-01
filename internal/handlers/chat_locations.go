@@ -824,9 +824,12 @@ func (h *ChatHandler) toolRecommendLocations(params map[string]any) (string, err
 	}
 	log.Printf("📍 [Recommend] Fill rates: %d per-bin, %d per-zip (all history)", len(perBinFillRate), len(zipFillRate))
 
-	// Step 3: No-go zones
+	// Step 3: No-go zones. A failed read must stop the run: an empty list
+	// filters nothing, so carrying on would recommend spots inside them.
 	var zones []noGoZone
-	h.db.Select(&zones, `SELECT center_latitude, center_longitude, GREATEST(radius_meters, 500) as radius_meters FROM no_go_zones WHERE status = 'active' AND merged_into_zone_id IS NULL`)
+	if err := h.db.Select(&zones, `SELECT center_latitude, center_longitude, GREATEST(radius_meters, 500) as radius_meters FROM no_go_zones WHERE status = 'active' AND merged_into_zone_id IS NULL`); err != nil {
+		return "", fmt.Errorf("failed to fetch no-go zones: %w", err)
+	}
 
 	// Step 4: Census data
 	type censusRow struct {
