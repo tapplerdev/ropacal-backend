@@ -2,8 +2,9 @@
 
 Status: **COMPLETE** (Phases 0–6 done + live-verified; census zero — no route_tasks
 writes outside this package; CompleteTask tx-wrapped, all seven task types
-live-completed on prod). Known follow-up: task #41 — pre-existing dropoff-before-
-pickup persisted ordering on mixed shifts + missing completion leg-order guard. Successor to the `moverequest` domain; follows
+live-completed on prod). Task #41 (dropoff-before-pickup persisted ordering on mixed
+shifts + the missing completion leg-order guard) was fixed 2026-07-05 in e828f79.
+Successor to the `moverequest` domain; follows
 the same conventions (consumer-defined seams, phased behavior-preserving migration,
 golden-diff + live-verify each slice). Supersedes the earlier `internal/route`
 scoping — renamed to `itinerary` because "route" is overloaded (see Boundary).
@@ -152,20 +153,31 @@ Driver task JSON + Centrifugo payloads byte-identical. Mutations synchronous, in
 caller's tx. Optimizer owns *order*; itinerary owns *numbering + persistence*. Two
 `sequence_order` writers only.
 
-## Future: `shift_edit_history` (unblocked by this domain)
-Today shift edits are audited only **row-level** on `route_tasks` (`added_by`/
-`addition_reason`/`deleted_by`/`deletion_reason`) + the move-side effect in
-`move_request_history`; there is **no unified, queryable edit timeline** for a shift
-(`shift_history` is the *completed-shift archive*; `shift_edited` is an ephemeral
-Centrifugo event). Once itinerary is the **single writer** of `route_tasks`, every
-`AddX` / `RemoveTasks` / `ApplyOrder` is one choke point that can also append a
-`shift_edit_history` event (added/removed/reordered/reassigned, with actor + reason).
-A clean follow-on feature this consolidation makes cheap — not part of the
-behavior-preserving migration. Tracked separately.
+## `shift_edit_history` — built 2026-10-01
+The unified edit timeline this domain made cheap (migration 00009, `history.go`).
+One row per human edit — `created` (one event at birth, carrying the shift's
+recomputed bin count), `task_added`, `task_removed`, `driver_reassigned` — with
+actor, reason and time, written in the SAME transaction as the edit.
+
+Because itinerary is the single writer, the writers log themselves: `RemoveByIDs`
+is one data-modifying CTE (UPDATE ... RETURNING feeding the INSERT); the `Add*`
+writers, manager-assigned `AddMove` (`AddedBy != nil`) and `ReconcileMove`'s legacy
+dropoff repair log what they inserted. Outside the package, `CreateShiftWithTasks`
+logs `created` after the recount and `UpdateShift` logs a reassignment before
+clearing the previous driver's finished work.
+
+Deliberately NOT logged — and this is where it differs from the plan above it
+replaced: reordering. `ApplyOrder`, the re-optimize retire/re-insert
+(`RemoveAllLive("system", "shift_reoptimized")`) and warehouse stops are optimizer
+mechanics; logging them would bury every real edit under N rows per reroute.
+Tasks born with the shift are not logged one by one either.
+
+Read: `GET /api/manager/shifts/{shiftId}/edit-history`. Tests: sqlmock plus
+`pgintegration` tests against real Postgres (see `internal/pgtest`).
 
 ## Out of scope (separate initiatives)
 - OR-Tools "saved optimized route" cache / revive `route` templates (optimization layer; feeds `ApplyOrder`).
 - Time windows for collections/moves (capability confirmed; product decision).
-- PUT→PATCH verb sweep (#14, dashboard lockstep).
+- ~~PUT→PATCH verb sweep (#14, dashboard lockstep).~~ Done 2026-10-01 (additive: PUT kept until the driver app release).
 - moverequest (c) kernel — *unblocked* by Phases 2 & 4.
-- `shift_edit_history` unified edit timeline (see Future above).
+- ~~`shift_edit_history` unified edit timeline.~~ Built 2026-10-01 (see above).

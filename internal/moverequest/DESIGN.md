@@ -69,17 +69,26 @@ internal/moverequest/
   - ✅ `Service` + `ClassifyActionable` (pure, unit-tested) + `Store.ActiveWithBin`;
     MoveRequestMonitor now delegates the overdue/due-soon query+classification to
     `Service.FindActionable` (watcher keeps only settings/policy + alert fan-out).
-  - ⏳ remaining: migrate write handlers (assign/clear/cancel/schedule) to the
-    `Service`; fold in the alert fan-out + dedup if it earns it.
+  - ✅ write handlers delegate their decisions to the domain — in a different
+    shape than planned: plain domain functions (`PlanAssignment`,
+    `AssignToShift` / `AssignToDriver`, `ClearAssignment`, `Cancel`, `Complete`,
+    `ScheduledUrgency`, and the `Log*` history writers), not methods on a
+    `Service`. `Service` keeps only the read side (`FindActionable`).
+  - still open, only if it earns it: fold the monitor's alert fan-out + dedup in.
 - **Phase 4 — history + ride-alongs.** Fold in history logging; do the
   move-request PUT→PATCH/POST verb fixes (lockstep with the dashboard).
+  The verb fixes shipped 2026-10-01 (PATCH for the edit, POST for cancel /
+  assign-to-user / clear-assignment / complete-manually; PUT kept until the
+  driver app release).
 
 ## Related, separate initiatives (not part of this package)
-- **Graceful shutdown** (cross-cutting bug): all worker `Stop()`s are dead code;
-  add `signal.NotifyContext` + `http.Server.Shutdown` + context-threaded loops.
-- **`internal/worker.Periodic`**: extract the 6×-copy-pasted ticker/start/stop
-  lifecycle into one context-aware runner.
-- **`total_bins` → `total_stops`** + final-stop flag (shift domain).
+- ~~**Graceful shutdown**~~ — done: `signal.NotifyContext` + `http.Server.Shutdown`
+  + a worker WaitGroup in `cmd/server/main.go`.
+- ~~**`internal/worker.Periodic`**~~ — done 2026-10-01: all seven background loops
+  run on it (the dead `Stop()`s are gone), with liveness on `/health`.
+- ~~**`total_bins` → `total_stops`** + final-stop flag~~ — dropped 2026-10-01 as
+  obsolete: `itinerary.CountStops` (2026-07) made `total_bins` genuinely count
+  logical bins (a relocation once), and the driver app adopted it.
 
 ## Invariant for every slice
 HTTP routes and response JSON stay **byte-identical** (golden-diff). Only internal
