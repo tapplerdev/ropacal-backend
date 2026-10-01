@@ -193,7 +193,8 @@ an unknown slug returns a 401 **identical** to bad credentials (no enumeration).
 
 ## Tier 1 realtime — status 2026-07-30
 
-Four of the five items are **SHIPPED AND GATED**. D1 is one deploy of three in.
+All five items are **SHIPPED**. (This section was written mid-way through D1;
+D1 finished the same day — see its row.)
 
 | Item | State | Gate result |
 |---|---|---|
@@ -201,9 +202,9 @@ Four of the five items are **SHIPPED AND GATED**. D1 is one deploy of three in.
 | **D3** Redis keys → `ropacal:org:{orgID}:driver:{id}:location`, `KEYS`→`SCAN` | **DONE** | Key landed under the org prefix; another org's prefix and the flat form both empty; Centrifugo's 153 keys untouched; batch writer advanced `driver_current_location` in 12s |
 | **D4b** cached per-request membership + role revalidation | **DONE** | A deleted user's still-valid token (exp 6 days out) 401'd at exactly 60s; 90s of continuous requests across the cache boundary all 200 |
 | **D4a** connection token TTL 24h → 1h | **DONE** | Freshly issued token has `exp - iat == 3600` |
-| **D1** `company:events` → `company:{orgID}:events` | **Deploy 1 of 3** | dual-publish + two-form parser live; see below |
+| **D1** `company:events` → `company:{orgID}:events` | **DONE** | Deploy 1 (4512512) dual-publish + two-form parser; Deploy 3a (9b50e8f) removed the legacy subscribe; Deploy 3b (04e89d9) removed the legacy publish — all by 2026-07-30 |
 
-### D1 — what remains
+### D1 — what remained (historical; D1 is DONE, see the table)
 
 Deploy 1 (backend: publisher dual-writes both channels, parser accepts both
 forms) is live and fully backward compatible. **It closes nothing on its own.**
