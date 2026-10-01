@@ -57,6 +57,7 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 	// and the driver completes a placement-style "Place Bin #N" stop that also
 	// finalizes the move request.
 	if p.MoveType == "redeployment" {
+		placementID := uuid.New().String()
 		if _, err := ext.Exec(ext.Rebind(`
 			UPDATE route_tasks SET sequence_order = sequence_order + 1
 			WHERE shift_id = ? AND sequence_order >= ?`), shiftID, p.InsertSeq); err != nil {
@@ -70,12 +71,15 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 				destination_latitude, destination_longitude, destination_address,
 				move_request_id, move_type, added_by, addition_reason, is_completed, created_at
 			) VALUES (?, ?, ?, ?, ?, 'placement', ?, ?, ?, ?, 'redeployment', ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
-			uuid.New().String(), shiftID, p.BinID, p.BinNumber, p.InsertSeq,
+			placementID, shiftID, p.BinID, p.BinNumber, p.InsertSeq,
 			p.DropoffLat, p.DropoffLng, p.DropoffAddress,
 			p.BinNumber, // "Place Bin #N" display parity with placements
 			p.DropoffLat, p.DropoffLng, p.DropoffAddress,
 			p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
 			return 0, fmt.Errorf("insert redeployment placement: %w", err)
+		}
+		if err := logMoveAdded(ext, p, placementID); err != nil {
+			return 0, err
 		}
 		return 1, nil
 	}
@@ -97,6 +101,8 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 	// created at shift-start; this keeps AddMove (assign-to-shift / reopt) at parity.
 	pickupDestLat, pickupDestLng, pickupDestAddr := p.DropoffLat, p.DropoffLng, p.DropoffAddress
 
+	pickupID, dropoffID := uuid.New().String(), uuid.New().String()
+
 	// Pickup at the bin's current location.
 	if _, err := ext.Exec(ext.Rebind(`
 		INSERT INTO route_tasks (
@@ -105,7 +111,7 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 			destination_latitude, destination_longitude, destination_address,
 			move_request_id, move_type, added_by, addition_reason, is_completed, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
-		uuid.New().String(), shiftID, p.BinID, p.BinNumber, p.InsertSeq, string(Pickup),
+		pickupID, shiftID, p.BinID, p.BinNumber, p.InsertSeq, string(Pickup),
 		p.PickupLat, p.PickupLng, p.PickupAddress, p.FillPercentage,
 		pickupDestLat, pickupDestLng, pickupDestAddr,
 		p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
@@ -121,7 +127,7 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 			destination_latitude, destination_longitude, destination_address,
 			move_request_id, move_type, added_by, addition_reason, is_completed, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
-		uuid.New().String(), shiftID, p.BinID, p.BinNumber, dropoffSeq, string(Dropoff),
+		dropoffID, shiftID, p.BinID, p.BinNumber, dropoffSeq, string(Dropoff),
 		p.DropoffLat, p.DropoffLng, p.DropoffAddress,
 		p.DropoffLat, p.DropoffLng, p.DropoffAddress,
 		p.MoveRequestID, p.MoveType, p.AddedBy, p.AdditionReason, p.Now); err != nil {
@@ -142,5 +148,25 @@ func AddMove(ext sqlx.Ext, shiftID string, p MovePlacement) (int, error) {
 	if ps >= ds {
 		return 0, fmt.Errorf("invalid sequence order: pickup at %d, dropoff at %d", ps, ds)
 	}
+	if err := logMoveAdded(ext, p, pickupID, dropoffID); err != nil {
+		return 0, err
+	}
 	return binsAdded, nil
+}
+
+// logMoveAdded puts a move's tasks on the shift's edit timeline — but only when
+// it is an EDIT. AddMove serves two callers: CreateShiftWithTasks, building the
+// shift, which leaves AddedBy nil; and the assign-move-to-shift paths, which
+// always set it. MovePlacement's own doc already defines nil AddedBy as "created
+// with the shift", so that is the line: birth is the single `created` event,
+// not one task_added per move.
+func logMoveAdded(ext sqlx.Ext, p MovePlacement, taskIDs ...string) error {
+	if p.AddedBy == nil {
+		return nil
+	}
+	reason := p.AdditionReason
+	if reason != nil && *reason == "" {
+		reason = nil // "" means no reason given, as on every other add path
+	}
+	return logTasksAdded(ext, taskIDs, *p.AddedBy, reason, p.Now)
 }

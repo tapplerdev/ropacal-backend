@@ -102,7 +102,8 @@ func TestSyncPlacementRemoval(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"shift_id", "task_id"}).
 			AddRow("sA", "t1").AddRow("sA", "t2").AddRow("sB", "t3"))
 	mock.ExpectExec(`UPDATE route_tasks\s+SET is_deleted = true, deleted_at = \$1, deleted_by = \$2, deletion_reason = \$3, updated_at = \$4\s+WHERE id IN \(\$5, \$6, \$7\) AND is_deleted = false`).
-		WithArgs(int64(9), "mgr", "potential_location_deleted", int64(9), "t1", "t2", "t3").
+		WithArgs(int64(9), "mgr", "potential_location_deleted", int64(9), "t1", "t2", "t3",
+			"task_removed", "mgr", "potential_location_deleted", int64(9)).
 		WillReturnResult(sqlmock.NewResult(0, 3))
 
 	m, err := SyncPlacementRemoval(db, "pl1", "mgr", "potential_location_deleted", 9)

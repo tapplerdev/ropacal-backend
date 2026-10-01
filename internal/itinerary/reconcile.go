@@ -123,6 +123,7 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 			shiftID, pickupSeq+1); err != nil {
 			return out, fmt.Errorf("reconcile: open room for dropoff: %w", err)
 		}
+		dropoffID := uuid.New().String()
 		if _, err := ext.Exec(ext.Rebind(`
 			INSERT INTO route_tasks (
 				id, shift_id, bin_id, bin_number, sequence_order, task_type,
@@ -130,11 +131,17 @@ func ReconcileMove(ext sqlx.Ext, shiftID, moveReqID, oldType, newType string, ad
 				destination_latitude, destination_longitude, destination_address,
 				move_request_id, move_type, is_completed, created_at
 			) VALUES (?, ?, ?, ?, ?, 'dropoff', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`),
-			uuid.New().String(), shiftID, binID, binNumber, pickupSeq+1,
+			dropoffID, shiftID, binID, binNumber, pickupSeq+1,
 			dest.Lat, dest.Lng, dest.Address,
 			dest.Lat, dest.Lng, dest.Address,
 			moveReqID, newType, now); err != nil {
 			return out, fmt.Errorf("reconcile: insert dropoff: %w", err)
+		}
+		// A task added to a live shift because a manager edited the move: an edit,
+		// so it goes on the timeline like any other add.
+		reason := "move_edited"
+		if err := logTasksAdded(ext, []string{dropoffID}, by, &reason, now); err != nil {
+			return out, err
 		}
 		out.DropoffAdded = true
 	} else {
