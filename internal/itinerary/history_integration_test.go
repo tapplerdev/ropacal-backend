@@ -41,7 +41,9 @@ func setup(t *testing.T) *fixture {
 	app, admin := pgtest.Connect(t)
 	f := &fixture{
 		app: app, admin: admin,
-		orgA: "org-a-" + uuid.NewString()[:8], orgB: "org-b-" + uuid.NewString()[:8],
+		// UUIDs, as in production: orgdb rejects anything else, and the login
+		// path loops over every active org.
+		orgA: uuid.NewString(), orgB: uuid.NewString(),
 		shiftA: uuid.NewString(), shiftA2: uuid.NewString(),
 		mgrA: uuid.NewString(), drvA: uuid.NewString(), drvA2: uuid.NewString(),
 	}

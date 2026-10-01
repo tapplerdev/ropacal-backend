@@ -45,8 +45,9 @@ func InternalAPIKey(next http.Handler) http.Handler {
 }
 
 // GetAirtagAccounts returns all airtag accounts with their keys.
-// The bridge polls every tenant's tags in one sweep, so once tenancy is live
-// this fans out over the active orgs and unions the results (a single
+// The bridge polls every account's tags in one sweep, so once tenancy is live
+// this fans out over the active orgs WITH AIRTAG TRACKING and unions the
+// results — no other org's Apple credentials ever leave the backend (a single
 // passthrough iteration while dark — byte-identical). Any per-org failure
 // fails the whole request: a silently partial account list would stop the
 // bridge polling that tenant's tags.

@@ -15,6 +15,9 @@ import (
 func GetAirtagLocations(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
+		if !airtagTrackingOr404(w, db) {
+			return
+		}
 		entries, err := services.GetAirtagLocationsFromDB(db)
 		if err != nil {
 			log.Printf("❌ [AirtagLocations] DB query failed: %v", err)
@@ -47,4 +50,21 @@ func GetAirtagLocations(root *sqlx.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// airtagTrackingOr404 answers 404 for an organization without AirTag tracking
+// (organizations.airtag_tracking) and reports whether the handler may go on.
+// A failed read is a 500, never a silent "off".
+func airtagTrackingOr404(w http.ResponseWriter, db *orgdb.DB) bool {
+	on, err := services.AirtagTrackingEnabled(db)
+	if err != nil {
+		log.Printf("❌ [Airtag] %v", err)
+		http.Error(w, "Failed to check AirTag tracking", http.StatusInternalServerError)
+		return false
+	}
+	if !on {
+		http.Error(w, "AirTag tracking is not enabled for this organization", http.StatusNotFound)
+		return false
+	}
+	return true
 }

@@ -5,10 +5,11 @@ package handlers
 // The /api/internal/* endpoints authenticate with INTERNAL_API_KEY and carry
 // no user JWT, so requests arrive with no organization. Once the tenancy
 // migration is live, the owning org is RESOLVED instead: enumerate the active
-// organizations (the organizations catalog is readable by the app role —
-// migration Part 10's org_catalog_read policy; org count is tiny) and probe,
-// org-bound handle by org-bound handle, which tenant's scope contains the
-// airtag/account/bin being written. Probes are EXISTS queries on indexed
+// organizations WITH AIRTAG TRACKING (organizations.airtag_tracking, migration
+// 00010 — the bridge serves one company, so no other org may be read from or
+// written into; the catalog is readable by the app role via org_catalog_read;
+// org count is tiny) and probe, org-bound handle by org-bound handle, which
+// tenant's scope contains the airtag/account/bin being written. Probes are EXISTS queries on indexed
 // columns and results are cached in-process for an hour, so steady state is
 // one map lookup per row.
 //
@@ -68,14 +69,36 @@ func airtagOrgCachePut(key, orgID string) {
 	airtagOrgCache.m[key] = airtagOrgEntry{orgID: orgID, expiresAt: time.Now().Add(airtagOrgCacheTTL)}
 }
 
+// airtagOrgIDs lists the active organizations with AirTag tracking on
+// (organizations.airtag_tracking) — the only ones a bridge endpoint may read
+// from or write into. The bridge serves one company and knows nothing about
+// organizations; without this filter, another org merely owning a bin with the
+// same NUMBER made a tag "ambiguous", and its locations were dropped.
+//
+// Read on the root pool, like orgdb.ActiveOrgIDs: org_catalog_read permits an
+// unscoped read of the catalogue while no tenant is bound.
+func airtagOrgIDs(root *sqlx.DB) ([]string, error) {
+	var ids []string
+	err := root.Select(&ids, `SELECT id FROM organizations WHERE status = 'active' AND airtag_tracking ORDER BY created_at, id`)
+	return ids, err
+}
+
+// airtagOrgEligible applies airtagOrgIDs' predicate to one org, so a cached
+// resolution is re-checked against exactly what a fresh scan would consider.
+func airtagOrgEligible(root *sqlx.DB, orgID string) (bool, error) {
+	var ok bool
+	err := root.Get(&ok, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id = $1 AND status = 'active' AND airtag_tracking)`, orgID)
+	return ok, err
+}
+
 // airtagOrgHandles returns the DB handles a bridge endpoint must fan out
 // over: the single passthrough while tenancy is dark, or one org-bound
-// handle per active organization once live.
+// handle per active organization with AirTag tracking once live.
 func airtagOrgHandles(root *sqlx.DB) ([]*orgdb.DB, error) {
 	if !orgdb.Migrated() {
 		return []*orgdb.DB{orgdb.Passthrough(root)}, nil
 	}
-	ids, err := orgdb.ActiveOrgIDs(root)
+	ids, err := airtagOrgIDs(root)
 	if err != nil {
 		return nil, fmt.Errorf("enumerating organizations: %w", err)
 	}
@@ -112,22 +135,33 @@ func resolveAirtagOrg(root *sqlx.DB, cacheKey string, probe func(d *orgdb.DB) (b
 	// authoritative: if that org no longer claims the identifier, fall through to
 	// the full scan (which re-derives the owner and re-applies the guard).
 	if orgID, ok := airtagOrgCacheGet(cacheKey); ok {
-		d, err := orgdb.System(root, orgID)
+		// A cached answer is held to the same predicate the scan uses, so it
+		// cannot outlive the org's AirTag tracking being switched off, the org
+		// being suspended, or the org being deleted.
+		eligible, err := airtagOrgEligible(root, orgID)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("re-checking cached org %s: %w", orgID, err)
 		}
-		stillOwns, err := probe(d)
-		if err != nil {
-			return nil, false, fmt.Errorf("re-probing cached org %s: %w", orgID, err)
+		if eligible {
+			d, err := orgdb.System(root, orgID)
+			if err != nil {
+				return nil, false, err
+			}
+			stillOwns, err := probe(d)
+			if err != nil {
+				return nil, false, fmt.Errorf("re-probing cached org %s: %w", orgID, err)
+			}
+			if stillOwns {
+				return d, true, nil
+			}
+			log.Printf("⚠️  [AirtagOrg] cached org %s no longer claims %s — re-resolving", orgID, cacheKey)
+		} else {
+			log.Printf("⚠️  [AirtagOrg] cached org %s is no longer eligible (AirTag tracking off, inactive or gone) — re-resolving %s", orgID, cacheKey)
 		}
-		if stillOwns {
-			return d, true, nil
-		}
-		log.Printf("⚠️  [AirtagOrg] cached org %s no longer claims %s — re-resolving", orgID, cacheKey)
 		airtagOrgCacheDelete(cacheKey)
 	}
 
-	ids, err := orgdb.ActiveOrgIDs(root)
+	ids, err := airtagOrgIDs(root)
 	if err != nil {
 		return nil, false, fmt.Errorf("enumerating organizations: %w", err)
 	}
