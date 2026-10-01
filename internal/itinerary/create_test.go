@@ -13,6 +13,14 @@ func mockExtCreate(t *testing.T) (*sqlx.DB, sqlmock.Sqlmock) {
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
+	// Every expected statement must actually run. Without this a test passes
+	// when a writer silently skips a statement it is supposed to issue — the
+	// timeline write, say.
+	t.Cleanup(func() {
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
 	return sqlx.NewDb(raw, "postgres"), mock
 }
 
@@ -25,8 +33,9 @@ func TestAddCollection_ColumnContract(t *testing.T) {
 	db, mock := mockExtCreate(t)
 	defer db.Close()
 
+	inserted := &capture{}
 	mock.ExpectExec(addTasksCols).
-		WithArgs(sqlmock.AnyArg(), "s1", "collection",
+		WithArgs(inserted, "s1", "collection",
 			"b1", nil, nil,
 			33, 37.1, -121.9,
 			"1 Main St, San Jose 95112", nil,
@@ -34,6 +43,7 @@ func TestAddCollection_ColumnContract(t *testing.T) {
 			0, int64(1700000000), int64(1700000000),
 			"mgr1", "why").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAddedLogged(mock, "mgr1", "why", 1700000000, sameAs{inserted})
 
 	id, err := AddCollection(db, "s1", NewCollection{
 		Seq: 7, BinID: "b1", BinNumber: 33, Lat: 37.1, Lng: -121.9,
@@ -49,8 +59,9 @@ func TestAddPlacement_ColumnContract(t *testing.T) {
 	db, mock := mockExtCreate(t)
 	defer db.Close()
 
+	inserted := &capture{}
 	mock.ExpectExec(addTasksCols).
-		WithArgs(sqlmock.AnyArg(), "s1", "placement",
+		WithArgs(inserted, "s1", "placement",
 			nil, "pl1", nil,
 			nil, 37.2, -121.8,
 			"9 Place Blvd", nil,
@@ -58,6 +69,7 @@ func TestAddPlacement_ColumnContract(t *testing.T) {
 			0, int64(1700000000), int64(1700000000),
 			"mgr1", "why").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAddedLogged(mock, "mgr1", "why", 1700000000, sameAs{inserted})
 
 	if _, err := AddPlacement(db, "s1", NewPlacement{
 		Seq: 3, PotentialLocationID: "pl1", Lat: 37.2, Lng: -121.8,
@@ -79,8 +91,9 @@ func TestAddMoveLeg_PickupCarriesDestination(t *testing.T) {
 
 	origin, dest := "P5 Move Rd", "P5 Dest Way"
 	dLat, dLng, fill, binNum := 37.334, -121.884, 42, 10993
+	inserted := &capture{}
 	mock.ExpectExec(legCols).
-		WithArgs(sqlmock.AnyArg(), "s1", "pickup",
+		WithArgs(inserted, "s1", "pickup",
 			"b1", nil, "m1",
 			&binNum, 37.332, -121.882,
 			&origin, &dest,
@@ -89,6 +102,7 @@ func TestAddMoveLeg_PickupCarriesDestination(t *testing.T) {
 			0, int64(1700000000), int64(1700000000),
 			"mgr1", "why").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAddedLogged(mock, "mgr1", "why", 1700000000, sameAs{inserted})
 
 	if _, err := AddMoveLeg(db, "s1", NewMoveLeg{
 		Seq: 4, Type: Pickup, MoveRequestID: "m1", BinID: "b1",
@@ -109,8 +123,9 @@ func TestAddMoveLeg_DropoffContract(t *testing.T) {
 
 	dest := "P5 Dest Way"
 	dLat, dLng, binNum := 37.334, -121.884, 10993
+	inserted := &capture{}
 	mock.ExpectExec(legCols).
-		WithArgs(sqlmock.AnyArg(), "s1", "dropoff",
+		WithArgs(inserted, "s1", "dropoff",
 			"b1", nil, "m1",
 			&binNum, 37.334, -121.884,
 			&dest, &dest,
@@ -119,6 +134,7 @@ func TestAddMoveLeg_DropoffContract(t *testing.T) {
 			0, int64(1700000000), int64(1700000000),
 			"mgr1", "why").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAddedLogged(mock, "mgr1", "why", 1700000000, sameAs{inserted})
 
 	if _, err := AddMoveLeg(db, "s1", NewMoveLeg{
 		Seq: 5, Type: Dropoff, MoveRequestID: "m1", BinID: "b1",

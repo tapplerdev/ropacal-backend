@@ -855,6 +855,11 @@ func CreateShiftWithTasks(
 	if err = itinerary.RecomputeShiftCounts(tx, shiftID, now); err != nil {
 		return "", 0, nil, nil, fmt.Errorf("failed to recompute shift counts: %w", err)
 	}
+	// The shift's birth is ONE timeline event, written after the counts it
+	// reads; the tasks it was born with are not logged one by one.
+	if err = itinerary.LogShiftCreated(tx, shiftID, managerID, now); err != nil {
+		return "", 0, nil, nil, err
+	}
 	log.Printf("✅ Created shift with %d tasks - optimizer will add warehouse stops during optimization", actualTasks)
 
 	err = tx.Commit()

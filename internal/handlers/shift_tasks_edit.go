@@ -528,6 +528,15 @@ func UpdateShift(root *sqlx.DB, redisClient *redis.Client, centrifugoClient *cen
 			changes["driver_changed"] = true
 			log.Printf("🔄 Driver reassignment: %s → %s", oldDriverID, *req.DriverID)
 
+			// Logged before the completed-task cleanup below, so the timeline reads
+			// "reassigned, then the finished work was cleared" in that order. Same
+			// transaction as the UPDATE: if the edit fails, so does its record.
+			if err = itinerary.LogDriverReassigned(tx, shiftID, userClaims.UserID, oldDriverID, *req.DriverID, now); err != nil {
+				log.Printf("❌ Error logging driver reassignment: %v", err)
+				utils.RespondError(w, http.StatusInternalServerError, "Failed to update shift")
+				return
+			}
+
 			// If active shift is being reassigned, reset to ready + remove completed tasks
 			if shift.Status == "active" || shift.Status == "paused" {
 				log.Printf("🔄 Active shift reassignment — resetting to 'ready', removing completed tasks")

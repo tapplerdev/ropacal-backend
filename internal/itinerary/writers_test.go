@@ -18,6 +18,14 @@ func mockExt(t *testing.T) (*sqlx.DB, sqlmock.Sqlmock) {
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
+	// Every expected statement must actually run. Without this a test passes
+	// when a writer silently skips a statement it is supposed to issue — the
+	// timeline write, say.
+	t.Cleanup(func() {
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
 	return sqlx.NewDb(raw, "postgres"), mock
 }
 
@@ -40,8 +48,10 @@ func TestRemoveByIDs_SoftDeleteCarriesIdempotencyGuard(t *testing.T) {
 	db, mock := mockExt(t)
 	defer db.Close()
 
-	mock.ExpectExec("(?s)SET is_deleted = true.*WHERE id IN.*AND is_deleted = false").
-		WithArgs(int64(1700000000), "mgr", "cancelled", int64(1700000000), "a", "b").
+	// One statement: the soft-delete AND its timeline rows (see RemoveByIDs).
+	mock.ExpectExec("(?s)SET is_deleted = true.*WHERE id IN.*AND is_deleted = false.*INSERT INTO shift_edit_history.*FROM removed.*task_type <> 'warehouse_stop'").
+		WithArgs(int64(1700000000), "mgr", "cancelled", int64(1700000000), "a", "b",
+			"task_removed", "mgr", "cancelled", int64(1700000000)).
 		WillReturnResult(sqlmock.NewResult(0, 2))
 
 	if err := RemoveByIDs(db, []string{"a", "b"}, "mgr", "cancelled", 1700000000); err != nil {

@@ -138,6 +138,10 @@ func AddCollection(ext sqlx.Ext, shiftID string, c NewCollection) (string, error
 	}); err != nil {
 		return "", fmt.Errorf("insert collection: %w", err)
 	}
+	// Mid-shift add — always an edit, so always on the timeline.
+	if err := logTasksAdded(ext, []string{id}, c.AddedBy, nonEmpty(c.AdditionReason), c.Now); err != nil {
+		return "", err
+	}
 	return id, nil
 }
 
@@ -165,6 +169,10 @@ func AddPlacement(ext sqlx.Ext, shiftID string, p NewPlacement) (string, error) 
 		{"added_by", p.AddedBy}, {"addition_reason", p.AdditionReason},
 	}); err != nil {
 		return "", fmt.Errorf("insert placement: %w", err)
+	}
+	// Mid-shift add — always an edit, so always on the timeline.
+	if err := logTasksAdded(ext, []string{id}, p.AddedBy, nonEmpty(p.AdditionReason), p.Now); err != nil {
+		return "", err
 	}
 	return id, nil
 }
@@ -216,5 +224,17 @@ func AddMoveLeg(ext sqlx.Ext, shiftID string, l NewMoveLeg) (string, error) {
 	}); err != nil {
 		return "", fmt.Errorf("insert %s: %w", l.Type, err)
 	}
+	// Mid-shift add — always an edit, so always on the timeline.
+	if err := logTasksAdded(ext, []string{id}, l.AddedBy, nonEmpty(l.AdditionReason), l.Now); err != nil {
+		return "", err
+	}
 	return id, nil
+}
+
+// nonEmpty maps "" to nil so an absent reason is stored as NULL, not "".
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

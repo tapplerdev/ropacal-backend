@@ -56,14 +56,18 @@ func TestReconcileMove_AddsDropoffForLegacyOneLeg(t *testing.T) {
 	mock.ExpectExec("(?s)UPDATE route_tasks SET sequence_order = sequence_order \\+ 1.*WHERE shift_id = .*AND sequence_order >= ").
 		WithArgs("s1", 3).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	inserted := &capture{}
 	mock.ExpectExec("(?s)INSERT INTO route_tasks.*'dropoff'").
 		WithArgs(
-			sqlmock.AnyArg(), "s1", "b1", 5, 3,
+			inserted, "s1", "b1", 5, 3,
 			37.3, -121.9, "Dest",
 			37.3, -121.9, "Dest",
 			"m1", "relocation", int64(100),
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// A dropoff added to a live shift by a manager's move edit is an edit, and
+	// the row logged is the row inserted.
+	expectAddedLogged(mock, "mgr", "move_edited", 100, sameAs{inserted})
 	mock.ExpectExec("(?s)UPDATE route_tasks\\s+SET destination_latitude = .*task_type = 'pickup'").
 		WithArgs(37.3, -121.9, "Dest", "relocation", int64(100), "m1", "s1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -116,7 +120,8 @@ func TestReconcileMove_DedupesExtraDropoffs(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// extra dropoff soft-deleted via RemoveByIDs
 	mock.ExpectExec("(?s)SET is_deleted = true.*WHERE id IN.*AND is_deleted = false").
-		WithArgs(int64(100), "mgr", "duplicate_dropoff_cleanup", int64(100), "d2").
+		WithArgs(int64(100), "mgr", "duplicate_dropoff_cleanup", int64(100), "d2",
+			"task_removed", "mgr", "duplicate_dropoff_cleanup", int64(100)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// pickup synced
 	mock.ExpectExec("(?s)UPDATE route_tasks\\s+SET destination_latitude = .*task_type = 'pickup'").
