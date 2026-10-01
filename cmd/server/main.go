@@ -350,7 +350,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "shift-edit-history",
+			"version":         "http-verbs",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
@@ -393,6 +393,7 @@ func main() {
 	r.Route("/api/internal", func(r chi.Router) {
 		r.Use(handlers.InternalAPIKey)
 		r.Get("/airtag-accounts", handlers.GetAirtagAccounts(db))
+		// PUT is right here: the bridge replaces the whole `state` sub-resource.
 		r.Put("/airtag-accounts/{id}/state", handlers.UpdateAirtagAccountState(db))
 		r.Post("/airtag-locations", handlers.UpsertAirtagLocations(db))
 		// Tenant provisioning. Behind INTERNAL_API_KEY rather than an admin JWT
@@ -709,6 +710,9 @@ func registerTenantRoutes(r chi.Router, d routeDeps) {
 	r.Get("/notifications", handlers.GetUserNotifications(db))
 	r.Get("/notifications/unread-count", handlers.GetUnreadCount(db))
 	r.Get("/notifications/preferences", handlers.GetNotificationPreferences(db))
+	// Partial update (each preference optional), so PATCH. PUT stays until the
+	// driver app release that sends PATCH has replaced the installed base.
+	r.Patch("/notifications/preferences", handlers.UpdateNotificationPreferences(db))
 	r.Put("/notifications/preferences", handlers.UpdateNotificationPreferences(db))
 	r.Patch("/notifications/read-all", handlers.MarkAllNotificationsRead(db))
 	r.Get("/notifications/{id}", handlers.GetNotificationByID(db))
@@ -734,10 +738,7 @@ func registerTenantAdminRoutes(r chi.Router, d routeDeps) {
 
 	r.Post("/manager/assign-route", handlers.AssignRoute(db, wsHub, fcmService, centrifugoClient))
 	// Cancel is an action (state transition), so POST is the correct verb.
-	// PUT is kept temporarily for backward-compat until the dashboard ships
-	// its POST switch; remove the PUT line after that deploys.
 	r.Post("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
-	r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
 	r.Post("/manager/shifts/cancel-all-active", handlers.CancelAllActiveShifts(db, wsHub, fcmService, centrifugoClient))
 	r.Patch("/manager/shifts/{id}", handlers.UpdateShift(db, redisClient, centrifugoClient, fcmService)) // Comprehensive shift editing
 	r.Post("/manager/shifts/{shift_id}/tasks/remove", handlers.RemoveTasksFromShift(db, redisClient, centrifugoClient, fcmService))
@@ -762,22 +763,23 @@ func registerTenantAdminRoutes(r chi.Router, d routeDeps) {
 
 	// Bin move request management
 	r.Post("/manager/bins/schedule-move", handlers.ScheduleBinMove(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
-	r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))                                                                           // List all move requests (register first - exact match)
-	r.Get("/manager/bins/{binId}/active-move-requests", handlers.GetBinActiveMoveRequests(moverequest.NewSQLStore(db)))                             // bin's non-terminal moves (for the manual-edit-supersedes-move banner)
-	r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(moverequest.NewSQLStore(db), db))                                          // Get single move request (register after)
-	r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db))                                  // Check if move request is in active shifts
-	r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient)) // Update move request
+	r.Get("/manager/bins/move-requests", handlers.GetBinMoveRequests(db))                                                                             // List all move requests (register first - exact match)
+	r.Get("/manager/bins/{binId}/active-move-requests", handlers.GetBinActiveMoveRequests(moverequest.NewSQLStore(db)))                               // bin's non-terminal moves (for the manual-edit-supersedes-move banner)
+	r.Get("/manager/bins/move-requests/{id}", handlers.GetBinMoveRequest(moverequest.NewSQLStore(db), db))                                            // Get single move request (register after)
+	r.Get("/manager/bins/move-requests/{id}/active-shift-dependencies", handlers.CheckMoveRequestDependencies(db))                                    // Check if move request is in active shifts
+	r.Patch("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient)) // Update move request (partial)
 	r.Post("/manager/bins/move-requests/{id}/assign-to-shift", handlers.AssignMoveToShift(moverequest.NewSQLStore(db), db, wsHub, fcmService, centrifugoClient))
-	r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient))
-	r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(moverequest.NewSQLStore(db), db))
-	r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(moverequest.NewSQLStore(db), db))
-	r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(moverequest.NewSQLStore(db), db))
+	// Actions (state transitions), so POST.
+	r.Post("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient))
+	r.Post("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(moverequest.NewSQLStore(db), db))
+	r.Post("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(moverequest.NewSQLStore(db), db))
+	r.Post("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(moverequest.NewSQLStore(db), db))
 	r.Get("/manager/bins/move-requests/{id}/history", handlers.GetMoveRequestHistory(db)) // Get audit trail
 
 	// Bin check recommendations (7-day stale bin flagging)
 	r.Post("/manager/bins/flag-stale", handlers.FlagStaleBins(db))
 	r.Get("/manager/bins/check-recommendations", handlers.GetBinCheckRecommendations(db))
-	r.Put("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db))
+	r.Post("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db)) // action, so POST
 
 	// Bin retirement & reactivation
 	r.Post("/manager/bins/{id}/retire", handlers.RetireBin(db))
@@ -806,9 +808,10 @@ func registerTenantAdminRoutes(r chi.Router, d routeDeps) {
 	// AI Recommendations
 	r.Get("/manager/ai-recommendations", handlers.GetAIRecommendations(db))
 	r.Get("/manager/ai-recommendations/pending-count", handlers.GetPendingRecommendationCount(db))
-	r.Put("/manager/ai-recommendations/{id}/accept", handlers.AcceptRecommendation(db))
-	r.Put("/manager/ai-recommendations/{id}/dismiss", handlers.DismissRecommendation(db))
-	r.Put("/manager/ai-recommendations/{id}/snooze", handlers.SnoozeRecommendation(db))
+	// Actions, so POST.
+	r.Post("/manager/ai-recommendations/{id}/accept", handlers.AcceptRecommendation(db))
+	r.Post("/manager/ai-recommendations/{id}/dismiss", handlers.DismissRecommendation(db))
+	r.Post("/manager/ai-recommendations/{id}/snooze", handlers.SnoozeRecommendation(db))
 
 	// Potential Locations management (managers can delete and convert)
 	r.Get("/potential-locations/{id}/active-shift-dependencies", handlers.CheckPotentialLocationDependencies(db)) // Check if potential location is in active shifts
@@ -848,9 +851,32 @@ func registerTenantAdminRoutes(r chi.Router, d routeDeps) {
 	// Daily digest (manual trigger)
 	r.Post("/manager/daily-digest", handlers.TriggerDigest(digestScheduler))
 
+	// ── Legacy PUT verbs ─────────────────────────────────────────────────────
+	// The same handlers as this function's POST/PATCH routes, kept only so
+	// clients that still send PUT keep working. Who still sends each, as of
+	// 2026-10-01:
+	//   - driver app (ropacalapp, until its next release is installed everywhere):
+	//     shift cancel, move-request cancel, assign-to-user, complete-manually
+	//     (and notification preferences, whose PUT sits with the tenant routes)
+	//   - dashboard: none once its PATCH/POST switch deploys
+	//   - nothing: check-recommendations dismiss (no client calls it at all)
+	// Retiring them: delete this block and that tenant PUT, and their lines in
+	// routes_test.go.
+	r.Put("/manager/shifts/{id}/cancel", handlers.CancelShift(db, wsHub, fcmService, centrifugoClient))
+	r.Put("/manager/bins/move-requests/{id}", handlers.UpdateBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient))
+	r.Put("/manager/bins/move-requests/{id}/cancel", handlers.CancelBinMoveRequest(moverequest.NewSQLStore(db), db, redisClient, wsHub, centrifugoClient))
+	r.Put("/manager/bins/move-requests/{id}/assign-to-user", handlers.AssignMoveToUser(moverequest.NewSQLStore(db), db))
+	r.Put("/manager/bins/move-requests/{id}/clear-assignment", handlers.ClearMoveAssignment(moverequest.NewSQLStore(db), db))
+	r.Put("/manager/bins/move-requests/{id}/complete-manually", handlers.ManuallyCompleteMoveRequest(moverequest.NewSQLStore(db), db))
+	r.Put("/manager/bins/check-recommendations/{id}/dismiss", handlers.DismissBinCheckRecommendation(db))
+	r.Put("/manager/ai-recommendations/{id}/accept", handlers.AcceptRecommendation(db))
+	r.Put("/manager/ai-recommendations/{id}/dismiss", handlers.DismissRecommendation(db))
+	r.Put("/manager/ai-recommendations/{id}/snooze", handlers.SnoozeRecommendation(db))
+	r.Put("/manager/notification-settings", handlers.UpdateNotificationSettings(db))
+
 	// Notification settings & history
 	r.Get("/manager/notification-settings", handlers.GetNotificationSettings(db))
-	r.Put("/manager/notification-settings", handlers.UpdateNotificationSettings(db))
+	r.Patch("/manager/notification-settings", handlers.UpdateNotificationSettings(db)) // partial: only the fields sent change
 	r.Get("/manager/notification-log", handlers.GetNotificationLog(db))
 	r.Get("/manager/notification-log/{id}/recipients", handlers.GetNotificationRecipients(db))
 

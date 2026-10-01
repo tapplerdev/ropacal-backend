@@ -108,11 +108,13 @@ func ClearAllShifts(root *sqlx.DB, hub *websocket.Hub, centrifugoClient *centrif
 // UpdateLocation handles driver location updates (POST /api/driver/location)
 // Called every 10 seconds when driver is on active shift
 
+// CancelShift cancels a specific shift.
+// POST /api/manager/shifts/:id/cancel (PUT kept for older clients)
 func CancelShift(root *sqlx.DB, wsHub *websocket.Hub, fcmService *services.FCMService, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
 		shiftID := chi.URLParam(r, "id")
-		log.Printf("❌ REQUEST: PUT /api/manager/shifts/%s/cancel", shiftID)
+		log.Printf("❌ REQUEST: %s /api/manager/shifts/%s/cancel", r.Method, shiftID)
 
 		if shiftID == "" {
 			utils.RespondError(w, http.StatusBadRequest, "shift_id is required")
