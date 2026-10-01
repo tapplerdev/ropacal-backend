@@ -1,8 +1,10 @@
 package orgdb
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync/atomic"
 
 	"github.com/jmoiron/sqlx"
@@ -114,47 +116,58 @@ func ActiveOrgIDs(root *sqlx.DB) ([]string, error) {
 }
 
 // ForEachActiveOrg runs fn once per active organization with an org-bound
-// handle — the canonical loop for the six background workers. While tenancy is
+// handle — the canonical loop for the background workers. While tenancy is
 // dark (or Init has not run) it invokes fn exactly once with a passthrough
 // handle, preserving single-tenant behavior byte-for-byte.
 //
 // One organization's failure (error or panic) is logged and does NOT stop the
-// remaining organizations.
-func ForEachActiveOrg(root *sqlx.DB, tag string, fn func(d *DB) error) {
+// remaining organizations — one tenant's bad row must not starve the others.
+// The failures are also RETURNED, joined, so a worker.Periodic can count them
+// on /health: absorbing them keeps the loop going, but absorbing them silently
+// made a worker that panicked on every pass look healthy. nil = every org ran
+// clean.
+func ForEachActiveOrg(root *sqlx.DB, tag string, fn func(d *DB) error) error {
 	if !Migrated() {
-		runForOrg(Passthrough(root), tag, "", fn)
-		return
+		return runForOrg(Passthrough(root), tag, "", fn)
 	}
 	ids, err := ActiveOrgIDs(root)
 	if err != nil {
 		log.Printf("❌ [%s] Failed to enumerate organizations: %v", tag, err)
-		return
+		return fmt.Errorf("enumerate organizations: %w", err)
 	}
 	if len(ids) == 0 {
 		log.Printf("🚨 [%s] ZERO active organizations visible — if tenants exist, the connection role "+
 			"is being filtered by the organizations RLS policy (see migration Part 10: run as a role "+
 			"that can read organizations, or add the permissive read policy). Skipping this cycle.", tag)
-		return
+		return errors.New("zero active organizations visible")
 	}
+	var failed []error
 	for _, id := range ids {
 		d, err := New(root, id)
 		if err != nil {
 			log.Printf("❌ [%s] org %s: %v", tag, id, err)
+			failed = append(failed, fmt.Errorf("org %q: %w", id, err))
 			continue
 		}
-		runForOrg(d, tag, id, fn)
+		if err := runForOrg(d, tag, id, fn); err != nil {
+			failed = append(failed, err)
+		}
 	}
+	return errors.Join(failed...)
 }
 
 // runForOrg isolates one org's execution: recovers panics and logs errors so
-// the caller's loop always continues.
-func runForOrg(d *DB, tag, orgID string, fn func(d *DB) error) {
+// the caller's loop always continues, and returns what went wrong.
+func runForOrg(d *DB, tag, orgID string, fn func(d *DB) error) (failure error) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Printf("🚨 [%s] PANIC while processing org %q: %v", tag, orgID, rec)
+			log.Printf("🚨 [%s] PANIC while processing org %q: %v\n%s", tag, orgID, rec, debug.Stack())
+			failure = fmt.Errorf("org %q: panic: %v", orgID, rec)
 		}
 	}()
 	if err := fn(d); err != nil {
 		log.Printf("❌ [%s] org %q: %v", tag, orgID, err)
+		return fmt.Errorf("org %q: %w", orgID, err)
 	}
+	return nil
 }

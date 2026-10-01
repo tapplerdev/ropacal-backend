@@ -13,6 +13,7 @@ import (
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
 	"ropacal-backend/internal/services/redis"
+	"ropacal-backend/internal/worker"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -33,8 +34,6 @@ type StaleShiftMonitor struct {
 	redisClient      *redis.Client
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
-	ticker           *time.Ticker
-	stopChan         chan bool
 }
 
 type activeShiftRow struct {
@@ -58,37 +57,18 @@ func NewStaleShiftMonitor(db *sqlx.DB, redisClient *redis.Client, fcmService *FC
 		redisClient:      redisClient,
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
-		ticker:           time.NewTicker(StaleCheckInterval),
-		stopChan:         make(chan bool),
 	}
 }
 
-// Start begins the background monitoring goroutine.
+// Start launches the loop; it stops when ctx is cancelled. See internal/worker.
 func (m *StaleShiftMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Printf("📋 [StaleShiftMonitor] Starting stale shift monitor (threshold=%s, interval=%s)", StaleThreshold, StaleCheckInterval)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		// Check immediately on startup
-		m.checkStaleShifts()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("🛑 [StaleShiftMonitor] Stopping...")
-				return
-			case <-m.ticker.C:
-				m.checkStaleShifts()
-			}
-		}
-	}()
-}
-
-// Stop halts the monitor.
-func (m *StaleShiftMonitor) Stop() {
-	m.ticker.Stop()
-	m.stopChan <- true
+	worker.Periodic{
+		Name:       "StaleShiftMonitor",
+		Interval:   StaleCheckInterval,
+		RunAtStart: true,
+		Run:        m.checkStaleShifts,
+	}.Start(ctx, wg)
 }
 
 // checkStaleShifts runs one sweep per active organization. This worker has
@@ -96,9 +76,9 @@ func (m *StaleShiftMonitor) Stop() {
 // to shift_history — so its reads AND its auto-end transaction must run under
 // the owning tenant's app.org_id (the snapshot-retention DELETE it issues is
 // likewise org-scoped by RLS instead of fleet-wide).
-func (m *StaleShiftMonitor) checkStaleShifts() {
-	orgdb.ForEachActiveOrg(m.root, "StaleShiftMonitor", func(d *orgdb.DB) error {
-		o := *m // shallow copy: shared clients/ticker, per-org db
+func (m *StaleShiftMonitor) checkStaleShifts() error {
+	return orgdb.ForEachActiveOrg(m.root, "StaleShiftMonitor", func(d *orgdb.DB) error {
+		o := *m // shallow copy: shared clients, per-org db
 		o.db = d
 		o.checkStaleShiftsOrg()
 		return nil

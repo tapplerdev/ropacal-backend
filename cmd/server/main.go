@@ -24,6 +24,7 @@ import (
 	"ropacal-backend/internal/services/redis"
 	"ropacal-backend/internal/services/roads"
 	"ropacal-backend/internal/websocket"
+	"ropacal-backend/internal/worker"
 
 	"github.com/jmoiron/sqlx"
 
@@ -250,15 +251,15 @@ func main() {
 		log.Println("✅ Location batch writer started (30-second intervals)")
 	}
 
-	// Start daily digest scheduler (sends at 8 AM & 2 PM)
+	// Start daily digest scheduler (sends each daily report at its org's configured time)
 	digestScheduler := services.NewDigestScheduler(db, fcmService, centrifugoClient)
 	digestScheduler.Start(shutdownCtx, &workerWG)
-	log.Println("✅ Daily digest scheduler started (hourly check, sends at 8 AM & 2 PM)")
+	log.Println("✅ Daily digest scheduler started (checks every minute, sends at each org's report times)")
 
-	// Start AirTag drift monitor (checks every 5 minutes)
+	// Start AirTag drift monitor (checks every 3 minutes)
 	airtagMonitor := services.NewAirtagMonitor(db, fcmService, centrifugoClient)
 	airtagMonitor.Start(shutdownCtx, &workerWG)
-	log.Println("✅ AirTag drift monitor started (5-minute intervals)")
+	log.Println("✅ AirTag drift monitor started (3-minute intervals)")
 
 	// Start move request monitor (checks for overdue/due-soon moves)
 	moveRequestMonitor := services.NewMoveRequestMonitor(db, fcmService, centrifugoClient)
@@ -281,7 +282,7 @@ func main() {
 	// scorer reads, and is never on the request path. Weekly, because at this
 	// fleet size the coefficients are noisy and refitting faster tracks a
 	// handful of new checks rather than any real change in the market.
-	handlers.StartPlacementRefitWorker(db)
+	handlers.StartPlacementRefitWorker(shutdownCtx, &workerWG, db)
 
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
@@ -349,13 +350,17 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":          "ok",
-			"version":         "placement-self-updating-model",
+			"version":         "worker-periodic",
 			"city_boundaries": handlers.BoundaryCount(),
 			"config": map[string]bool{
 				"here_api_key":        os.Getenv("HERE_API_KEY") != "",
 				"here_app_id":         os.Getenv("HERE_APP_ID") != "",
 				"mapbox_access_token": os.Getenv("MAPBOX_ACCESS_TOKEN") != "",
 			},
+			// Liveness of every background loop — the only way to see from
+			// outside whether the stale-shift monitor, GPS batch writer etc.
+			// are actually running. Counts and timestamps only; see worker.Snapshot.
+			"workers": worker.Snapshot(),
 		})
 	})
 

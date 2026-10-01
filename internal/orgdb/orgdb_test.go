@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -283,7 +285,7 @@ func TestForEachActiveOrgDarkRunsOnce(t *testing.T) {
 	defer restore()
 
 	var calls int
-	ForEachActiveOrg(db, "test", func(d *DB) error {
+	err := ForEachActiveOrg(db, "test", func(d *DB) error {
 		calls++
 		if !d.passthrough {
 			t.Fatal("dark mode must hand out a passthrough")
@@ -292,6 +294,9 @@ func TestForEachActiveOrgDarkRunsOnce(t *testing.T) {
 	})
 	if calls != 1 {
 		t.Fatalf("want exactly 1 call, got %d", calls)
+	}
+	if err != nil {
+		t.Fatalf("a clean pass must return nil, got %v", err)
 	}
 }
 
@@ -303,12 +308,13 @@ func TestForEachActiveOrgLoopsAndSurvivesFailures(t *testing.T) {
 	mock.ExpectQuery(`SELECT id FROM organizations WHERE status = 'active'`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(orgA).AddRow(orgB).AddRow(orgC))
 
+	errA := errors.New("org A failed")
 	var seen []string
-	ForEachActiveOrg(db, "test", func(d *DB) error {
+	err := ForEachActiveOrg(db, "test", func(d *DB) error {
 		seen = append(seen, d.OrgID())
 		switch d.OrgID() {
 		case orgA:
-			return errors.New("org A failed")
+			return errA
 		case orgB:
 			panic("org B panicked")
 		}
@@ -316,6 +322,40 @@ func TestForEachActiveOrgLoopsAndSurvivesFailures(t *testing.T) {
 	})
 	if len(seen) != 3 || seen[2] != orgC {
 		t.Fatalf("failures must not stop the loop; saw %v", seen)
+	}
+	// Absorbed so the loop continues, but RETURNED so a worker can count them —
+	// both of them, the error and the panic, and not the org that ran clean.
+	if !errors.Is(err, errA) {
+		t.Errorf("org A's error not returned (errors.Is): %v", err)
+	}
+	msg := fmt.Sprint(err)
+	if !strings.Contains(msg, orgB) || !strings.Contains(msg, "panic: org B panicked") {
+		t.Errorf("org B's panic not returned: %v", err)
+	}
+	if strings.Contains(msg, orgC) {
+		t.Errorf("org C ran clean but is reported as failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// When the cycle cannot run at all, that is a failure too: a loop that skips
+// every cycle must not read as healthy.
+func TestForEachActiveOrgReportsACycleThatCouldNotRun(t *testing.T) {
+	db, mock := newMock(t)
+	restore := setStateForTest(&tenancyState{migrated: true, root: db})
+	defer restore()
+	never := func(*DB) error { t.Fatal("fn must not run"); return nil }
+
+	mock.ExpectQuery(`SELECT id FROM organizations`).WillReturnError(errors.New("connection refused"))
+	if err := ForEachActiveOrg(db, "test", never); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("enumeration failure: got %v", err)
+	}
+
+	mock.ExpectQuery(`SELECT id FROM organizations`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	if err := ForEachActiveOrg(db, "test", never); err == nil || !strings.Contains(err.Error(), "zero active organizations") {
+		t.Errorf("zero visible orgs: got %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

@@ -11,6 +11,7 @@ import (
 	"ropacal-backend/internal/moverequest"
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/worker"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -22,57 +23,36 @@ type MoveRequestMonitor struct {
 	db               *orgdb.DB // org-bound handle for the CURRENT per-org pass (see checkMoveRequests)
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
-	ticker           *time.Ticker
-	stopChan         chan bool
 }
 
-// NewMoveRequestMonitor creates a new monitor that checks every 15 minutes (configurable via settings).
+// NewMoveRequestMonitor creates a new monitor. It checks every 15 minutes (see Start).
 func NewMoveRequestMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *MoveRequestMonitor {
 	return &MoveRequestMonitor{
 		root:             db,
 		db:               orgdb.Passthrough(db),
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
-		ticker:           time.NewTicker(15 * time.Minute),
-		stopChan:         make(chan bool),
 	}
 }
 
-// Start begins the background monitoring goroutine.
+// Start launches the loop; it stops when ctx is cancelled. See internal/worker.
 func (m *MoveRequestMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Println("📋 [MoveRequestMonitor] Starting move request monitor (checks for overdue/due-soon)")
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		// Check immediately on startup
-		m.checkMoveRequests()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("🛑 [MoveRequestMonitor] Stopping...")
-				return
-			case <-m.ticker.C:
-				m.checkMoveRequests()
-			}
-		}
-	}()
-}
-
-// Stop halts the monitor.
-func (m *MoveRequestMonitor) Stop() {
-	m.ticker.Stop()
-	m.stopChan <- true
+	worker.Periodic{
+		Name:       "MoveRequestMonitor",
+		Interval:   15 * time.Minute,
+		RunAtStart: true,
+		Run:        m.checkMoveRequests,
+	}.Start(ctx, wg)
 }
 
 // checkMoveRequests runs one overdue/due-soon sweep per active organization.
 // Settings, the actionable-move working set, the 24h dedup, and the admin
 // recipient list all resolve through the org-bound handle, so each tenant's
 // alerts reach only that tenant's admins.
-func (m *MoveRequestMonitor) checkMoveRequests() {
-	orgdb.ForEachActiveOrg(m.root, "MoveRequestMonitor", func(d *orgdb.DB) error {
-		o := *m // shallow copy: shared clients/ticker, per-org db
+func (m *MoveRequestMonitor) checkMoveRequests() error {
+	return orgdb.ForEachActiveOrg(m.root, "MoveRequestMonitor", func(d *orgdb.DB) error {
+		o := *m // shallow copy: shared clients, per-org db
 		o.db = d
 		o.checkMoveRequestsOrg()
 		return nil
