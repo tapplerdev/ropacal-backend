@@ -15,6 +15,7 @@ import (
 	"ropacal-backend/internal/geo"
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/worker"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -27,8 +28,6 @@ type AirtagMonitor struct {
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
 	bridgeURL        string
-	ticker           *time.Ticker
-	stopChan         chan bool
 }
 
 // AirtagAPIResponse is the response from the FindMy bridge /api/airtag-locations endpoint.
@@ -104,46 +103,27 @@ func NewAirtagMonitor(db *sqlx.DB, fcmService *FCMService, centrifugoClient *cen
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
 		bridgeURL:        bridgeURL,
-		ticker:           time.NewTicker(3 * time.Minute),
-		stopChan:         make(chan bool),
 	}
 }
 
-// Start begins the background monitoring goroutine.
+// Start launches the loop; it stops when ctx is cancelled. See internal/worker.
 func (m *AirtagMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Printf("📡 [AirtagMonitor] Starting drift monitor (3-minute intervals, reads from DB)")
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		// Check immediately on startup
-		m.checkDrift()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("🛑 [AirtagMonitor] Stopping...")
-				return
-			case <-m.ticker.C:
-				m.checkDrift()
-			}
-		}
-	}()
-}
-
-// Stop halts the monitor.
-func (m *AirtagMonitor) Stop() {
-	m.ticker.Stop()
-	m.stopChan <- true
+	worker.Periodic{
+		Name:       "AirtagMonitor",
+		Interval:   3 * time.Minute,
+		RunAtStart: true,
+		Run:        m.checkDrift,
+	}.Start(ctx, wg)
 }
 
 // checkDrift runs one drift sweep per active organization. AirTag rows, the
 // bin map they join against (by bin_number — NOT unique across tenants, which
 // is exactly why the join must happen inside one org's scope), settings, and
 // the alert recipients all resolve through the org-bound handle.
-func (m *AirtagMonitor) checkDrift() {
-	orgdb.ForEachActiveOrg(m.root, "AirtagMonitor", func(d *orgdb.DB) error {
-		o := *m // shallow copy: shared clients/ticker, per-org db
+func (m *AirtagMonitor) checkDrift() error {
+	return orgdb.ForEachActiveOrg(m.root, "AirtagMonitor", func(d *orgdb.DB) error {
+		o := *m // shallow copy: shared clients, per-org db
 		o.db = d
 		o.checkDriftOrg()
 		return nil

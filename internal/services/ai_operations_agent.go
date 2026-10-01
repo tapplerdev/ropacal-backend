@@ -11,6 +11,7 @@ import (
 
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/worker"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -24,8 +25,6 @@ type AIOperationsAgent struct {
 	client           anthropic.Client
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
-	ticker           *time.Ticker
-	stopChan         chan bool
 }
 
 func NewAIOperationsAgent(db *sqlx.DB, fcmService *FCMService, centrifugoClient *centrifugo.Client) *AIOperationsAgent {
@@ -38,11 +37,10 @@ func NewAIOperationsAgent(db *sqlx.DB, fcmService *FCMService, centrifugoClient 
 		client:           client,
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
-		ticker:           time.NewTicker(30 * time.Minute),
-		stopChan:         make(chan bool),
 	}
 }
 
+// Start launches the loop; it stops when ctx is cancelled. See internal/worker.
 func (a *AIOperationsAgent) Start(ctx context.Context, wg *sync.WaitGroup) {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		log.Println("⚠️ [AIAgent] ANTHROPIC_API_KEY not set — agent disabled")
@@ -50,37 +48,17 @@ func (a *AIOperationsAgent) Start(ctx context.Context, wg *sync.WaitGroup) {
 	}
 
 	log.Println("🤖 [AIAgent] Starting AI Operations Agent (30-minute cycle)")
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		// Run first cycle after a 2-minute delay (let other services init), but
-		// bail immediately if we're already shutting down.
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Minute):
-		}
-		a.runCycle()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("🤖 [AIAgent] Stopping...")
-				return
-			case <-a.ticker.C:
-				a.runCycle()
-			}
-		}
-	}()
+	worker.Periodic{
+		Name:       "AIAgent",
+		Interval:   30 * time.Minute,
+		RunAtStart: true,
+		// Let the rest of the backend come up before the first cycle.
+		InitialDelay: 2 * time.Minute,
+		Run:          a.runCycle,
+	}.Start(ctx, wg)
 }
 
-func (a *AIOperationsAgent) Stop() {
-	a.ticker.Stop()
-	a.stopChan <- true
-}
-
-func (a *AIOperationsAgent) runCycle() {
+func (a *AIOperationsAgent) runCycle() error {
 	loc, _ := time.LoadLocation("America/Los_Angeles")
 	now := time.Now().In(loc)
 	hour := now.Hour()
@@ -88,7 +66,7 @@ func (a *AIOperationsAgent) runCycle() {
 	// Only run during business hours (6 AM - 8 PM Pacific)
 	if hour < 6 || hour > 20 {
 		log.Printf("🤖 [AIAgent] Outside business hours (%d:00 PT) — skipping", hour)
-		return
+		return nil
 	}
 
 	log.Printf("🤖 [AIAgent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -98,8 +76,8 @@ func (a *AIOperationsAgent) runCycle() {
 	// dedup (`WHERE entity_id = $1 AND status = 'pending'`), every
 	// ai_recommendations / bin_watchlist write, and the alert fan-out all
 	// resolve through the org-bound handle.
-	orgdb.ForEachActiveOrg(a.root, "AIAgent", func(d *orgdb.DB) error {
-		o := *a // shallow copy: shared clients/ticker, per-org db
+	err := orgdb.ForEachActiveOrg(a.root, "AIAgent", func(d *orgdb.DB) error {
+		o := *a // shallow copy: shared clients, per-org db
 		o.db = d
 		o.runChecksOrg()
 		return nil
@@ -107,6 +85,7 @@ func (a *AIOperationsAgent) runCycle() {
 
 	log.Printf("🤖 [AIAgent] Cycle complete")
 	log.Printf("🤖 [AIAgent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	return err
 }
 
 // runChecksOrg runs the nine analysis passes against one organization.

@@ -13,6 +13,7 @@ import (
 
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/centrifugo"
+	"ropacal-backend/internal/worker"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -26,8 +27,6 @@ type DigestScheduler struct {
 	fcmService       *FCMService
 	centrifugoClient *centrifugo.Client
 	bridgeURL        string
-	ticker           *time.Ticker
-	stopChan         chan bool
 }
 
 // DigestResult contains the outcome of a report run.
@@ -51,14 +50,12 @@ func NewDigestScheduler(db *sqlx.DB, fcmService *FCMService, centrifugoClient *c
 		fcmService:       fcmService,
 		centrifugoClient: centrifugoClient,
 		bridgeURL:        os.Getenv("FINDMY_BRIDGE_URL"),
-		ticker:           time.NewTicker(1 * time.Minute),
-		stopChan:         make(chan bool),
 	}
 }
 
 // ForOrg returns a shallow copy of the scheduler bound to the given org
 // handle. The manual-trigger endpoint uses it so an admin's digest runs
-// against THEIR tenant only; the per-minute ticker uses the same mechanism
+// against THEIR tenant only; the per-minute loop uses the same mechanism
 // for each active org. Shared clients are inherited; only db differs.
 func (s *DigestScheduler) ForOrg(d *orgdb.DB) *DigestScheduler {
 	o := *s
@@ -66,39 +63,23 @@ func (s *DigestScheduler) ForOrg(d *orgdb.DB) *DigestScheduler {
 	return &o
 }
 
-// Start begins the background scheduler goroutine.
+// Start launches the loop; it stops when ctx is cancelled. See internal/worker.
 func (s *DigestScheduler) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Println("📬 [DailyReport] Starting daily report scheduler (minute-level check)")
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		s.checkAndSend()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("🛑 [DailyReport] Stopping...")
-				return
-			case <-s.ticker.C:
-				s.checkAndSend()
-			}
-		}
-	}()
-}
-
-// Stop halts the scheduler.
-func (s *DigestScheduler) Stop() {
-	s.ticker.Stop()
-	s.stopChan <- true
+	worker.Periodic{
+		Name:       "DailyReport",
+		Interval:   1 * time.Minute,
+		RunAtStart: true,
+		Run:        s.checkAndSend,
+	}.Start(ctx, wg)
 }
 
 // checkAndSend runs one time-window check per active organization. Each org
 // evaluates ITS OWN notification settings (timezone, report times) and its own
 // dedup keys — the config conflict target is per-org once tenancy is live, so
 // one org sending its 8 AM report can never mark another org's as sent.
-func (s *DigestScheduler) checkAndSend() {
-	orgdb.ForEachActiveOrg(s.root, "DailyReport", func(d *orgdb.DB) error {
+func (s *DigestScheduler) checkAndSend() error {
+	return orgdb.ForEachActiveOrg(s.root, "DailyReport", func(d *orgdb.DB) error {
 		s.ForOrg(d).checkAndSendOrg()
 		return nil
 	})

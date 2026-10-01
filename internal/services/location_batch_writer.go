@@ -9,6 +9,7 @@ import (
 
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services/redis"
+	"ropacal-backend/internal/worker"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -19,8 +20,6 @@ type LocationBatchWriter struct {
 	root        *sqlx.DB  // unscoped pool — org enumeration only
 	db          *orgdb.DB // org-bound handle for the CURRENT per-org pass (see writeBatch)
 	redisClient *redis.Client
-	ticker      *time.Ticker
-	stopChan    chan bool
 }
 
 // NewLocationBatchWriter creates a new batch writer that runs every 30 seconds
@@ -29,34 +28,17 @@ func NewLocationBatchWriter(db *sqlx.DB, redisClient *redis.Client) *LocationBat
 		root:        db,
 		db:          orgdb.Passthrough(db),
 		redisClient: redisClient,
-		ticker:      time.NewTicker(30 * time.Second),
-		stopChan:    make(chan bool),
 	}
 }
 
-// Start begins the background batch writing process
+// Start launches the loop; it stops when ctx is cancelled. See internal/worker.
 func (w *LocationBatchWriter) Start(ctx context.Context, wg *sync.WaitGroup) {
 	log.Println("📊 [BatchWriter] Starting location batch writer (30-second intervals)")
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("🛑 [BatchWriter] Stopping...")
-				return
-			case <-w.ticker.C:
-				w.writeBatch()
-			}
-		}
-	}()
-}
-
-// Stop halts the batch writer
-func (w *LocationBatchWriter) Stop() {
-	w.ticker.Stop()
-	w.stopChan <- true
+	worker.Periodic{
+		Name:     "BatchWriter",
+		Interval: 30 * time.Second,
+		Run:      w.writeBatch,
+	}.Start(ctx, wg)
 }
 
 // writeBatch runs one flush per active organization. The Redis snapshot is
@@ -64,9 +46,9 @@ func (w *LocationBatchWriter) Stop() {
 // guard in writeBatchOrg), so every driver row is written exactly once, under
 // the right tenant. Single-tenant mode is one passthrough pass — unchanged
 // behavior.
-func (w *LocationBatchWriter) writeBatch() {
-	orgdb.ForEachActiveOrg(w.root, "BatchWriter", func(d *orgdb.DB) error {
-		o := *w // shallow copy: shared redis/ticker, per-org db
+func (w *LocationBatchWriter) writeBatch() error {
+	return orgdb.ForEachActiveOrg(w.root, "BatchWriter", func(d *orgdb.DB) error {
+		o := *w // shallow copy: shared redis, per-org db
 		o.db = d
 		o.writeBatchOrg()
 		return nil

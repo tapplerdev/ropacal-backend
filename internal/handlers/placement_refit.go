@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/placementfit"
+	"ropacal-backend/internal/worker"
 )
 
 // Periodic refit of the placement site score from realized outcomes.
@@ -42,17 +44,23 @@ const refitStartupDelay = 10 * time.Minute
 //
 // Loops per organization like every other worker here, because a fitted model
 // is tenant-specific: one org's fleet says nothing about another's market.
-func StartPlacementRefitWorker(root *sqlx.DB) {
-	go func() {
-		time.Sleep(refitStartupDelay)
-		for {
-			orgdb.ForEachActiveOrg(root, "PlacementRefit", func(d *orgdb.DB) error {
+//
+// On the shared runner like the other workers, so it stops on shutdown and
+// shows on /health. A refit in flight at shutdown is waited out; it only
+// writes once, at the end, so a forced kill mid-run loses nothing but the run.
+func StartPlacementRefitWorker(ctx context.Context, wg *sync.WaitGroup, root *sqlx.DB) {
+	worker.Periodic{
+		Name:         "PlacementRefit",
+		Interval:     refitInterval,
+		RunAtStart:   true,
+		InitialDelay: refitStartupDelay,
+		Run: func() error {
+			return orgdb.ForEachActiveOrg(root, "PlacementRefit", func(d *orgdb.DB) error {
 				RunPlacementRefit(d)
 				return nil
 			})
-			time.Sleep(refitInterval)
-		}
-	}()
+		},
+	}.Start(ctx, wg)
 	log.Printf("🧠 [PlacementRefit] worker started (every %s, first run in %s)", refitInterval, refitStartupDelay)
 }
 
