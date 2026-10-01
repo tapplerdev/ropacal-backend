@@ -164,7 +164,7 @@ func LogAppError(root *sqlx.DB) http.HandlerFunc {
 }
 
 // GetAppErrorLogs retrieves error logs with filtering and pagination
-// GET /manager/logs/app-errors
+// GET /api/manager/logs/app-errors
 func GetAppErrorLogs(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
@@ -177,10 +177,19 @@ func GetAppErrorLogs(root *sqlx.DB) http.HandlerFunc {
 		resolvedParam := r.URL.Query().Get("is_resolved")
 		limit := r.URL.Query().Get("limit")
 
-		// Build query dynamically
+		// Build query dynamically. The columns are listed in Scan order on
+		// purpose: this used to be el.*, and when the tenancy migration added
+		// organization_id every row failed the Scan and the page went empty.
 		query := `
 			SELECT
-				el.*,
+				el.id, el.driver_id, el.shift_id, el.task_id,
+				el.created_at, el.log_timestamp,
+				el.context, el.error_type, el.error_message,
+				el.severity, el.platform,
+				el.app_version, el.os_version, el.device_info,
+				el.last_gps_latitude, el.last_gps_longitude,
+				el.stack_trace, el.metadata,
+				COALESCE(el.is_resolved, false), el.resolved_at, el.resolved_by_user_id, el.notes,
 				u.name as driver_name,
 				ru.name as resolved_by_user_name
 			FROM app_error_logs el
@@ -264,10 +273,16 @@ func GetAppErrorLogs(root *sqlx.DB) http.HandlerFunc {
 			)
 			if err != nil {
 				log.Printf("Failed to scan app error log: %v", err)
-				continue
+				http.Error(w, "Failed to fetch error logs", http.StatusInternalServerError)
+				return
 			}
 
 			errorLogs = append(errorLogs, errorLog.ToAppErrorLogResponse(driverName, resolvedByName))
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("Failed to read app error logs: %v", err)
+			http.Error(w, "Failed to fetch error logs", http.StatusInternalServerError)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -276,7 +291,7 @@ func GetAppErrorLogs(root *sqlx.DB) http.HandlerFunc {
 }
 
 // ResolveAppErrorLog marks an error log as resolved
-// PATCH /manager/logs/app-errors/:id/resolve
+// PATCH /api/manager/logs/app-errors/:id/resolve
 func ResolveAppErrorLog(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
@@ -334,7 +349,7 @@ func ResolveAppErrorLog(root *sqlx.DB) http.HandlerFunc {
 }
 
 // GetAppErrorStats retrieves error statistics for dashboard
-// GET /manager/logs/app-error-stats
+// GET /api/manager/logs/app-error-stats
 func GetAppErrorStats(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)

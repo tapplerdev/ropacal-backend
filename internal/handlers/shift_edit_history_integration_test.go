@@ -27,6 +27,7 @@ func request(t *testing.T, app *sqlx.DB, org, method, body string, params map[st
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(d.Release) // as the org middleware does: rolls back read txs a Queryx left open
 	r := httptest.NewRequest(method, "/x", strings.NewReader(body))
 	rc := chi.NewRouteContext()
 	for k, v := range params {

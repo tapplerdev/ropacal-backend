@@ -141,10 +141,13 @@ func GetBinCheckRecommendations(root *sqlx.DB) http.HandlerFunc {
 
 		binID := r.URL.Query().Get("bin_id")
 
-		// Build query
+		// Build query. Columns are listed in Scan order: bcr.* broke every row
+		// once the tenancy migration added organization_id.
 		query := `
 			SELECT
-				bcr.*,
+				bcr.id, bcr.bin_id, bcr.reason, bcr.flagged_at, bcr.days_since_check,
+				bcr.status, bcr.resolved_at, bcr.resolved_by_user_id, bcr.notes,
+				bcr.created_at, bcr.updated_at,
 				b.id as "bin.id",
 				b.bin_number as "bin.bin_number",
 				b.current_street as "bin.current_street",
@@ -177,7 +180,7 @@ func GetBinCheckRecommendations(root *sqlx.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		var recommendations []models.BinCheckRecommendationWithBin
+		recommendations := []models.BinCheckRecommendationWithBin{}
 
 		for rows.Next() {
 			var rec models.BinCheckRecommendationWithBin
@@ -209,10 +212,16 @@ func GetBinCheckRecommendations(root *sqlx.DB) http.HandlerFunc {
 
 			if err != nil {
 				log.Printf("❌ [GET-CHECK-RECOMMENDATIONS] Row scan failed: %v", err)
-				continue
+				http.Error(w, "Failed to retrieve recommendations", http.StatusInternalServerError)
+				return
 			}
 
 			recommendations = append(recommendations, rec)
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("❌ [GET-CHECK-RECOMMENDATIONS] Reading rows failed: %v", err)
+			http.Error(w, "Failed to retrieve recommendations", http.StatusInternalServerError)
+			return
 		}
 
 		log.Printf("✅ [GET-CHECK-RECOMMENDATIONS] Found %d recommendations (status: %s)", len(recommendations), status)
