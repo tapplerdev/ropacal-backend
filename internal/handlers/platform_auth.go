@@ -299,17 +299,8 @@ func PlatformWhoAmI(root *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		type orgRow struct {
-			ID     string `db:"id" json:"id"`
-			Name   string `db:"name" json:"name"`
-			Slug   string `db:"slug" json:"slug"`
-			Status string `db:"status" json:"status"`
-		}
-		// Non-nil so an operator with zero tenants gets [] rather than null —
-		// a nil slice marshals to null, which clients then have to special-case.
-		orgs := []orgRow{}
-		if err := root.Select(&orgs,
-			`SELECT id, name, slug, status FROM organizations ORDER BY created_at, id`); err != nil {
+		orgs, err := platformOrgList(root)
+		if err != nil {
 			log.Printf("❌ [Platform] whoami org list failed: %v", err)
 			utils.RespondError(w, http.StatusInternalServerError, "could not list organizations")
 			return
@@ -333,6 +324,25 @@ func PlatformWhoAmI(root *sqlx.DB) http.HandlerFunc {
 			"organizations": orgs,
 		})
 	}
+}
+
+// platformOrg is one organization as an operator's org switcher receives it —
+// including the capabilities the dashboard renders from (airtag_tracking).
+type platformOrg struct {
+	ID             string `db:"id" json:"id"`
+	Name           string `db:"name" json:"name"`
+	Slug           string `db:"slug" json:"slug"`
+	Status         string `db:"status" json:"status"`
+	AirtagTracking bool   `db:"airtag_tracking" json:"airtag_tracking"`
+}
+
+// platformOrgList is every organization, for the operator's switcher. Never nil:
+// an operator with zero tenants gets [] rather than null, which clients would
+// otherwise have to special-case.
+func platformOrgList(root *sqlx.DB) ([]platformOrg, error) {
+	orgs := []platformOrg{}
+	err := root.Select(&orgs, `SELECT id, name, slug, status, airtag_tracking FROM organizations ORDER BY created_at, id`)
+	return orgs, err
 }
 
 // writePlatformJSON mirrors writeLoginJSON: an explicit status with a JSON body,

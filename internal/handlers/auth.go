@@ -44,6 +44,8 @@ type LoginOrganization struct {
 	ID   string `json:"id" db:"id"`
 	Name string `json:"name" db:"name"`
 	Slug string `json:"slug" db:"slug"`
+	// The clients hide every AirTag surface when this is off (migration 00010).
+	AirtagTracking bool `json:"airtag_tracking" db:"airtag_tracking"`
 }
 
 type LoginResponse struct {
@@ -69,12 +71,10 @@ func writeLoginJSON(w http.ResponseWriter, status int, resp LoginResponse) {
 func resolveLoginOrg(root *sqlx.DB, slug, email string) (*LoginOrganization, int, string) {
 	if slug != "" {
 		var row struct {
-			ID     string `db:"id"`
-			Name   string `db:"name"`
-			Slug   string `db:"slug"`
+			activeOrg
 			Status string `db:"status"`
 		}
-		err := root.Get(&row, `SELECT id, name, slug, status FROM organizations WHERE LOWER(slug) = LOWER($1)`, slug)
+		err := root.Get(&row, `SELECT id, name, slug, airtag_tracking, status FROM organizations WHERE LOWER(slug) = LOWER($1)`, slug)
 		if errors.Is(err, sql.ErrNoRows) {
 			log.Printf("❌ Login: unknown organization slug %q", slug)
 			return nil, http.StatusUnauthorized, ""
@@ -87,19 +87,19 @@ func resolveLoginOrg(root *sqlx.DB, slug, email string) (*LoginOrganization, int
 			log.Printf("❌ Login: organization %q is %s", row.Slug, row.Status)
 			return nil, http.StatusForbidden, fmt.Sprintf("organization %q is %s", row.Slug, row.Status)
 		}
-		return &LoginOrganization{ID: row.ID, Name: row.Name, Slug: row.Slug}, 0, ""
+		return row.login(), 0, ""
 	}
 
 	// No organization ID supplied: single-org grace, then email resolution.
 	var rows []activeOrg
-	if err := root.Select(&rows, `SELECT id, name, slug FROM organizations WHERE status = 'active' ORDER BY created_at, id`); err != nil {
+	if err := root.Select(&rows, `SELECT id, name, slug, airtag_tracking FROM organizations WHERE status = 'active' ORDER BY created_at, id`); err != nil {
 		log.Printf("❌ Login: organization enumeration failed: %v", err)
 		return nil, http.StatusInternalServerError, ""
 	}
 	switch len(rows) {
 	case 1:
 		log.Printf("ℹ️  Login: no organization supplied; using the only active organization %q (single-org grace)", rows[0].Slug)
-		return &LoginOrganization{ID: rows[0].ID, Name: rows[0].Name, Slug: rows[0].Slug}, 0, ""
+		return rows[0].login(), 0, ""
 	case 0:
 		log.Println("❌ Login: no active organizations exist")
 		return nil, http.StatusUnauthorized, ""
@@ -115,9 +115,15 @@ func resolveLoginOrg(root *sqlx.DB, slug, email string) (*LoginOrganization, int
 
 // activeOrg is one row of the active-organization list a login resolves against.
 type activeOrg struct {
-	ID   string `db:"id"`
-	Name string `db:"name"`
-	Slug string `db:"slug"`
+	ID             string `db:"id"`
+	Name           string `db:"name"`
+	Slug           string `db:"slug"`
+	AirtagTracking bool   `db:"airtag_tracking"`
+}
+
+// login is the organization as the login response carries it.
+func (o activeOrg) login() *LoginOrganization {
+	return &LoginOrganization{ID: o.ID, Name: o.Name, Slug: o.Slug, AirtagTracking: o.AirtagTracking}
 }
 
 // resolveOrgByEmail determines which active organization a login email belongs
@@ -177,7 +183,7 @@ func decideOrgFromMatches(matches []activeOrg, email string) (*LoginOrganization
 	switch len(matches) {
 	case 1:
 		log.Printf("ℹ️  Login: no organization ID supplied; resolved %q from the email", matches[0].Slug)
-		return &LoginOrganization{ID: matches[0].ID, Name: matches[0].Name, Slug: matches[0].Slug}, 0, ""
+		return matches[0].login(), 0, ""
 	case 0:
 		// Deliberately the SAME opaque 401 that a wrong password returns, with
 		// no message. Anything more specific would turn an unauthenticated
@@ -378,7 +384,7 @@ func GetAuthStatus(root *sqlx.DB) http.HandlerFunc {
 		if orgID := db.OrgID(); orgID != "" {
 			var org LoginOrganization
 			if err := db.Get(&org,
-				`SELECT id, name, slug FROM organizations WHERE id = $1`, orgID); err != nil {
+				`SELECT id, name, slug, airtag_tracking FROM organizations WHERE id = $1`, orgID); err != nil {
 				log.Printf("⚠️  Auth status: could not load organization %s: %v", orgID, err)
 			} else {
 				resp["organization"] = org

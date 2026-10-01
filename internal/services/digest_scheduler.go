@@ -40,6 +40,9 @@ type DigestResult struct {
 	CriticalBins   int    `json:"critical_bins,omitempty"`
 	OverdueBins    int    `json:"overdue_bins,omitempty"`
 	TokensSent     int    `json:"tokens_sent"`
+	// Skipped says why a report did not run at all (not "ran and found
+	// nothing"), e.g. the battery report for an org without AirTag tracking.
+	Skipped string `json:"skipped,omitempty"`
 }
 
 // NewDigestScheduler creates a new digest scheduler that checks every minute.
@@ -136,6 +139,8 @@ func (s *DigestScheduler) checkAndSendOrg() {
 		result, err := s.RunDailyBatteryReport()
 		if err != nil {
 			log.Printf("❌ [DailyReport] Failed to send battery report: %v", err)
+		} else if result.Skipped != "" {
+			log.Printf("⏭️  [DailyReport] Battery report skipped — %s", result.Skipped)
 		} else if result.AlreadySent {
 			log.Printf("📬 [DailyReport] Battery report already sent today, skipping")
 		} else {
@@ -585,6 +590,13 @@ func (s *DigestScheduler) RunDigest(window string, force ...bool) (*DigestResult
 func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, error) {
 	ctx := context.Background()
 
+	// Gated here rather than at the scheduler so the manual trigger obeys it too.
+	if on, err := AirtagTrackingEnabled(s.db); err != nil {
+		return nil, err
+	} else if !on {
+		return &DigestResult{Window: "daily_battery_report", Skipped: "AirTag tracking is not enabled for this organization"}, nil
+	}
+
 	settings := loadNotificationSettings(s.db)
 	loc, err := time.LoadLocation(settings.Timezone)
 	if err != nil {
@@ -603,19 +615,12 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 		}
 	}
 
-	// Fetch AirTag locations from bridge
-	log.Printf("🔋 [BatteryReport] bridgeURL=%q", s.bridgeURL)
-	if s.bridgeURL == "" {
-		log.Println("⚠️  [DailyReport] FINDMY_BRIDGE_URL not set — skipping battery report")
-		return &DigestResult{Window: "daily_battery_report"}, nil
-	}
-
-	airtags, err := s.fetchBridgeAirtagLocations()
+	airtags, err := s.airtagLocations()
 	if err != nil {
-		return nil, fmt.Errorf("fetch airtag locations: %w", err)
+		return nil, fmt.Errorf("read airtag locations: %w", err)
 	}
 
-	log.Printf("🔋 [BatteryReport] Fetched %d airtags from bridge", len(airtags))
+	log.Printf("🔋 [BatteryReport] Read %d airtags", len(airtags))
 	for i, at := range airtags {
 		if i < 10 || at.BatteryStatus >= 2 {
 			log.Printf("🔋 [BatteryReport]   Bin %d (%s): battery_status=%d", at.BinNumber, at.Name, at.BatteryStatus)
@@ -769,23 +774,11 @@ func (s *DigestScheduler) RunDailyBatteryReport(force ...bool) (*DigestResult, e
 	}, nil
 }
 
-// fetchBridgeAirtagLocations reads AirTag locations from DB, falling back to bridge.
-func (s *DigestScheduler) fetchBridgeAirtagLocations() ([]AirtagEntry, error) {
-	entries, err := GetAirtagLocationsFromDB(s.db)
-	if err == nil && len(entries) > 0 {
-		return entries, nil
-	}
-	if err != nil {
-		log.Printf("⚠️  [DigestScheduler] DB read failed, falling back to bridge: %v", err)
-	}
-	if s.bridgeURL == "" {
-		return nil, fmt.Errorf("no airtag data in DB and bridge URL not set")
-	}
-	resp, err := FetchAirtagLocations(s.bridgeURL)
-	if err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
+// airtagLocations returns this organization's AirTags (see readAirtagLocations:
+// the database's answer is final, empty included).
+func (s *DigestScheduler) airtagLocations() ([]AirtagEntry, error) {
+	return readAirtagLocations(func() ([]AirtagEntry, error) { return GetAirtagLocationsFromDB(s.db) },
+		orgdb.Migrated(), s.bridgeURL, "DigestScheduler")
 }
 
 // updateConfigTimestamp upserts the config key with today's date. The conflict

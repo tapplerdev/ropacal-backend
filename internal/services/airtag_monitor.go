@@ -133,6 +133,14 @@ func (m *AirtagMonitor) checkDrift() error {
 func (m *AirtagMonitor) checkDriftOrg() {
 	ctx := context.Background()
 
+	// AirTag tracking is per organization, and most have no AirTags at all.
+	if on, err := AirtagTrackingEnabled(m.db); err != nil {
+		log.Printf("⚠️  [AirtagMonitor] %v — skipping this organization", err)
+		return
+	} else if !on {
+		return
+	}
+
 	// 0. Read notification settings — skip if drift alerts disabled
 	settings := loadNotificationSettings(m.db)
 	if !settings.DriftAlertsEnabled {
@@ -323,42 +331,37 @@ func GetUnmatchedAirtagLocationsFromDB(db Querier) ([]AirtagEntry, error) {
 }
 
 func (m *AirtagMonitor) fetchAirtagLocations() ([]AirtagEntry, error) {
-	// Read from DB (single source of truth)
-	entries, err := GetAirtagLocationsFromDB(m.db)
-	if err == nil {
-		// ZERO ROWS IS A LEGITIMATE ANSWER — do NOT fall through to the bridge.
-		//
-		// This used to read `err == nil && len(entries) > 0`, so a *successful*
-		// read returning nothing dropped through to FetchAirtagLocations, which
-		// pulls the ENTIRE FindMy fleet with no org scoping. And the warning
-		// below is on the error branch only, so it was silent.
-		//
-		// A newly provisioned organization has zero airtag_locations rows BY
-		// DEFINITION. So minutes after a second org existed, its drift sweep
-		// would evaluate the other tenant's whole fleet against its own bins —
-		// matched on bin_number, which is NOT unique (prod has 56, 86, 116) —
-		// and emit FCM pushes carrying the other tenant's addresses. No attacker
-		// and no misconfiguration required; it fired on a timer.
-		//
-		// Under live tenancy the DB read is already org-scoped by RLS, so an
-		// empty result means "this tenant has no AirTags", not "the DB is
-		// unavailable". Return it.
-		return entries, nil
-	}
-	log.Printf("⚠️  [AirtagMonitor] DB read failed, falling back to bridge: %v", err)
+	return readAirtagLocations(func() ([]AirtagEntry, error) { return GetAirtagLocationsFromDB(m.db) },
+		orgdb.Migrated(), m.bridgeURL, "AirtagMonitor")
+}
 
-	// Fallback: bridge fetch, ONLY on a genuine DB error. This path is NOT
-	// org-scoped, so it must stay unreachable whenever the DB answered.
-	if m.bridgeURL == "" {
+// readAirtagLocations is the ONE read path for an organization's AirTags, shared
+// by the drift monitor and the daily battery report.
+//
+// airtag_locations is the source of truth — the bridge writes into it — and its
+// answer is final, EMPTY INCLUDED. The FindMy bridge is asked only when that
+// read fails AND tenancy is dark, where there is a single organization and the
+// bridge's fleet is that organization's fleet.
+//
+// Every other fallback has leaked. The bridge serves one company's whole fleet
+// with no notion of organizations, so asking it on behalf of any other org hands
+// that org the company's tags, bin numbers and street addresses: the drift
+// monitor did it on an empty result until July (D5); the battery report did it
+// the same way until 2026-10, the duplicate copy of this logic having been
+// missed; and the drift monitor still did it on a DB ERROR under live tenancy
+// until both moved here. Two copies is how one got fixed and the other did not.
+func readAirtagLocations(read func() ([]AirtagEntry, error), tenancyLive bool, bridgeURL, tag string) ([]AirtagEntry, error) {
+	entries, err := read()
+	if err == nil || tenancyLive {
+		return entries, err
+	}
+	log.Printf("⚠️  [%s] DB read failed, falling back to the bridge (single organization): %v", tag, err)
+	if bridgeURL == "" {
 		return nil, fmt.Errorf("airtag DB read failed and FINDMY_BRIDGE_URL not set: %w", err)
 	}
-	if orgdb.Migrated() {
-		log.Printf("🚨 [AirtagMonitor] Falling back to the UNSCOPED bridge fleet while tenancy " +
-			"is live — entries may span organizations. Investigate the DB error above.")
-	}
-	resp, err := FetchAirtagLocations(m.bridgeURL)
-	if err != nil {
-		return nil, err
+	resp, ferr := FetchAirtagLocations(bridgeURL)
+	if ferr != nil {
+		return nil, ferr
 	}
 	return resp.Data, nil
 }

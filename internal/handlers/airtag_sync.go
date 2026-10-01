@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	"ropacal-backend/internal/orgdb"
 	"ropacal-backend/internal/services"
 )
 
@@ -16,6 +17,10 @@ func SyncAirtagLocations() http.HandlerFunc {
 	apiKey := os.Getenv("INTERNAL_API_KEY")
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The bridge syncs one company's Apple accounts; nobody else may kick it.
+		if !airtagTrackingOr404(w, orgdb.From(r)) {
+			return
+		}
 		if bridgeURL == "" {
 			log.Println("❌ [AirtagSync] FINDMY_BRIDGE_URL not configured")
 			http.Error(w, "FindMy bridge not configured", http.StatusServiceUnavailable)
