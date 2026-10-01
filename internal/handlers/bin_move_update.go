@@ -21,6 +21,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// UpdateBinMoveRequest updates move request details (date, notes, location, assignment, etc.).
+// Only the fields sent change.
+// PATCH /api/manager/bins/move-requests/:id (PUT kept for older clients)
 func UpdateBinMoveRequest(store moverequest.Store, root *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
@@ -789,6 +792,3 @@ func UpdateBinMoveRequest(store moverequest.Store, root *sqlx.DB, redisClient *r
 		json.NewEncoder(w).Encode(response)
 	}
 }
-
-// CancelBinMoveRequest cancels a pending move request
-// PUT /api/manager/bins/move-requests/:id/cancel

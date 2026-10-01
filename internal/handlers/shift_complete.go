@@ -1123,6 +1123,3 @@ func moveCompletionSideEffects(db *orgdb.DB, hub *websocket.Hub, centrifugoClien
 	}
 
 }
-
-// CancelShift cancels a specific shift
-// PUT /api/manager/shifts/:id/cancel

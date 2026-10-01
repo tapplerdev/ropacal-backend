@@ -493,6 +493,8 @@ func assignMoveToShift(db *orgdb.DB, wsHub *websocket.Hub, fcmService *services.
 // GetBinMoveRequest returns a single move request by ID
 // GET /api/manager/bins/move-requests/:id
 
+// AssignMoveToUser assigns a move request to a specific user for manual completion.
+// POST /api/manager/bins/move-requests/:id/assign-to-user (PUT kept for older clients)
 func AssignMoveToUser(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
@@ -645,9 +647,8 @@ func AssignMoveToUser(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// ManuallyCompleteMoveRequest marks a move request as manually completed
-// PUT /api/manager/bins/move-requests/:id/complete-manually
-
+// ClearMoveAssignment removes all assignment from a move request (shift or user).
+// POST /api/manager/bins/move-requests/:id/clear-assignment (PUT kept for older clients)
 func ClearMoveAssignment(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)

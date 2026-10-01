@@ -416,9 +416,6 @@ func GetBinMoveRequestsByBinID(root *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-// UpdateBinMoveRequest updates move request details (date, notes, location, assignment, etc.)
-// PUT /api/manager/bins/move-requests/:id
-
 func GetMoveRequestHistory(root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)

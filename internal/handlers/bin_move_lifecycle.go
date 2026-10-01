@@ -21,6 +21,8 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// CancelBinMoveRequest cancels a pending move request.
+// POST /api/manager/bins/move-requests/:id/cancel (PUT kept for older clients)
 func CancelBinMoveRequest(store moverequest.Store, root *sqlx.DB, redisClient *redis.Client, wsHub *websocket.Hub, centrifugoClient *centrifugo.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
@@ -193,9 +195,8 @@ func CancelBinMoveRequest(store moverequest.Store, root *sqlx.DB, redisClient *r
 	}
 }
 
-// AssignMoveToUser assigns a move request to a specific user for manual completion
-// PUT /api/manager/bins/move-requests/:id/assign-to-user
-
+// ManuallyCompleteMoveRequest marks a move request as manually completed.
+// POST /api/manager/bins/move-requests/:id/complete-manually (PUT kept for older clients)
 func ManuallyCompleteMoveRequest(store moverequest.Store, root *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		db := orgdb.From(r)
@@ -410,6 +411,3 @@ func ManuallyCompleteMoveRequest(store moverequest.Store, root *sqlx.DB) http.Ha
 		})
 	}
 }
-
-// ClearMoveAssignment removes all assignment from a move request (shift or user)
-// PUT /api/manager/bins/move-requests/:id/clear-assignment
